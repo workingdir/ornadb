@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::ToPrimitive;
+use orna_foundation_v1::CanonicalValue;
 
 use super::{
     timezone::{resolve_time_zone, Instant, LocalDateTime, LocalTimeResolution, TimeZone, TimeZoneError},
@@ -279,6 +280,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 pub(super) struct RelationPlan {
     pub(super) source: String,
     pub(super) source_identity: RelationReadScope,
+    pub(super) snapshot: Option<Arc<CanonicalValue>>,
     /// Union identity that distributed the trailing `SharedFilter` prefix.
     pub(super) shared_filter_group: Option<RelationReadScope>,
     pub(super) source_union: Option<(Box<RelationPlan>, Box<RelationPlan>)>,
@@ -292,6 +294,7 @@ pub(super) struct RelationPlan {
 impl PartialEq for RelationPlan {
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source
+            && self.snapshot == other.snapshot
             && self.source_union == other.source_union
             && self.source_values == other.source_values
             && self.stages == other.stages
@@ -683,10 +686,29 @@ impl RelationLastState {
 }
 
 impl RelationPlan {
+    pub(super) fn with_snapshot(self, snapshot: CanonicalValue) -> Option<Self> {
+        self.with_shared_snapshot(Arc::new(snapshot))
+    }
+
+    fn with_shared_snapshot(mut self, snapshot: Arc<CanonicalValue>) -> Option<Self> {
+        if self.source_values.is_some() {
+            return None;
+        }
+        if let Some((left, right)) = self.source_union.take() {
+            self.source_union = Some((
+                Box::new((*left).with_shared_snapshot(Arc::clone(&snapshot))?),
+                Box::new((*right).with_shared_snapshot(Arc::clone(&snapshot))?),
+            ));
+        }
+        self.snapshot = Some(snapshot);
+        Some(self)
+    }
+
     pub(super) fn new(source: String) -> Self {
         Self {
             source,
             source_identity: next_relation_source_id(),
+            snapshot: None,
             shared_filter_group: None,
             source_union: None,
             source_values: None,
@@ -698,6 +720,7 @@ impl RelationPlan {
         Self {
             source: String::new(),
             source_identity: next_relation_source_id(),
+            snapshot: None,
             shared_filter_group: None,
             source_union: None,
             source_values: Some(Arc::new(values)),
@@ -714,6 +737,7 @@ impl RelationPlan {
         Self {
             source: String::new(),
             source_identity: next_relation_source_id(),
+            snapshot: None,
             shared_filter_group: None,
             source_union: Some((Box::new(left), Box::new(right))),
             source_values: None,

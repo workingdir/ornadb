@@ -221,6 +221,13 @@ pub struct RelationPage {
     pub next: Option<Vec<u8>>,
 }
 
+/// Records whether a proven deterministic pure function call was computed or reused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryReuseDecision {
+    ComputedAndStored,
+    Reused,
+}
+
 /// One bounded ordered relation page whose rows retain their value profiles
 /// and format-3 owner contexts across an evaluator source scan.
 #[derive(Clone, Debug)]
@@ -746,6 +753,9 @@ pub trait EffectHandler {
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError>;
 
+    /// Reports a proved query cache hit or newly stored result to an optional host observer.
+    fn observe_query_reuse(&mut self, _function: &str, _decision: QueryReuseDecision) {}
+
     /// Handle an effect while sharing the activation's step budget.
     ///
     /// The default delegates to [`EffectHandler::handle`] so existing effect
@@ -823,6 +833,7 @@ pub trait EffectHandler {
         Ok(())
     }
 
+
     /// Supplies one bounded page for an evaluator-owned relation plan at its
     /// first observation. Existing handlers return `Ok(None)` by default so
     /// this remains a backward-compatible extension of the effect boundary.
@@ -853,6 +864,30 @@ pub trait EffectHandler {
         budget: &mut StepBudget,
     ) -> Result<Option<RelationPage>, EvaluationError> {
         self.scan_relation_page(source, after, limit, budget)
+    }
+
+    /// Validate a relation source at the exact supplied snapshot without
+    /// enumerating rows. Implementations that lack historical reads fail closed.
+    fn validate_relation_source_at_snapshot(
+        &mut self,
+        _source: &str,
+        _snapshot: &CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Supplies a bounded page from the exact snapshot pinned on the relation.
+    /// The default deliberately does not delegate to the current-snapshot hook.
+    fn scan_relation_page_at_snapshot_scoped(
+        &mut self,
+        _source: &str,
+        _scope: RelationReadScope,
+        _snapshot: &CanonicalValue,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        Ok(None)
     }
 
     /// Validate a provider stream binding before an activation constructs a
@@ -941,6 +976,9 @@ pub trait Ovb2EffectHandler {
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError>;
 
+    /// Reports a proved query cache hit or newly stored result to an optional host observer.
+    fn observe_query_reuse(&mut self, _function: &str, _decision: QueryReuseDecision) {}
+
     /// Handle an effect while sharing the activation's step budget.
     fn handle_with_budget(
         &mut self,
@@ -991,6 +1029,29 @@ pub trait Ovb2EffectHandler {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
     }
 
+    /// Validate the exact source at the supplied snapshot before zero-demand reads.
+    fn validate_relation_source_at_snapshot(
+        &mut self,
+        _source: &str,
+        _snapshot: &CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    /// Supplies one historical context-preserving relation page. `None` does
+    /// not fall back to the current relation scan.
+    fn scan_context_relation_page_at_snapshot_scoped(
+        &mut self,
+        _source: &str,
+        _scope: RelationReadScope,
+        _snapshot: &CanonicalValue,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        Ok(None)
+    }
+
     /// Supplies ordered relation rows without flattening contextual values to
     /// canonical OVB-1. `None` falls back to the canonical page hook.
     fn scan_context_relation_page_scoped(
@@ -1016,6 +1077,10 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
         _arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         Err(error("ORNA-EVAL-UNSUPPORTED"))
+    }
+
+    fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+        self.handler.observe_query_reuse(function, decision);
     }
 
     fn is_ovb2_binding(&self) -> bool {
@@ -1066,6 +1131,20 @@ pub trait ContextValueEffectHandler: EffectHandler {
     ) -> Result<Option<ContextValue>, EvaluationError> {
         self.handle_context_registered_with_budget(operation, callee, arguments, budget)
     }
+    /// Supplies rows for a context-preserving historical relation scan.
+    /// Returning `None` never falls back to a current-context scan.
+    fn scan_context_relation_page_at_snapshot_scoped(
+        &mut self,
+        _source: &str,
+        _scope: RelationReadScope,
+        _snapshot: &CanonicalValue,
+        _after: Option<&[u8]>,
+        _limit: usize,
+        _budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        Ok(None)
+    }
+
     /// Supplies rows for a context-preserving indexed source scan. Returning
     /// `None` keeps the existing canonical `EffectHandler` scan path.
     fn scan_context_relation_page_scoped(
@@ -1166,6 +1245,38 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         Ok(result)
     }
 
+    fn validate_relation_source_at_snapshot(
+        &mut self,
+        source: &str,
+        snapshot: &CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        EffectHandler::validate_relation_source_at_snapshot(self.handler, source, snapshot)
+    }
+
+    fn scan_context_relation_page_at_snapshot_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        snapshot: &CanonicalValue,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
+        let page = self.handler.scan_context_relation_page_at_snapshot_scoped(
+            source, scope, snapshot, after, limit, budget,
+        )?;
+        if let Some(row) = page.as_ref().and_then(|page| page.rows.first())
+            && matches!(row.format(), ValueFormat::Rov3 | ValueFormat::Sov3)
+            && let Some(context) = row.context()
+        {
+            self.format = row.format();
+            self.context = Some(context.clone());
+            self.source_format = row.format();
+            self.source_context = Some(context.clone());
+        }
+        Ok(page)
+    }
+
     fn scan_context_relation_page_scoped(
         &mut self,
         source: &str,
@@ -1211,6 +1322,10 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         EffectHandler::handle(self.handler, callee, arguments)
     }
 
+
+    fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+        EffectHandler::observe_query_reuse(self.handler, function, decision);
+    }
     fn handle_with_budget(
         &mut self,
         callee: &Expr,
@@ -1277,6 +1392,14 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         EffectHandler::validate_relation_source(self.handler, source)
     }
 
+    fn validate_relation_source_at_snapshot(
+        &mut self,
+        source: &str,
+        snapshot: &CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        EffectHandler::validate_relation_source_at_snapshot(self.handler, source, snapshot)
+    }
+
     fn scan_relation_page(
         &mut self,
         source: &str,
@@ -1302,6 +1425,20 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
             after,
             limit,
             budget,
+        )
+    }
+
+    fn scan_relation_page_at_snapshot_scoped(
+        &mut self,
+        source: &str,
+        scope: RelationReadScope,
+        snapshot: &CanonicalValue,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        EffectHandler::scan_relation_page_at_snapshot_scoped(
+            self.handler, source, scope, snapshot, after, limit, budget,
         )
     }
 
@@ -1444,20 +1581,18 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
     let effects = effects_adapter
         .as_mut()
         .map(|adapter| adapter as &mut dyn EffectHandler);
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects,
-        namespace: None,
-        transfer: None,
-        cancellation,
-    };
+    let mut context = Context { limits,
+    steps: 0,
+    functions: &functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects,
+    namespace: None,
+    transfer: None,
+    cancellation, };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
     if context.transfer.is_some() {
@@ -1551,20 +1686,18 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         return Err(error("ORNA-EVAL-PARSE"));
     }
     validate_limits(limits)?;
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: Some(effects),
-        namespace: None,
-        transfer: None,
-        cancellation,
-    };
+    let mut context = Context { limits,
+    steps: 0,
+    functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects: Some(effects),
+    namespace: None,
+    transfer: None,
+    cancellation, };
     context.items(functions.len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
@@ -1688,20 +1821,18 @@ fn evaluate_with_functions_and_nominals_and_budget(
     budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
-    let mut context = Context {
-        limits,
-        steps: limits.max_steps.saturating_sub(budget.remaining()),
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        cancellation: None,
-    };
+    let mut context = Context { limits,
+    steps: limits.max_steps.saturating_sub(budget.remaining()),
+    functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects: None,
+    namespace: None,
+    transfer: None,
+    cancellation: None, };
     let result = (|| {
         context.items(functions.len())?;
         let mut scope =
@@ -1729,20 +1860,18 @@ pub fn evaluate_function(
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let functions = Functions::new();
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions: &functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: None,
-        transfer: None,
-        cancellation: None,
-    };
+    let mut context = Context { limits,
+    steps: 0,
+    functions: &functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects: None,
+    namespace: None,
+    transfer: None,
+    cancellation: None, };
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
     let captured = Scope::from_environment(environment, &mut context)?;
     invoke_pure(&mut context, parameters, body, captured, supplied, 0).and_then(Value::canonical)
@@ -1776,20 +1905,18 @@ pub fn invoke_named_with_nominals(
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: None,
-        namespace: function_namespace(name),
-        transfer: None,
-        cancellation: None,
-    };
+    let mut context = Context { limits,
+    steps: 0,
+    functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects: None,
+    namespace: function_namespace(name),
+    transfer: None,
+    cancellation: None, };
     context.items(functions.len())?;
     let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
@@ -1821,20 +1948,18 @@ pub fn invoke_named_with_effects_and_budget(
     budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
-    let mut context = Context {
-        limits,
-        steps: limits.max_steps.saturating_sub(budget.remaining()),
-        functions,
-        aliases: None,
-        session_functions: None,
-        repl_bindings: false,
-        restrict_function_names: false,
-        reject_unhandled_field_calls: false,
-        effects: Some(effects),
-        namespace: function_namespace(name),
-        transfer: None,
-        cancellation: None,
-    };
+    let mut context = Context { limits,
+    steps: limits.max_steps.saturating_sub(budget.remaining()),
+    functions,
+    aliases: None,
+    session_functions: None,
+    repl_bindings: false,
+    restrict_function_names: false,
+    reject_unhandled_field_calls: false,
+    effects: Some(effects),
+    namespace: function_namespace(name),
+    transfer: None,
+    cancellation: None, };
     let result = (|| {
         context.items(functions.len())?;
         let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -1900,20 +2025,18 @@ pub fn invoke_named_with_context_effects(
         source_context: value_context.clone(),
     };
     let (result, steps) = {
-        let mut context = Context {
-            limits,
-            steps: limits.max_steps.saturating_sub(budget.remaining()),
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: Some(&mut profiled_effects),
-            namespace: function_namespace(name),
-            transfer: None,
-            cancellation: None,
-        };
+        let mut context = Context { limits,
+        steps: limits.max_steps.saturating_sub(budget.remaining()),
+        functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: Some(&mut profiled_effects),
+        namespace: function_namespace(name),
+        transfer: None,
+        cancellation: None, };
         let result = (|| {
             context.items(functions.len())?;
             let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
@@ -3565,22 +3688,20 @@ fn invoke_task_callback(
     depth: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
 ) -> Result<Value, EvaluationError> {
-    let mut context = Context {
-        limits,
-        steps: 0,
-        functions,
-        aliases,
-        session_functions,
-        repl_bindings,
-        restrict_function_names,
-        reject_unhandled_field_calls,
-        effects: effects
-            .as_deref_mut()
-            .map(|handler| handler as &mut dyn EffectHandler),
-        namespace: None,
-        transfer: None,
-        cancellation: Some(&cancellation),
-    };
+    let mut context = Context { limits,
+    steps: 0,
+    functions,
+    aliases,
+    session_functions,
+    repl_bindings,
+    restrict_function_names,
+    reject_unhandled_field_calls,
+    effects: effects
+        .as_deref_mut()
+        .map(|handler| handler as &mut dyn EffectHandler),
+    namespace: None,
+    transfer: None,
+    cancellation: Some(&cancellation), };
     context.invoke_callable(&callback, Vec::new(), depth)
 }
 
@@ -5394,6 +5515,14 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
+        let as_of_receiver = match callee {
+            Expr::Field { base, name, .. }
+                if name == "as_of" && relation_expression_candidate(base, scope) =>
+            {
+                Some(base.as_ref())
+            }
+            _ => None,
+        };
         let resolved = self.resolve_function_name(callee, scope);
         let statistics_operation =
             portable_statistics_operation(callee, resolved.as_deref(), scope);
@@ -5413,10 +5542,12 @@ impl Context<'_, '_> {
                     .then(|| portable_collection_operation(callee, resolved.as_deref()))
                     .flatten()
             })
+            .or_else(|| as_of_receiver.map(|_| "as_of"))
             .or(statistics_operation)?;
         if (statistics_operation.is_none()
             && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
             || (resolved.is_some() && !native_export && statistics_operation.is_none())
+                && as_of_receiver.is_none()
         {
             return None;
         }
@@ -5425,11 +5556,26 @@ impl Context<'_, '_> {
         if input.is_some() && !pipeline_relation && !relation_argument {
             return None;
         }
-        if input.is_none() && !relation_argument {
+        if input.is_none() && !relation_argument && as_of_receiver.is_none() {
             return None;
         }
 
         Some((|| {
+            let mut input = input;
+            if let Some(receiver) = as_of_receiver {
+                if input.is_some() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                let receiver = if let Some(source) = system_relation_source(receiver) {
+                    Value::Relation(RelationPlan::new(source.to_owned()))
+                } else {
+                    self.evaluate(receiver, scope, depth + 1)?
+                };
+                let Value::Relation(receiver) = receiver else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                input = Some(Value::Relation(receiver));
+            }
             let implicit = usize::from(input.is_some());
             let mut values = input.into_iter().collect::<Vec<_>>();
             for argument in arguments {
@@ -5441,6 +5587,20 @@ impl Context<'_, '_> {
             } else {
                 relation_named_arguments(name, arguments, values, implicit)?
             };
+            if name == "as_of" {
+                let mut arguments = ordered.into_iter();
+                let Some(Value::Relation(plan)) = arguments.next() else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let Some(snapshot) = arguments.next() else {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                };
+                return Ok(Value::Relation(
+                    plan.with_snapshot(snapshot.canonical()?)
+                        .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?,
+                ));
+            }
+
             if statistics_operation.is_some() {
                 let Some(Value::Relation(plan)) = ordered.first() else {
                     return Err(error("ORNA-EVAL-TYPE"));
@@ -5644,6 +5804,7 @@ impl Context<'_, '_> {
         let prefix = RelationPlan {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
+            snapshot: plan.snapshot.clone(),
             source_union: plan.source_union.clone(),
             shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
@@ -5660,6 +5821,7 @@ impl Context<'_, '_> {
             let group_plan = RelationPlan {
                 source: plan.source.clone(),
                 source_identity: plan.source_identity,
+                snapshot: plan.snapshot.clone(),
                 source_union: plan.source_union.clone(),
                 shared_filter_group: plan.shared_filter_group,
                 source_values: plan.source_values.clone(),
@@ -6165,6 +6327,7 @@ impl Context<'_, '_> {
             let (rows, next) = self.relation_page(
                 &plan.source,
                 plan.source_identity,
+                plan.snapshot.as_deref(),
                 after.as_deref(),
                 page_limit,
                 depth,
@@ -6402,6 +6565,7 @@ impl Context<'_, '_> {
         let prefix = RelationPlan {
             source: plan.source.clone(),
             source_identity: plan.source_identity,
+            snapshot: plan.snapshot.clone(),
             source_union: plan.source_union.clone(),
             shared_filter_group: plan.shared_filter_group,
             source_values: plan.source_values.clone(),
@@ -6551,6 +6715,7 @@ impl Context<'_, '_> {
         &mut self,
         source: &str,
         scope: RelationReadScope,
+        snapshot: Option<&CanonicalValue>,
         after: Option<&[u8]>,
         page_limit: usize,
         depth: usize,
@@ -6567,29 +6732,58 @@ impl Context<'_, '_> {
             .as_deref_mut()
             .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))
             .and_then(|effects| {
-                let contextual = if let Some(handler) = effects.ovb2_binding() {
-                    handler.scan_context_relation_page_scoped(
-                        source,
-                        scope,
-                        after,
-                        page_limit,
-                        &mut budget,
-                    )?
+                if let Some(snapshot) = snapshot {
+                    let contextual = if let Some(handler) = effects.ovb2_binding() {
+                        handler.scan_context_relation_page_at_snapshot_scoped(
+                            source,
+                            scope,
+                            snapshot,
+                            after,
+                            page_limit,
+                            &mut budget,
+                        )?
+                    } else {
+                        None
+                    };
+                    if let Some(page) = contextual {
+                        Ok(Some(SourcePage::Contextual(page)))
+                    } else {
+                        effects
+                            .scan_relation_page_at_snapshot_scoped(
+                                source,
+                                scope,
+                                snapshot,
+                                after,
+                                page_limit,
+                                &mut budget,
+                            )
+                            .map(|page| page.map(SourcePage::Canonical))
+                    }
                 } else {
-                    None
-                };
-                if let Some(page) = contextual {
-                    Ok(Some(SourcePage::Contextual(page)))
-                } else {
-                    effects
-                        .scan_relation_page_scoped(
+                    let contextual = if let Some(handler) = effects.ovb2_binding() {
+                        handler.scan_context_relation_page_scoped(
                             source,
                             scope,
                             after,
                             page_limit,
                             &mut budget,
-                        )
-                        .map(|page| page.map(SourcePage::Canonical))
+                        )?
+                    } else {
+                        None
+                    };
+                    if let Some(page) = contextual {
+                        Ok(Some(SourcePage::Contextual(page)))
+                    } else {
+                        effects
+                            .scan_relation_page_scoped(
+                                source,
+                                scope,
+                                after,
+                                page_limit,
+                                &mut budget,
+                            )
+                            .map(|page| page.map(SourcePage::Canonical))
+                    }
                 }
             });
         let debited = remaining.saturating_sub(budget.remaining());
@@ -6652,13 +6846,21 @@ impl Context<'_, '_> {
         } else if plan.source_values.is_some() {
             Ok(())
         } else {
-            self.effects
+            let effects = self
+                .effects
                 .as_deref_mut()
-                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?
-                .validate_relation_source(&plan.source)
+                .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+            if let Some(snapshot) = plan.snapshot.as_deref() {
+                if let Some(handler) = effects.ovb2_binding() {
+                    handler.validate_relation_source_at_snapshot(&plan.source, snapshot)
+                } else {
+                    effects.validate_relation_source_at_snapshot(&plan.source, snapshot)
+                }
+            } else {
+                effects.validate_relation_source(&plan.source)
+            }
         }
     }
-
     fn decode_with_type_witness(
         &mut self,
         codec: &str,
@@ -12959,6 +13161,7 @@ fn named_arguments(
         },
         "every" | "exists" => &["rows", "predicate"],
         "union" => &["left", "right"],
+        "as_of" => &["rows", "snapshot"],
         "take" | "drop" => &["rows", "count"],
         "map" | "flat_map" => &["rows", "transform"],
         "sort_by" => &["rows", "key"],
@@ -13714,6 +13917,7 @@ fn root_collection_name(expression: &Expr) -> Option<&str> {
             | "take"
             | "drop"
             | "window"
+            | "as_of"
     )
     .then_some(text.as_str())
 }
@@ -14686,20 +14890,18 @@ mod tests {
     }
 
     fn test_context<'functions>(functions: &'functions Functions) -> Context<'functions, 'static> {
-        Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            cancellation: None,
-        }
+        Context { limits: Limits::default(),
+        steps: 0,
+        functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None, }
     }
 
     #[test]
@@ -16160,20 +16362,18 @@ mod tests {
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            cancellation: None,
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None, };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16233,20 +16433,18 @@ mod tests {
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            cancellation: None,
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: Some(effects),
+        namespace: None,
+        transfer: None,
+        cancellation: None, };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16382,20 +16580,18 @@ mod tests {
         let parsed = parse_expression(source);
         assert!(parsed.is_ok(), "{source} should parse");
         let functions = Functions::new();
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: false,
-            restrict_function_names: false,
-            reject_unhandled_field_calls: false,
-            effects: Some(effects),
-            namespace: None,
-            transfer: None,
-            cancellation,
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: Some(effects),
+        namespace: None,
+        transfer: None,
+        cancellation, };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16526,20 +16722,18 @@ mod tests {
         };
         let functions = Functions::new();
         let mut effects = RelationEffects { calls: 0 };
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            cancellation: None,
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: true,
+        restrict_function_names: true,
+        reject_unhandled_field_calls: true,
+        effects: Some(&mut effects),
+        namespace: None,
+        transfer: None,
+        cancellation: None, };
         let mut scope = Scope(
             BTreeMap::new(),
             BTreeSet::new(),
@@ -16560,20 +16754,18 @@ mod tests {
     fn nonadvancing_relation_cursor_rejects_page_before_callback() {
         let functions = Functions::new();
         let mut effects = NonAdvancingRelationEffects;
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            cancellation: None,
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: true,
+        restrict_function_names: true,
+        reject_unhandled_field_calls: true,
+        effects: Some(&mut effects),
+        namespace: None,
+        transfer: None,
+        cancellation: None, };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17025,20 +17217,18 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(1);
         let mut effects = NonAdvancingRelationEffects;
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            cancellation: Some(&cancellation),
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: true,
+        restrict_function_names: true,
+        reject_unhandled_field_calls: true,
+        effects: Some(&mut effects),
+        namespace: None,
+        transfer: None,
+        cancellation: Some(&cancellation), };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17057,20 +17247,18 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(2);
         let mut effects = NonAdvancingRelationEffects;
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: Some(&mut effects),
-            namespace: None,
-            transfer: None,
-            cancellation: Some(&cancellation),
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: true,
+        restrict_function_names: true,
+        reject_unhandled_field_calls: true,
+        effects: Some(&mut effects),
+        namespace: None,
+        transfer: None,
+        cancellation: Some(&cancellation), };
         let plan = RelationPlan::new("Note".into());
         let mut callbacks = 0;
 
@@ -17088,20 +17276,18 @@ mod tests {
         let functions = Functions::new();
         let cancellation = CancellationToken::new();
         cancellation.request_after_checks(2);
-        let mut context = Context {
-            limits: Limits::default(),
-            steps: 0,
-            functions: &functions,
-            aliases: None,
-            session_functions: None,
-            repl_bindings: true,
-            restrict_function_names: true,
-            reject_unhandled_field_calls: true,
-            effects: None,
-            namespace: None,
-            transfer: None,
-            cancellation: Some(&cancellation),
-        };
+        let mut context = Context { limits: Limits::default(),
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: true,
+        restrict_function_names: true,
+        reject_unhandled_field_calls: true,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: Some(&cancellation), };
         let mut callbacks = 0;
         let mut distinct_seen = Vec::new();
         let mut pair_previous = Vec::new();
