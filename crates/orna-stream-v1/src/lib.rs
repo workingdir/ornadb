@@ -1764,6 +1764,7 @@ mod tests {
 
     // ORNA-TYPE-003: a failed delivery remains explicit until the stream retry succeeds or fails.
     // ORNA-SYS-122: retry transitions preserve one failure identity and checkpoint semantics.
+    /// ORNA-FAIL-002 / ORNA-SYS-121 / ORNA-SYS-122: retry admission and outcomes preserve the same blocked delivery until success.
     #[test]
     fn retry_can_succeed_or_fail() {
         let mut backend = InMemoryCheckpointBackend::default();
@@ -1838,6 +1839,7 @@ mod tests {
 
     // ORNA-FAIL-003: explicit skip records the delivery and advances to its provider successor.
     #[test]
+    /// ORNA-FAIL-003 / ORNA-CP-006: explicit skip advances only the blocked delivery to its provider successor.
     fn skip_advances_exactly_one_position() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -1858,6 +1860,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-FAIL-004 / ORNA-SYS-123: replay succeeds without moving the live checkpoint.
     fn replay_does_not_move_live_checkpoint() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -1899,6 +1902,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-SYS-123: replaying a skipped delivery does not block later ordered delivery admission.
     fn admitted_replay_does_not_block_later_ordered_delivery() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -1941,6 +1945,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-SYS-123: an admitted replay does not prevent stream resume.
     fn admitted_replay_does_not_block_stream_resume() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:resume", "resume:one");
@@ -1982,6 +1987,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-SYS-123: failed replay restores skipped state and preserves the admitted attempt count.
     fn replay_failure_preserves_the_admission_attempt_count() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -2017,6 +2023,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-SYS-064 / ORNA-SYS-123: replay cancellation is version-fenced and leaves live progress unchanged.
     fn replay_cancellation_is_version_fenced_and_preserves_live_checkpoint() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:zero", "resume:one");
@@ -2072,6 +2079,7 @@ mod tests {
     }
 
     #[test]
+    /// ORNA-SYS-123: cancellation after replay claim cannot mutate terminal replay state.
     fn replay_cancellation_is_fenced_after_execution_claim() {
         let mut backend = InMemoryCheckpointBackend::default();
         let item = delivery("receipt:claimed", "resume:claimed");
