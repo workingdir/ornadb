@@ -148,6 +148,7 @@ pub mod live_bootstrap;
 pub mod live_presentation;
 pub mod live_session;
 pub mod live_transport;
+pub mod page_state;
 pub mod runtime_adapter;
 pub mod runtime_loader;
 pub mod session;
