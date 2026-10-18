@@ -335,6 +335,7 @@ fn trusted_async_dispatch_returns_admin_outcome_without_staged_writes() {
     runtime.cleanup();
 }
 
+/// ORNA-ADMIN-002: reentrant administrative effects fail with `sys.admin.busy` before writes publish.
 #[test]
 fn administrative_effect_is_busy_until_staged_table_writes_finish() {
     let (authority, application) = admitted_staged_admin();

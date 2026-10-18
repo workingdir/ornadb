@@ -257,6 +257,7 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
     }
 }
 
+/// ORNA-DIAG-002: `orna explain` returns extended diagnostic guidance through the CLI binary.
 #[test]
 fn binary_explain_returns_extended_orna_diagnostic_guidance() {
     let directory = tempfile::tempdir().expect("CLI working directory");
@@ -482,6 +483,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
     clippy::too_many_lines,
     reason = "the process-level regression keeps all command outcomes and host-boundary observations together"
 )]
+/// ORNA-UX-001, ORNA-UX-002, ORNA-UX-004: the CLI diagnostic leads with an Orna-level problem and actionable remedy.
 fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_substitution() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
@@ -858,6 +860,7 @@ fn binary_run_treats_a_path_like_target_as_an_ordinary_function_name() {
     clippy::too_many_lines,
     reason = "the process-level regression retains the complete byte-for-byte status boundary evidence"
 )]
+/// ORNA-CLI-001, ORNA-CLI-003: status's Git-compatible porcelain is exercised through the CLI binary.
 fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_paths() {
     let repository = function_fixture_project();
     let source_path = repository.path().join("main.orna");
