@@ -786,6 +786,7 @@ async fn replay_cancel_counts_one_attempt_without_moving_checkpoint() {
 }
 
 #[tokio::test]
+/// ORNA-CP-007: reopening a runtime resumes a stream from its durable checkpoint successor.
 async fn list_stream_restart_recovers_at_the_durable_successor() {
     let (directory, repository) = repository();
     let state = RuntimeState::open(
@@ -872,6 +873,7 @@ async fn list_stream_restart_recovers_at_the_durable_successor() {
     drop(directory);
 }
 
+/// ORNA-TXN-002 / ORNA-CANCEL-001 / ORNA-CP-005 / ORNA-SYS-062: callback cancellation rolls back table writes and checkpoint movement.
 #[tokio::test]
 async fn cancellation_after_callback_discards_staged_table_and_checkpoint() {
     let (directory, repository) = repository();
@@ -940,6 +942,7 @@ async fn cancellation_after_callback_discards_staged_table_and_checkpoint() {
     drop(directory);
 }
 
+/// ORNA-TXN-001 / ORNA-TXN-002 / ORNA-CP-005 / ORNA-SYS-061 / ORNA-SYS-062 / ORNA-SYS-121 / ORNA-SYS-122: handler failure rolls back, then same-delivery retry atomically commits writes and progress.
 #[tokio::test]
 async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
     let (directory, repository) = repository();
