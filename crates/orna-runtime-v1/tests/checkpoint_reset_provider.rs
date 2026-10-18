@@ -188,7 +188,7 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
 }
 
 #[tokio::test]
-async fn stale_owner_provider_mismatch_preserves_error_without_failed_audit() {
+async fn stale_owner_is_rejected_before_provider_validation_without_failed_audit() {
     let (_directory, state, stale_writer, key) = fixture().await;
     let before_audits = state.admin_invocation_audits().await.unwrap();
     let current_writer = state.takeover_lease(stale_writer, [5; 16]).await.unwrap();
@@ -211,7 +211,7 @@ async fn stale_owner_provider_mismatch_preserves_error_without_failed_audit() {
         .await
         .unwrap_err();
 
-    assert_eq!(rejected, RuntimeError::CheckpointNotReplayable);
+    assert_eq!(rejected, RuntimeError::OwnerLost);
     assert_eq!(provider.validations.load(Ordering::Relaxed), 0);
     assert_eq!(
         state.admin_invocation_audits().await.unwrap(),
