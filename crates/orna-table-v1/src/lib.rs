@@ -2548,12 +2548,15 @@ mod tests {
         assert_eq!(database.committed(&"orders", &1).copied(), Some("old"));
     }
 
+    /// ORNA-ORDER-001: relation scans enumerate base rows by ascending canonical primary key.
+    /// ORNA-ORDER-002: filter, map, drop and take preserve that source order.
+    /// ORNA-ORDER-003: sort_by and distinct expose declared stable/order semantics.
     #[test]
     fn lazy_relations_compose_in_order_over_committed_and_candidate_rows() {
         let mut database = DatabaseRuntime::<&'static str, u64, &'static str>::default();
         database
             .activate(|activation| {
-                for (key, row) in [(1, "one"), (2, "two"), (3, "three"), (4, "four")] {
+                for (key, row) in [(4, "four"), (2, "two"), (1, "one"), (3, "three")] {
                     activation.insert("notes", key, row)?;
                 }
                 Ok::<_, TableError>(())
