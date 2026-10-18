@@ -7,6 +7,12 @@ license = "Apache-2.0"
 description = "Authoritative source admission and activation seam for Orna applications"
 publish = false
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+browser-wasm = ["orna-evaluator-v1/browser-wasm"]
 [dependencies]
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
@@ -25,3 +31,4 @@ orna-security-v1 = { path = "../orna-security-v1" }
 
 [dev-dependencies]
 futures = "0.3.31"
+orna-client = { path = "../orna-client" }

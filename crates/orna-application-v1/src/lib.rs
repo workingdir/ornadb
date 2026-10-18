@@ -59,6 +59,8 @@ pub fn remote_analysis_request(
 }
 
 mod repl_transaction;
+mod browser_profile;
+pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::ReplTransactionScope;
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";

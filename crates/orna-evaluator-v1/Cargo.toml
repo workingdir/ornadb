@@ -5,11 +5,15 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 description = "Bounded deterministic evaluator for the Orna 1.0 expression subset"
-publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["project-repl"]
-project-repl = ["dep:orna-project-v1"]
+default = ["project-repl", "system-host-bindings"]
+project-repl = ["dep:orna-project-v1", "system-host-bindings"]
+system-host-bindings = ["dep:orna-sys-v1", "dep:orna-repository-v1"]
+browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -17,15 +21,16 @@ num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
 getrandom = "0.3.4"
+uuid = { version = "1.18.1", default-features = false, optional = true }
 icu_properties = "2.2.0"
 serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1", optional = true }
-orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-repository-v1 = { path = "../orna-repository-v1", optional = true }
 orna-standard = { path = "../orna-standard" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
-orna-sys-v1 = { path = "../orna-sys-v1" }
+orna-sys-v1 = { path = "../orna-sys-v1", optional = true }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 sha2 = "0.10.9"
