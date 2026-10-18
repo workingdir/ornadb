@@ -11,11 +11,17 @@ use std::{
 
 const MAX_JSON_NESTING_DEPTH: usize = 128;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn generated_system_api_json() -> &'static str {
     static GENERATED: OnceLock<String> = OnceLock::new();
     GENERATED
         .get_or_init(orna_sys_v1::system_api_json)
         .as_str()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn generated_system_api_json() -> &'static str {
+    include_str!("../../../api/sys.json")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,10 +171,12 @@ pub(crate) enum SystemApiError {
 impl SystemApi {
     pub(crate) fn embedded() -> Result<Self, SystemApiError> {
         let api = Self::from_json(generated_system_api_json())?;
+        #[cfg(not(target_arch = "wasm32"))]
         api.validate_dispatch_table(orna_sys_v1::system_dispatch_table())?;
         Ok(api)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn validate_dispatch_table(
         &self,
         table: &orna_sys_v1::SystemDispatchTable,
@@ -984,11 +992,14 @@ fn validate_function_metadata(
     snapshot_rule: Option<&str>,
 ) -> Result<(), SystemApiError> {
     let requires_contract = label.starts_with("sys.admin.") || label.starts_with("sys.blob.");
+    #[cfg(not(target_arch = "wasm32"))]
     let requires_preconditions = orna_sys_v1::system_dispatch_table()
         .operation(label)
         .map_or(preconditions.is_some(), |operation| {
             !operation.preconditions.is_empty()
         });
+    #[cfg(target_arch = "wasm32")]
+    let requires_preconditions = preconditions.is_some();
     let requires_ownership = matches!(label, "sys.start(Value)" | "sys.start<T>");
     let requires_snapshot_rule = matches!(
         label,
