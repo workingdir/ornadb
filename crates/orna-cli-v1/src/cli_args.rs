@@ -106,6 +106,7 @@ pub(super) enum Command {
     Import(Vec<String>),
     Export(Vec<String>),
     Publish(Vec<String>),
+    Commit(Vec<String>),
     Migrate(Vec<String>),
     Annotate(Vec<String>),
     Check,
@@ -521,6 +522,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         Some("import") => Command::Import(words.by_ref().map(str::to_owned).collect()),
         Some("export") => Command::Export(words.by_ref().map(str::to_owned).collect()),
         Some("publish") => Command::Publish(words.by_ref().map(str::to_owned).collect()),
+        Some("commit") => Command::Commit(words.by_ref().map(str::to_owned).collect()),
         Some("migrate") => Command::Migrate(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;

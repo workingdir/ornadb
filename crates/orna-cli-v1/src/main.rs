@@ -17,6 +17,7 @@ mod cli_stage;
 mod fuse_mount;
 mod cli_annotate;
 mod cli_publish;
+mod cli_commit;
 mod cli_status;
 mod cli_serve;
 mod media_range;
