@@ -137,7 +137,8 @@ pub use execution::{
     evaluate_client_function_with_state_and_grants_and_arguments_and_executor_with_parent_invocation,
     validate_client_artifact_integrity,
 };
-
+mod browser_profile;
+pub use browser_profile::BrowserProfileValue;
 pub mod capability;
 pub mod connection;
 pub mod endpoint;
