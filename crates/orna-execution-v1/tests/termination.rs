@@ -184,6 +184,7 @@ fn ending_owner_fences_new_child_admission() {
     );
 }
 
+/// ORNA-CONCUR-001: normal activation completion cancels and joins owned children before commit.
 // ORNA-ERR-005: successful activation completion cancels and joins activation-owned child tasks before commit.
 #[test]
 fn success_cancels_and_joins_children_in_child_id_order_before_commit() {
@@ -287,6 +288,7 @@ fn cancellation_errors_still_fan_out_joins() {
     assert_eq!(store.commits, 0);
 }
 
+/// ORNA-TASK-001: a committed owner is terminal and cannot be reactivated to publish another commit.
 #[test]
 fn committed_owner_cannot_be_cancelled_or_relabelled_as_rolled_back() {
     let (mut coordinator, owner) = active();
@@ -308,6 +310,7 @@ fn committed_owner_cannot_be_cancelled_or_relabelled_as_rolled_back() {
 }
 
 #[test]
+/// ORNA-TASK-001: owner fencing rejects a late child publication after terminal completion.
 fn committed_owner_cannot_execute_publish_or_pass_its_fence() {
     let (mut coordinator, owner) = active();
     let mut provider = Provider;
@@ -437,6 +440,7 @@ fn store_panic_revokes_owner_before_unwind_escapes() {
     assert_eq!(store.commits, 0);
 }
 
+/// ORNA-CONCUR-001 / ORNA-TASK-001: unfinished children prevent owner commit until cancellation and join complete.
 #[test]
 fn children_joining_owner_cannot_execute_or_pass_its_fence_before_retrying_cleanup() {
     let (mut coordinator, owner) = active();
