@@ -22,6 +22,7 @@ fn execute(
 }
 
 #[test]
+// Specified: ORNA-ASSERT-004.
 fn assert_004_checks_the_complete_unpublished_candidate_relation() {
     let (outcome, runtime) = execute("mutate_candidate");
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -30,6 +31,7 @@ fn assert_004_checks_the_complete_unpublished_candidate_relation() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-005.
 fn assert_005_includes_insert_update_delete_and_rekey_in_candidate_evidence() {
     let (outcome, runtime) = execute("mutate_candidate");
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
@@ -39,6 +41,7 @@ fn assert_005_includes_insert_update_delete_and_rekey_in_candidate_evidence() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-013.
 fn assert_013_false_table_assertion_blocks_candidate_visibility() {
     let (outcome, runtime) = execute("candidate_failure");
     assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"));
@@ -48,6 +51,7 @@ fn assert_013_false_table_assertion_blocks_candidate_visibility() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-014.
 fn assert_014_table_assertion_failure_rolls_back_all_candidate_writes() {
     let (outcome, runtime) = execute("candidate_failure");
     assert!(matches!(outcome, StageOutcome::Failed(_)), "{outcome:?}");
@@ -56,6 +60,7 @@ fn assert_014_table_assertion_failure_rolls_back_all_candidate_writes() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-021.
 fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
     let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
@@ -66,6 +71,7 @@ fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-022.
 fn assert_022_module_assertion_with_one_table_dependency_is_rejected() {
     let source = include_str!("fixtures/reference/examples/invalid/module-single-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("module-single-table-assertion.orna", source)]);
@@ -74,6 +80,7 @@ fn assert_022_module_assertion_with_one_table_dependency_is_rejected() {
 
 // ORNA-MODULE-002: rejects module assertions without a cross-table invariant dependency.
 #[test]
+// Specified: ORNA-ASSERT-023.
 fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
     let source = include_str!("fixtures/reference/examples/invalid/module-zero-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("module-zero-table-assertion.orna", source)]);
@@ -81,6 +88,7 @@ fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-026.
 fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
     let (outcome, runtime) = execute("module_failure");
     assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"), "{outcome:?}");
@@ -89,6 +97,7 @@ fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-027.
 fn assert_027_table_assertions_fail_before_module_assertions() {
     let (outcome, runtime) = execute("table_and_module_failure");
     assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"), "first failure must be the table-owned assertion: {outcome:?}");
@@ -97,6 +106,7 @@ fn assert_027_table_assertions_fail_before_module_assertions() {
 }
 
 #[test]
+// Specified: ORNA-ASSERT-029.
 fn assert_029_false_module_assertion_rolls_back_the_complete_database_candidate() {
     let (outcome, runtime) = execute("module_failure");
     assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"), "{outcome:?}");
