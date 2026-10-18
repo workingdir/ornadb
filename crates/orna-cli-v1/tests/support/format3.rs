@@ -26,7 +26,7 @@ use orna_value_v1::{
 };
 
 use orna_project_v1::ObjectIdentityManifest;
-use orna_semantic_v1::{ModuleInput, analyze};
+use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 
 pub fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -462,7 +462,17 @@ fn format3_repository_parts(
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
     let modules = [ModuleInput::new("main.orna", media_source)];
-    let analysis = analyze(&modules);
+    let catalogue = Catalogue::authoritative_core();
+    let analysis = analyze_with_catalogue(&modules, &catalogue);
+    assert!(
+        analysis.is_ok(),
+        "format-3 fixture source produced semantic diagnostics: {:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>(),
+    );
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
     let table = identities

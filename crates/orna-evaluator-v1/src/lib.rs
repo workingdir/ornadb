@@ -833,6 +833,12 @@ pub trait EffectHandler {
         Ok(())
     }
 
+    /// Returns whether this handler admits a statically named relation source.
+    /// This resolves names only; snapshot validation and row reads still use the
+    /// exact-snapshot relation hooks below.
+    fn recognizes_relation_source(&self, _source: &str) -> bool {
+        false
+    }
 
     /// Supplies one bounded page for an evaluator-owned relation plan at its
     /// first observation. Existing handlers return `Ok(None)` by default so
@@ -979,6 +985,12 @@ pub trait Ovb2EffectHandler {
     /// Reports a proved query cache hit or newly stored result to an optional host observer.
     fn observe_query_reuse(&mut self, _function: &str, _decision: QueryReuseDecision) {}
 
+    /// Identifies relation names without reading rows; historical accesses must
+    /// still pass exact-snapshot validation and page hooks.
+    fn recognizes_relation_source(&self, _source: &str) -> bool {
+        false
+    }
+
     /// Handle an effect while sharing the activation's step budget.
     fn handle_with_budget(
         &mut self,
@@ -1081,6 +1093,10 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
 
     fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
         self.handler.observe_query_reuse(function, decision);
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        self.handler.recognizes_relation_source(source)
     }
 
     fn is_ovb2_binding(&self) -> bool {
@@ -1197,6 +1213,7 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         Ok(result)
     }
 
+
     fn handle_with_budget(
         &mut self,
         callee: &Expr,
@@ -1251,6 +1268,10 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         snapshot: &CanonicalValue,
     ) -> Result<(), EvaluationError> {
         EffectHandler::validate_relation_source_at_snapshot(self.handler, source, snapshot)
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        EffectHandler::recognizes_relation_source(self.handler, source)
     }
 
     fn scan_context_relation_page_at_snapshot_scoped(
@@ -1325,6 +1346,10 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
 
     fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
         EffectHandler::observe_query_reuse(self.handler, function, decision);
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        EffectHandler::recognizes_relation_source(self.handler, source)
     }
     fn handle_with_budget(
         &mut self,
@@ -5637,10 +5662,22 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Option<Result<Value, EvaluationError>> {
         let as_of_receiver = match callee {
-            Expr::Field { base, name, .. }
-                if name == "as_of" && relation_expression_candidate(base, scope) =>
-            {
-                Some(base.as_ref())
+            Expr::Field { base, name, .. } if name == "as_of" => {
+                let relation_candidate = relation_expression_candidate(base, scope);
+                let source = system_relation_source(base)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        if relation_candidate {
+                            None
+                        } else {
+                            function_name(base).filter(|source| {
+                                self.effects.as_deref().is_some_and(|effects| {
+                                    effects.recognizes_relation_source(source)
+                                })
+                            })
+                        }
+                    });
+                (relation_candidate || source.is_some()).then_some((base.as_ref(), source))
             }
             _ => None,
         };
@@ -5663,7 +5700,7 @@ impl Context<'_, '_> {
                     .then(|| portable_collection_operation(callee, resolved.as_deref()))
                     .flatten()
             })
-            .or_else(|| as_of_receiver.map(|_| "as_of"))
+            .or_else(|| as_of_receiver.as_ref().map(|_| "as_of"))
             .or(statistics_operation)?;
         if (statistics_operation.is_none()
             && intrinsic_name.is_some_and(|name| scope.0.contains_key(name)))
@@ -5683,12 +5720,12 @@ impl Context<'_, '_> {
 
         Some((|| {
             let mut input = input;
-            if let Some(receiver) = as_of_receiver {
+            if let Some((receiver, source)) = as_of_receiver {
                 if input.is_some() {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
                 }
-                let receiver = if let Some(source) = system_relation_source(receiver) {
-                    Value::Relation(RelationPlan::new(source.to_owned()))
+                let receiver = if let Some(source) = source {
+                    Value::Relation(RelationPlan::new(source))
                 } else {
                     self.evaluate(receiver, scope, depth + 1)?
                 };

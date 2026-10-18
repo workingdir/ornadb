@@ -1286,6 +1286,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
+ "orna-conformance-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-live-v1",
@@ -1294,9 +1295,12 @@ dependencies = [
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
+ "orna-storage-v1",
  "orna-syntax-v1",
+ "orna-sys-v1",
  "orna-value-v1",
  "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]

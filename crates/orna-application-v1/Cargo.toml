@@ -24,3 +24,7 @@ orna-repository-v1 = { path = "../orna-repository-v1" }
 
 [dev-dependencies]
 futures = "0.3.31"
+orna-conformance-v1 = { path = "../orna-conformance-v1" }
+orna-storage-v1 = { path = "../orna-storage-v1" }
+tempfile = "3.23.0"
+orna-sys-v1 = { path = "../orna-sys-v1" }

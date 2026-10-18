@@ -9,21 +9,22 @@
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, Ovb2EffectHandler,
-    PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
+    PureFunction, QueryReuseDecision, RelationPage, RelationReadScope, ReplError,
+    StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
     invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
-use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
+use orna_value_v1::{ContextValue, Format3Context, GitHash, Snapshot, ValueFormat, decode_canonical_storage_value};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
-use orna_project_v1::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema};
+use orna_project_v1::{AdmittedSourceRow, LoadedProject, ProjectLoader, ResolvedTableSchema};
 use orna_protocol_v1::{
     Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
     ResultStatus,
 };
-use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
+use orna_repository_v1::{GitCommitRef, KeyRange, ProtectedContentPin, Repository, RepositoryCaptureCapability, TypedKey};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
@@ -462,6 +463,39 @@ impl ApplicationAuthority {
         })?;
         handler.into_staged_activation(value, None)
     }
+    /// Evaluates admitted source with access to committed relation snapshots.
+    /// Each relation read uses the exact commit pinned by sys.snapshot; missing
+    /// historical support fails with ORNA-EVAL-HIST-INCOMPLETE.
+    pub fn evaluate_staged_with_repository(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        repository: &Repository,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
+        let mut handler = SourceMutationEffectHandler::new_with_table_object_ids(
+            tables,
+            table_object_ids,
+        )?
+        .with_insert_defaults(
+            application.table_insert_defaults.clone(),
+            application.functions.clone(),
+            application.limits,
+        )
+        .with_historical_repository(repository.clone());
+        let value = invoke_named_with_effects(
+            &application.entry,
+            &application.functions,
+            arguments,
+            application.limits,
+            &mut handler,
+        )
+        .map_err(|error: EvaluationError| {
+            ApplicationError::EffectRejected(error.code().to_owned())
+        })?;
+        handler.into_staged_activation(value, None)
+    }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
     /// through an explicit trusted host capability before returning staged
@@ -721,6 +755,26 @@ pub struct StagedActivation {
     snapshot_generation: Option<[u8; 32]>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    query_reuse_observations: Vec<QueryReuseObservation>,
+}
+
+/// One function-call cache decision retained for host inspection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryReuseObservation {
+    function: String,
+    decision: QueryReuseDecision,
+}
+
+impl QueryReuseObservation {
+    #[must_use]
+    pub fn function(&self) -> &str {
+        &self.function
+    }
+
+    #[must_use]
+    pub const fn decision(&self) -> QueryReuseDecision {
+        self.decision
+    }
 }
 
 /// Schema artifact retained for the repository's expected-schema admission.
@@ -917,6 +971,13 @@ impl StagedActivation {
     pub fn mutations(&self) -> &[TableMutation] {
         &self.mutations
     }
+    /// Per-call cache decisions retained for host inspection; they do not
+    /// populate sys.Query or sys.Materialization rows.
+    #[must_use]
+    pub fn query_reuse_observations(&self) -> &[QueryReuseObservation] {
+        &self.query_reuse_observations
+    }
+
     /// Source schemas retained for repository expected-schema row admission.
     #[must_use]
     pub fn source_row_schemas(&self) -> &[SourceRowSchemaProvenance] {
@@ -929,7 +990,8 @@ impl StagedActivation {
         &self.protected_field_pins
     }
 
-    /// Consumes the activation so callers can transfer pins without cloning.
+    /// Consumes the activation so callers can transfer pins and observations
+    /// without cloning.
     #[must_use]
     pub fn into_parts(
         self,
@@ -939,6 +1001,7 @@ impl StagedActivation {
         Option<[u8; 32]>,
         Vec<SourceRowSchemaProvenance>,
         Vec<RetainedSourceBlobPin>,
+        Vec<QueryReuseObservation>,
     ) {
         (
             self.value,
@@ -946,6 +1009,7 @@ impl StagedActivation {
             self.snapshot_generation,
             self.source_row_schemas,
             self.protected_field_pins,
+            self.query_reuse_observations,
         )
     }
 
@@ -1021,6 +1085,8 @@ pub struct SourceMutationEffectHandler {
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    historical_repository: Option<Repository>,
+    query_reuse_observations: Vec<QueryReuseObservation>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1040,6 +1106,8 @@ impl SourceMutationEffectHandler {
             captured_rows: None,
             overlay: BTreeMap::new(),
             source_row_schemas: Vec::new(),
+            historical_repository: None,
+            query_reuse_observations: Vec::new(),
             protected_field_pins: Vec::new(),
         }
     }
@@ -1116,6 +1184,10 @@ impl SourceMutationEffectHandler {
         Ok(handler)
     }
 
+    fn with_historical_repository(mut self, repository: Repository) -> Self {
+        self.historical_repository = Some(repository);
+        self
+    }
     fn with_insert_defaults(
         mut self,
         defaults: TableInsertDefaults,
@@ -1312,6 +1384,7 @@ impl SourceMutationEffectHandler {
             snapshot_generation,
             source_row_schemas: self.source_row_schemas,
             protected_field_pins: self.protected_field_pins,
+            query_reuse_observations: self.query_reuse_observations,
         })
     }
 
@@ -1778,6 +1851,14 @@ impl AsyncSourceMutationEffectHandler {
 }
 
 impl EffectHandler for AsyncSourceMutationEffectHandler {
+    fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+        EffectHandler::observe_query_reuse(&mut self.mutations, function, decision);
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        EffectHandler::recognizes_relation_source(&self.mutations, source)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -2074,11 +2155,55 @@ fn runtime_effect_statement_count(statement: &Statement) -> usize {
 }
 
 impl EffectHandler for SourceMutationEffectHandler {
+    fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+        self.query_reuse_observations.push(QueryReuseObservation {
+            function: function.to_owned(),
+            decision,
+        });
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        self.admitted_table_name(source).is_some()
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if source_function_path(callee).as_deref() == Some("sys.snapshot") {
+            let [selector] = arguments else {
+                return Err(Self::effect_error("ORNA-EVAL-TYPE"));
+            };
+            let OvbRaw::Text(selector) = selector.raw() else {
+                return Err(Self::effect_error("ORNA-EVAL-TYPE"));
+            };
+            let repository = self
+                .historical_repository
+                .as_ref()
+                .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let (commit, format) = repository
+                .open_pinned_format_context_with_commit(selector)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let oid = decode_commit_oid(commit.as_str())
+                .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let database_id = format
+                .database_id()
+                .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let algorithm = match oid.len() {
+                20 => GitHash::Sha1,
+                32 => GitHash::Sha256,
+                _ => return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE")),
+            };
+            let snapshot = Snapshot::Commit {
+                database: *database_id.as_bytes(),
+                algorithm,
+                oid,
+            };
+            return CanonicalValue::new(snapshot.raw())
+                .map(Some)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        }
         let Expr::Field { base, name, .. } = callee else {
             return Ok(None);
         };
@@ -2286,6 +2411,224 @@ impl EffectHandler for SourceMutationEffectHandler {
             next: None,
         }))
     }
+    fn validate_relation_source_at_snapshot(
+        &mut self,
+        source: &str,
+        snapshot: &CanonicalValue,
+    ) -> Result<(), EvaluationError> {
+        let repository = self
+            .historical_repository
+            .as_ref()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let table = self
+            .admitted_table_name(source)
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let object_id = self
+            .table_object_ids
+            .get(table)
+            .copied()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let Snapshot::Commit {
+            database,
+            algorithm,
+            oid,
+        } = Snapshot::decode(snapshot.raw())
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?
+        else {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        };
+        if oid.len() != algorithm.oid_width() {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        }
+        let (commit, format) = repository
+            .open_pinned_format_context_with_commit(&encode_commit_oid(&oid))
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let format_database = format
+            .database_id()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        if format_database.as_bytes() != &database {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        }
+        ProjectLoader::default()
+            .resolve_committed_source_table_schema(repository, &commit, object_id)
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        format
+            .load_row_map(object_id.bytes())
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        Ok(())
+    }
+
+    fn scan_relation_page_at_snapshot_scoped(
+        &mut self,
+        source: &str,
+        _scope: RelationReadScope,
+        snapshot: &CanonicalValue,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        if limit == 0 {
+            return Ok(Some(RelationPage {
+                rows: Vec::new(),
+                next: None,
+            }));
+        }
+        let repository = self
+            .historical_repository
+            .as_ref()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let table = self
+            .admitted_table_name(source)
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?
+            .to_owned();
+        let schema = self
+            .tables
+            .get(&table)
+            .and_then(|schema| schema.admission.as_ref())
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let object_id = self
+            .table_object_ids
+            .get(&table)
+            .copied()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let Snapshot::Commit {
+            database,
+            algorithm,
+            oid,
+        } = Snapshot::decode(snapshot.raw())
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?
+        else {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        };
+        if oid.len() != algorithm.oid_width() {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        }
+        let (commit, format) = repository
+            .open_pinned_format_context_with_commit(&encode_commit_oid(&oid))
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let format_database = format
+            .database_id()
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        if format_database.as_bytes() != &database {
+            return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+        }
+        let resolved = ProjectLoader::default()
+            .resolve_committed_source_table_schema(repository, &commit, object_id)
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let binding = resolved.binding();
+        let row_map = format
+            .load_row_map(object_id.bytes())
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let graph = format
+            .open_native_graph(&row_map)
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let read_scope = graph
+            .open_read_scope()
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let (field_names, _) = repl_transaction::stored_field_names(binding.descriptor().raw())
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let lower = after
+            .map(TypedKey::decode_canonical)
+            .transpose()
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let range = KeyRange::new(
+            lower,
+            None,
+            limit
+                .saturating_add(usize::from(after.is_some()))
+                .saturating_add(1),
+        )
+        .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        let page = graph
+            .range_rows(&range, &read_scope)
+            .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+        budget.debit(1)?;
+
+        let mut rows = Vec::with_capacity(limit);
+        let mut next = None;
+        let mut last_key = None;
+        for row in page {
+            let key_bytes = row
+                .key()
+                .canonical_bytes()
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            if after == Some(key_bytes.as_slice()) {
+                continue;
+            }
+            if rows.len() == limit {
+                next = last_key;
+                break;
+            }
+            let key = CanonicalValue::decode(&key_bytes)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let key_values = match (schema.keys.len(), key.raw()) {
+                (1, _) => vec![key.raw().clone()],
+                (key_count, OvbRaw::Array(values)) if values.len() == key_count => {
+                    values.clone()
+                }
+                _ => return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE")),
+            };
+            let decoded = graph
+                .decode_admitted_row_fields(&row, binding, &read_scope)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+            let OvbRaw::Array(stored) = decode_canonical_storage_value(decoded.canonical_fields())
+                .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?
+            else {
+                return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+            };
+            if stored.len() != decoded.fields().len() {
+                return Err(Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"));
+            }
+            let mut fields = Vec::with_capacity(key_values.len() + stored.len());
+            for ((name, _), value) in schema.keys.iter().zip(key_values) {
+                fields.push((OvbRaw::Text(name.clone()), value));
+            }
+            for (field, value) in decoded.fields().iter().zip(stored) {
+                let name = field_names
+                    .get(field.field_id())
+                    .ok_or_else(|| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+                CanonicalValue::new(value.clone())
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?;
+                fields.push((OvbRaw::Text(name.clone()), value));
+            }
+            fields.sort_by(|(left, _), (right, _)| {
+                canonical_map_key(left).cmp(&canonical_map_key(right))
+            });
+            rows.push(
+                CanonicalValue::new(OvbRaw::Map(fields))
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-HIST-INCOMPLETE"))?,
+            );
+            last_key = Some(key_bytes);
+        }
+        Ok(Some(RelationPage { rows, next }))
+    }
+}
+
+fn decode_commit_oid(value: &str) -> Option<Vec<u8>> {
+    if !matches!(value.len(), 40 | 64) {
+        return None;
+    }
+    let digit = |byte| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    };
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Some((digit(pair[0])? << 4) | digit(pair[1])?))
+        .collect()
+}
+
+fn encode_commit_oid(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {

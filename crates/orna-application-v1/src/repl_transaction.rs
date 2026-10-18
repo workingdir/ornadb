@@ -59,8 +59,14 @@ fn normalize_repl_mutations(
     table_ids: &BTreeMap<String, TableObjectId>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
-    let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
-        activation.into_parts();
+    let (
+        value,
+        mutations,
+        snapshot_generation,
+        source_row_schemas,
+        protected_field_pins,
+        query_reuse_observations,
+    ) = activation.into_parts();
     let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
     let mut field_names_by_table = BTreeMap::<String, Vec<String>>::new();
     let mut normalized = Vec::with_capacity(mutations.len());
@@ -114,6 +120,7 @@ fn normalize_repl_mutations(
         snapshot_generation,
         source_row_schemas,
         protected_field_pins,
+        query_reuse_observations,
     })
 }
 
@@ -201,7 +208,7 @@ fn committed_table_rows(
     Ok(result)
 }
 
-fn stored_field_names(descriptor: &OvbRaw) -> Result<(BTreeMap<[u8; 16], String>, Vec<String>), ApplicationError> {
+pub(super) fn stored_field_names(descriptor: &OvbRaw) -> Result<(BTreeMap<[u8; 16], String>, Vec<String>), ApplicationError> {
     let OvbRaw::Map(entries) = descriptor else { return Err(ApplicationError::InvalidTableMetadata); };
     let fields = entries.iter().find_map(|(key, value)| (key == &OvbRaw::Int(BigInt::from(3))).then_some(value))
         .ok_or(ApplicationError::InvalidTableMetadata)?;
@@ -514,6 +521,14 @@ impl ReplTransactionEffectHandler<'_, '_> {
 }
 
 impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
+    fn observe_query_reuse(&mut self, function: &str, decision: QueryReuseDecision) {
+        EffectHandler::observe_query_reuse(&mut self.mutations, function, decision);
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        EffectHandler::recognizes_relation_source(&self.mutations, source)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -795,6 +810,10 @@ impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
         self.handle_contextual_effect(callee, arguments)
+    }
+
+    fn recognizes_relation_source(&self, source: &str) -> bool {
+        EffectHandler::recognizes_relation_source(&self.mutations, source)
     }
 
     fn handle_with_budget(

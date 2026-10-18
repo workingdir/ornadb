@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Relation `as_of` pins a validated SnapshotRef for historical reads; unsupported
+  historical validation or pages fail with ORNA-EVAL-HIST-INCOMPLETE instead of
+  falling back to current rows.
+  Proven scalar-only calls may reuse results within one activation; the
+  application adapter retains per-call decisions on the staged activation.
+  This observer does not populate sys.Query, sys.Plan or sys.Materialization rows.
+
 - Semantic quantities retain reduced dimension exponents, exact rational scale,
   and affine metadata through numeric aggregates. Integrating speed by elapsed
   time adds the Time exponent and returns a length quantity. Dimension expressions
