@@ -396,3 +396,36 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(Sha256::digest(actual_cover).as_slice(), expected_cover_sha);
 
 }
+#[test]
+fn walkthrough_five_stages_and_commits_the_selected_row_through_review() {
+    let (directory, repository, _relation_id, _context) =
+        format3::format3_repository_for_table_with_source_row(
+            MUSIC_SOURCE,
+            "music",
+            "music/london.orna",
+            "{ title: \"Live in London\", artist: \"Kieran\", }\n",
+        );
+    let root = directory.path();
+    std::fs::write(
+        root.join("music/london.orna"),
+        "{ title: \"Live in London — remastered\", artist: \"Kieran\", }\n",
+    ).unwrap();
+
+    let staged = run(root, &["add", "--row", "music", "\"london\""]);
+    assert_eq!(staged.status.code(), Some(0), "row staging failed: {}", stderr(&staged));
+    let status = run(root, &["status", "--porcelain"]);
+    assert_eq!(status.status.code(), Some(0), "status failed: {}", stderr(&status));
+    assert!(String::from_utf8_lossy(&status.stdout).contains("music/london.orna"));
+
+    let committed = run(root, &["commit", "-m", "Retitle the recording"]);
+    assert_eq!(committed.status.code(), Some(0), "reviewed commit failed: {}", stderr(&committed));
+    let head = repository.head().unwrap().unwrap();
+    let published = Command::new("git")
+        .args(["show", &format!("{}:music/london.orna", head.as_str())])
+        .current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output().unwrap();
+    assert!(published.status.success(), "published row missing: {}", String::from_utf8_lossy(&published.stderr));
+    assert!(String::from_utf8_lossy(&published.stdout).contains("Live in London — remastered"));
+}
