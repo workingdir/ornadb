@@ -380,7 +380,9 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
 
     #[cfg(target_os = "linux")]
     {
-        if let Some((filesystem, source)) = mounted_source_for_path(&mountpoint)? {
+        if let Some(mount_identity) = mounted_mount_for_path(&mountpoint)? {
+            let filesystem = mount_identity.filesystem.as_str();
+            let source = mount_identity.source.as_str();
             if !filesystem.starts_with("fuse") || !is_orna_mount_source(&source) {
                 return Err(mount_error(
                     "Unmount was refused",
@@ -436,10 +438,20 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     ));
                 }
             };
-            let quiesced = if attached_view.is_some() {
-                match crate::fuse_mount::begin_unmount(&mountpoint) {
-                    Ok(()) => true,
-                    Err(crate::fuse_mount::UnmountPreparationError::UnresolvedDrafts) => {
+            let quiesced = match crate::fuse_mount::begin_unmount(&mountpoint) {
+                Ok(()) => true,
+                Err(crate::fuse_mount::UnmountPreparationError::UnresolvedDrafts) => {
+                    return Err(Diagnostic::target_with_detail(
+                        "E2000",
+                        "Unmount was refused",
+                        "unresolved workspace drafts remain; accept them with fsync or recover them before unmounting",
+                        "the FUSE mount and its repository view remain attached",
+                    ));
+                }
+                Err(crate::fuse_mount::UnmountPreparationError::ReadOnlyMount) => {
+                    let unresolved = crate::fuse_mount::has_unresolved_drafts(&mountpoint)
+                        .map_err(|error| mount_error("Mount draft state could not be read", error))?;
+                    if unresolved {
                         return Err(Diagnostic::target_with_detail(
                             "E2000",
                             "Unmount was refused",
@@ -447,43 +459,53 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                             "the FUSE mount and its repository view remain attached",
                         ));
                     }
-                    Err(crate::fuse_mount::UnmountPreparationError::ReadOnlyMount) => {
-                        let unresolved = crate::fuse_mount::has_unresolved_drafts(&mountpoint)
-                            .map_err(|error| {
-                                mount_error("Mount draft state could not be read", error)
-                            })?;
-                        if unresolved {
-                            return Err(Diagnostic::target_with_detail(
-                                "E2000",
-                                "Unmount was refused",
-                                "unresolved workspace drafts remain; accept them with fsync or recover them before unmounting",
-                                "the FUSE mount and its repository view remain attached",
-                            ));
-                        }
-                        false
-                    }
-                    Err(crate::fuse_mount::UnmountPreparationError::Operation(error)) => {
-                        return Err(mount_error("Mount draft state could not be quiesced", error));
-                    }
+                    false
                 }
-            } else {
-                false
+                Err(crate::fuse_mount::UnmountPreparationError::Disconnected)
+                    if attached_view.is_none() =>
+                {
+                    false
+                }
+                Err(crate::fuse_mount::UnmountPreparationError::Disconnected) => {
+                    return Err(mount_error(
+                        "Mount draft state could not be read",
+                        "the Orna FUSE session is disconnected while its registered view remains attached",
+                    ));
+                }
+                Err(crate::fuse_mount::UnmountPreparationError::Operation(error)) => {
+                    return Err(mount_error("Mount draft state could not be quiesced", error));
+                }
             };
-            if let Err(error) = crate::fuse_mount::unmount_mountpoint(&mountpoint) {
-                if quiesced {
-                    crate::fuse_mount::cancel_unmount(&mountpoint).map_err(|resume_error| {
-                        mount_error(
-                            "FUSE unmount failed and the mount could not resume",
-                            format!("{error}; {resume_error}"),
-                        )
-                    })?;
+            match mounted_mount_for_path(&mountpoint)? {
+                Some(current) if current == mount_identity => {
+                    let unmount_error = crate::fuse_mount::unmount_mountpoint(&mountpoint).err();
+                    let remaining = mounted_mount_for_path(&mountpoint)?;
+                    if remaining.as_ref() == Some(&mount_identity) {
+                        let detail = unmount_error.unwrap_or_else(|| {
+                            "FUSE unmount helper returned successfully but the validated mount remains attached".to_owned()
+                        });
+                        if quiesced {
+                            crate::fuse_mount::cancel_unmount(&mountpoint)
+                                .map_err(|resume_error| {
+                                    mount_error(
+                                        "FUSE unmount failed and the mount could not resume",
+                                        format!("{detail}; {resume_error}"),
+                                    )
+                                })?;
+                        }
+                        return Err(mount_error("FUSE unmount failed", detail));
+                    }
                 }
-                return Err(mount_error("FUSE unmount failed", error));
+                Some(_) => {
+                    return Err(mount_error(
+                        "Unmount was refused",
+                        "mount identity changed before unmount; the replacement mount was left untouched",
+                    ));
+                }
+                None => {}
             }
             if let Some((attached_view, status)) = attached_view {
-                attached_view.detach().map_err(|error| {
-                    mount_error("Mount view could not be detached", error.to_string())
-                })?;
+                detach_view_with_retry(&repository, &status, attached_view)?;
                 writeln!(
                     io::stdout().lock(),
                     "unmounted {} snapshot {}",
@@ -505,10 +527,14 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
         let statuses = repository
             .mount_status()
             .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?;
-        let status = statuses
+        let Some(status) = statuses
             .into_iter()
             .find(|status| status.mountpoint() == mountpoint)
-            .ok_or_else(|| mount_error("Unmount was refused", "no mount view is attached there"))?;
+        else {
+            writeln!(io::stdout().lock(), "already unmounted {}", mountpoint.display())
+                .map_err(|_| stdout_error())?;
+            return Ok(());
+        };
         let view = repository
             .open_mount_view_by_id(&status.view_hex())
             .map_err(|error| mount_error("Mount view could not be opened", error.to_string()))?;
@@ -522,8 +548,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                 "mount view changed after its status was read",
             ));
         }
-        view.detach()
-            .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))?;
+        detach_view_with_retry(&repository, &status, view)?;
         writeln!(
             io::stdout().lock(),
             "unmounted {} snapshot {}",
@@ -550,6 +575,54 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
     }
 }
 
+#[cfg(target_os = "linux")]
+fn detach_view_with_retry(
+    repository: &Repository,
+    status: &MountStatus,
+    view: MountView,
+) -> Result<(), Diagnostic> {
+    let view_id = status.view_hex();
+    let first_error = match view.detach() {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    let retry_view = match repository.open_mount_view_by_id(&view_id) {
+        Ok(view) => view,
+        Err(orna_repository_v1::MountError::NotAttached) => return Ok(()),
+        Err(error) => {
+            return Err(mount_error(
+                "Mount view could not be detached",
+                format!("{first_error}; recovery lookup failed: {error}"),
+            ));
+        }
+    };
+    let retry_status = retry_view.verify_record().map_err(|error| {
+        mount_error(
+            "Mount view could not be detached",
+            format!("{first_error}; recovery record could not be verified: {error}"),
+        )
+    })?;
+    if &retry_status != status {
+        return Err(mount_error(
+            "Mount view could not be detached",
+            "the registered view changed during post-unmount recovery",
+        ));
+    }
+    match retry_view.detach() {
+        Ok(()) => Ok(()),
+        Err(second_error) => match repository.open_mount_view_by_id(&view_id) {
+            Err(orna_repository_v1::MountError::NotAttached) => Ok(()),
+            Err(recovery_error) => Err(mount_error(
+                "Mount view could not be detached",
+                format!("{first_error}; retry failed: {second_error}; recovery lookup failed: {recovery_error}"),
+            )),
+            Ok(_) => Err(mount_error(
+                "Mount view remains attached after FUSE unmount",
+                format!("{first_error}; retry failed: {second_error}; run unmount again to retry view cleanup"),
+            )),
+        },
+    }
+}
 #[cfg(target_os = "linux")]
 fn canonical_mountpoint_or_original(path: &Path) -> std::path::PathBuf {
     match fs::canonicalize(path) {
@@ -579,7 +652,15 @@ fn is_orna_mount_source(source: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn mounted_source_for_path(path: &Path) -> Result<Option<(String, String)>, Diagnostic> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MountedFuseIdentity {
+    mount_id: u64,
+    filesystem: String,
+    source: String,
+}
+
+#[cfg(target_os = "linux")]
+fn mounted_mount_for_path(path: &Path) -> Result<Option<MountedFuseIdentity>, Diagnostic> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| mount_error("Mount table could not be read", error.to_string()))?;
     for line in mountinfo.lines() {
@@ -589,13 +670,24 @@ fn mounted_source_for_path(path: &Path) -> Result<Option<(String, String)>, Diag
         let Some(mountpoint) = mount_fields.split_whitespace().nth(4) else {
             continue;
         };
+        let Some(mount_id) = mount_fields
+            .split_whitespace()
+            .next()
+            .and_then(|field| field.parse::<u64>().ok())
+        else {
+            continue;
+        };
         if unescape_mountinfo_path(mountpoint) != path.as_os_str().as_bytes() {
             continue;
         }
         let mut fields = filesystem_fields.split_whitespace();
         let filesystem = fields.next().unwrap_or_default().to_owned();
         let source = fields.next().unwrap_or_default().to_owned();
-        return Ok(Some((filesystem, source)));
+        return Ok(Some(MountedFuseIdentity {
+            mount_id,
+            filesystem,
+            source,
+        }));
     }
     Ok(None)
 }
