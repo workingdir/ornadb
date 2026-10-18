@@ -2945,6 +2945,91 @@ impl Repository {
         }
     }
 
+    /// Keeps newly introduced compact files out of ordinary worktree diffs while
+    /// their post-ref recovery journal is pending. The worktree bytes remain
+    /// checked directly by recovery, and the bits are cleared once reconciliation
+    /// succeeds. The caller holds the publisher's Git index lock.
+    fn set_compact_recovery_skip_worktree_locked(
+        &self,
+        journal: &PublicationJournal,
+        skip: bool,
+    ) -> Result<(), RepositoryError> {
+        if journal.compact_manifest().is_none() {
+            return Ok(());
+        }
+
+        let mut encoded_paths = Vec::new();
+        for entry in journal.entries() {
+            if entry.expected().is_none() && entry.next().is_some() {
+                encoded_paths.extend_from_slice(
+                    entry.path.as_path().as_os_str().as_encoded_bytes(),
+                );
+                encoded_paths.push(0);
+            }
+        }
+        if encoded_paths.is_empty() {
+            return Ok(());
+        }
+
+        self.ensure_atomic_index_install_supported()?;
+        let index = self.git_path("index")?;
+        let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let parent = index.parent().ok_or(RepositoryError::LocalStateUnavailable)?;
+        let candidate_index = parent.join(format!(
+            ".orna-index-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                .as_nanos()
+        ));
+        let result = (|| {
+            fs::write(&candidate_index, &base_index)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let mut update = self.command();
+            update
+                .env("GIT_INDEX_FILE", &candidate_index)
+                .args([
+                    "update-index",
+                    if skip { "--skip-worktree" } else { "--no-skip-worktree" },
+                    "-z",
+                    "--stdin",
+                ])
+                .stdin(Stdio::piped());
+            let mut child = update
+                .spawn()
+                .map_err(|_| RepositoryError::GitUnavailable)?;
+            child
+                .stdin
+                .take()
+                .ok_or(RepositoryError::LocalStateUnavailable)?
+                .write_all(&encoded_paths)
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            let output = child
+                .wait_with_output()
+                .map_err(|_| RepositoryError::GitUnavailable)?;
+            if !output.status.success() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            fs::File::open(&candidate_index)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            let current_index =
+                fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if current_index != base_index
+                || self.head()?.as_ref() != Some(journal.new_head())
+            {
+                return Err(RepositoryError::StaleHead);
+            }
+            fs::rename(&candidate_index, &index)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)
+        })();
+        let _ = fs::remove_file(&candidate_index);
+        result
+    }
     /// Enumerates regular blobs in a committed native-store tree.
     /// Tree entries are validated before they can affect the worktree.
     fn native_store_tree_blobs(
@@ -4014,9 +4099,11 @@ impl Repository {
         &self,
         journal: &mut PublicationJournal,
     ) -> Result<(), RepositoryError> {
+        self.set_compact_recovery_skip_worktree_locked(journal, true)?;
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
+        self.set_compact_recovery_skip_worktree_locked(journal, false)?;
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
         self.write_publication_journal_locked(journal)?;
         Ok(())
