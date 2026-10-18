@@ -79,7 +79,12 @@ pub use invocation::{
 
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
--- FULL synchronous covers process and OS crashes; power-loss durability is not claimed.
+-- Runtime durability profile: journal_mode=WAL and synchronous=FULL. In WAL mode
+-- FULL asks the local SQLite-compatible VFS to sync the WAL before a successful
+-- commit; process and OS crash durability therefore depend on the host filesystem
+-- honoring those sync requests. Power-loss durability is not claimed because
+-- device-cache and hardware behavior are outside this flush guarantee. These are
+-- the configured settings; no latency or power-cut benchmark is claimed.
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS runtime_meta (
