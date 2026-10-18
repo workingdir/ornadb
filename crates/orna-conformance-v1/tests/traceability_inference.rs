@@ -37,7 +37,7 @@ fn increment_type(result: &orna_semantic_v1::Analysis) -> &Type {
         .ty
 }
 
-// Specified: ORNA-INFER-001. Exists: the checked-in unannotated function.
+// Specified: ORNA-INFER-001, ORNA-FN-008. Exists: the checked-in unannotated function.
 // Passed: analysis resolves it to a single static callable signature.
 #[test]
 fn omitted_parameter_and_return_annotations_are_inferred() {
