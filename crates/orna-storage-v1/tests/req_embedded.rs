@@ -1,4 +1,4 @@
-use orna_repository_v1::Repository;
+use orna_repository_v1::{Repository, RepositoryError};
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, NoFault, RuntimeError, RuntimeIdentity, RuntimeState,
     TableMutation,
@@ -242,4 +242,57 @@ fn owner_lock_recovers_after_lost_acquisition_response() {
             .unwrap(),
         Some(0)
     );
+}
+
+/// ORNA-TURSO-004: competing writers stay exclusive while owner state is atomically renamed.
+#[cfg(target_os = "linux")]
+#[test]
+fn owner_lock_serializes_competing_state_renames() {
+    use std::{
+        os::unix::fs::MetadataExt,
+        sync::{Arc, Barrier},
+    };
+
+    let (root, _) = repository();
+    let first_root = root.path().to_path_buf();
+    let second_root = root.path().to_path_buf();
+    let start = Arc::new(Barrier::new(3));
+
+    let first_start = Arc::clone(&start);
+    let first = std::thread::spawn(move || {
+        let repository = Repository::discover(first_root).unwrap();
+        first_start.wait();
+        repository.acquire_runtime_owner_lock([31; 16])
+    });
+    let second_start = Arc::clone(&start);
+    let second = std::thread::spawn(move || {
+        let repository = Repository::discover(second_root).unwrap();
+        second_start.wait();
+        repository.acquire_runtime_owner_lock([32; 16])
+    });
+    start.wait();
+
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    let (winner, winner_id) = match (first, second) {
+        (Ok(winner), Err(RepositoryError::RepositoryBusy)) => (winner, [31; 16]),
+        (Err(RepositoryError::RepositoryBusy), Ok(winner)) => (winner, [32; 16]),
+        _ => panic!("exactly one racing runtime owner must acquire the lock"),
+    };
+
+    let repository = Repository::discover(root.path()).unwrap();
+    let locks = repository.runtime_paths().locks();
+    let lock_path = locks.join("runtime-owner.lock");
+    let owner_state_path = locks.join("runtime-owner.state");
+    let lock_inode = fs::metadata(&lock_path).unwrap().ino();
+    let state_inode = fs::metadata(&owner_state_path).unwrap().ino();
+    drop(winner);
+
+    let replacement_id = if winner_id == [31; 16] { [32; 16] } else { [31; 16] };
+    let replacement = repository
+        .acquire_runtime_owner_lock(replacement_id)
+        .unwrap();
+    assert_eq!(replacement.previous_owner(), Some(winner_id));
+    assert_eq!(fs::metadata(lock_path).unwrap().ino(), lock_inode);
+    assert_ne!(fs::metadata(owner_state_path).unwrap().ino(), state_inode);
 }
