@@ -944,6 +944,7 @@ async fn cancellation_after_callback_discards_staged_table_and_checkpoint() {
 
 /// ORNA-TXN-001 / ORNA-TXN-002 / ORNA-CP-005 / ORNA-SYS-061 / ORNA-SYS-062 / ORNA-SYS-121 / ORNA-SYS-122: handler failure rolls back, then same-delivery retry atomically commits writes and progress.
 #[tokio::test]
+/// ORNA-FAIL-005: retry retains the exact failure identity for the same delivery.
 async fn failed_table_delivery_retains_failure_and_retries_same_identity() {
     let (directory, repository) = repository();
     let state = RuntimeState::open(

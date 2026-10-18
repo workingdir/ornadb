@@ -121,6 +121,7 @@ fn expected_initial() -> CheckpointPrecondition {
 }
 
 #[tokio::test]
+/// ORNA-CP-004: incompatible position formats fail before provider or checkpoint mutation.
 async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     let (_directory, state, writer, key) = fixture().await;
     let before = state.stream_checkpoint(&key).await.unwrap();
@@ -264,6 +265,7 @@ async fn supported_target_advances_once_and_audits_once() {
 }
 
 #[tokio::test]
+/// ORNA-SYS-063: checkpoint advancement compares both expected version and typed position.
 async fn stale_version_and_position_map_to_conflict_without_mutation() {
     let (_directory, state, writer, key) = fixture().await;
     let provider = provider(key.clone(), true);
