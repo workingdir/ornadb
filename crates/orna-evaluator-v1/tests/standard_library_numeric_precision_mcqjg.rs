@@ -28,6 +28,7 @@ fn option_decimal(coefficient: &str, exponent10: i64) -> CanonicalValue {
     canonical(value.raw().clone())
 }
 
+// Specified: ORNA-NUM-001, ORNA-NUM-002, and ORNA-NUM-004; exact Int and Decimal results remain exact above binary Float precision.
 #[test]
 fn pinned_numeric_modules_keep_results_exact_past_float_precision() {
     let sources = orna_standard::reference_standard_sources_v1()

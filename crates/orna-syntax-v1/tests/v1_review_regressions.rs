@@ -258,6 +258,7 @@ fn opaque_and_currency_are_accepted_in_ordinary_identifier_positions() {
     }
 }
 
+// Specified: ORNA-NOMINAL-004 and ORNA-MONEY-008; legacy opaque and currency declaration forms receive targeted diagnostics.
 #[test]
 fn legacy_opaque_and_currency_declarations_remain_rejected() {
     for (source, expected) in [
