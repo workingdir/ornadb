@@ -778,7 +778,6 @@ pub trait EffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError>;
 
     /// Handle an effect while sharing the activation's step budget.
-    ///
     /// The default delegates to [`EffectHandler::handle`] so existing effect
     /// handlers remain source-compatible and retain their prior behavior.
     fn handle_with_budget(
@@ -1428,6 +1427,9 @@ pub fn planner_metadata(
     if !parsed.is_ok() {
         return Err(error("ORNA-EVAL-PARSE"));
     }
+    if !planner_metadata_relation_expression(&parsed.value) {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
     validate_limits(limits)?;
     let functions = Functions::new();
     let mut context = Context {
@@ -1454,7 +1456,41 @@ pub fn planner_metadata(
         _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
     }
 }
+fn planner_metadata_relation_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => planner_metadata_relation_expression(inner),
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            planner_metadata_relation_expression(lhs) && planner_metadata_lazy_stage(rhs)
+        }
+        _ => system_relation_source(expression).is_some(),
+    }
+}
 
+fn planner_metadata_lazy_stage(expression: &Expr) -> bool {
+    let callee = match expression {
+        Expr::Call { callee, .. } | Expr::GenericCall { callee, .. } => callee,
+        Expr::Group { inner, .. } => return planner_metadata_lazy_stage(inner),
+        _ => return false,
+    };
+    function_name(callee).is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "filter"
+                | "map"
+                | "project"
+                | "flat_map"
+                | "sort_by"
+                | "bucket_by"
+                | "window"
+                | "distinct"
+                | "unique"
+                | "pairs"
+                | "take"
+                | "drop"
+                | "union"
+        )
+    })
+}
 /// Evaluate one expression using OVB-2 context values at the boundary.
 ///
 /// Every environment value must carry the OVB-2 profile. Annotated Blobs are
