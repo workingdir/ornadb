@@ -195,6 +195,50 @@ struct EditorMount {
     _repository_directory: TempDir,
 }
 
+fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
+    std::fs::create_dir(mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_path.to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.to_path_buf(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let stderr = mounted
+                .child
+                .stderr
+                .take()
+                .map(|mut pipe| {
+                    let mut text = String::new();
+                    let _ = pipe.read_to_string(&mut text);
+                    text
+                })
+                .unwrap_or_default();
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(Instant::now() < deadline, "mount did not expose data.orna");
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("Original")
+    );
+    mounted
+}
 async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     let source = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
     let initial = "{ title: \"Original\", artist: \"Kieran\", }\n";
@@ -237,50 +281,9 @@ async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
 
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
-    std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
-        .args([
-            "--db",
-            repository_directory.path().to_str().unwrap(),
-            "mount",
-            mountpoint.to_str().unwrap(),
-            "--cwd",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start mount --cwd");
-    let mut mounted = MountedProcess {
-        child,
-        mountpoint: mountpoint.clone(),
-    };
-
+    let mounted = spawn_editor_mount(repository_directory.path(), &mountpoint);
     let row_directory = mountpoint.join("Music/london");
     let data_path = row_directory.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let stderr = mounted
-                .child
-                .stderr
-                .take()
-                .map(|mut pipe| {
-                    use std::io::Read;
-                    let mut text = String::new();
-                    let _ = pipe.read_to_string(&mut text);
-                    text
-                })
-                .unwrap_or_default();
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(Instant::now() < deadline, "mount did not expose data.orna");
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        std::fs::read_to_string(&data_path)
-            .unwrap()
-            .contains("Original")
-    );
     EditorMount {
         _mounted: mounted,
         repository,
@@ -291,7 +294,6 @@ async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
         _repository_directory: repository_directory,
     }
 }
-
 /// ORNA-VFS-006: edits submitted from the editor path use the normal validated VFS admission path.
 #[tokio::test]
 async fn editor_saves_use_the_validated_vfs_row_path() {
@@ -504,5 +506,65 @@ async fn real_editors_save_through_the_mounted_linux_vfs() {
         emacs_pending,
         vim_pending + 1,
         "Emacs's accepted save must add one durable engine mutation",
+    );
+}
+#[tokio::test]
+async fn fsynced_temporary_scratch_survives_mount_restart() {
+    assert!(
+        require_fuse_or_skip(),
+        "temporary scratch durability requires a mounted Linux FUSE view",
+    );
+    let fixture = start_editor_mount(false).await;
+    let head_before_restart = fixture.repository.head().unwrap().unwrap();
+    let repository = fixture.repository.clone();
+    let relation_id = fixture.relation_id;
+    assert!(mountinfo_contains(&fixture._mounted.mountpoint));
+
+    let scratch_path = fixture.row_directory.join(".data.orna.persisted-scratch");
+    let expected = b"durable editor scratch, not an accepted row";
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch_path)
+        .expect("create temporary scratch through FUSE");
+    scratch.write_all(expected).unwrap();
+    scratch
+        .sync_all()
+        .expect("fsync persists the private scratch");
+    drop(scratch);
+
+    let EditorMount {
+        _mounted: previous_mount,
+        _mount_parent: mount_parent,
+        _repository_directory: repository_directory,
+        ..
+    } = fixture;
+    drop(previous_mount);
+    assert_eq!(
+        repository.head().unwrap().unwrap().as_str(),
+        head_before_restart.as_str(),
+        "fsync of temporary scratch must not advance workspace HEAD",
+    );
+    let context = repository.open_format_context_at_selector("HEAD").unwrap();
+    let row_map = context.load_row_map(relation_id).unwrap();
+    assert_eq!(
+        row_map.version().row_count(),
+        Some(1),
+        "fsync of temporary scratch must leave the committed row present",
+    );
+    let restarted_mountpoint = mount_parent.path().join("restarted");
+    let _restarted_mount = spawn_editor_mount(repository_directory.path(), &restarted_mountpoint);
+    assert!(mountinfo_contains(&restarted_mountpoint));
+    let restarted_row = restarted_mountpoint.join("Music/london");
+    assert_eq!(
+        std::fs::read(restarted_row.join(".data.orna.persisted-scratch")).unwrap(),
+        expected,
+        "synced scratch survives the mount process restart",
+    );
+    assert!(
+        std::fs::read_to_string(restarted_row.join("data.orna"))
+            .unwrap()
+            .contains("Original"),
+        "fsync of temporary scratch must not accept the row",
     );
 }
