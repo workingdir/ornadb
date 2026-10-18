@@ -2313,6 +2313,7 @@ fn named_functions_share_structured_parameter_binding_and_defaults() {
     }
 }
 
+// Specified: ORNA-VALUE-003; verifies closure capture snapshots and nested calls.
 #[test]
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
     let source = include_str!("fixtures/closures.orna");
@@ -4143,6 +4144,7 @@ fn std_collection_float_sum_accepts_direct_named_pipeline_and_function_calls() {
     );
 }
 
+// Specified: ORNA-FLOAT-005; this test exercises left-to-right Float accumulation and canonical-NaN propagation.
 #[test]
 fn std_collection_float_sum_folds_left_to_right_and_propagates_canonical_nan() {
     let rows = float_rows(&[
@@ -4205,6 +4207,7 @@ fn std_collection_float_sum_keeps_the_sign_of_zero_from_a_left_to_right_fold() {
     }
 }
 
+// Specified: ORNA-FLOAT-001 and ORNA-FLOAT-006; verifies ordinary equality is distinct from total ordering for signed zero.
 #[test]
 fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separately() {
     let negative_zero = Value::float_bits((-0.0f64).to_bits());
@@ -4262,6 +4265,7 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
     );
 }
 
+// Specified: ORNA-FLOAT-005; verifies NaN propagation and empty identities for Float aggregation.
 #[test]
 fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
     let environment = Environment::from([(
@@ -6364,6 +6368,7 @@ fn std_collection_sort_by_orders_normalized_instants_and_nanoseconds_stably() {
     );
 }
 
+// Specified: ORNA-FLOAT-002; sorting compares Float values with the defined total order.
 #[test]
 fn std_collection_sort_by_uses_float_total_order() {
     let rows = float_rows(&[
@@ -7808,6 +7813,7 @@ fn fail_argument_propagates_a_return_transfer_before_error_matching() {
     );
 }
 
+// Specified: ORNA-RANGE-001, ORNA-RANGE-002, ORNA-RANGE-003, ORNA-RANGE-004, ORNA-RANGE-005, ORNA-RANGE-006; integer, decimal, and unbounded-endpoint range behavior is exercised by this and the neighboring range tests.
 #[test]
 fn integer_ranges_are_canonical_membership_values_and_finite_iterables() {
     let half_open = Value::new(Raw::Tag(
@@ -11690,6 +11696,7 @@ fn bucket_by_preserves_filter_map_flat_map_window_and_sort_suffixes() {
     );
 }
 
+// Specified: ORNA-TIME-004; buckets by calendar day rather than elapsed duration.
 #[test]
 fn bucket_by_calendar_utc_groups_by_local_day_not_elapsed_duration() {
     let environment = Environment::new();
@@ -11719,6 +11726,7 @@ fn bucket_by_calendar_utc_groups_by_local_day_not_elapsed_duration() {
     );
 }
 
+// Specified: ORNA-TIME-003; covers local calendar days with 23, 24, and 25 elapsed hours.
 #[test]
 fn bucket_by_london_calendar_days_cover_23_24_and_25_elapsed_hours() {
     let environment = Environment::new();
