@@ -125,6 +125,11 @@ fn emitted_diagnostic(
     }
 }
 
+// Executed negative examples include expression-at-module-level, invalid return arrows,
+// legacy match arms, removed generic syntaxes, postfix propagation, and Result-style
+// failures; each engine diagnostic is compared to its pinned expected payload.
+// ORNA-MODULE-001, ORNA-FN-007, ORNA-CASE-006, ORNA-GENERIC-006, ORNA-GENERIC-007,
+// ORNA-GENERIC-010, ORNA-ERR-008, ORNA-ERR-009.
 #[test]
 fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
     let manifest: Value = serde_json::from_str(MANIFEST).expect("reference manifest");

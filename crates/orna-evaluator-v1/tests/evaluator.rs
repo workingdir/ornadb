@@ -2313,7 +2313,8 @@ fn named_functions_share_structured_parameter_binding_and_defaults() {
     }
 }
 
-// Specified: ORNA-VALUE-003; verifies closure capture snapshots and nested calls.
+// Specified: ORNA-VALUE-003, ORNA-LAMBDA-003. Exists: closures with immutable captures and nested calls.
+// Passed: snapshots produce the expected values and reassignment is rejected.
 #[test]
 fn closures_capture_immutable_snapshots_and_support_nested_calls() {
     let source = include_str!("fixtures/closures.orna");
@@ -2358,6 +2359,7 @@ fn closures_capture_immutable_snapshots_and_support_nested_calls() {
     );
 }
 
+// ORNA-FN-005: actual function values pass through local values, arguments, and collections.
 #[test]
 fn function_values_pass_through_locals_arguments_and_collections() {
     let source = include_str!("fixtures/function_values.orna");
@@ -2435,6 +2437,7 @@ fn anonymous_pipeline_stages_share_callable_binding_and_limits() {
     }
 }
 
+// ORNA-PIPE-002, ORNA-PIPE-003, ORNA-PIPE-004: callable stages receive the piped input first.
 #[test]
 fn pipelines_insert_the_input_before_explicit_arguments_and_defaults() {
     let source = include_str!("fixtures/pipelines.orna");
@@ -6498,6 +6501,7 @@ fn root_map_names_remain_shadowable_by_admitted_functions_and_locals() {
     );
 }
 
+// ORNA-ERR-001: failures in callbacks propagate through their enclosing collection operation.
 #[test]
 fn std_collection_map_and_flat_map_propagate_callback_errors() {
     for expression in [

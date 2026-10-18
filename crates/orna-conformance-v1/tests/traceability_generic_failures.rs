@@ -35,7 +35,7 @@ fn incomplete_nested_protocol_implementation_is_rejected() {
     );
 }
 
-// Specified: ORNA-GENERIC-014. Exists: a fixture with duplicate identical
+// Specified: ORNA-GENERIC-002, ORNA-GENERIC-014. Exists: a fixture with duplicate identical
 // implementations. Passed: this source order is rejected; reverse ordering is
 // not exercised here.
 #[test]
