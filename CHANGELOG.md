@@ -68,6 +68,9 @@ been published.
   Captured scratch refs share the runtime owner and are reclaimed when a later
   runtime reopen recovers a crashed session.
 
+- Decimal division preserves exact terminating quotients and provides explicit
+  scale with half-even rounding.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
