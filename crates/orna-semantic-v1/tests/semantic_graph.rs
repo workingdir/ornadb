@@ -1712,6 +1712,7 @@ fn generic_ordering_pipeline_keeps_element_and_optional_types() {
     );
 }
 
+// ORNA-FN-010, ORNA-FAILURE-001, ORNA-FAILURE-002: a fallible callable keeps failure metadata separate from its successful result type.
 #[test]
 fn imported_generic_calls_preserve_declared_effects_and_failure_metadata() {
     let result = analyze(&[
@@ -15089,6 +15090,7 @@ fn recovery_pipeline_unifies_success_type_before_later_stages() {
     ));
 }
 
+// ORNA-FAILURE-002: recovery clears may-fail only when the handler itself succeeds.
 #[test]
 fn recovery_pipeline_replaces_handled_failure_effect() {
     let result = analyze(&[ModuleInput::new(
@@ -15117,6 +15119,7 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
     assert!(module.symbols["still_fails"].effects.may_fail);
 }
 
+// ORNA-FAILURE-001: `fail` has Bottom as its successful result and remains fallible.
 #[test]
 fn fail_has_bottom_success_type_and_accepts_error_values() {
     let result = analyze(&[ModuleInput::new(
@@ -15194,6 +15197,7 @@ fn user_defined_fail_shadows_the_intrinsic() {
     assert!(!module.symbols["call"].effects.may_fail);
 }
 
+// ORNA-FAILURE-005: constructed Error values have an ordinary inspectable static type.
 #[test]
 fn error_constructor_returns_an_inspectable_error_value() {
     let result = analyze(&[ModuleInput::new(
