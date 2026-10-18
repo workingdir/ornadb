@@ -92,6 +92,7 @@ fn git_log_subjects(root: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
+/// Exercises format-3 Blob metadata and replacement identity against raw bytes.
 async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_untouched() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
