@@ -425,8 +425,14 @@ pub struct NominalDefinition {
     fields: Vec<NominalField>,
     /// Closed enum variants retained for qualified constructor patterns.
     variants: Vec<NominalVariant>,
+    currency: Option<CurrencyMetadata>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CurrencyMetadata {
+    code: String,
+    minor_digits: usize,
+}
 impl NominalDefinition {
     /// Create an admitted declaration plan without exposing its private
     /// field names or default expressions through public field access.
@@ -437,9 +443,23 @@ impl NominalDefinition {
             owner,
             fields,
             variants: Vec::new(),
+            currency: None,
         }
     }
 
+    /// Associate this nominal identity with the stable Currency protocol metadata.
+    #[must_use]
+    pub fn with_currency(
+        mut self,
+        code: impl Into<String>,
+        minor_digits: usize,
+    ) -> Self {
+        self.currency = Some(CurrencyMetadata {
+            code: code.into(),
+            minor_digits,
+        });
+        self
+    }
     /// Retain the closed enum variants for qualified constructor patterns.
     #[must_use]
     pub fn with_enum_variants(mut self, variants: Vec<NominalVariant>) -> Self {
@@ -477,6 +497,13 @@ fn validate_nominal_definition(
     limits: Limits,
 ) -> Result<BTreeSet<[u8; 16]>, EvaluationError> {
     if !is_object_id_raw(&definition.type_id) {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    if let Some(currency) = &definition.currency
+        && (currency.code.len() != 3
+            || !currency.code.bytes().all(|byte| byte.is_ascii_uppercase())
+            || currency.minor_digits > DEFAULT_INTEGER_DIGITS)
+    {
         return Err(error("ORNA-EVAL-VALUE"));
     }
     if !definition.variants.is_empty() && !definition.fields.is_empty() {
@@ -7723,7 +7750,7 @@ impl Context<'_, '_> {
         } else if base64.is_some() {
             self.base64(name, values)
         } else if json.is_some() {
-            self.json_codec(name, values)
+            self.json_codec(name, values, &scope.3)
         } else if orna_codec.is_some() {
             self.orna_codec(name, values)
         } else if ovb_codec.is_some() {
@@ -9653,11 +9680,16 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn json_codec(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+    fn json_codec(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        nominals: &NominalDefinitions,
+    ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("__encode", [value]) => {
                 let mut output = String::new();
-                write_json_value(value, &mut output, self, 0)?;
+                write_json_value(value, &mut output, self, nominals, 0)?;
                 self.string(output).map(Value::String)
             }
             ("__decode", [Value::String(input)])
@@ -12064,6 +12096,7 @@ fn write_json_value(
     value: &Value,
     output: &mut String,
     context: &mut Context<'_, '_>,
+    nominals: &NominalDefinitions,
     depth: usize,
 ) -> Result<(), EvaluationError> {
     context.depth(depth)?;
@@ -12092,7 +12125,7 @@ fn write_json_value(
                 if index > 0 {
                     output.push(',');
                 }
-                write_json_value(value, output, context, depth + 1)?;
+                write_json_value(value, output, context, nominals, depth + 1)?;
             }
             output.push(']');
         }
@@ -12105,14 +12138,32 @@ fn write_json_value(
                 }
                 output.push_str(&serde_json::to_string(key).map_err(|_| error("ORNA-EVAL-VALUE"))?);
                 output.push(':');
-                write_json_value(value, output, context, depth + 1)?;
+                write_json_value(value, output, context, nominals, depth + 1)?;
             }
             output.push('}');
         }
         Value::Option(None) => output.push_str("null"),
-        Value::Option(Some(value)) => write_json_value(value, output, context, depth + 1)?,
+        Value::Option(Some(value)) => {
+            write_json_value(value, output, context, nominals, depth + 1)?;
+        }
+        Value::Money { amount, currency } => {
+            let metadata = nominals
+                .values()
+                .find(|definition| object_id_key(&definition.type_id) == Some(*currency))
+                .and_then(|definition| definition.currency.as_ref())
+                .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+            output.push_str("{\"amount\":");
+            let amount = decimal_json_token(amount)?;
+            output.push_str(
+                &serde_json::to_string(&amount).map_err(|_| error("ORNA-EVAL-VALUE"))?,
+            );
+            output.push_str(",\"currency\":");
+            output.push_str(
+                &serde_json::to_string(&metadata.code).map_err(|_| error("ORNA-EVAL-VALUE"))?,
+            );
+            output.push('}');
+        }
         Value::Unit
-        | Value::Money { .. }
         | Value::Blob(_)
         | Value::AnnotatedBlob(_)
         | Value::ContextualBlob(_)
