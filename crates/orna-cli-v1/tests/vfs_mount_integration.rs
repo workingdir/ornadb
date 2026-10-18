@@ -5,7 +5,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
@@ -633,7 +633,6 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     assert!(status.success(), "mount exits cleanly after edit and unmount");
@@ -925,8 +924,8 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     );
 }
 #[tokio::test]
-/// ORNA-VFS-018: corrupt backing Blob data is reported as an I/O error rather than decoded or substituted.
-async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
+/// ORNA-VFS-010, ORNA-VFS-018: metadata-only saves do not fetch corrupt sibling content; reading that content reports I/O failure.
+async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     if !fuse_test_available() {
         return;
     }
@@ -1055,6 +1054,19 @@ async fn cwd_mount_returns_eio_when_a_chunk_object_is_corrupt() {
     assert!(metadata.contains(
         "content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"
     ));
+
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let replacement_document = "{\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n}\n";
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .expect("open projected row document for metadata-only save");
+    document.write_all(replacement_document.as_bytes()).unwrap();
+    document
+        .sync_all()
+        .expect("metadata-only save must not fetch corrupt sibling payload");
+    drop(document);
 
     let mut blob = File::open(&blob_path).expect("open projected Blob");
     let mut byte = [0u8; 1];
@@ -1287,10 +1299,13 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         );
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(
-        status.success(),
-        "mount process exits cleanly after SIGTERM"
-    );
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = mounted.child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        panic!("mount process exits cleanly after SIGTERM ({status}): {stderr}");
+    }
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while mountinfo_contains(&mountpoint) && Instant::now() < deadline {
@@ -1403,9 +1418,247 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         "orna unmount left the orphaned FUSE mount in /proc/self/mountinfo"
     );
     assert_eq!(repository.mount_status().unwrap().len(), 0);
+    run_unmount_from(
+        repository_directory.path(),
+        mount_parent.path(),
+        Path::new("library"),
+    );
     assert_eq!(
         dead_mount_error.map(|error| error.kind()),
         Some(std::io::ErrorKind::NotConnected),
         "a directory request to the dead FUSE mount should fail with ENOTCONN"
     );
+}
+#[tokio::test]
+/// ORNA-VFS-024: unmount refuses an unresolved draft and succeeds after fsync accepts it.
+async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x92,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("mount exited before data.orna appeared ({status})");
+        }
+        assert!(Instant::now() < deadline, "data.orna did not appear");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .unwrap();
+    document.write_all(b"{ title: \"after\", }\n").unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run dirty-state unmount");
+    assert!(!refused.status.success(), "dirty mount unmount was accepted");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain"),
+        "unmount refusal did not explain draft recovery: {diagnostic}"
+    );
+    assert!(mountinfo_contains(&mountpoint));
+    assert_eq!(repository.mount_status().unwrap().len(), 1);
+
+    document.sync_all().unwrap();
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+#[tokio::test]
+/// ORNA-VFS-024: released drafts are discarded; path-based truncates stay pending until fsync.
+async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x93,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let start_mount = || {
+        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+            .args([
+                "--db",
+                repository_directory.path().to_str().unwrap(),
+                "mount",
+                mountpoint.to_str().unwrap(),
+                "--cwd",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start mount --cwd")
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let mut mounted = MountedProcess {
+        child: start_mount(),
+        mountpoint: mountpoint.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("mount exited before data.orna appeared ({status})");
+        }
+        assert!(Instant::now() < deadline, "data.orna did not appear");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .unwrap();
+    document.write_all(b"{ title: \"unretained\", }\n").unwrap();
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+    drop(mounted);
+
+    let mut mounted = MountedProcess {
+        child: start_mount(),
+        mountpoint: mountpoint.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("remount exited before data.orna appeared ({status})");
+        }
+        assert!(Instant::now() < deadline, "data.orna did not reappear");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let truncated = Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], 0)"])
+        .arg(&data_path)
+        .output()
+        .expect("run path-based truncate");
+    assert!(
+        truncated.status.success(),
+        "path-based truncate failed: {}",
+        String::from_utf8_lossy(&truncated.stderr)
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run pending path-truncate unmount");
+    assert!(!refused.status.success(), "pending path truncate was discarded");
+    assert!(mountinfo_contains(&mountpoint));
+
+    let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
+    document.write_all(b"{ title: \"accepted\", }\n").unwrap();
+    document.sync_all().unwrap();
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
 }

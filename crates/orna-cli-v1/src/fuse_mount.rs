@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
     ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    ReplyWrite, Request,
+    ReplyWrite, ReplyXattr, Request,
 };
 use orna_conformance_v1::transactional_loaded_project_candidate_validator;
 use orna_evaluator_v1::Limits as EvaluatorLimits;
@@ -174,7 +174,7 @@ impl MountWriter {
                     let pin = row
                         .source
                         .graph
-                        .protect_verified_blob(&field.reference, &scope)
+                        .protect_admitted_blob_reference(&field.reference, &scope)
                         .map_err(|_| {
                             orna_runtime_v1::TableActivationError::Runtime(
                                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
@@ -738,6 +738,62 @@ pub(super) fn edit_path(
         Err(error) => Err(format!("edit candidate was rejected or stale: {error}; draft retained at {}", draft_path.display())),
     }
 }
+#[derive(Debug)]
+pub(super) enum UnmountPreparationError {
+    UnresolvedDrafts,
+    ReadOnlyMount,
+    Disconnected,
+    Operation(String),
+}
+
+
+pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
+    rustix::fs::setxattr(
+        mountpoint,
+        "user.orna.unmount-quiesce",
+        b"1",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::BUSY {
+            UnmountPreparationError::UnresolvedDrafts
+        } else if error == rustix::io::Errno::ROFS {
+            UnmountPreparationError::ReadOnlyMount
+        } else if error == rustix::io::Errno::NOTCONN {
+            UnmountPreparationError::Disconnected
+        } else {
+            UnmountPreparationError::Operation(format!("could not quiesce Orna mount: {error}"))
+        }
+    })
+}
+
+pub(super) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
+    rustix::fs::setxattr(
+        mountpoint,
+        "user.orna.unmount-quiesce",
+        b"0",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .map_err(|error| format!("could not resume Orna mount after failed unmount: {error}"))
+}
+pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
+    let mut value = [0_u8; 1];
+    let length = rustix::fs::getxattr(
+        mountpoint,
+        "user.orna.unresolved-drafts",
+        &mut value,
+    )
+    .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
+    if length != 1 {
+        return Err("Orna mount returned an invalid draft-state length".to_owned());
+    }
+    match value[0] {
+        b'0' => Ok(false),
+        b'1' => Ok(true),
+        _ => Err("Orna mount returned invalid draft state".to_owned()),
+    }
+}
+
 pub(super) fn unmount_mountpoint(mountpoint: &Path) -> Result<(), String> {
     let output = Command::new(fusermount_program())
         .args(["-u", "--"])
@@ -781,11 +837,28 @@ enum OpenFile {
         Option<BlobField>,
     ),
 }
+/// Document drafts live only on their open handles and are discarded on release;
+/// replacement scratch drafts remain unresolved until their rename is accepted.
+#[derive(Default)]
+struct DraftState {
+    pending_truncates: HashMap<u64, u64>,
+    unresolved_handles: HashMap<u64, u64>,
+    retained_scratch: HashSet<u64>,
+    quiescing: bool,
+}
+
+impl DraftState {
+    fn has_unresolved_drafts(&self) -> bool {
+        !self.pending_truncates.is_empty()
+            || !self.unresolved_handles.is_empty()
+            || !self.retained_scratch.is_empty()
+    }
+}
 
 struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
-    pending_truncates: Mutex<HashMap<u64, u64>>,
+    draft_state: Mutex<DraftState>,
     next_handle: AtomicU64,
 }
 
@@ -853,7 +926,7 @@ impl WorkspaceFilesystem {
         Ok(Self {
             state: Mutex::new(builder),
             open_files: Mutex::new(HashMap::new()),
-            pending_truncates: Mutex::new(HashMap::new()),
+            draft_state: Mutex::new(DraftState::default()),
             next_handle: AtomicU64::new(1),
         })
     }
@@ -873,9 +946,72 @@ impl WorkspaceFilesystem {
         current.extend_from_slice(bytes);
         true
     }
+    fn has_unresolved_drafts(&self) -> bool {
+        self.draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .has_unresolved_drafts()
+    }
 }
 
 impl Filesystem for WorkspaceFilesystem {
+    fn getxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        if inode.0 != ROOT_INODE || name != OsStr::new("user.orna.unresolved-drafts") {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        let value = if self.has_unresolved_drafts() { b"1" } else { b"0" };
+        if size == 0 {
+            reply.size(1);
+        } else if size >= 1 {
+            reply.data(value);
+        } else {
+            reply.error(Errno::ERANGE);
+        }
+    }
+    fn setxattr(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        if inode.0 != ROOT_INODE || name != OsStr::new("user.orna.unmount-quiesce") {
+            reply.error(Errno::ENODATA);
+            return;
+        }
+        if flags != 0 || position != 0 {
+            reply.error(Errno::EINVAL);
+            return;
+        }
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if value == b"1" {
+            if draft_state.has_unresolved_drafts() {
+                reply.error(Errno::EBUSY);
+                return;
+            }
+            draft_state.quiescing = true;
+            reply.ok();
+        } else if value == b"0" {
+            draft_state.quiescing = false;
+            reply.ok();
+        } else {
+            reply.error(Errno::EINVAL);
+        }
+    }
     fn init(
         &mut self,
         _request: &Request,
@@ -968,6 +1104,14 @@ impl Filesystem for WorkspaceFilesystem {
             reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
             return;
         }
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         let (save, target, scratch, blob_field) = {
             let state = self
                 .state
@@ -1004,16 +1148,20 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        let pending_truncate = self
-            .pending_truncates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&inode.0);
+        let pending_truncate = draft_state.pending_truncates.get(&inode.0).copied();
         let truncate_size = if flags.0 & libc::O_TRUNC != 0 {
             Some(0)
         } else {
             pending_truncate
         };
+        let is_scratch = scratch.is_some();
+        let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+        if truncate_size.is_some() {
+            draft_state.unresolved_handles.insert(handle, inode.0);
+            if is_scratch {
+                draft_state.retained_scratch.insert(inode.0);
+            }
+        }
         if let Some(scratch) = scratch {
             if let Some(size) = truncate_size
                 && save
@@ -1022,6 +1170,10 @@ impl Filesystem for WorkspaceFilesystem {
                     .block_on(scratch.truncate(size))
                     .is_err()
             {
+                draft_state.unresolved_handles.remove(&handle);
+                if is_scratch && !had_retained_scratch {
+                    draft_state.retained_scratch.remove(&inode.0);
+                }
                 reply.error(Errno::EIO);
                 return;
             }
@@ -1032,6 +1184,9 @@ impl Filesystem for WorkspaceFilesystem {
                     handle,
                     OpenFile::Temporary(save, target, scratch, blob_field),
                 );
+            if truncate_size.is_some() {
+                draft_state.pending_truncates.remove(&inode.0);
+            }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
@@ -1043,6 +1198,7 @@ impl Filesystem for WorkspaceFilesystem {
         if let Some(size) = truncate_size
             && save.writer.runtime.block_on(draft.truncate(size)).is_err()
         {
+            draft_state.unresolved_handles.remove(&handle);
             reply.error(Errno::EIO);
             return;
         }
@@ -1050,6 +1206,9 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(handle, OpenFile::Document(save, draft));
+        if truncate_size.is_some() {
+            draft_state.pending_truncates.remove(&inode.0);
+        }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
     fn create(
@@ -1066,6 +1225,14 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
+        let draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         let (attr, save, target, scratch, blob_field) = {
             let mut state = self
                 .state
@@ -1189,6 +1356,14 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EROFS);
             return;
         }
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         let (source_inode, destination_inode, save, target, scratch, blob_field, baseline) = {
             let mut state = self
                 .state
@@ -1307,6 +1482,11 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        draft_state
+            .unresolved_handles
+            .retain(|_, dirty_inode| *dirty_inode != source_inode);
+        draft_state.retained_scratch.remove(&source_inode);
+        draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
     }
@@ -1425,12 +1605,29 @@ impl Filesystem for WorkspaceFilesystem {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         let open_file = self
             .open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&handle.0)
             .cloned();
+        let is_scratch = matches!(&open_file, Some(OpenFile::Temporary(_, _, _, _)));
+        let had_unresolved_handle = draft_state.unresolved_handles.contains_key(&handle.0);
+        let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+        if !data.is_empty() {
+            draft_state.unresolved_handles.insert(handle.0, inode.0);
+            if is_scratch {
+                draft_state.retained_scratch.insert(inode.0);
+            }
+        }
         let (result, candidate_bytes) = match open_file {
             Some(OpenFile::Document(save, draft)) => (
                 save.writer.runtime.block_on(draft.write_at(offset, data)),
@@ -1444,11 +1641,20 @@ impl Filesystem for WorkspaceFilesystem {
                 (result, bytes)
             }
             None => {
+                if !had_unresolved_handle {
+                    draft_state.unresolved_handles.remove(&handle.0);
+                }
                 reply.error(Errno::EBADF);
                 return;
             }
         };
         if result.is_err() {
+            if !had_unresolved_handle {
+                draft_state.unresolved_handles.remove(&handle.0);
+            }
+            if is_scratch && !had_retained_scratch {
+                draft_state.retained_scratch.remove(&inode.0);
+            }
             reply.error(Errno::EIO);
         } else {
             if let Some(bytes) = candidate_bytes {
@@ -1466,12 +1672,21 @@ impl Filesystem for WorkspaceFilesystem {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         let open_file = self
             .open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&handle.0)
             .cloned();
+        let is_document = matches!(&open_file, Some(OpenFile::Document(_, _)));
         let result = match open_file {
             Some(OpenFile::Document(save, draft)) => {
                 let result = save.commit_document(&draft);
@@ -1494,6 +1709,9 @@ impl Filesystem for WorkspaceFilesystem {
             None => Err("file handle is not open".to_owned()),
         };
         if result.is_ok() {
+            if is_document {
+                draft_state.unresolved_handles.remove(&handle.0);
+            }
             reply.ok();
         } else {
             reply.error(Errno::EIO);
@@ -1521,10 +1739,20 @@ impl Filesystem for WorkspaceFilesystem {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.open_files
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let released = self
+            .open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
+        if let Some(inode) = draft_state.unresolved_handles.remove(&handle.0)
+            && matches!(&released, Some(OpenFile::Temporary(_, _, _, _)))
+        {
+            draft_state.retained_scratch.insert(inode);
+        }
         reply.ok();
     }
 
@@ -1551,6 +1779,14 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         if let Some(size) = size {
+            let mut draft_state = self
+                .draft_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if draft_state.quiescing {
+                reply.error(Errno::EBUSY);
+                return;
+            }
             if let Some(handle) = handle {
                 let open_file = self
                     .open_files
@@ -1558,23 +1794,36 @@ impl Filesystem for WorkspaceFilesystem {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&handle.0)
                     .cloned();
+                let is_scratch = matches!(&open_file, Some(OpenFile::Temporary(_, _, _, _)));
+                let had_unresolved_handle = draft_state.unresolved_handles.contains_key(&handle.0);
+                let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
+                let Some(open_file) = open_file else {
+                    reply.error(Errno::EBADF);
+                    return;
+                };
+                draft_state.unresolved_handles.insert(handle.0, inode.0);
+                if is_scratch {
+                    draft_state.retained_scratch.insert(inode.0);
+                }
                 let (result, candidate_bytes) = match open_file {
-                    Some(OpenFile::Document(save, draft)) => {
+                    OpenFile::Document(save, draft) => {
                         (save.writer.runtime.block_on(draft.truncate(size)), None)
                     }
-                    Some(OpenFile::Temporary(save, _, scratch, _)) => {
+                    OpenFile::Temporary(save, _, scratch, _) => {
                         let result = save.writer.runtime.block_on(scratch.truncate(size));
                         let bytes = result
                             .is_ok()
                             .then(|| save.writer.runtime.block_on(scratch.candidate_bytes()));
                         (result, bytes)
                     }
-                    None => {
-                        reply.error(Errno::EBADF);
-                        return;
-                    }
                 };
                 if result.is_err() {
+                    if !had_unresolved_handle {
+                        draft_state.unresolved_handles.remove(&handle.0);
+                    }
+                    if is_scratch && !had_retained_scratch {
+                        draft_state.retained_scratch.remove(&inode.0);
+                    }
                     reply.error(Errno::EIO);
                     return;
                 }
@@ -1593,10 +1842,7 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EROFS);
                     return;
                 }
-                self.pending_truncates
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(inode.0, size);
+                draft_state.pending_truncates.insert(inode.0, size);
             }
         }
         let state = self
