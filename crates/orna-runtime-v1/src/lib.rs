@@ -40209,7 +40209,6 @@ mod tests {
         );
     }
 
-// ORNA-FAILURE-010: a failed stream handler does not advance the stream checkpoint.
     #[tokio::test]
     async fn runtime_stream_scheduler_commits_noop_and_keeps_failures_unadvanced() {
         let (_temp, repo) = repository();
@@ -44067,7 +44066,6 @@ mod tests {
         );
     }
 
-// ORNA-FAILURE-010: activation failure rolls back table changes and recovers as proven.
     #[tokio::test]
     async fn runtime_owned_activation_failure_rolls_back_and_recovers_as_proven_after_reopen() {
         let (_temp, repo) = repository();
@@ -49651,7 +49649,7 @@ mod tests {
         assert!(!completed.live);
     }
 
-// ORNA-FAILURE-009, ORNA-FAILURE-010: stream failure persists as a sys.Failure reference, distinct from activation failure.
+// ORNA-FAILURE-009: stream failure persists as a sys.Failure reference.
     #[tokio::test]
     async fn stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen() {
         let (_temp, repo) = repository();

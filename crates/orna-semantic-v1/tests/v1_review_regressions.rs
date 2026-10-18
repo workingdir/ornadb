@@ -148,7 +148,6 @@ fn direct_return_ends_body_before_later_statement() {
     ));
 }
 
-// ORNA-FN-009: the inferred result includes a reachable return and the block tail.
 #[test]
 fn reachable_return_and_block_tail_contribute_to_inferred_result() {
     let result = analyze_main("pub fn inferred(flag: Bool) { if flag { return 1; } 2 }");
