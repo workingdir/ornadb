@@ -104,8 +104,7 @@ fn assert_025_module_assertion_rejects_a_forbidden_network_effect() {
 }
 
 #[test]
-// Specified: ORNA-ASSERT-028.
-fn assert_028_preserves_source_span_order_within_one_module() {
+fn preserves_source_span_order_within_one_module() {
     let analysis = analyze(&[ModuleInput::new("module-shapes.orna", MODULE_SHAPES)]);
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().next().expect("module assertion plans");
