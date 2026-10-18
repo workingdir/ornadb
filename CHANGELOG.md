@@ -5,6 +5,8 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Remounted writable workspace views project accepted row edits from the current
+  runtime snapshot while keeping the row's committed Blob bindings intact.
 - Semantic quantities retain reduced dimension exponents, exact rational scale,
   and affine metadata through numeric aggregates. Integrating speed by elapsed
   time adds the Time exponent and returns a length quantity. Dimension expressions

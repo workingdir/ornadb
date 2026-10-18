@@ -2411,8 +2411,21 @@ impl FsBuilder {
             .graph
             .decode_admitted_row_fields(&row, &source.binding, &row_scope)
             .map_err(|error| format!("committed row fields could not be decoded: {error:?}"))?;
-        let canonical_fields = decode_canonical_storage_value(decoded.canonical_fields())
-            .map_err(|error| format!("committed row values could not be decoded: {error:?}"))?;
+        let canonical_fields = if let Some(writer) = &self.writer {
+            let table = RuntimeTableIdentity::new(
+                source.schema.declaration_name(),
+                TableObjectId::new(*source.binding.relation_id()),
+            )
+            .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
+            let runtime_key = runtime_table_key_bytes(key)?;
+            match writer.row_baseline(&table, &runtime_key)? {
+                Some(row) => decode_canonical_storage_value(&row),
+                None => decode_canonical_storage_value(decoded.canonical_fields()),
+            }
+        } else {
+            decode_canonical_storage_value(decoded.canonical_fields())
+        }
+        .map_err(|error| format!("committed row values could not be decoded: {error:?}"))?;
         let Raw::Array(values) = canonical_fields else {
             return Err("committed row values are not a canonical field array".into());
         };
