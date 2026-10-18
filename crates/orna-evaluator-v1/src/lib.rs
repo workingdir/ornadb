@@ -41,11 +41,13 @@ mod cancellation;
 mod regex_lite;
 mod relation;
 mod repl;
+#[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
-
+mod browser_profile;
+pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
 pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 pub use cancellation::CancellationToken;
@@ -54,6 +56,7 @@ use relation::{
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
 pub use repl::{ReplSession, parse_admitted_repl};
+#[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
@@ -6852,6 +6855,7 @@ impl Context<'_, '_> {
     /// admitted only for operations bound to the generated Blob annotation
     /// role, so a source-level `sys.blob.*` call cannot reach native code the
     /// registry has not declared.
+#[cfg(feature = "system-host-bindings")]
     fn call_blob_annotation(
         &mut self,
         operation: &str,
@@ -6928,6 +6932,7 @@ impl Context<'_, '_> {
     /// The declared type comes from the generated contract, so the conversion
     /// cannot invent a shape the declaration does not allow. Unannotated bytes
     /// remain unsupported rather than receiving a lossy fallback annotation.
+#[cfg(feature = "system-host-bindings")]
     fn blob_annotation_argument(
         value: Value,
         declared: &orna_sys_v1::AbiType,
@@ -7194,6 +7199,7 @@ impl Context<'_, '_> {
         // declaration was reachable; an unresolved, unshadowed source-level
         // `sys.blob.*` call is accepted so the generated declarations stay
         // callable, and a resolved non-Blob function never falls through.
+        #[cfg(feature = "system-host-bindings")]
         let declared = match resolved_function.as_deref() {
             Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
                 Some(name.to_owned())
@@ -7212,9 +7218,11 @@ impl Context<'_, '_> {
                 .operation(name)
                 .is_some()
         });
+        #[cfg(feature = "system-host-bindings")]
         if let Some(operation) = declared {
             return self.call_blob_annotation(&operation, arguments, input, scope, depth);
         }
+        #[cfg(feature = "system-host-bindings")]
         if let Some(operation_name) = resolved_function.as_deref()
             && let Some(operation) =
                 orna_sys_v1::system_host_operation_registry().operation(operation_name)
@@ -7790,6 +7798,7 @@ impl Context<'_, '_> {
         {
             return Some(alias.clone());
         }
+        #[cfg(feature = "system-host-bindings")]
         if self.functions.contains_key(&name)
             && orna_sys_v1::system_host_operation_registry()
                 .operation(&name)
@@ -14704,6 +14713,7 @@ mod tests {
                     true,
                     true,
                 );
+                #[cfg(feature = "system-host-bindings")]
                 let system_host = orna_sys_v1::system_host_operation_registry()
                     .operation(&qualified)
                     .is_some();
