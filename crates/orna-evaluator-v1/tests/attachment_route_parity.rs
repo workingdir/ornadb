@@ -80,6 +80,7 @@ fn commit_snapshot(
     git(directory, &["rev-parse", "HEAD"])
 }
 
+/// ORNA-HIST-002: calls through a pinned database alias use that snapshot's committed function definition.
 #[test]
 fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     let (_primary_dir, primary_repository, primary_commit) =
