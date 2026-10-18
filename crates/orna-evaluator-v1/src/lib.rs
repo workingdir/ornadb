@@ -1467,29 +1467,40 @@ fn planner_metadata_relation_expression(expression: &Expr) -> bool {
 }
 
 fn planner_metadata_lazy_stage(expression: &Expr) -> bool {
-    let callee = match expression {
-        Expr::Call { callee, .. } | Expr::GenericCall { callee, .. } => callee,
+    let (callee, arguments) = match expression {
+        Expr::Call { callee, arguments, .. } | Expr::GenericCall { callee, arguments, .. } => {
+            (callee, arguments)
+        }
         Expr::Group { inner, .. } => return planner_metadata_lazy_stage(inner),
         _ => return false,
     };
-    function_name(callee).is_some_and(|name| {
-        matches!(
-            name.as_str(),
-            "filter"
-                | "map"
-                | "project"
-                | "flat_map"
-                | "sort_by"
-                | "bucket_by"
-                | "window"
-                | "distinct"
-                | "unique"
-                | "pairs"
-                | "take"
-                | "drop"
-                | "union"
-        )
-    })
+    let Some(name) = function_name(callee) else {
+        return false;
+    };
+    let operation = name
+        .strip_prefix("std.collection.")
+        .or_else(|| name.strip_prefix("std.query."))
+        .unwrap_or(&name);
+    if operation == "union" {
+        return arguments
+            .iter()
+            .all(|argument| planner_metadata_relation_expression(&argument.value));
+    }
+    matches!(
+        operation,
+        "filter"
+            | "map"
+            | "project"
+            | "flat_map"
+            | "sort_by"
+            | "bucket_by"
+            | "window"
+            | "distinct"
+            | "unique"
+            | "pairs"
+            | "take"
+            | "drop"
+    )
 }
 /// Evaluate one expression using OVB-2 context values at the boundary.
 ///
