@@ -1458,7 +1458,7 @@ mod tests {
         }
     }
     #[test]
-    /// ORNA-FAIL-005: failure identity equality uses the complete typed delivery composite, not its successor token.
+    /// Delivery identity equality covers the typed natural key and excludes the successor position.
     fn failure_identity_is_the_exact_typed_delivery_composite() {
         let base = delivery("opaque-position", "successor-one");
         let same_delivery = delivery("opaque-position", "successor-two");
