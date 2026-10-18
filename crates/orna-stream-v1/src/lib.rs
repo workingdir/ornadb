@@ -112,7 +112,7 @@ impl Ord for DeliveryIdentity {
             &self.partition_format,
             &self.partition,
             &self.position_format,
-            &self.position,
+            &self.position.token,
         )
             .cmp(&(
                 &other.consumer,
@@ -121,7 +121,7 @@ impl Ord for DeliveryIdentity {
                 &other.partition_format,
                 &other.partition,
                 &other.position_format,
-                &other.position,
+                &other.position.token,
             ))
     }
 }
@@ -158,7 +158,7 @@ impl DeliveryIdentity {
 }
 
 /// An opaque provider-defined position.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Position {
     pub token: Component,
 }
@@ -1320,6 +1320,7 @@ mod tests {
         }
     }
 
+    /// ORNA-CONSUMER-008 / ORNA-CP-004: opaque positions merge by equality, never inferred order.
     #[test]
     fn checkpoint_merge_adopts_equal_or_unchanged_positions_and_preserves_divergence() {
         let base = position("base-token");
@@ -1685,8 +1686,7 @@ mod tests {
         assert!(!protected_debug.contains("7, 7, 7"));
     }
 
-    // ORNA-FAIL-001: repeated failures for one delivery update its stable failure record.
-    // ORNA-FAIL-001: repeated processing failures update the one durable failure identity.
+    /// ORNA-FAIL-001: repeated processing failures update the one durable failure identity.
     #[test]
     fn repeated_failures_update_one_stable_row() {
         let mut backend = InMemoryCheckpointBackend::default();
