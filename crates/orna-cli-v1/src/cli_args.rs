@@ -73,6 +73,10 @@ pub(super) enum Command {
         old: String,
         new: String,
     },
+    Edit {
+        path: String,
+        row: bool,
+    },
     SemanticLegend {
         format: LegendFormat,
         limit: Option<usize>,
@@ -413,6 +417,15 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 old: old.to_owned(),
                 new: new.to_owned(),
             }
+        }
+        Some("edit") => {
+            let row = words.peek() == Some(&"--row");
+            if row { words.next(); }
+            let path = words.next().ok_or_else(|| Diagnostic::usage("E1001", "`edit` needs a path", "use `edit PATH` or `edit --row PATH`"))?;
+            if words.next().is_some() {
+                return Err(Diagnostic::usage("E1002", "unexpected trailing arguments for `edit`", "use `edit PATH` or `edit --row PATH`"));
+            }
+            Command::Edit { path: path.to_owned(), row }
         }
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
         Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
