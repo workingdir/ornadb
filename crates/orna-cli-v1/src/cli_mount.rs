@@ -153,6 +153,17 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     view.detach()
         .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
 }
+#[cfg(target_os = "linux")]
+pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(), Diagnostic> {
+    let repository = open_repository(endpoint)?;
+    crate::fuse_mount::edit_path(&repository, path, row)
+        .map_err(|error| mount_error("Edit was not accepted", error))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn run_edit(_endpoint: &Endpoint, _path: &str, _row: bool) -> Result<(), Diagnostic> {
+    Err(mount_error("Workspace editing is unavailable", "orna edit requires Linux VFS support"))
+}
 
 #[cfg(target_os = "linux")]
 struct MountSignalHandler {
