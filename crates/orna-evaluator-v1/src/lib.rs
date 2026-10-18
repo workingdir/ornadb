@@ -3981,6 +3981,29 @@ impl Context<'_, '_> {
             Ok(value)
         }
     }
+    fn field_value(
+        &mut self,
+        base: Value,
+        name: &str,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        match base {
+            Value::Record(fields) => fields
+                .get(name)
+                .cloned()
+                .ok_or_else(|| error("ORNA-EVAL-FIELD")),
+            Value::NominalRecord { type_id, fields } => {
+                self.nominal_field(&type_id, &fields, name, scope)
+            }
+            Value::Reference(reference) => self.reference_field(&reference, name, scope, depth + 1),
+            Value::Error(failure) => self.error_field(&failure, name, depth + 1),
+            Value::Int(value) => self.numeric_postfix(value, name),
+            Value::Decimal(value) => self.numeric_decimal_postfix(value, name),
+            _ if self.transfer.is_some() => Ok(Value::Null),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
+    }
     fn evaluate(
         &mut self,
         expression: &Expr,
@@ -4127,23 +4150,7 @@ impl Context<'_, '_> {
             }
             Expr::Field { base, name, .. } => {
                 let base = self.evaluate(base, scope, depth + 1)?;
-                match base {
-                    Value::Record(fields) => fields
-                        .get(name)
-                        .cloned()
-                        .ok_or_else(|| error("ORNA-EVAL-FIELD")),
-                    Value::NominalRecord { type_id, fields } => {
-                        self.nominal_field(&type_id, &fields, name, scope)
-                    }
-                    Value::Reference(reference) => {
-                        self.reference_field(&reference, name, scope, depth + 1)
-                    }
-                    Value::Error(failure) => self.error_field(&failure, name, depth + 1),
-                    Value::Int(value) => self.numeric_postfix(value, name),
-                    Value::Decimal(value) => self.numeric_decimal_postfix(value, name),
-                    _ if self.transfer.is_some() => Ok(Value::Null),
-                    _ => Err(error("ORNA-EVAL-TYPE")),
-                }
+                self.field_value(base, name, scope, depth)
             }
             Expr::Control {
                 kind: ControlKind::If,
@@ -5299,6 +5306,52 @@ impl Context<'_, '_> {
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
         .map(Value::Decimal)
+    }
+    fn decimal_divide_method(
+        &mut self,
+        numerator: DecimalValue,
+        arguments: &[orna_syntax_v1::Argument],
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let shorthand_rounding = argument.name.as_deref() == Some("rounding")
+                && matches!(
+                    &argument.value,
+                    Expr::Name { text, .. } if text == "half_even"
+                );
+            let value = if shorthand_rounding {
+                Value::String("half_even".into())
+            } else {
+                self.evaluate(&argument.value, scope, depth + 1)?
+            };
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            values.push(value);
+        }
+        let values = named_arguments("decimal.divide", arguments, values, 0, false)?;
+        match values.as_slice() {
+            [Value::Decimal(divisor)] => {
+                self.checked_decimal(numerator.divide(divisor)?).map(Value::Decimal)
+            }
+            [Value::Decimal(divisor), Value::Int(scale), Value::String(rounding)] => {
+                if scale.is_negative() {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                if rounding != "half_even" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let scale = scale.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+                if scale > self.limits.max_integer_digits {
+                    return Err(error("ORNA-EVAL-LIMIT"));
+                }
+                self.checked_decimal(numerator.divide_rounded(divisor, scale)?)
+                    .map(Value::Decimal)
+            }
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
     }
     fn float_binary(&self, op: &str, a: u64, b: u64) -> Result<Value, EvaluationError> {
         let (a, b) = (f64::from_bits(a), f64::from_bits(b));
@@ -6845,6 +6898,26 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Value, EvaluationError> {
         let resolved_name = self.resolve_function_name(callee, scope);
+        let mut pre_evaluated_callee = None;
+        if resolved_name.is_none()
+            && input.is_none()
+            && let Expr::Field { base, name, .. } = callee
+            && name == "divide"
+        {
+            let receiver = self.evaluate(base, scope, depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            match receiver {
+                Value::Decimal(numerator) => {
+                    return self.decimal_divide_method(numerator, arguments, scope, depth + 1);
+                }
+                receiver => {
+                    pre_evaluated_callee =
+                        Some(self.field_value(receiver, name, scope, depth + 1)?);
+                }
+            }
+        }
         if let Some((codec, supports_options)) =
             resolved_name.as_deref().and_then(codec_decode_operation)
         {
@@ -7377,6 +7450,8 @@ impl Context<'_, '_> {
                     name,
                     nominal_definitions: scope.3.clone(),
                 }
+            } else if let Some(callable) = pre_evaluated_callee {
+                callable
             } else {
                 self.evaluate(callee, scope, depth + 1)?
             };
@@ -12745,6 +12820,7 @@ fn named_arguments(
             | "random.shuffle"
             | "base64.encode"
             | "base64.decode"
+            | "decimal.divide"
             | "money.format"
     ) && arguments.iter().all(|argument| argument.name.is_none())
     {
@@ -12767,6 +12843,11 @@ fn named_arguments(
         "replace" => &["value", "from", "to"],
         "normalise" => &["value", "form"],
         "offset_at" => &["instant", "zone"],
+        "decimal.divide" => match values.len() {
+            1 => &["value"],
+            3 => &["value", "scale", "rounding"],
+            _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+        },
         "resolve_local" => match values.len() {
             3 => &["local", "zone", "ambiguous"],
             4 => &["local", "zone", "ambiguous", "gap"],
