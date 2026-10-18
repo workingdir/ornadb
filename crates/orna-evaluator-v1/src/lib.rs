@@ -14697,7 +14697,7 @@ mod tests {
         let source =
             include_str!("../../orna-cli-v1/tests/fixtures/media/import-song-annotation.orna")
                 .replace(
-                    "sys.blob.capture_file(__MEDIA_ROOT__, \"note.wav\", 65536)",
+                    "sys.blob.capture_file(__MEDIA_ROOT__, \"tone.wav\", 65536)",
                     "blob",
                 );
         let parsed = parse_expression(&source);
@@ -14715,7 +14715,7 @@ mod tests {
             .expect("retain source ContextValue in the evaluator environment");
             let result = context
                 .evaluate(&parsed.value, &mut scope, 0)
-                .expect("authored annotation call");
+                .unwrap_or_else(|error| panic!("authored annotation call: {}", error.code()));
             let Value::ContextualBlob(annotated) = result else {
                 panic!("annotation result must retain its contextual Blob");
             };
