@@ -27,8 +27,9 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableIdentity, TableObjectId,
     vfs::{
         EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
-        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
+        VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
         VfsSaveCoordinates, VfsStoredField, VfsTableRowReplacement, project_component,
+        unproject_component,
     },
 };
 use orna_syntax_v1::{Expr, parse_row};
@@ -596,8 +597,11 @@ const ROOT_INODE: u64 = 1;
 const ROW_PAGE_LIMIT: usize = 256;
 // Do not let cached attributes hide ENOTCONN when the FUSE session dies.
 const ENTRY_TTL: Duration = Duration::ZERO;
-// Private editor drafts must bypass the shared kernel page cache.
+// Private editor drafts bypass the shared kernel page cache. Writeback cache is
+// intentionally not requested: it can mix a later database generation into an
+// already-open draft.
 const EDITABLE_OPEN_FLAGS: fuser::FopenFlags = fuser::FopenFlags::FOPEN_DIRECT_IO;
+const EDITOR_INIT_CAPABILITIES: fuser::InitFlags = fuser::InitFlags::FUSE_ATOMIC_O_TRUNC;
 pub(super) fn spawn_read_only(
     repository: &Repository,
     commit: &GitCommitRef,
@@ -1025,7 +1029,7 @@ impl Filesystem for WorkspaceFilesystem {
             .is_some();
         if editor {
             config
-                .add_capabilities(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC)
+                .add_capabilities(EDITOR_INIT_CAPABILITIES)
                 .map_err(|unsupported| {
                     std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
@@ -1035,6 +1039,41 @@ impl Filesystem for WorkspaceFilesystem {
         }
         Ok(())
     }
+    fn mknod(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
+    fn symlink(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _link_name: &OsStr,
+        _target: &Path,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
+    fn link(
+        &self,
+        _request: &Request,
+        _inode: INodeNo,
+        _new_parent: INodeNo,
+        _new_name: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = self
             .state
@@ -1874,51 +1913,40 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        if state.ensure_readdir(inode.0, start).is_err() {
-            reply.error(Errno::EIO);
+        let parent = match state.nodes.get(&inode.0) {
+            Some(node) => node.parent,
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        };
+        if state.directory(inode.0).is_none() {
+            reply.error(Errno::ENOTDIR);
             return;
         }
-        let Some(directory) = state.directory(inode.0) else {
-            if state.nodes.contains_key(&inode.0) {
-                reply.error(Errno::ENOTDIR);
-            } else {
-                reply.error(Errno::ENOENT);
-            }
-            return;
-        };
-        let Some(node) = state.nodes.get(&inode.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
         if start == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
             reply.ok();
             return;
         }
         if start <= 1
-            && reply.add(
-                INodeNo(node.parent),
-                2,
-                FileType::Directory,
-                OsStr::new(".."),
-            )
+            && reply.add(INodeNo(parent), 2, FileType::Directory, OsStr::new(".."))
         {
             reply.ok();
             return;
         }
-        for (index, entry) in directory
-            .entries
-            .iter()
-            .enumerate()
-            .skip(start.saturating_sub(2))
+        if state
+            .readdir_page(inode.0, start, |index, entry| {
+                reply.add(
+                    INodeNo(entry.inode),
+                    u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
+                    entry.kind,
+                    entry.name.as_os_str(),
+                )
+            })
+            .is_err()
         {
-            if reply.add(
-                INodeNo(entry.inode),
-                u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
-                entry.kind,
-                entry.name.as_os_str(),
-            ) {
-                break;
-            }
+            reply.error(Errno::EIO);
+            return;
         }
         reply.ok();
     }
@@ -2056,6 +2084,7 @@ impl FsBuilder {
             lower: None,
             exhausted: false,
             error: None,
+            indexed_rows: HashMap::new(),
         });
         Ok(())
     }
@@ -2101,6 +2130,11 @@ impl FsBuilder {
         {
             return Ok(Some(inode));
         }
+        if matches!(self.nodes.get(&parent).map(|node| &node.kind), Some(NodeKind::Table(_)))
+            && let Some(inode) = self.lookup_indexed_text_row(parent, name)?
+        {
+            return Ok(Some(inode));
+        }
         let table_inode = match self.nodes.get(&parent).map(|node| &node.kind) {
             Some(NodeKind::Table(_)) => Some(parent),
             Some(NodeKind::KeyDirectory(directory)) => Some(directory.table_inode),
@@ -2129,6 +2163,61 @@ impl FsBuilder {
             }
             self.load_next_key_page(table_inode)?;
         }
+    }
+
+    fn lookup_indexed_text_row(&mut self, table_inode: u64, name: &OsStr) -> Result<Option<u64>, String> {
+        let (source, cached) = match self.nodes.get(&table_inode).map(|node| &node.kind) {
+            Some(NodeKind::Table(table)) => (
+                Arc::clone(&table.source),
+                table.indexed_rows.get(name).copied(),
+            ),
+            _ => return Ok(None),
+        };
+        if let Some(inode) = cached {
+            return Ok(Some(inode));
+        }
+        let Some(projected) = name.to_str() else {
+            return Ok(None);
+        };
+        let Ok(VfsComponent::Canonical(key_text)) = unproject_component(projected) else {
+            return Ok(None);
+        };
+        let key = TypedKey::Text(key_text);
+        let scope = source
+            .graph
+            .open_read_scope()
+            .map_err(|error| format!("indexed row lookup scope could not be opened: {error:?}"))?;
+        let row = source
+            .graph
+            .lookup_row(&key, &scope)
+            .map_err(|error| format!("indexed row lookup failed: {error:?}"))?;
+        if row.is_none() {
+            return Ok(None);
+        }
+        let inode = self.next_inode;
+        let next_inode = inode
+            .checked_add(1)
+            .ok_or_else(|| "mount tree has too many entries".to_owned())?;
+        self.nodes.insert(
+            inode,
+            FsNode {
+                parent: table_inode,
+                kind: NodeKind::Row(RowDirectory {
+                    directory: Directory::new(),
+                    source,
+                    key,
+                    state: RowLoadState::Unloaded,
+                }),
+            },
+        );
+        self.next_inode = next_inode;
+        let Some(NodeKind::Table(table)) =
+            self.nodes.get_mut(&table_inode).map(|node| &mut node.kind)
+        else {
+            return Err("mount table directory is missing".into());
+        };
+        table.indexed_rows.insert(name.to_os_string(), inode);
+        Ok(Some(inode))
     }
 
     fn ensure_readdir(&mut self, inode: u64, start: usize) -> Result<(), String> {
@@ -2174,6 +2263,29 @@ impl FsBuilder {
             }
             self.load_next_key_page(table_inode)?;
         }
+    }
+
+    fn readdir_page(
+        &mut self,
+        inode: u64,
+        start: usize,
+        mut visit: impl FnMut(usize, &DirectoryEntry) -> bool,
+    ) -> Result<(), String> {
+        self.ensure_readdir(inode, start)?;
+        let directory = self
+            .directory(inode)
+            .ok_or_else(|| "mount directory is missing".to_owned())?;
+        for (index, entry) in directory
+            .entries
+            .iter()
+            .enumerate()
+            .skip(start.saturating_sub(2))
+        {
+            if !visit(index, entry) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn load_next_key_page(&mut self, table_inode: u64) -> Result<(), String> {
@@ -2333,6 +2445,31 @@ impl FsBuilder {
             } else {
                 Err("committed row key path collides with another projected entry".into())
             };
+        }
+        let indexed = match self.nodes.get_mut(&parent).map(|node| &mut node.kind) {
+            Some(NodeKind::Table(table)) => table.indexed_rows.remove(OsStr::new(name)),
+            _ => None,
+        };
+        if let Some(inode) = indexed {
+            let matches = self
+                .nodes
+                .get(&inode)
+                .is_some_and(|node| matches!(&node.kind, NodeKind::Row(row) if row.key == key));
+            if !matches {
+                return Err("indexed row key path collides with another projected entry".into());
+            }
+            let directory = self
+                .directory_mut(parent)
+                .ok_or_else(|| "mount row parent is not a directory".to_owned())?;
+            let entry_name = OsString::from(name);
+            let index = directory.entries.len();
+            directory.by_name.insert(entry_name.clone(), index);
+            directory.entries.push(DirectoryEntry {
+                inode,
+                name: entry_name,
+                kind: FileType::Directory,
+            });
+            return Ok(inode);
         }
         self.insert_node(
             parent,
@@ -2685,6 +2822,7 @@ struct TableDirectory {
     lower: Option<TypedKey>,
     exhausted: bool,
     error: Option<String>,
+    indexed_rows: HashMap<OsString, u64>,
 }
 
 struct KeyDirectory {
@@ -3076,6 +3214,7 @@ mod tests {
         Expr, FsBuilder, NodeKind, ROOT_INODE, is_replacement_scratch_name, key_directory,
         parse_row, runtime_table_key_bytes, source_without_fields,
     };
+    use super::{EDITABLE_OPEN_FLAGS, EDITOR_INIT_CAPABILITIES, ROW_PAGE_LIMIT, WorkspaceFilesystem};
     use orna_repository_v1::TypedKey;
     use orna_runtime_v1::vfs::project_component;
     #[test]
@@ -3172,5 +3311,133 @@ mod tests {
             .entry(OsStr::new(&project_component("7")))
             .unwrap();
         assert_eq!(second.inode, row);
+    }
+    #[test]
+    fn editor_open_flags_bypass_kernel_cache_without_writeback_capability() {
+        assert!(EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC));
+        assert!(!EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_WRITEBACK_CACHE));
+        assert_eq!(EDITABLE_OPEN_FLAGS, fuser::FopenFlags::FOPEN_DIRECT_IO);
+    }
+
+    #[tokio::test]
+    async fn workspace_readdir_uses_lazy_indexed_pages() {
+        const SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+        let fixture_rows = (0..ROW_PAGE_LIMIT)
+            .map(|index| {
+                let key = format!("row-{index:03}");
+                let source = format!("{{ title: \"{key}\", }}\n");
+                (key, source)
+            })
+            .collect::<Vec<_>>();
+        let paths = fixture_rows
+            .iter()
+            .map(|(key, source)| (format!("Music/{key}.orna"), source.clone()))
+            .collect::<Vec<_>>();
+        let path_sources = paths
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let (_repository_directory, repository, relation_id, format_context) =
+            crate::format3::format3_repository_for_table_with_source_rows(
+                SOURCE,
+                "Music",
+                &path_sources,
+            );
+        let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
+        let state = orna_runtime_v1::RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+        let mut bindings = orna_evaluator_v1::SysHostBindingRegistry::new(
+            orna_sys_v1::EnvironmentProvider::default(),
+        );
+        let captures = fixture_rows
+            .iter()
+            .enumerate()
+            .map(|(index, (key, source))| crate::media_commit::SourceCaptureRow {
+                key,
+                blob_fields: &[],
+                source_row: Some(source),
+                ordinal: u8::try_from(index).unwrap(),
+                insert_only: true,
+            })
+            .collect::<Vec<_>>();
+        crate::media_commit::commit_source_captures_for_table(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            relation_id,
+            &format_context,
+            "Music",
+            &captures,
+        )
+        .await;
+        drop(state);
+
+        let context = repository.open_format_context_at_selector("HEAD").unwrap();
+        let filesystem = WorkspaceFilesystem::from_snapshot(
+            &repository,
+            context.commit(),
+            &context,
+            None,
+        )
+        .unwrap();
+        let mut builder = filesystem.state.lock().unwrap();
+        let table_inode = builder
+            .directory(ROOT_INODE)
+            .unwrap()
+            .entry(OsStr::new("Music"))
+            .unwrap()
+            .inode;
+
+        let indexed_name = project_component("row-255");
+        let indexed_inode = builder
+            .lookup_child(table_inode, OsStr::new(&indexed_name))
+            .unwrap()
+            .expect("indexed row lookup finds a stored text key");
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert!(table.directory.entries.is_empty(), "lookup does not materialize a readdir page");
+        assert!(table.lower.is_none(), "indexed lookup leaves the page cursor untouched");
+        assert_eq!(table.indexed_rows.len(), 1, "the direct lookup is retained outside the ordered page");
+
+        let mut first_page = Vec::with_capacity(ROW_PAGE_LIMIT);
+        builder
+            .readdir_page(table_inode, 0, |_, entry| {
+                first_page.push(entry.name.to_string_lossy().into_owned());
+                true
+            })
+            .unwrap();
+        assert_eq!(first_page.len(), ROW_PAGE_LIMIT);
+        assert_eq!(first_page.first().map(String::as_str), Some("row-000"));
+        assert_eq!(first_page.last().map(String::as_str), Some("row-255"));
+        assert!(builder.nodes.get(&indexed_inode).is_some());
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert_eq!(table.directory.entries.len(), ROW_PAGE_LIMIT);
+        assert!(table.indexed_rows.is_empty(), "enumeration absorbs the cached indexed row in key order");
+        assert!(!table.exhausted, "a full page does not prove that another page is absent");
+
+        let mut next_page = Vec::new();
+        builder
+            .readdir_page(table_inode, ROW_PAGE_LIMIT + 2, |_, entry| {
+                next_page.push(entry.name.to_string_lossy().into_owned());
+                true
+            })
+            .unwrap();
+        assert!(next_page.is_empty(), "the exact page boundary does not duplicate the inclusive cursor");
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert!(table.exhausted, "the empty final page marks the directory exhausted");
+        assert_eq!(
+            builder
+                .lookup_child(table_inode, OsStr::new(&indexed_name))
+                .unwrap(),
+            Some(indexed_inode),
+        );
     }
 }
