@@ -3523,6 +3523,8 @@ mod tests {
         git(directory, &["rev-parse", "HEAD"])
     }
 
+    /// ORNA-PACKAGE-001: exact Git pins make a registry or semver solver unnecessary.
+    /// ORNA-PACKAGE-002: parent snapshots retain the exact package commit after package HEAD moves.
     #[test]
     fn parent_snapshot_resolves_exact_package_commit_after_head_moves() {
         let package_dir = tempfile::tempdir().unwrap();
@@ -12921,6 +12923,7 @@ mod tests {
         );
     }
 
+    /// ORNA-ATTACH-003: cross-database unit equivalence is checked structurally, not by name.
     #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
@@ -12974,6 +12977,7 @@ mod tests {
         ));
     }
 
+    /// ORNA-PACKAGE-001: package pins reject moving selectors in favor of exact commits.
     #[test]
     fn package_manifest_rejects_moving_selectors_and_duplicate_names() {
         let oid = "a".repeat(40);
@@ -12983,6 +12987,7 @@ mod tests {
         assert!(PackagePinManifest::parse(&format!("sys {oid}\n")).is_err());
     }
 
+    /// ORNA-PACKAGE-003: std resolves as an ordinary optional Git-pinned attachment.
     #[test]
     fn std_package_pin_must_match_the_gitlink_when_both_are_committed() {
         let (std_directory, std_repository, first_std_commit) =
@@ -13063,6 +13068,7 @@ mod tests {
         );
     }
 
+    /// ORNA-ATTACH-001: relation source composition retains rows from each pinned snapshot.
     #[test]
     fn relation_sources_compose_rows_from_each_pinned_snapshot() {
         fn committed_database(main: &str, row: &str) -> (TempDir, Repository, String) {
