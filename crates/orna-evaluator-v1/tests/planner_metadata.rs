@@ -15,3 +15,13 @@ fn planner_metadata_reports_query_stages_and_no_reuse_without_materializing_rows
     assert_eq!(metadata.reused_filter_batch_count, 0);
     assert!(!metadata.materializes_source_rows);
 }
+
+#[test]
+fn planner_metadata_rejects_materializing_expressions_before_scanning() {
+    for source in ["sys.Storage | count()", "sys.Storage | chunk(2)"] {
+        let error = planner_metadata(source, &Environment::new(), Limits::default())
+            .expect_err("materializing expressions cannot provide planner metadata");
+
+        assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED", "{source}");
+    }
+}
