@@ -101,7 +101,8 @@ fn coalescing_chains_associate_to_the_right() {
     );
 }
 
-// ORNA-PIPE-007, ORNA-PIPE-012, ORNA-ERR-012: failures propagate and explicit `|?` recovery resumes the enclosing expression.
+// ORNA-PIPE-007, ORNA-PIPE-012, ORNA-ERR-012: failures propagate and explicit |? recovery resumes the enclosing expression.
+// ORNA-ERR-011/012 (source/06-expressions.md:413-415).
 #[test]
 fn pipelines_preserve_failure_and_successful_recovery_continues_once() {
     assert_eq!(
