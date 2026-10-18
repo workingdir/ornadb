@@ -19,6 +19,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
     CanonicalValue::new(raw).expect("expected value is canonical")
 }
 
+/// ORNA-CONCUR-002: parallel returns successful results in callback input order.
 #[test]
 fn structured_combinators_return_computed_values() {
     let mut session = pinned_time_text_std::concurrent_session();
@@ -57,6 +58,49 @@ fn structured_combinators_return_computed_values() {
             ))
             .unwrap_or_else(|error| panic!("captured callback failed with {}", error.code())),
         Some(canonical(list([int(41)])))
+    );
+}
+
+/// ORNA-CONCUR-002: a slower first callback still contributes the first result in input order.
+#[test]
+fn parallel_results_follow_input_order_when_completion_is_reversed() {
+    let mut session = pinned_time_text_std::concurrent_session();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-concurrent-zhw5h.orna")),
+        Ok(None)
+    );
+    let mut bindings = SysHostBindingRegistry::default()
+        .with_clock_provider(ClockProvider::new(Duration::from_secs(5)));
+    let result = session
+        .submit_with_sys_host_bindings(
+            "concurrent.parallel([() => { concurrent.sleep(1.s); 2 }, () => 3])",
+            &mut bindings,
+        )
+        .unwrap_or_else(|error| panic!("ordered parallel failed with {}", error.code()));
+    assert_eq!(result, Some(canonical(list([int(2), int(3)]))));
+}
+
+/// ORNA-CONCUR-005: race selects the first success and joins its cancelled, sleeping loser.
+#[test]
+fn race_cancels_and_joins_a_slower_loser() {
+    let mut session = pinned_time_text_std::concurrent_session();
+    assert_eq!(
+        session.submit(include_str!("fixtures/stdlib-use-concurrent-zhw5h.orna")),
+        Ok(None)
+    );
+    let mut bindings = SysHostBindingRegistry::default()
+        .with_clock_provider(ClockProvider::new(Duration::from_secs(5)));
+    let started = Instant::now();
+    let result = session
+        .submit_with_sys_host_bindings(
+            "concurrent.race([() => { concurrent.sleep(2.s); 29 }, () => 31])",
+            &mut bindings,
+        )
+        .unwrap_or_else(|error| panic!("race cancellation failed with {}", error.code()));
+    assert_eq!(result, Some(canonical(int(31))));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "race must join the cancelled sleeper without awaiting its full duration"
     );
 }
 
@@ -103,6 +147,7 @@ fn empty_and_timeout_edges_follow_the_documented_results() {
     );
 }
 
+/// ORNA-CONCUR-006: timeout requests cancellation and joins the timed-out host-effect callback before returning.
 #[test]
 fn structured_children_fork_host_effects_and_timeout_joins_cancellation() {
     let mut session = pinned_time_text_std::concurrent_session();
