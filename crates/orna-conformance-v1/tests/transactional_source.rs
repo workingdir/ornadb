@@ -192,6 +192,8 @@ fn parsed_upsert_patches_existing_rows_and_inserts_absent_rows() {
     );
 }
 
+/// ORNA-LIB-002: core table writes and assertions execute without importing optional std.
+/// ORNA-QUERY-005: a nested function's successful write is visible to the caller query.
 #[test]
 fn parsed_table_count_observes_nested_read_your_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
