@@ -22,6 +22,8 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
     "  serve [--port PORT]",
     "  mount DIR --cwd              editable workspace view; row saves are validated",
+    "  edit PATH                     edit one projected row or Blob through transactional admission",
+    "  edit --row PATH               edit a row through the same transactional admission path",
     "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
     "  mount status [--json]         report attached views",
     "  unmount DIR                   release a view's record",
