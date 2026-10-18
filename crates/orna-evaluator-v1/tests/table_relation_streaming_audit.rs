@@ -1076,6 +1076,7 @@ fn relation_page_rejects_empty_nonterminal_pages() {
     assert_eq!(effects.cursors, vec![None]);
 }
 
+/// ORNA-ORDER-002: flat-map concatenates each callback result in input and inner order.
 #[test]
 fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
     // ORNA-ORDER-002: input page order precedes each callback's emitted order.
@@ -1099,6 +1100,7 @@ fn flat_map_preserves_page_then_inner_order_from_fixture_functions() {
     assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
 }
 
+/// ORNA-ORDER-003: stable sort preserves source order across equal-key page boundaries.
 #[test]
 fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
     // ORNA-ORDER-003: sort_by is stable even when equal keys cross a page edge.
@@ -1118,6 +1120,9 @@ fn stable_sort_keeps_equal_keys_in_source_order_across_pages() {
     assert_eq!(effects.cursors, vec![None, Some(vec![1])]);
 }
 
+/// ORNA-REL-001: the relation pipeline remains composable without full materialization.
+/// ORNA-REL-002: a bounded observation does not enumerate the whole relation.
+/// ORNA-ORDER-002: filter and map preserve input order and take observes only its prefix.
 #[test]
 fn filtered_mapped_take_stops_after_the_requested_prefix() {
     // ORNA-REL-001/002 and ORNA-ORDER-002: compose stages lazily and do not
@@ -1210,7 +1215,8 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
         ),
     ]);
     assert_eq!(
-        run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh).unwrap(),
+        run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh)
+            .unwrap_or_else(|error| panic!("incremental view refresh failed with {}", error.to_string())),
         integer(18),
         "left odd rows and right even rows each retain their source filter across both pages"
     );
