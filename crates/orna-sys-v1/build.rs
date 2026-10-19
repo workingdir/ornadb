@@ -34,7 +34,7 @@ fn main() {
     let build_support_path = manifest.join("build_support.rs");
     let build_host_path = manifest.join("build_host.rs");
     let build_provider_path = manifest.join("build_provider.rs");
-    let authority_path = manifest.join("../../api/sys.json");
+    let authority_path = manifest.join("authority/sys.json");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", build_support_path.display());
     println!("cargo:rerun-if-changed={}", build_host_path.display());

@@ -16,7 +16,7 @@ const GENERATED_API_STATUS: &str =
     "Final 1.1.0 specification contract; engine execution not claimed";
 /// Frozen final compatibility artifact. Native metadata is projected and
 /// validated against these reviewed bytes; it does not regenerate them.
-pub const FINAL_API_AUTHORITY_JSON: &str = include_str!("../../api/sys.json");
+pub const FINAL_API_AUTHORITY_JSON: &str = include_str!("authority/sys.json");
 #[derive(Clone, Debug)]
 pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.

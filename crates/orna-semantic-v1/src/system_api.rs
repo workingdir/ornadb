@@ -21,7 +21,7 @@ fn generated_system_api_json() -> &'static str {
 
 #[cfg(target_arch = "wasm32")]
 fn generated_system_api_json() -> &'static str {
-    include_str!("../../../api/sys.json")
+    include_str!("../../orna-sys-v1/authority/sys.json")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
