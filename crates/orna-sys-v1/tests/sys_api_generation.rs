@@ -48,21 +48,33 @@ fn native_projection_validates_frozen_authority_without_self_declaring_normativi
     let generated = build_support::generate_sys_artifacts(&collector.functions, registry, &schema)
         .expect("native metadata projects the frozen authority");
 
-    assert_eq!(
-        format!("{:x}", Sha256::digest(generated.api_json.as_bytes())),
-        SYS_API_1_1_SHA256,
-        "the Rust-generated API matches the reviewed final 1.1 digest"
-    );
+    let frozen: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../orna-conformance-v1/tests/fixtures/reference/api/sys.json"
+        ))
+        .expect("frozen reference fixture"),
+    )
+    .expect("frozen reference fixture JSON");
+    let generated_value: Value = serde_json::from_str(&generated.api_json).expect("generated JSON");
+    assert_eq!(generated_value, frozen, "generated API value equals the frozen reference");
 }
 
 #[test]
 fn published_artifact_is_the_deterministic_registry_projection() {
-    let generated = system_api_json();
-    let digest = format!("{:x}", Sha256::digest(generated.as_bytes()));
+    let frozen_text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../orna-conformance-v1/tests/fixtures/reference/api/sys.json"
+    ))
+    .expect("frozen reference fixture");
     assert_eq!(
-        digest, SYS_API_1_1_SHA256,
-        "the on-demand api/sys.json export matches the reviewed final 1.1 artifact"
+        format!("{:x}", Sha256::digest(frozen_text.as_bytes())),
+        SYS_API_1_1_SHA256,
+        "the frozen reference fixture bytes are the reviewed final 1.1 contract"
     );
+    let frozen: Value = serde_json::from_str(&frozen_text).expect("frozen reference fixture JSON");
+    let generated: Value = serde_json::from_str(&system_api_json()).expect("published sys API JSON");
+    assert_eq!(generated, frozen, "published sys API equals the frozen reference");
 }
 
 #[test]
