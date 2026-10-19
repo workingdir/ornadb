@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The Gate B large-payload fixture now lives in a separate temporary root, and scratch accounting measures it alongside repository storage without counting nested bytes twice.
 - Blob annotation binding canonicalizes caller-supplied MIME-1 values (including
   the preferred suffix) before storing the canonical wire annotation.
 - JSON encoding supports Money values when their registered nominal Currency metadata is available. It preserves the exact decimal amount as a string and emits the registered currency code.

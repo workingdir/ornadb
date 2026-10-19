@@ -2159,8 +2159,8 @@ fn write_high_entropy_fixture(path: &Path) -> [u8; 32] {
 }
 
 #[cfg(target_os = "linux")]
-fn scratch_tree_bytes(root: &Path) -> u64 {
-    let mut pending = vec![root.to_path_buf()];
+fn scratch_tree_bytes(roots: &[&Path]) -> u64 {
+    let mut pending = roots.iter().map(|root| root.to_path_buf()).collect::<Vec<_>>();
     let mut total = 0_u64;
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(directory).expect("read scratch directory") {
@@ -2267,7 +2267,7 @@ async fn commit_captured_binding(
 #[tokio::test]
 async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata() {
     let (directory, repository, relation_id) = empty_format3_repository();
-    let source = TempDir::new_in(directory.path()).expect("create disposable input directory");
+    let source = TempDir::new().expect("create disposable input directory");
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
             Path::new(MEDIA_FIXTURES).join(name),
@@ -2437,16 +2437,50 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
     );
 
     let peak_rss = process_peak_rss_bytes();
-    let scratch_bytes = scratch_tree_bytes(directory.path());
+    let scratch_bytes = scratch_tree_bytes(&[directory.path(), source.path()]);
     let object_count_after = git_object_count(directory.path());
     let temporary_storage_bound = 2 * GATE_B_LARGE_PAYLOAD_BYTES + 1024 * 1024 * 1024;
     assert!(
         peak_rss < 512 * 1024 * 1024,
         "10 GiB import exceeded bounded RSS: {peak_rss} bytes"
     );
+    let scratch_breakdown = || {
+        let source_bytes = std::fs::metadata(&large_path)
+            .expect("read high-entropy fixture size")
+            .len();
+        let objects_dir = directory.path().join(".git/objects");
+        let pack_dir = objects_dir.join("pack");
+        let packed_bytes = scratch_tree_bytes(&[&pack_dir]);
+        let loose_bytes = std::fs::read_dir(&objects_dir)
+            .expect("read Git object directory")
+            .fold(0_u64, |total, entry| {
+                let entry = entry.expect("read Git object directory entry");
+                let name = entry.file_name();
+                let is_fanout = entry.file_type().expect("read Git object entry type").is_dir()
+                    && name.to_str().is_some_and(|name| {
+                        name.len() == 2 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    });
+                if is_fanout {
+                    total
+                        .checked_add(scratch_tree_bytes(&[&entry.path()]))
+                        .expect("loose Git object bytes fit u64")
+                } else {
+                    total
+                }
+            });
+        let other_bytes = scratch_bytes
+            .checked_sub(source_bytes)
+            .and_then(|bytes| bytes.checked_sub(loose_bytes))
+            .and_then(|bytes| bytes.checked_sub(packed_bytes))
+            .expect("scratch byte categories are disjoint");
+        format!(
+            "source={source_bytes}, loose_objects={loose_bytes}, packed_objects={packed_bytes}, other={other_bytes}"
+        )
+    };
     assert!(
         scratch_bytes <= temporary_storage_bound,
-        "scratch storage exceeded source + owned content + bounded metadata: {scratch_bytes}"
+        "scratch storage exceeded source + owned content + bounded metadata: {scratch_bytes} bytes ({})",
+        scratch_breakdown()
     );
     eprintln!(
         "Gate B: small fixture rows=2; large network bytes={network_bytes_read}; graph payload bytes read={graph_payload_bytes_read}, written={graph_payload_bytes_written}; native objects read={graph_objects_read}; remote Git objects=0; new Git objects={}; elapsed_ms={}; peak_rss_bytes={peak_rss}; scratch_storage_bytes={scratch_bytes}",
