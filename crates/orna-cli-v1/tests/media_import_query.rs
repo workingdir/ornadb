@@ -2392,7 +2392,7 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
         .protect_admitted_blob_reference(&reference, &scope)
         .unwrap();
     let updated_binding = graph
-        .accept_protected_blob_pin_with_annotation(pin, "application/pdf", Some("pdf"))
+        .accept_protected_blob_pin_with_annotation(pin, "application/pdf", None)
         .unwrap();
     assert_eq!(updated_binding.content_identity().sha256(), expected_sha256);
     assert_eq!(scope.payload_bytes_read(), 0);
