@@ -2179,6 +2179,50 @@ fn scratch_tree_bytes(roots: &[&Path]) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
+fn largest_other_scratch_files(roots: &[&Path], source_file: &Path, objects_dir: &Path) -> String {
+    let mut pending = roots.iter().map(|root| root.to_path_buf()).collect::<Vec<_>>();
+    let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("read scratch directory") {
+            let entry = entry.expect("read scratch entry");
+            let kind = entry.file_type().expect("read scratch entry type");
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let path = entry.path();
+                let is_object = path
+                    .strip_prefix(objects_dir)
+                    .ok()
+                    .and_then(|relative| relative.components().next())
+                    .and_then(|component| component.as_os_str().to_str())
+                    .is_some_and(|first| {
+                        first == "pack"
+                            || (first.len() == 2
+                                && first.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    });
+                if path.as_path() != source_file && !is_object {
+                    files.push((
+                        entry.metadata().expect("read scratch file size").len(),
+                        path,
+                    ));
+                }
+            }
+        }
+    }
+    files.sort_unstable_by(|(left_size, left_path), (right_size, right_path)| {
+        right_size
+            .cmp(left_size)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    files.truncate(12);
+    files
+        .into_iter()
+        .map(|(bytes, path)| format!("{}={bytes}", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(target_os = "linux")]
 fn process_peak_rss_bytes() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("read process status");
     let kib = status
@@ -2473,8 +2517,13 @@ async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_met
             .and_then(|bytes| bytes.checked_sub(loose_bytes))
             .and_then(|bytes| bytes.checked_sub(packed_bytes))
             .expect("scratch byte categories are disjoint");
+        let largest_paths = largest_other_scratch_files(
+            &[directory.path(), source.path()],
+            &large_path,
+            &objects_dir,
+        );
         format!(
-            "source={source_bytes}, loose_objects={loose_bytes}, packed_objects={packed_bytes}, other={other_bytes}"
+            "source={source_bytes}, loose_objects={loose_bytes}, packed_objects={packed_bytes}, other={other_bytes}, largest_other_files=[{largest_paths}]"
         )
     };
     assert!(
