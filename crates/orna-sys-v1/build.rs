@@ -76,7 +76,7 @@ fn main() {
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("build output directory"));
     fs::write(out_dir.join("api_sys.json"), artifacts.api_json)
-        .expect("write generated api/sys.json");
+        .expect("write generated sys API json");
     fs::write(
         out_dir.join("system_api_selection.json"),
         artifacts.api_selection_json,
