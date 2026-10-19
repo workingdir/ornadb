@@ -41,11 +41,13 @@ mod cancellation;
 mod regex_lite;
 mod relation;
 mod repl;
+#[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
-
+mod browser_profile;
+pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
 pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
 pub use cancellation::CancellationToken;
@@ -53,7 +55,9 @@ use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
+pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
+#[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
@@ -425,8 +429,14 @@ pub struct NominalDefinition {
     fields: Vec<NominalField>,
     /// Closed enum variants retained for qualified constructor patterns.
     variants: Vec<NominalVariant>,
+    currency: Option<CurrencyMetadata>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CurrencyMetadata {
+    code: String,
+    minor_digits: usize,
+}
 impl NominalDefinition {
     /// Create an admitted declaration plan without exposing its private
     /// field names or default expressions through public field access.
@@ -437,9 +447,23 @@ impl NominalDefinition {
             owner,
             fields,
             variants: Vec::new(),
+            currency: None,
         }
     }
 
+    /// Associate this nominal identity with the stable Currency protocol metadata.
+    #[must_use]
+    pub fn with_currency(
+        mut self,
+        code: impl Into<String>,
+        minor_digits: usize,
+    ) -> Self {
+        self.currency = Some(CurrencyMetadata {
+            code: code.into(),
+            minor_digits,
+        });
+        self
+    }
     /// Retain the closed enum variants for qualified constructor patterns.
     #[must_use]
     pub fn with_enum_variants(mut self, variants: Vec<NominalVariant>) -> Self {
@@ -477,6 +501,13 @@ fn validate_nominal_definition(
     limits: Limits,
 ) -> Result<BTreeSet<[u8; 16]>, EvaluationError> {
     if !is_object_id_raw(&definition.type_id) {
+        return Err(error("ORNA-EVAL-VALUE"));
+    }
+    if let Some(currency) = &definition.currency
+        && (currency.code.len() != 3
+            || !currency.code.bytes().all(|byte| byte.is_ascii_uppercase())
+            || currency.minor_digits > DEFAULT_INTEGER_DIGITS)
+    {
         return Err(error("ORNA-EVAL-VALUE"));
     }
     if !definition.variants.is_empty() && !definition.fields.is_empty() {
@@ -747,7 +778,6 @@ pub trait EffectHandler {
     ) -> Result<Option<CanonicalValue>, EvaluationError>;
 
     /// Handle an effect while sharing the activation's step budget.
-    ///
     /// The default delegates to [`EffectHandler::handle`] so existing effect
     /// handlers remain source-compatible and retain their prior behavior.
     fn handle_with_budget(
@@ -1382,6 +1412,96 @@ pub fn evaluate_expression(
     evaluate_expression_with_functions(source, environment, &Functions::new(), limits)
 }
 
+/// Builds planner metadata for a typed relation query without executing its source scan.
+///
+/// Evaluation proceeds only far enough to construct the relation plan. Source reads,
+/// callbacks, and terminal operators that materialize rows are not run.
+#[must_use]
+pub fn planner_metadata(
+    source: &str,
+    environment: &Environment,
+    limits: Limits,
+) -> Result<RelationPlanMetadata, EvaluationError> {
+    check_limits(source, limits)?;
+    let parsed = parse_expression(source);
+    if !parsed.is_ok() {
+        return Err(error("ORNA-EVAL-PARSE"));
+    }
+    if !planner_metadata_relation_expression(&parsed.value) {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    validate_limits(limits)?;
+    let functions = Functions::new();
+    let mut context = Context {
+        limits,
+        steps: 0,
+        functions: &functions,
+        aliases: None,
+        session_functions: None,
+        repl_bindings: false,
+        restrict_function_names: false,
+        reject_unhandled_field_calls: false,
+        effects: None,
+        namespace: None,
+        transfer: None,
+        cancellation: None,
+    };
+    let mut scope = Scope::from_environment(environment, &mut context)?;
+    let value = context.evaluate(&parsed.value, &mut scope, 0)?;
+    if context.transfer.is_some() {
+        return Err(error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    match value {
+        Value::Relation(plan) => Ok(plan.metadata()),
+        _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
+}
+fn planner_metadata_relation_expression(expression: &Expr) -> bool {
+    match expression {
+        Expr::Group { inner, .. } => planner_metadata_relation_expression(inner),
+        Expr::Binary { lhs, op, rhs, .. } if op == "|" => {
+            planner_metadata_relation_expression(lhs) && planner_metadata_lazy_stage(rhs)
+        }
+        _ => system_relation_source(expression).is_some(),
+    }
+}
+
+fn planner_metadata_lazy_stage(expression: &Expr) -> bool {
+    let (callee, arguments) = match expression {
+        Expr::Call { callee, arguments, .. } | Expr::GenericCall { callee, arguments, .. } => {
+            (callee, arguments)
+        }
+        Expr::Group { inner, .. } => return planner_metadata_lazy_stage(inner),
+        _ => return false,
+    };
+    let Some(name) = function_name(callee) else {
+        return false;
+    };
+    let operation = name
+        .strip_prefix("std.collection.")
+        .or_else(|| name.strip_prefix("std.query."))
+        .unwrap_or(&name);
+    if operation == "union" {
+        return arguments
+            .iter()
+            .all(|argument| planner_metadata_relation_expression(&argument.value));
+    }
+    matches!(
+        operation,
+        "filter"
+            | "map"
+            | "project"
+            | "flat_map"
+            | "sort_by"
+            | "bucket_by"
+            | "window"
+            | "distinct"
+            | "unique"
+            | "pairs"
+            | "take"
+            | "drop"
+    )
+}
 /// Evaluate one expression using OVB-2 context values at the boundary.
 ///
 /// Every environment value must carry the OVB-2 profile. Annotated Blobs are
@@ -6825,6 +6945,7 @@ impl Context<'_, '_> {
     /// admitted only for operations bound to the generated Blob annotation
     /// role, so a source-level `sys.blob.*` call cannot reach native code the
     /// registry has not declared.
+#[cfg(feature = "system-host-bindings")]
     fn call_blob_annotation(
         &mut self,
         operation: &str,
@@ -6901,6 +7022,7 @@ impl Context<'_, '_> {
     /// The declared type comes from the generated contract, so the conversion
     /// cannot invent a shape the declaration does not allow. Unannotated bytes
     /// remain unsupported rather than receiving a lossy fallback annotation.
+#[cfg(feature = "system-host-bindings")]
     fn blob_annotation_argument(
         value: Value,
         declared: &orna_sys_v1::AbiType,
@@ -7167,6 +7289,7 @@ impl Context<'_, '_> {
         // declaration was reachable; an unresolved, unshadowed source-level
         // `sys.blob.*` call is accepted so the generated declarations stay
         // callable, and a resolved non-Blob function never falls through.
+        #[cfg(feature = "system-host-bindings")]
         let declared = match resolved_function.as_deref() {
             Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
                 Some(name.to_owned())
@@ -7185,9 +7308,11 @@ impl Context<'_, '_> {
                 .operation(name)
                 .is_some()
         });
+        #[cfg(feature = "system-host-bindings")]
         if let Some(operation) = declared {
             return self.call_blob_annotation(&operation, arguments, input, scope, depth);
         }
+        #[cfg(feature = "system-host-bindings")]
         if let Some(operation_name) = resolved_function.as_deref()
             && let Some(operation) =
                 orna_sys_v1::system_host_operation_registry().operation(operation_name)
@@ -7723,7 +7848,7 @@ impl Context<'_, '_> {
         } else if base64.is_some() {
             self.base64(name, values)
         } else if json.is_some() {
-            self.json_codec(name, values)
+            self.json_codec(name, values, &scope.3)
         } else if orna_codec.is_some() {
             self.orna_codec(name, values)
         } else if ovb_codec.is_some() {
@@ -7763,6 +7888,7 @@ impl Context<'_, '_> {
         {
             return Some(alias.clone());
         }
+        #[cfg(feature = "system-host-bindings")]
         if self.functions.contains_key(&name)
             && orna_sys_v1::system_host_operation_registry()
                 .operation(&name)
@@ -9653,11 +9779,16 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn json_codec(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
+    fn json_codec(
+        &mut self,
+        name: &str,
+        values: Vec<Value>,
+        nominals: &NominalDefinitions,
+    ) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("__encode", [value]) => {
                 let mut output = String::new();
-                write_json_value(value, &mut output, self, 0)?;
+                write_json_value(value, &mut output, self, nominals, 0)?;
                 self.string(output).map(Value::String)
             }
             ("__decode", [Value::String(input)])
@@ -12064,6 +12195,7 @@ fn write_json_value(
     value: &Value,
     output: &mut String,
     context: &mut Context<'_, '_>,
+    nominals: &NominalDefinitions,
     depth: usize,
 ) -> Result<(), EvaluationError> {
     context.depth(depth)?;
@@ -12092,7 +12224,7 @@ fn write_json_value(
                 if index > 0 {
                     output.push(',');
                 }
-                write_json_value(value, output, context, depth + 1)?;
+                write_json_value(value, output, context, nominals, depth + 1)?;
             }
             output.push(']');
         }
@@ -12105,14 +12237,32 @@ fn write_json_value(
                 }
                 output.push_str(&serde_json::to_string(key).map_err(|_| error("ORNA-EVAL-VALUE"))?);
                 output.push(':');
-                write_json_value(value, output, context, depth + 1)?;
+                write_json_value(value, output, context, nominals, depth + 1)?;
             }
             output.push('}');
         }
         Value::Option(None) => output.push_str("null"),
-        Value::Option(Some(value)) => write_json_value(value, output, context, depth + 1)?,
+        Value::Option(Some(value)) => {
+            write_json_value(value, output, context, nominals, depth + 1)?;
+        }
+        Value::Money { amount, currency } => {
+            let metadata = nominals
+                .values()
+                .find(|definition| object_id_key(&definition.type_id) == Some(*currency))
+                .and_then(|definition| definition.currency.as_ref())
+                .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
+            output.push_str("{\"amount\":");
+            let amount = decimal_json_token(amount)?;
+            output.push_str(
+                &serde_json::to_string(&amount).map_err(|_| error("ORNA-EVAL-VALUE"))?,
+            );
+            output.push_str(",\"currency\":");
+            output.push_str(
+                &serde_json::to_string(&metadata.code).map_err(|_| error("ORNA-EVAL-VALUE"))?,
+            );
+            output.push('}');
+        }
         Value::Unit
-        | Value::Money { .. }
         | Value::Blob(_)
         | Value::AnnotatedBlob(_)
         | Value::ContextualBlob(_)
@@ -14653,6 +14803,7 @@ mod tests {
                     true,
                     true,
                 );
+                #[cfg(feature = "system-host-bindings")]
                 let system_host = orna_sys_v1::system_host_operation_registry()
                     .operation(&qualified)
                     .is_some();

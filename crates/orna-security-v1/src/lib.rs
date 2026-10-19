@@ -222,6 +222,63 @@ pub struct OriginPolicy {
     deny: BTreeSet<Origin>,
 }
 
+/// Explicit user choice controlling whether source may be disclosed for remote analysis.
+/// The default is local-only; transport configuration never implies consent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RemoteAnalysisPolicy {
+    #[default]
+    LocalOnly,
+    AllowRemoteDisclosure,
+}
+
+/// Exact provenance and disclosure boundary for one remote analysis attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteAnalysisRequest {
+    decision: RemoteAnalysisDecision,
+    source_snapshot: String,
+    disclosed_data: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteAnalysisDecision {
+    DeniedLocalOnly,
+    AllowedByUserPolicy,
+}
+
+impl RemoteAnalysisRequest {
+    /// Makes an auditable request record. It does not perform network I/O.
+    /// The snapshot identity must identify the exact admitted source/dependency/resource inputs.
+    #[must_use]
+    pub fn new(
+        policy: RemoteAnalysisPolicy,
+        source_snapshot: impl Into<String>,
+        disclosed_data: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            decision: match policy {
+                RemoteAnalysisPolicy::LocalOnly => RemoteAnalysisDecision::DeniedLocalOnly,
+                RemoteAnalysisPolicy::AllowRemoteDisclosure => RemoteAnalysisDecision::AllowedByUserPolicy,
+            },
+            source_snapshot: source_snapshot.into(),
+            disclosed_data: disclosed_data.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn decision(&self) -> RemoteAnalysisDecision { self.decision }
+
+    #[must_use]
+    pub fn source_snapshot(&self) -> &str { &self.source_snapshot }
+
+    #[must_use]
+    pub fn disclosed_data(&self) -> &[String] { &self.disclosed_data }
+
+    #[must_use]
+    pub fn is_allowed(&self) -> bool {
+        self.decision == RemoteAnalysisDecision::AllowedByUserPolicy
+    }
+}
+
 impl OriginPolicy {
     #[must_use]
     pub fn new(
@@ -237,6 +294,34 @@ impl OriginPolicy {
     #[must_use]
     pub fn permits(&self, origin: &Origin) -> bool {
         !self.deny.contains(origin) && self.allow.contains(origin)
+    }
+}
+
+#[cfg(test)]
+mod remote_analysis_tests {
+    use super::*;
+
+    #[test]
+    fn remote_analysis_requires_explicit_policy_and_records_provenance() {
+        let default_policy = RemoteAnalysisPolicy::default();
+        let denied = RemoteAnalysisRequest::new(
+            default_policy,
+            "git:source=abc;deps=def;resources=ghi;toolchain=jkl;abi=mno",
+            Vec::<String>::new(),
+        );
+        assert!(!denied.is_allowed());
+        assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
+        assert_eq!(denied.source_snapshot(), "git:source=abc;deps=def;resources=ghi;toolchain=jkl;abi=mno");
+        assert!(denied.disclosed_data().is_empty());
+
+        let allowed = RemoteAnalysisRequest::new(
+            RemoteAnalysisPolicy::AllowRemoteDisclosure,
+            "git:source=abc;deps=def;resources=ghi;toolchain=jkl;abi=mno",
+            ["source", "dependency-snapshot", "query"].map(str::to_owned),
+        );
+        assert!(allowed.is_allowed());
+        assert_eq!(allowed.decision(), RemoteAnalysisDecision::AllowedByUserPolicy);
+        assert_eq!(allowed.disclosed_data(), &["source", "dependency-snapshot", "query"]);
     }
 }
 
