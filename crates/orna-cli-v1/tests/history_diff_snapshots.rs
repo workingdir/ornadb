@@ -41,10 +41,11 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
     output
 }
 
-/// The song row is added after `before`, then its optional cover changes from
-/// None to Some without reading either snapshot's payloads.
+/// ORNA-EVOL-004: compare the logical row's Blob annotation transition across
+/// pinned endpoints, without treating their distinct Git/storage layout IDs
+/// as row changes and without reading either snapshot's payloads.
 #[tokio::test]
-async fn diff_between_two_pinned_snapshots_reports_a_nullable_blob_field_change_without_payloads() {
+async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_ids() {
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
