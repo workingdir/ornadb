@@ -4525,6 +4525,17 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
     dead_owner: [u8; 16],
     accepted_pending: &BTreeMap<[u8; 16], NativeOid>,
 ) -> Result<usize, GraphError> {
+    reclaim_departed_owner_pin_refs(repository, &[(dead_owner, accepted_pending)])
+}
+
+/// Reclaims every listed departed owner in one pass under one coordination
+/// lock. The journal check and each owner's deletions all run while that lock
+/// is held, so a publisher cannot journal a root between owners. A pass that
+/// cannot take the lock deletes nothing.
+pub(crate) fn reclaim_departed_owner_pin_refs(
+    repository: &crate::Repository,
+    departed: &[([u8; 16], &BTreeMap<[u8; 16], NativeOid>)],
+) -> Result<usize, GraphError> {
     let _coordination_lock = NativeGraphCoordinationLock::acquire(repository)?;
     if repository
         .read_publication_journal_locked()
@@ -4536,6 +4547,21 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
+    let mut reclaimed = 0;
+    for (dead_owner, accepted_pending) in departed {
+        reclaimed += reclaim_owner_pin_refs_locked(&owner, *dead_owner, accepted_pending)?;
+    }
+    Ok(reclaimed)
+}
+
+/// Deletes one departed owner's unaccepted private pin refs. The caller must
+/// hold the coordination lock and have confirmed that no publication journal
+/// is pending.
+fn reclaim_owner_pin_refs_locked(
+    owner: &PrivateRefCleanupOwner,
+    dead_owner: [u8; 16],
+    accepted_pending: &BTreeMap<[u8; 16], NativeOid>,
+) -> Result<usize, GraphError> {
     let prefix = format!("refs/orna/pins/{}/", hex_encode(&dead_owner));
     let listing = owner.git_output(&["for-each-ref", "--format=%(refname)", &prefix])?;
     let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
@@ -9273,6 +9299,83 @@ mod persisted_orp_tests {
         );
         assert!(fixture_ref_exists(root, &accepted_ref));
         assert!(!fixture_ref_exists(root, &unaccepted_ref));
+    }
+
+    /// Reclaims several departed owners in one pass, retaining accepted pins.
+    #[test]
+    fn departed_owner_reclaim_settles_all_owners_in_one_pass() {
+        let directory = tempfile::tempdir().expect("create reclaim repository");
+        let root = directory.path();
+        let init = Command::new("git")
+            .current_dir(root)
+            .args(["init", "--quiet", "--template="])
+            .status()
+            .expect("initialize reclaim repository");
+        assert!(init.success());
+        let repository = crate::Repository::discover(root).expect("discover reclaim repository");
+
+        fs::write(root.join("pin-payload"), b"departed owner pin payload")
+            .expect("write pin payload");
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["hash-object", "-w", "pin-payload"])
+            .output()
+            .expect("hash pin payload");
+        assert!(
+            output.status.success(),
+            "hash pin payload: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload_hex = String::from_utf8(output.stdout)
+            .expect("hash output is UTF-8")
+            .trim()
+            .to_owned();
+        let payload_oid =
+            NativeOid::from_hex(GitHashAlgorithm::Sha1, &payload_hex).expect("payload object id");
+
+        let owner_a = [0xA0; 16];
+        let owner_b = [0xB0; 16];
+        let owner_c = [0xC0; 16];
+        let pins = [
+            (owner_a, [0xA1; 16]),
+            (owner_a, [0xA2; 16]),
+            (owner_b, [0xB1; 16]),
+            (owner_c, [0xC1; 16]),
+            (owner_c, [0xC2; 16]),
+        ];
+        for (owner, pin_id) in pins {
+            let reference = accepted_content_ref(&owner, &pin_id);
+            let status = Command::new("git")
+                .current_dir(root)
+                .args(["update-ref", reference.as_str(), payload_hex.as_str()])
+                .status()
+                .expect("create departed owner pin ref");
+            assert!(status.success(), "create {reference}");
+        }
+        let exists = |owner: [u8; 16], pin_id: [u8; 16]| {
+            fixture_ref_exists(root, &accepted_content_ref(&owner, &pin_id))
+        };
+
+        let accepted_a = BTreeMap::from([([0xA1; 16], payload_oid.clone())]);
+        let accepted_c = BTreeMap::from([([0xC1; 16], payload_oid.clone())]);
+        let accepted_none: BTreeMap<[u8; 16], NativeOid> = BTreeMap::new();
+        let departed = [
+            (owner_a, &accepted_a),
+            (owner_b, &accepted_none),
+            (owner_c, &accepted_c),
+        ];
+
+
+        assert_eq!(
+            reclaim_departed_owner_pin_refs(&repository, &departed),
+            Ok(3),
+            "one pass removes each owner's unaccepted pin"
+        );
+        assert!(exists(owner_a, [0xA1; 16]));
+        assert!(!exists(owner_a, [0xA2; 16]));
+        assert!(!exists(owner_b, [0xB1; 16]));
+        assert!(exists(owner_c, [0xC1; 16]));
+        assert!(!exists(owner_c, [0xC2; 16]));
     }
 
     const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
