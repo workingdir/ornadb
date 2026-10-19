@@ -23,7 +23,7 @@ use std::{
 use fs2::FileExt;
 use orna_value_v1::{
     AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
-    Format3Context, Format3Quota, GitHash, MediaAnnotation,
+    Format3Context, Format3Quota, GitHash, MediaAnnotation, MimeRegistry,
     NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
     Snapshot as ValueSnapshot,
 };
@@ -2765,11 +2765,8 @@ impl NativeGraphContext {
         self.accept_protected_blob_pin_with_annotation(pin, "application/octet-stream", None)
     }
 
-    /// Accepts a graph-issued pin with its canonical MIME-1 annotation.
-    ///
-    /// Inputs must already be in canonical MIME-1 spelling; the repository
-    /// validates both the closed registry rules and the exact supplied
-    /// spelling before writing the ORP Blob value.
+    /// Accepts a graph-issued pin with a MIME-1 annotation. Caller spelling is
+    /// canonicalized before the canonical OVB-2/ORP Blob value is written.
     pub fn accept_protected_blob_pin_with_annotation(
         &self,
         pin: ProtectedContentPin,
@@ -2797,11 +2794,9 @@ impl NativeGraphContext {
             return Err(GraphError::InvalidProtectedRef);
         }
 
-        let annotation = MediaAnnotation::new(media_type, suffix)
+        let annotation = MimeRegistry::mime1()
+            .canonical_annotation(media_type, suffix)
             .map_err(|_| GraphError::InvalidBlobAnnotation)?;
-        if annotation.media_type() != media_type || annotation.suffix() != suffix {
-            return Err(GraphError::InvalidBlobAnnotation);
-        }
 
         let encoded_value = canonical_value_bytes(&CborValue::Tag(
             60111,
