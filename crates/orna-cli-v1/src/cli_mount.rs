@@ -345,7 +345,10 @@ impl MountSignalHandler {
                             .expect("live FUSE session is retained")
                             .umount_and_join();
                         return match fallback {
-                            Ok(()) => Ok(()),
+                            Ok(()) => {
+                                eprintln!("{error}; FUSE fallback cleanup succeeded");
+                                Ok(())
+                            }
                             Err(fallback_error) => Err(format!(
                                 "{error}; FUSE session cleanup also failed: {fallback_error}"
                             )),
@@ -354,20 +357,11 @@ impl MountSignalHandler {
                 }
             }
 
-            let joined = session
+            session
                 .take()
                 .expect("FUSE session is retained until it is joined")
-                .join();
-            match joined {
-                Ok(()) => Ok(()),
-                Err(error)
-                    if received_signal.is_some()
-                        && error.kind() == std::io::ErrorKind::NotConnected =>
-                {
-                    Ok(())
-                }
-                Err(error) => Err(format!("FUSE session join failed: {error}")),
-            }
+                .join()
+                .map_err(|error| format!("FUSE session join failed: {error}"))
         })
     }
 }
