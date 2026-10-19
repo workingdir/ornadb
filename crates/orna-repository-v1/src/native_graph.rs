@@ -4506,6 +4506,11 @@ impl NativeGraphCoordinationLock {
         Ok(Self { _file: file })
     }
 }
+impl Drop for NativeGraphCoordinationLock {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
+}
 
 /// Reclaims a departed runtime owner's private refs after durable runtime
 /// state has been recovered. Accepted pending pins are retained only when the
@@ -9364,6 +9369,19 @@ mod persisted_orp_tests {
             (owner_b, &accepted_none),
             (owner_c, &accepted_c),
         ];
+        let publication_lock = NativeGraphCoordinationLock::acquire(&repository)
+            .expect("hold coordination lock through another handle");
+        let _inherited_file = publication_lock
+            ._file
+            .try_clone()
+            .expect("duplicate lock descriptor as a forked child would");
+        assert_eq!(
+            reclaim_departed_owner_pin_refs(&repository, &departed),
+            Err(GraphError::PublicationNotTerminal),
+            "busy coordination lock defers the whole pass"
+        );
+        assert!(pins.iter().all(|(owner, pin_id)| exists(*owner, *pin_id)));
+        drop(publication_lock);
 
 
         assert_eq!(
