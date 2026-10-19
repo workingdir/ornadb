@@ -3005,7 +3005,7 @@ impl Repository {
                 candidate,
                 true,
             )?;
-            self.clear_store_tree_skip_worktree(&candidate_index)?;
+            self.configure_store_tree_skip_worktree(&candidate_index)?;
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -3032,10 +3032,48 @@ impl Repository {
         result
     }
 
-    /// Clears obsolete skip-worktree bits so edits to internal store files remain visible.
-    /// The store files themselves are materialized from the published Git tree.
-    fn clear_store_tree_skip_worktree(&self, index: &Path) -> Result<(), RepositoryError> {
-        let paths = self.store_skip_worktree_paths(index)?;
+    /// OGS envelope metadata stays materialized, but OGB-2 raw chunks remain
+    /// only in Git's object store instead of being copied into the worktree.
+    fn configure_store_tree_skip_worktree(&self, index: &Path) -> Result<(), RepositoryError> {
+        let mut list = self.command();
+        list.env("GIT_INDEX_FILE", index)
+            .args(["ls-files", "-t", "-z", "--", ".orna/store"]);
+        let output = self.run(list)?.stdout;
+        let mut skip_paths = Vec::new();
+        let mut clear_paths = Vec::new();
+        for record in output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+        {
+            if record.len() < 3 || record[1] != b' ' {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let path = std::str::from_utf8(&record[2..])
+                .map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            if !path.starts_with(".orna/store/") {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
+            ManagedPath::new(path)?;
+            let should_skip = Self::is_store_payload_blob_path(path);
+            if (record[0] == b'S') == should_skip {
+                continue;
+            }
+            if should_skip {
+                skip_paths.push(path.to_owned());
+            } else {
+                clear_paths.push(path.to_owned());
+            }
+        }
+        self.update_store_skip_worktree_paths(index, false, &clear_paths)?;
+        self.update_store_skip_worktree_paths(index, true, &skip_paths)
+    }
+
+    fn update_store_skip_worktree_paths(
+        &self,
+        index: &Path,
+        skip: bool,
+        paths: &[String],
+    ) -> Result<(), RepositoryError> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -3044,11 +3082,15 @@ impl Repository {
             encoded_paths.extend_from_slice(path.as_bytes());
             encoded_paths.push(0);
         }
-
         let mut update = self.command();
         update
             .env("GIT_INDEX_FILE", index)
-            .args(["update-index", "--no-skip-worktree", "-z", "--stdin"])
+            .args([
+                "update-index",
+                if skip { "--skip-worktree" } else { "--no-skip-worktree" },
+                "-z",
+                "--stdin",
+            ])
             .stdin(Stdio::piped());
         let mut child = update
             .spawn()
@@ -3068,7 +3110,6 @@ impl Repository {
             Err(RepositoryError::GitOperationFailed)
         }
     }
-
     /// Keeps newly introduced compact files out of ordinary worktree diffs while
     /// their post-ref recovery journal is pending. The worktree bytes remain
     /// checked directly by recovery, and the bits are cleared once reconciliation
@@ -3222,7 +3263,63 @@ impl Repository {
         }
         Ok(paths)
     }
+    /// In an OGS envelope, regular leaves named data are bounded node
+    /// metadata. Other regular leaves are OGB-2 chunks named by their Git OID.
+    fn is_store_payload_blob_path(path: &str) -> bool {
+        path.strip_prefix(".orna/store/")
+            .and_then(|relative| relative.rsplit('/').next())
+            .is_some_and(|name| name != "data")
+    }
 
+    fn reconcile_store_payload_worktree_file(
+        &self,
+        path: &ManagedPath,
+        object: &str,
+        target: &Path,
+        quarantine: &Path,
+        install: bool,
+    ) -> Result<(), RepositoryError> {
+        let current = self.read_managed_file(target)?;
+        let displaced = self.read_managed_file(quarantine)?;
+        if current.is_some() && displaced.is_some() {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        let expected = if current.is_some() || displaced.is_some() {
+            Some(self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?)
+        } else {
+            None
+        };
+        if current
+            .as_deref()
+            .is_some_and(|bytes| Some(bytes) != expected.as_deref())
+            || displaced
+                .as_deref()
+                .is_some_and(|bytes| Some(bytes) != expected.as_deref())
+        {
+            return Err(RepositoryError::ManagedContentConflict);
+        }
+        if !install {
+            return Ok(());
+        }
+        let Some(expected) = expected.as_deref() else {
+            return Ok(());
+        };
+        if current.is_some() {
+            self.materialize_managed_file_impl_with_quarantine_locked(
+                path,
+                Some(expected),
+                None,
+                Some(quarantine),
+                None,
+                None,
+            )
+        } else {
+            let parent = target
+                .parent()
+                .ok_or(RepositoryError::LocalStateUnavailable)?;
+            self.remove_verified_quarantine(parent, quarantine, target, Some(expected), None)
+        }
+    }
     fn reconcile_store_worktree_transition(
         &self,
         expected_index: &IndexGeneration,
@@ -3244,12 +3341,25 @@ impl Repository {
             let new_object = new.get(relative);
             let unchanged = old_object == new_object;
             let skipped = skipped_paths.contains(relative);
-            if unchanged && !skipped {
+            let is_payload = Self::is_store_payload_blob_path(relative);
+            if unchanged && !skipped && !is_payload {
                 continue;
             }
 
             let path = ManagedPath::new(relative)?;
             let (target, quarantine) = self.store_reconciliation_paths(&path, candidate)?;
+            if is_payload {
+                if let Some(object) = new_object {
+                    self.reconcile_store_payload_worktree_file(
+                        &path,
+                        object,
+                        &target,
+                        &quarantine,
+                        install,
+                    )?;
+                    continue;
+                }
+            }
             let current = self.read_managed_file(&target)?;
             // Older publications could leave skipped leaves absent; restore them before
             // clearing those bits so reconciliation does not invent deletions.
