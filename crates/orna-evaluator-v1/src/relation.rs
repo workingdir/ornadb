@@ -300,6 +300,82 @@ impl PartialEq for RelationPlan {
 
 impl Eq for RelationPlan {}
 
+/// Planner-visible operation in an evaluator relation plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationPlanNode {
+    /// Stable operation name such as `scan`, `filter_batch`, or `materialized_source`.
+    pub kind: &'static str,
+    /// Relation source name for scan nodes.
+    pub source: Option<String>,
+}
+
+/// Immutable metadata describing decisions already represented by a relation plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationPlanMetadata {
+    pub nodes: Vec<RelationPlanNode>,
+    pub filter_batch_count: usize,
+    pub reused_filter_batch_count: usize,
+    pub materializes_source_rows: bool,
+}
+
+impl RelationPlan {
+    pub(super) fn metadata(&self) -> RelationPlanMetadata {
+        fn collect(
+            plan: &RelationPlan,
+            metadata: &mut RelationPlanMetadata,
+            batches: &mut HashMap<usize, usize>,
+        ) {
+            if let Some((left, right)) = &plan.source_union {
+                metadata.nodes.push(RelationPlanNode { kind: "union", source: None });
+                collect(left, metadata, batches);
+                collect(right, metadata, batches);
+            } else if plan.source_values.is_some() {
+                metadata.nodes.push(RelationPlanNode {
+                    kind: "materialized_source",
+                    source: None,
+                });
+                metadata.materializes_source_rows = true;
+            } else {
+                metadata.nodes.push(RelationPlanNode {
+                    kind: "scan",
+                    source: Some(plan.source.clone()),
+                });
+            }
+            for stage in &plan.stages {
+                let kind = match stage {
+                    RelationStage::Filter(_) => "filter",
+                    RelationStage::SharedFilter(batch) => {
+                        *batches.entry(Arc::as_ptr(batch) as usize).or_default() += 1;
+                        "filter_batch"
+                    }
+                    RelationStage::Map(_) => "map",
+                    RelationStage::FlatMap(_) => "flat_map",
+                    RelationStage::SortBy(_) => "sort_by",
+                    RelationStage::BucketBy(_) => "bucket_by",
+                    RelationStage::Distinct => "distinct",
+                    RelationStage::Pairs => "pairs",
+                    RelationStage::Window(_, _) => "window",
+                    RelationStage::Drop(_) => "drop",
+                    RelationStage::Take(_) => "take",
+                };
+                metadata.nodes.push(RelationPlanNode { kind, source: None });
+            }
+        }
+
+        let mut metadata = RelationPlanMetadata {
+            nodes: Vec::new(),
+            filter_batch_count: 0,
+            reused_filter_batch_count: 0,
+            materializes_source_rows: false,
+        };
+        let mut batches = HashMap::new();
+        collect(self, &mut metadata, &mut batches);
+        metadata.filter_batch_count = batches.values().sum();
+        metadata.reused_filter_batch_count = batches.values().filter(|count| **count > 1).count();
+        metadata
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FilterContinuationKey {
     /// Relation source whose local continuation cache owns this join.
