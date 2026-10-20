@@ -702,9 +702,27 @@ async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
     assert_eq!(state.pending().await.unwrap().len(), 1);
 }
 
+/// ORNA-UPGRADE-003: a format-2 snapshot keeps its reader but has no row
+/// writer, so publishing the frozen source prefix onto it is refused before
+/// any Git object, ref, index or loose row is written.
 #[tokio::test]
-async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
-    let (_temp, repository) = durable_repository();
+async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_writing() {
+    let (temp, repository) = durable_repository();
+    fs::create_dir_all(temp.path().join(".orna")).expect("legacy metadata directory");
+    fs::write(temp.path().join(".orna/format.orna"), "format 2\n").expect("legacy format");
+    fs::write(
+        temp.path().join(".orna/database.orna"),
+        "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
+    )
+    .expect("legacy database sidecar");
+    git(temp.path(), &["add", ".orna"]);
+    git(temp.path(), &["commit", "--quiet", "-m", "format 2 metadata"]);
+    let head = repository.head().unwrap().expect("legacy head");
+    assert_eq!(
+        orna_storage_v1::writable_snapshot_context(&repository, &head).err(),
+        Some(orna_storage_v1::Error::LegacyReadOnly { format: 2 })
+    );
+
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
     let identity = RuntimeIdentity {
         database_id: [61; 16],
@@ -729,40 +747,48 @@ async fn durable_source_publication_projects_the_frozen_prefix_into_git() {
         .await
         .unwrap()
         .expect("durable source checkpoint");
-    let published = evaluator
-        .publish_pending(
-            &repository,
-            &state,
-            [65; 16],
-            &checkpoint,
-            |mutation| {
-                let key = mutation
-                    .key()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                LoosePath::for_key(mutation.table(), &[key])
-            },
-            "orna: publish durable source",
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(repository.head().unwrap(), published.head().cloned());
-    assert!(state.pending().await.unwrap().is_empty());
-    let key = orna_foundation_v1::Value::int(7.into())
+    let pending = state.pending().await.unwrap();
+    assert!(!pending.is_empty());
+    let index = repository.index_generation().unwrap();
+    let key = Value::int(7.into())
         .encode()
         .unwrap()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let managed = LoosePath::for_key("Note", &[key]).unwrap();
-    assert!(
+
+    assert!(matches!(
+        evaluator
+            .publish_pending(
+                &repository,
+                &state,
+                [65; 16],
+                &checkpoint,
+                |mutation| {
+                    let key = mutation
+                        .key()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    LoosePath::for_key(mutation.table(), &[key])
+                },
+                "orna: publish durable source",
+            )
+            .await,
+        Err(RuntimeError::StorageUnavailable)
+    ));
+
+    assert_eq!(repository.head().unwrap(), Some(head));
+    assert_eq!(repository.index_generation().unwrap(), index);
+    assert_eq!(repository.read_publication_journal().unwrap(), None);
+    assert_eq!(
         repository
             .managed_file_bytes(managed.as_managed_path())
-            .unwrap()
-            .is_some()
+            .unwrap(),
+        None
     );
+    assert_eq!(state.pending().await.unwrap(), pending);
 }
 
 #[test]
