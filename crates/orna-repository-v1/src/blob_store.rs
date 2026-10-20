@@ -44,41 +44,6 @@ impl ContentIdentity {
     }
 }
 
-/// Canonical declared metadata carried by each referencing value.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BlobAnnotation {
-    media_type: String,
-    suffix: Option<String>,
-}
-
-impl BlobAnnotation {
-    pub fn new(
-        media_type: impl Into<String>,
-        suffix: Option<impl Into<String>>,
-    ) -> Result<Self, BlobStoreError> {
-        let media_type = media_type.into();
-        if !valid_media_type(&media_type) {
-            return Err(BlobStoreError::InvalidMediaType);
-        }
-        let suffix = suffix.map(Into::into);
-        if suffix
-            .as_deref()
-            .is_some_and(|suffix| !valid_suffix(suffix))
-        {
-            return Err(BlobStoreError::InvalidSuffix);
-        }
-        Ok(Self { media_type, suffix })
-    }
-
-    pub fn media_type(&self) -> &str {
-        &self.media_type
-    }
-
-    pub fn suffix(&self) -> Option<&str> {
-        self.suffix.as_deref()
-    }
-}
-
 /// The one format-3 Blob descriptor.  A nonempty descriptor always uses a
 /// native byte graph root; an empty descriptor is the single canonical empty
 /// form with no root.
@@ -156,29 +121,6 @@ impl BlobMetadata {
 
     pub const fn has_payload_graph(self) -> bool {
         self.has_payload_graph
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BlobReference {
-    descriptor: BlobDescriptor,
-    annotation: BlobAnnotation,
-}
-
-impl BlobReference {
-    pub fn new(descriptor: BlobDescriptor, annotation: BlobAnnotation) -> Self {
-        Self {
-            descriptor,
-            annotation,
-        }
-    }
-
-    pub fn descriptor(&self) -> &BlobDescriptor {
-        &self.descriptor
-    }
-
-    pub fn annotation(&self) -> &BlobAnnotation {
-        &self.annotation
     }
 }
 
@@ -468,26 +410,9 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn valid_media_type(value: &str) -> bool {
-    !value.is_empty()
-        && value.is_ascii()
-        && value.contains('/')
-        && !value.bytes().any(|byte| byte <= b' ' || byte == b'\x7f')
-}
-
-fn valid_suffix(value: &str) -> bool {
-    !value.is_empty()
-        && value.is_ascii()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlobStoreError {
     LengthExceeded(u64),
-    InvalidMediaType,
-    InvalidSuffix,
     InvalidEmptyDescriptor,
     InvalidChunkSpan,
     InvalidHeight,
@@ -503,8 +428,6 @@ impl fmt::Display for BlobStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LengthExceeded(length) => write!(f, "Blob length {length} exceeds 2^63-1"),
-            Self::InvalidMediaType => f.write_str("invalid canonical media type"),
-            Self::InvalidSuffix => f.write_str("invalid safe suffix hint"),
             Self::InvalidEmptyDescriptor => f.write_str("empty descriptor must have no byte root"),
             Self::InvalidChunkSpan => f.write_str("invalid chunk span"),
             Self::InvalidHeight => f.write_str("invalid byte-index height"),
