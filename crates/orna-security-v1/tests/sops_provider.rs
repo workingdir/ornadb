@@ -30,6 +30,7 @@ case "$action" in
 esac
 "##;
 
+/// ORNA-SECRET-001: Orna MUST NOT commit plaintext secret values by default.
 #[test]
 fn write_encrypts_before_persisting_and_removes_plaintext_temp() {
     let root = TempDir::new().unwrap();
