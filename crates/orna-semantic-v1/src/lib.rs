@@ -8306,9 +8306,9 @@ fn infer_contextual_lambda(
 }
 
 /// Native stack headroom kept before inference requests a fresh stack segment.
-const SEMANTIC_STACK_RED_ZONE: usize = 1024 * 1024;
+const SEMANTIC_STACK_RED_ZONE: usize = 128 * 1024;
 /// Size of each fresh stack segment used by deep expression inference.
-const SEMANTIC_STACK_SEGMENT: usize = 1024 * 1024;
+const SEMANTIC_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
 /// Nested expressions recurse once per level, and debug frames for
 /// `infer_node`'s large match arms can exhaust a test thread's default stack
