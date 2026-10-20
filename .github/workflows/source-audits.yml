@@ -60,6 +60,8 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: recursive
+        # The standard library mirror compiles stdlib/std bytes directly, so the job must
+        # check out the submodule at the superproject gitlink (submodules: recursive).
 
       - name: Reject checkout and sibling reference trees
         run: |
@@ -68,6 +70,12 @@ jobs:
 
       - name: Prove fixture manifest drift detection
         run: python3 -m unittest scripts.test_fixture_manifest
+
+      - name: Prove standard library pin checker behavior
+        run: python3 -m unittest scripts.test_standard_library_pin
+
+      - name: Check standard library pin and Rust mirror
+        run: python3 scripts/check_standard_library_pin.py --check
 
       - name: Check fixture paths and content hashes
         run: python3 scripts/check_fixture_manifest.py --check
