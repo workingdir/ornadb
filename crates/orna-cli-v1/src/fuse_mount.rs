@@ -27,8 +27,8 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableIdentity, TableObjectId,
     vfs::{
         EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
-        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
-        VfsSaveCoordinates, VfsStoredField, VfsTableRowReplacement, project_component,
+        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates,
+        VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
     },
 };
 use orna_syntax_v1::{Expr, parse_row};
@@ -379,6 +379,24 @@ fn row_save_context(
         blob_fields: Mutex::new(blob_fields),
     }))
 }
+/// Why a document save did not commit. `NoCandidate` means the handle never
+/// submitted bytes, so there is nothing to accept or discard; `Failed` means a
+/// save was attempted and did not commit, so the draft stays unresolved.
+#[derive(Debug)]
+enum DocumentCommitError {
+    NoCandidate,
+    Failed(String),
+}
+
+impl std::fmt::Display for DocumentCommitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCandidate => formatter.write_str("mounted row save failed: NoCandidate"),
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
 impl RowSaveContext {
     fn durable_save(&self) -> Result<VfsDurableSave, String> {
         let expected_baseline_row = self
@@ -413,8 +431,11 @@ impl RowSaveContext {
         }
     }
 
-    fn commit_document(self: &Arc<Self>, draft: &EditDraft<RowMapSnapshot>) -> Result<(), String> {
-        let save = self.durable_save()?;
+    fn commit_document(
+        self: &Arc<Self>,
+        draft: &EditDraft<RowMapSnapshot>,
+    ) -> Result<(), DocumentCommitError> {
+        let save = self.durable_save().map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -446,13 +467,16 @@ impl RowSaveContext {
                 self.record_accepted_row(accepted_row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => {
-                Err("mounted row document was rejected by semantic admission".into())
-            }
-            Ok(TemporaryRenameOutcome::Stale { .. }) => {
-                Err("mounted row document is stale against its captured baseline".into())
-            }
-            Err(error) => Err(format!("mounted row save failed: {error:?}")),
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+                "mounted row document was rejected by semantic admission".into(),
+            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Failed(
+                "mounted row document is stale against its captured baseline".into(),
+            )),
+            Err(VfsSaveError::NoCandidate) => Err(DocumentCommitError::NoCandidate),
+            Err(error) => Err(DocumentCommitError::Failed(format!(
+                "mounted row save failed: {error:?}"
+            ))),
         }
     }
 
@@ -730,7 +754,7 @@ pub(super) fn edit_path(
             draft.write_at(0, &candidate).await.map_err(|error| format!("edited candidate exceeds draft limits: {error:?}"))
         })
         .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_document(&draft)
+        save.commit_document(&draft).map_err(|error| error.to_string())
     };
     match admission {
         Ok(()) => std::fs::remove_file(&draft_path)
@@ -1489,7 +1513,7 @@ impl Filesystem for WorkspaceFilesystem {
             .unresolved_handles
             .retain(|_, dirty_inode| *dirty_inode != source_inode);
         draft_state.retained_scratch.remove(&source_inode);
-        draft_state.rejected_documents.remove(&source_inode);
+        draft_state.rejected_documents.remove(&destination_inode);
         draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
@@ -1691,7 +1715,7 @@ impl Filesystem for WorkspaceFilesystem {
             .get(&handle.0)
             .cloned();
         let is_document = matches!(&open_file, Some(OpenFile::Document(_, _)));
-        let result = match open_file {
+        let result: Result<(), DocumentCommitError> = match open_file {
             Some(OpenFile::Document(save, draft)) => {
                 let result = save.commit_document(&draft);
                 if result.is_ok() {
@@ -1709,20 +1733,29 @@ impl Filesystem for WorkspaceFilesystem {
                 }
                 result
             }
-            Some(OpenFile::Temporary(save, _, scratch, _)) => save.fsync_temporary(&scratch),
-            None => Err("file handle is not open".to_owned()),
+            Some(OpenFile::Temporary(save, _, scratch, _)) => save
+                .fsync_temporary(&scratch)
+                .map_err(DocumentCommitError::Failed),
+            None => Err(DocumentCommitError::Failed(
+                "file handle is not open".to_owned(),
+            )),
         };
-        if result.is_ok() {
-            if is_document {
-                draft_state.unresolved_handles.remove(&handle.0);
-                draft_state.rejected_documents.remove(&inode.0);
+        match result {
+            Ok(()) => {
+                if is_document {
+                    draft_state.unresolved_handles.remove(&handle.0);
+                    draft_state.rejected_documents.remove(&inode.0);
+                }
+                reply.ok();
             }
-            reply.ok();
-        } else {
-            if is_document {
-                draft_state.rejected_documents.insert(inode.0);
+            Err(error) => {
+                // An unmodified handle submits no candidate, so there is nothing
+                // rejected to keep unresolved; only a failed submission blocks unmount.
+                if is_document && matches!(error, DocumentCommitError::Failed(_)) {
+                    draft_state.rejected_documents.insert(inode.0);
+                }
+                reply.error(Errno::EIO);
             }
-            reply.error(Errno::EIO);
         }
     }
 

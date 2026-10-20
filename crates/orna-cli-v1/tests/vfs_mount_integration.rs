@@ -1774,3 +1774,193 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     assert!(repository.mount_status().unwrap().is_empty());
     drop(mounted);
 }
+
+#[tokio::test]
+/// ORNA-VFS-024: an accepted atomic replacement supersedes the rejected Document draft, so unmount succeeds.
+async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x95,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("mount exited before data.orna appeared ({status})");
+        }
+        assert!(Instant::now() < deadline, "data.orna did not appear");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .unwrap();
+    document.write_all(b"{ title: \"rejected\",\n").unwrap();
+    assert!(
+        document.sync_all().is_err(),
+        "malformed Document candidate must be rejected by fsync"
+    );
+    drop(document);
+
+    let scratch = mountpoint.join("Music/london/.data.orna.replacement-tmp");
+    let mut replacement = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("create replacement scratch beside data.orna");
+    replacement.write_all(b"{ title: \"replaced\", }\n").unwrap();
+    replacement.sync_all().expect("accept replacement scratch");
+    drop(replacement);
+    std::fs::rename(&scratch, &data_path).expect("atomically replace data.orna");
+    assert!(
+        std::fs::read_to_string(&data_path)
+            .unwrap()
+            .contains("replaced")
+    );
+
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+    drop(mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-024: fsync on a Document handle that submitted no candidate does not block unmount.
+async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x96,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !data_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("mount exited before data.orna appeared ({status})");
+        }
+        assert!(Instant::now() < deadline, "data.orna did not appear");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let document = OpenOptions::new()
+        .write(true)
+        .open(&data_path)
+        .unwrap();
+    // The handle submitted no candidate, so the fsync result is not a rejection and is not asserted.
+    let _ = document.sync_all();
+    drop(document);
+
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+    drop(mounted);
+}
