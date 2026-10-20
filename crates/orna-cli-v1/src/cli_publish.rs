@@ -17,6 +17,7 @@
 
 use orna_runtime_v1::{PublicationTableIdentity, RuntimeState, TableMutation};
 use orna_storage_v1::{CompactOvbProfile, LoosePath, RuntimePublicationCoordinator};
+use orna_repository_v1::publication_crash_barrier;
 
 use super::*;
 
@@ -273,17 +274,6 @@ fn validate_candidate_source_rows(
 }
 
 
-/// Test-only subprocess barrier. When unset, publication has no extra work.
-/// Integration tests set an exact boundary and marker path; the parent then
-/// SIGKILLs this process after the marker is durable. Kept in the CLI rather
-/// than a library so normal library callers never inherit ambient test state.
-fn publication_crash_barrier(boundary: &str) {
-    let Ok(selected) = std::env::var("ORNA_TEST_PUBLICATION_CRASH_AT") else { return; };
-    if selected != boundary { return; }
-    let Ok(marker) = std::env::var("ORNA_TEST_PUBLICATION_CRASH_MARKER") else { return; };
-    std::fs::write(marker, boundary).expect("write publication crash marker");
-    loop { std::thread::park(); }
-}
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
 /// completion receipt never claims an object the range did not produce.

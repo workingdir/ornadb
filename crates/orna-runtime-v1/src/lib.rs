@@ -6753,7 +6753,10 @@ impl RuntimeState {
                     .await?;
                 Err(error)
             }
-            Ok(committed) => Ok(committed),
+            Ok(committed) => {
+                orna_repository_v1::publication_crash_barrier("row-commit");
+                Ok(committed)
+            }
             Err(RequestActivationTransactionError::Runtime(error)) => Err(error),
             Err(RequestActivationTransactionError::RolledBackValidation(_)) => {
                 unreachable!("unvalidated request activation cannot reject a candidate")
