@@ -47,6 +47,7 @@ fn explicit_png_preview_returns_bounded_rgba_pixels() {
     assert_eq!(blob.read(0, blob.length()).expect("raw bytes remain readable").len() as u64, blob.length());
 }
 
+/// ORNA-MEDIA-005: malformed and oversized inputs are rejected without panicking.
 #[test]
 fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     let malformed = [
@@ -106,6 +107,7 @@ fn unsupported_active_content_is_not_read_or_decoded() {
     assert_eq!(blob.read(0, svg.len() as u64).expect("raw SVG is preservable"), svg);
 }
 
+/// ORNA-MEDIA-005: preview input over the limit is rejected with a typed error.
 #[test]
 fn preview_input_limit_rejects_before_attempting_full_blob_read() {
     let bytes = vec![0_u8; (MAX_PREVIEW_INPUT_BYTES + 1) as usize];
