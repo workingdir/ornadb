@@ -12,6 +12,15 @@ const GENERIC_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.unavailable",
     "sys.abi.provider_failed",
 ];
+const EXPLAIN_FAILURES: [&str; 7] = [
+    "sys.explain.invalid_snapshot",
+    "sys.explain.invalid_object",
+    "sys.explain.invalid_expression",
+    "sys.explain.plan_limit",
+    "sys.explain.expression_limit",
+    "sys.explain.invalid_dependency",
+    "sys.explain.invalid_plan_tree",
+];
 
 struct FixedResolver {
     response: Result<QueryPlanDescription, FailureCode>,
@@ -79,6 +88,18 @@ fn linked_registry(provider: &ExplainQueryProvider<FixedResolver>) -> ProviderRo
     registry
 }
 
+fn invoke_refusal(
+    provider: &ExplainQueryProvider<FixedResolver>,
+    operation: &str,
+    arguments: &[TypedValue],
+) -> String {
+    let operation = OperationId::new(operation).expect("operation identifier is valid");
+    match provider.invoke(&operation, arguments) {
+        Err(failure) => failure.code.as_str().to_owned(),
+        Ok(value) => panic!("expected the provider to refuse the call, got {value:?}"),
+    }
+}
+
 #[test]
 fn generated_abi_declares_explain_query_on_the_explain_role() {
     let abi = system_provider_abi();
@@ -93,8 +114,15 @@ fn generated_abi_declares_explain_query_on_the_explain_role() {
     assert_eq!(operation.effects, EffectSet::one(SystemEffect::Read));
     for code in &operation.failures {
         assert!(
-            GENERIC_PROVIDER_FAILURES.contains(&code.as_str()),
-            "sys.explain(Query) declares only generic provider failures, found {code:?}"
+            GENERIC_PROVIDER_FAILURES.contains(&code.as_str())
+                || EXPLAIN_FAILURES.contains(&code.as_str()),
+            "sys.explain(Query) declares only generic or explain failures, found {code:?}"
+        );
+    }
+    for code in EXPLAIN_FAILURES {
+        assert!(
+            operation.failures.iter().any(|declared| declared.as_str() == code),
+            "sys.explain(Query) must declare {code}"
         );
     }
 
@@ -131,7 +159,7 @@ fn explain_provider_offer_matches_the_generated_role_contract() {
 }
 
 #[test]
-fn dispatch_through_registry_returns_structured_sys_plan() {
+fn dispatch_through_registry_returns_flat_structured_sys_plan() {
     let provider = explain_provider(Ok(scan_query()));
     let registry = linked_registry(&provider);
     let result = registry
@@ -149,16 +177,22 @@ fn dispatch_through_registry_returns_structured_sys_plan() {
     assert_eq!(value.static_type().as_str(), "sys.Plan");
     let bytes = value.canonical().expect("sys.Plan is public");
     let plan: serde_json::Value = serde_json::from_slice(bytes).expect("sys.Plan is JSON");
-    assert_eq!(plan["plan"]["actual_available"], serde_json::json!(false));
+    assert_eq!(plan["actual_available"], serde_json::json!(false));
     assert!(
-        plan["plan"]["id"].is_string(),
+        plan["id"].is_string(),
         "plan id is serialized: {plan}"
     );
+    for field in [
+        "reference",
+        "snapshot",
+        "root",
+        "warnings",
+    ] {
+        assert!(plan.get(field).is_some(), "sys.Plan carries {field}: {plan}");
+    }
     assert!(
-        plan["nodes"]
-            .as_array()
-            .is_some_and(|nodes| !nodes.is_empty()),
-        "structured plan nodes are emitted: {plan}"
+        plan.get("plan").is_none() && plan.get("nodes").is_none(),
+        "sys.Plan is flat, not the internal explained-plan wrapper: {plan}"
     );
 }
 
@@ -204,9 +238,9 @@ fn explain_offer_with_wider_effect_is_refused_at_bind() {
 }
 
 #[test]
-fn resolver_failure_with_undeclared_code_is_refused() {
+fn resolver_failure_outside_the_abi_is_refused_as_undeclared() {
     let provider = explain_provider(Err(
-        FailureCode::new("sys.explain.invalid_snapshot").unwrap()
+        FailureCode::new("sys.explain.unlisted_resolver_fault").unwrap()
     ));
     let registry = linked_registry(&provider);
     let error = registry
@@ -217,7 +251,7 @@ fn resolver_failure_with_undeclared_code_is_refused() {
             &[query_argument()],
             |_| Ok(()),
         )
-        .expect_err("sys.explain(Query) does not declare sys.explain.invalid_snapshot");
+        .expect_err("sys.explain(Query) does not declare sys.explain.unlisted_resolver_fault");
     assert!(
         matches!(error, ProviderDiagnostic::UndeclaredFailure { .. }),
         "unexpected diagnostic: {error:?}"
@@ -248,6 +282,56 @@ fn resolver_failure_with_generic_provider_code_is_reported_as_failure() {
 }
 
 #[test]
+fn empty_snapshot_fails_planning_with_declared_invalid_snapshot() {
+    let mut query = scan_query();
+    query.snapshot = SnapshotRef::descriptive("");
+    let provider = explain_provider(Ok(query));
+    let registry = linked_registry(&provider);
+    let result = registry
+        .dispatch_to_provider(
+            system_dispatch_table(),
+            OPERATION,
+            &provider,
+            &[query_argument()],
+            |_| Ok(()),
+        )
+        .expect("a declared explain failure is a dispatch failure, not a diagnostic");
+    match result {
+        SystemDispatchResult::Failed(code) => {
+            assert_eq!(code.as_str(), "sys.explain.invalid_snapshot");
+        }
+        SystemDispatchResult::Returned(value) => {
+            panic!("an empty snapshot must not yield a plan: {value:?}")
+        }
+    }
+}
+
+#[test]
+fn empty_source_fails_planning_with_declared_invalid_object() {
+    let mut query = scan_query();
+    query.source = ObjectRef::descriptive("");
+    let provider = explain_provider(Ok(query));
+    let registry = linked_registry(&provider);
+    let result = registry
+        .dispatch_to_provider(
+            system_dispatch_table(),
+            OPERATION,
+            &provider,
+            &[query_argument()],
+            |_| Ok(()),
+        )
+        .expect("a declared explain failure is a dispatch failure, not a diagnostic");
+    match result {
+        SystemDispatchResult::Failed(code) => {
+            assert_eq!(code.as_str(), "sys.explain.invalid_object");
+        }
+        SystemDispatchResult::Returned(value) => {
+            panic!("an empty source must not yield a plan: {value:?}")
+        }
+    }
+}
+
+#[test]
 fn call_without_query_argument_is_not_planned() {
     let provider = explain_provider(Ok(scan_query()));
     let registry = linked_registry(&provider);
@@ -263,5 +347,42 @@ fn call_without_query_argument_is_not_planned() {
     assert!(
         refused,
         "a call without the query argument must not return a plan"
+    );
+}
+
+#[test]
+fn direct_invoke_refuses_a_different_operation() {
+    let provider = explain_provider(Ok(scan_query()));
+    assert_eq!(
+        invoke_refusal(&provider, "sys.explain(FunctionRef)", &[query_argument()]),
+        "sys.explain.invalid_object"
+    );
+}
+
+#[test]
+fn direct_invoke_refuses_zero_arguments() {
+    let provider = explain_provider(Ok(scan_query()));
+    assert_eq!(
+        invoke_refusal(&provider, OPERATION, &[]),
+        "sys.explain.invalid_object"
+    );
+}
+
+#[test]
+fn direct_invoke_refuses_two_arguments() {
+    let provider = explain_provider(Ok(scan_query()));
+    assert_eq!(
+        invoke_refusal(&provider, OPERATION, &[query_argument(), query_argument()]),
+        "sys.explain.invalid_object"
+    );
+}
+
+#[test]
+fn direct_invoke_refuses_a_non_query_argument() {
+    let provider = explain_provider(Ok(scan_query()));
+    let not_a_query = TypedValue::public(TypeId::new("Int"), Vec::<u8>::new());
+    assert_eq!(
+        invoke_refusal(&provider, OPERATION, &[not_a_query]),
+        "sys.explain.invalid_object"
     );
 }

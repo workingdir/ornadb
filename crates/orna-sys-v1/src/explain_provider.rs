@@ -77,9 +77,9 @@ impl<R: QueryPlanResolver> SystemOperationProvider for ExplainQueryProvider<R> {
                 code,
                 payload: None,
             })?;
-        let plan = explain_query(&description).map_err(failure)?;
-        let bytes =
-            serde_json::to_vec(&plan).map_err(|_| failure(ExplainError::InvalidPlanTree))?;
+        let explained = explain_query(&description).map_err(failure)?;
+        let bytes = serde_json::to_vec(explained.plan())
+            .map_err(|_| failure(ExplainError::InvalidPlanTree))?;
         Ok(TypedValue::public(TypeId::new(SYS_PLAN_TYPE), bytes))
     }
 }
