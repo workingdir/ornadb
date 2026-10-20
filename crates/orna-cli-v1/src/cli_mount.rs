@@ -379,7 +379,10 @@ impl MountSignalHandler {
                             .expect("live FUSE session is retained")
                             .umount_and_join();
                         return match fallback {
-                            Ok(()) => Err(error),
+                            Ok(()) => {
+                                eprintln!("{error}; FUSE fallback cleanup succeeded");
+                                Ok(())
+                            }
                             Err(fallback_error) => Err(format!(
                                 "{error}; FUSE session cleanup also failed: {fallback_error}"
                             )),
