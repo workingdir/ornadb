@@ -1,70 +1,116 @@
 //! ORNA-APP-022; `store-format-3.md` §§2 and 5 (row maps and ROV-3 Blob descriptors).
-//! The browser profile's media row and Blob survive source admission, format-3
-//! publication, and retrieval through the committed store graph.
+//! The browser profile's media row and Blob are written through the app path
+//! (trusted REPL submission -> admitted REPL transaction -> runtime commit),
+//! then published by the CLI and read back from the committed format-3 graph.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    process::{Command, Output, Stdio},
+};
 
-use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::TypedKey;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
-use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
 mod format3;
 use format3::*;
 
-#[path = "support/media_commit.rs"]
-mod media_commit;
-use media_commit::commit_capture;
+const BROWSER_SOURCE: &str = r#"pub table media(id: Str) {
+    content: Blob,
+}
 
+pub fn store_profile(id: Str, content: Blob) =
+    media.insert({ id: id, content: content });
+"#;
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const BROWSER_PROFILE_BLOB: &[u8] = include_bytes!("fixtures/media/pixel.png");
 
-#[tokio::test]
-async fn browser_profile_stores_and_retrieves_row_and_blob_from_format3_store() {
-    let (_directory, repository, relation_id) = empty_format3_repository();
-    let source = TempDir::new().unwrap();
+fn run_repl(directory: &Path, input: &str) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Orna REPL process");
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(format!("{input}\n:quit\n").as_bytes())
+        .expect("write trusted REPL submission");
+    child.wait_with_output().expect("wait for Orna REPL")
+}
+
+fn run_publish(directory: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(directory)
+        .arg("publish")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("run orna-cli-v1 publish")
+}
+
+fn git_head(directory: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("read Git HEAD");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .expect("HEAD text")
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn browser_profile_stores_and_retrieves_row_and_blob_from_format3_store() {
+    let (directory, repository, relation_id) = format3_repository(BROWSER_SOURCE);
+    let root = directory.path();
     std::fs::copy(
         Path::new(MEDIA_FIXTURES).join("pixel.png"),
-        source.path().join("profile.png"),
+        root.join("profile.png"),
     )
-    .unwrap();
+    .expect("copy browser profile image");
+    let head_before = git_head(root);
 
-    let state = RuntimeState::open(
-        &repository,
-        RuntimeIdentity {
-            database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
-            repository_id: [0x61; 16],
-        },
-        [0x62; 32],
-    )
-    .await
-    .unwrap();
-    let writer = state.acquire_lease([0x63; 16]).await.unwrap();
-    let capability = repository.capture_capability(relation_id).unwrap();
-    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
-    filesystem.allow_root(source.path()).unwrap();
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_filesystem_provider(filesystem)
-        .with_repository_capture_capability(capability);
-    let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = format!("sys.blob.capture_file({root}, {:?}, 65536)", "profile.png");
+    // The app path: the admitted REPL stages the effectful invocation, the
+    // runtime commits its table mutation and Blob capture as one request.
+    let input = format!(
+        "let raw = sys.blob.capture_file({root:?}, \"profile.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store_profile(\"browser-profile\", image).id",
+        root = root.to_string_lossy().as_ref(),
+    );
+    let output = run_repl(root, &input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{:?}",
+        output.stderr
+    );
+    assert!(
+        !stdout.contains("ORNA-REPL-EFFECT") && !stdout.contains("ORNA-EVAL-VALUE"),
+        "trusted REPL rejected the browser profile invocation: {stdout}"
+    );
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert_eq!(
+        git_head(root),
+        head_before,
+        "REPL must not publish a Git commit"
+    );
 
-    // The admitted capture commits the row; the helper publishes its staged
-    // mutation through the real format-3 graph path.
-    commit_capture(
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        &capture,
-        "browser-profile",
-        0xb0,
-        true,
-        relation_id,
-    )
-    .await;
+    // Publication makes the committed row durable in the format-3 graph.
+    let published = run_publish(root);
+    assert!(
+        published.status.success(),
+        "publish failed: {}",
+        String::from_utf8_lossy(&published.stderr)
+    );
 
     // Read the row independently from the published relation graph.
     let rows = committed_store_rows(&repository, relation_id);
@@ -97,7 +143,10 @@ async fn browser_profile_stores_and_retrieves_row_and_blob_from_format3_store() 
         })
         .expect("the published row resolves its Blob descriptor");
     assert_eq!(stored_blob.annotation().media_type(), "image/png");
-    assert_eq!(stored_blob.reference().content_identity().length(), BROWSER_PROFILE_BLOB.len() as u64);
+    assert_eq!(
+        stored_blob.reference().content_identity().length(),
+        BROWSER_PROFILE_BLOB.len() as u64
+    );
     let payload = graph
         .read_blob_range(
             stored_blob.reference(),
