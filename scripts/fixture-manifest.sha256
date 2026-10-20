@@ -4915,12 +4915,10 @@ e7f150469b1464dcf5012800d10fe7a720bb31af00ed77c1c074261639e2c4f3  crates/orna-st
 61376f4445f61005033b70e8c2d17259df78ef4604effc584925df14bbce5e27  crates/orna-storage-v1/tests/fixtures/compact-fold-reinsertion.orna
 dfe4c341c588ae27892dc10c2be9eecf0437dd122a82e8f86803f61138d93330  crates/orna-storage-v1/tests/fixtures/compact-fold-replacement.orna
 027b18989e4165b9d6d2f6cd48ecf7f71a714580bbe8e2b9dfb1b486e1a7444a  crates/orna-storage-v1/tests/fixtures/compact-fold-survivor.orna
-8aac96ef8404da7188820f8a6c20c6ae4651c447dc10a72dfba8f953953eb9a7  crates/orna-storage-v1/tests/fixtures/compact-runtime-receipt-main.orna
 cb0fad5d2a55f63d3dc774144327e545a990a506e3465682cc431e4d6dace876  crates/orna-storage-v1/tests/fixtures/git-history-new-row.orna
 bfdd87bc8b2a29499393d2d09201b7c48ea05678a73dff922bd588873a3eaf65  crates/orna-storage-v1/tests/fixtures/git-history-old-row.orna
 3d6a4794b86143294f9ee01fd86aaafcdbfbb2c21f12f87b0b35d4b887cde47e  crates/orna-storage-v1/tests/fixtures/git-history-replaced-row-after.orna
 bfdd87bc8b2a29499393d2d09201b7c48ea05678a73dff922bd588873a3eaf65  crates/orna-storage-v1/tests/fixtures/git-history-replaced-row-before.orna
-5c42917d34bc9160ecef4f00d9a10b3090b7c31b96e47a771bf053234b20cbbf  crates/orna-storage-v1/tests/fixtures/key-path-roundtrip-row.orna
 70e782d9804def40d45f21b622f780748e7892e110be42f32900d37daad18fb3  crates/orna-storage-v1/tests/fixtures/merge-budget-table-one-base.orna
 0186ec11e4500df4c45d077c0bc54530a27f35e03d2647275388c876c604875f  crates/orna-storage-v1/tests/fixtures/merge-budget-table-one-edit.orna
 e0bf5caf0a23c0157ac5d14ed6b6e9cd5b5d8d623ca1f067a4493ef87de5bc96  crates/orna-storage-v1/tests/fixtures/merge-budget-table-two-base.orna
