@@ -64,6 +64,10 @@ mod checkpoint_bootstrap;
 mod invocation;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
+mod repository_identity;
+pub use repository_identity::{repository_runtime_identity, runtime_identity_for_database_id};
+mod stream_carry;
+pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
@@ -4379,46 +4383,6 @@ pub trait CheckpointResetProvider {
 }
 
 impl RuntimeState {
-    /// Reports whether the repository's runtime database holds durable stream
-    /// state: checkpoint rows or retained `sys.Stream` observations.
-    ///
-    /// The probe never creates or migrates `state.db`. An absent database
-    /// holds no state; an unreadable or non-file database fails closed so a
-    /// caller cannot treat unknown consumer state as absent.
-    pub async fn persistent_stream_state_present(
-        repository: &Repository,
-    ) -> Result<bool, RuntimeError> {
-        let path = repository.runtime_paths().state_db();
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-            Ok(metadata) if metadata.is_file() => {}
-            _ => return Err(RuntimeError::StorageUnavailable),
-        }
-        let database = Builder::new_local(&path)
-            .build()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let connection = database
-            .connect()
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = connection
-            .query(
-                "SELECT (SELECT COUNT(*) FROM stream_checkpoint) + (SELECT COUNT(*) FROM sys_stream_observation)",
-                (),
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        let count = row
-            .get::<i64>(0)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-        Ok(count > 0)
-    }
-
     /// Opens the `state.db` path resolved by Git for this exact worktree.
     pub async fn open(
         repository: &Repository,

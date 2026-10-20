@@ -1728,45 +1728,13 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    let metadata = orna_repository_v1::inspect_metadata(repository).map_err(|_| {
+    orna_runtime_v1::repository_runtime_identity(repository).map_err(|_| {
         Diagnostic::target(
             "E2200",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
         )
-    })?;
-    let Some(metadata) = metadata else {
-        return Err(Diagnostic::target(
-            "E2200",
-            "repository runtime metadata is unavailable",
-            "initialize the Orna repository before running a durable project invocation",
-        ));
-    };
-
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
-        let salt = u8::try_from(index).expect("fixed identity length");
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    if initial_digest == [0; 32] {
-        initial_digest[0] = 1;
-    }
-    Ok((
-        RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    ))
+    })
 }
 
 fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
