@@ -5,6 +5,9 @@ use orna_evaluator_v1::{
 use orna_syntax_v1::{Declaration, Expr};
 use orna_value_v1::Value;
 
+/// Stands in for the relation write and read path. Relation writes reach the
+/// evaluator as `Note.insert(..)` through `EffectHandler::handle`, and reads as
+/// `Note.count()`.
 #[derive(Default)]
 struct NoteEffects {
     calls: Vec<Vec<Value>>,
@@ -22,7 +25,13 @@ impl EffectHandler for NoteEffects {
         let Expr::Name { text, .. } = base.as_ref() else {
             return Ok(None);
         };
-        if text != "Note" || name != "insert" {
+        if text != "Note" {
+            return Ok(None);
+        }
+        if name == "count" {
+            return Ok(Some(Value::int(self.calls.len().into())));
+        }
+        if name != "insert" {
             return Ok(None);
         }
         self.calls.push(arguments.to_vec());
@@ -102,10 +111,10 @@ fn calls_with_different_arguments_do_not_reuse() {
     assert_eq!(stats.misses, 2);
 }
 
-/// ORNA-CALL-002: an external effect between two equal pure calls is a
-/// boundary, so the second call must be evaluated again rather than reused.
+/// ORNA-CALL-002: a relation write between two equal pure calls is a boundary,
+/// so the second call must be evaluated again rather than reused.
 #[test]
-fn external_effect_between_equal_calls_invalidates_reuse() {
+fn relation_write_between_equal_calls_invalidates_reuse() {
     let functions = functions_from_source(
         "fn helper(value: Int) = value + 1;\nfn entry() = helper(41) + Note.insert(1) + helper(41);",
     );
@@ -124,6 +133,31 @@ fn external_effect_between_equal_calls_invalidates_reuse() {
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 2);
     assert_eq!(stats.invalidations, 1);
+    assert_eq!(effects.calls.len(), 1);
+}
+
+/// ORNA-QUERY-005: a write earlier in the activation is observed by a later
+/// read of the changed table, even when the reading call has equal arguments.
+#[test]
+fn later_read_observes_earlier_write_in_same_activation() {
+    let functions = functions_from_source(
+        "fn read_count(value: Int) = Note.count() + value;\nfn entry() = read_count(0) + Note.insert(1) + read_count(0);",
+    );
+    let mut effects = NoteEffects::default();
+
+    let (value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    // First read sees 0 rows, the insert returns 1, and the second read must
+    // see the inserted row: 0 + 1 + 1.
+    assert_eq!(value, Value::int(2.into()));
+    assert_eq!(stats.hits, 0);
     assert_eq!(effects.calls.len(), 1);
 }
 
