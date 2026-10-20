@@ -1663,6 +1663,7 @@ mod tests {
         )
     }
 
+    /// ORNA-SERVE-002: `orna serve` MUST NOT automatically invoke root `main()` or unrelated stream programs.
     #[test]
     fn serving_loads_the_local_main_module_without_evaluating_it() {
         let directory = tempfile::tempdir().expect("temporary clone");
@@ -1897,6 +1898,7 @@ mod tests {
         );
     }
 
+    /// ORNA-SERVE-003: A different clone running `orna serve` serves that clone's HEAD and CWD; CWD MUST remain local to that clone.
     #[test]
     fn clone_route_reports_head_and_cwd_from_the_selected_clone() {
         let left = tempfile::tempdir().expect("left clone");
@@ -1998,6 +2000,8 @@ mod tests {
         assert!(server.join().expect("route detection thread"));
     }
 
+    /// ORNA-TRUST-002: `orna serve` binds to loopback by default. Remote deployment SHOULD use normal SSH, Tailscale, or a trusted authenticated reverse proxy/TLS boundary.
+    /// ORNA-SERVE-004: The default listener MUST bind only to loopback unless the operator explicitly selects another address.
     #[test]
     fn default_loopback_listener_serves_the_clone_route() {
         let directory = tempfile::tempdir().expect("temporary clone");
@@ -2046,6 +2050,56 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("\"HEAD\":null"));
         assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
+    }
+
+    /// ORNA-TRUST-003: Public anonymous mutation or arbitrary remote REPL execution is outside the trusted v1 profile. The default profile's anonymous receive-pack surface is the loopback listener, and only that listener is bound by default.
+    #[test]
+    fn default_loopback_listener_is_the_anonymous_receive_pack_surface() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet", "--initial-branch", "trust-test"])
+                .current_dir(directory.path())
+                .status()
+                .expect("git")
+                .success()
+        );
+        let identity = RuntimeIdentity {
+            database_id: [7; 16],
+            repository_id: [8; 16],
+        };
+        let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
+        let status = listener.status();
+        assert!(status.address.ip().is_loopback());
+        let root = directory.path().to_path_buf();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.listener().accept().expect("accepted request");
+            let mut state = new_serve_state(
+                root,
+                identity,
+                status.address,
+                orna_semantic_v1::Catalogue::authoritative_core(),
+            )
+            .expect("serve host");
+            serve_connection(stream, &mut state).expect("served receive-pack advertisement");
+        });
+
+        let mut client = TcpStream::connect(status.address).expect("loopback connection");
+        client
+            .write_all(
+                format!(
+                    "GET /git/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: {}\r\n\r\n",
+                    status.address
+                )
+                .as_bytes(),
+            )
+            .expect("request bytes");
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).expect("response bytes");
+        server.join().expect("server thread");
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.contains("application/x-git-receive-pack-advertisement"));
     }
 
     #[test]
