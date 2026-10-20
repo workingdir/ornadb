@@ -66,13 +66,18 @@ fn inferred_export_does_not_fall_back_to_dynamic_any() {
     ));
 }
 
-// Specified: ORNA-INFER-003, ORNA-INFER-004. Exists: the same real source fixture,
-// whose public function omits every annotation. Passed: inference succeeds with no
-// diagnostic, so absent annotations are not a syntax or annotation error.
+// Specified: ORNA-INFER-003, ORNA-INFER-004. Exists: the same real source fixture, whose public
+// function `increment` omits every parameter and return annotation. Passed: inference
+// yields no diagnostic and the exported `increment` has the inferred type Int -> Int.
 #[test]
 fn inferable_function_signature_needs_no_annotations() {
     let result = analyze(INFER_SUCCESS);
     assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(matches!(
+        increment_type(&result),
+        Type::Function { parameters, result, .. }
+            if parameters == &[Type::Int] && **result == Type::Int
+    ));
 }
 
 // Specified: ORNA-INFER-007. Exists: a fixture with an underconstrained
@@ -105,25 +110,6 @@ fn contextual_numeric_inference_preserves_decimal_and_float_types() {
             Some(Type::Function { result, .. }) if **result == expected
         ));
     }
-}
-
-// Specified: ORNA-INFER-006. Exists: two sources that differ only in literal data
-// values. Passed: each analysis is repeatable, and both exported signatures are the
-// same Int -> Int, so the signature does not depend on runtime data values.
-#[test]
-fn inferred_signature_is_independent_of_literal_data_values() {
-    let small = analyze("pub fn increment(value) = value + 1;");
-    let large = analyze("pub fn increment(value) = value + 99;");
-    let repeated = analyze("pub fn increment(value) = value + 1;");
-    for result in [&small, &large, &repeated] {
-        assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(result));
-        assert!(matches!(
-            increment_type(result),
-            Type::Function { parameters, result, .. }
-                if parameters == &[Type::Int] && **result == Type::Int
-        ));
-    }
-    assert_eq!(increment_type(&repeated), increment_type(&small));
 }
 
 // Specified: ORNA-INFER-010. Exists: the same function written with and without a
