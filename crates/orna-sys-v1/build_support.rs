@@ -819,13 +819,7 @@ fn parse_function_attributes(
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    for (key, value) in parse_doc_metadata(attrs)? {
-        if fields.insert(key.clone(), value).is_some() {
-            return Err(format!(
-                "`{key}` is declared both in #[ornasys] and in its doc comment"
-            ));
-        }
-    }
+    fields.extend(parse_doc_metadata(attrs)?);
     let metadata = Value::Object(fields);
     validate_function_metadata(&metadata)?;
     if let Some(role) = &role {
