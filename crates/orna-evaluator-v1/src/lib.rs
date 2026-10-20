@@ -85,6 +85,10 @@ const DEFAULT_DEPTH: usize = 64;
 const DEFAULT_ITEMS: usize = 2_048;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
+/// Native stack headroom kept before evaluation requests a fresh stack segment.
+const EVALUATOR_STACK_RED_ZONE: usize = 128 * 1024;
+/// Size of each fresh stack segment used by deep expression evaluation.
+const EVALUATOR_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
 fn unicode_16_white_space(value: char) -> bool {
     matches!(
@@ -405,6 +409,8 @@ impl NominalField {
 pub struct NominalVariant {
     variant_id: Raw,
     name: String,
+    /// Declared payload field names; empty for a payload-free variant.
+    payload_fields: Vec<String>,
 }
 
 impl NominalVariant {
@@ -414,7 +420,15 @@ impl NominalVariant {
         Self {
             variant_id: object_id_raw(variant_id),
             name: name.into(),
+            payload_fields: Vec::new(),
         }
+    }
+
+    /// Declare the record payload fields used by `Enum.variant { ... }`.
+    #[must_use]
+    pub fn with_payload_fields(mut self, fields: Vec<String>) -> Self {
+        self.payload_fields = fields;
+        self
     }
 }
 
@@ -4187,6 +4201,19 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        // Expression nesting is bounded by `Limits::max_depth`, but debug frames
+        // for the evaluator's large match arms can exceed a test thread's default
+        // stack well before that bound. Grow onto a fresh segment near the limit.
+        stacker::maybe_grow(EVALUATOR_STACK_RED_ZONE, EVALUATOR_STACK_SEGMENT, || {
+            self.evaluate_node(expression, scope, depth)
+        })
+    }
+    fn evaluate_node(
+        &mut self,
+        expression: &Expr,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
         // Once a block emits a transfer, every enclosing expression is only a
         // transport frame. Do not run siblings, effects, or later statements.
         if self.transfer.is_some() {
@@ -4490,12 +4517,14 @@ impl Context<'_, '_> {
                     .map(|namespace| format!("{namespace}.{spelling}"))
             })
             .flatten();
-        let definition = scope
+        let Some(definition) = scope
             .3
             .get(qualified.as_deref().unwrap_or_default())
             .or_else(|| scope.3.get(&spelling))
             .cloned()
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        else {
+            return self.enum_variant_construction(path, supplied, scope, depth);
+        };
         self.items(definition.fields.len())?;
 
         let private_allowed = definition.owner.as_deref() == self.namespace.as_deref();
@@ -4581,6 +4610,58 @@ impl Context<'_, '_> {
         Ok(Value::NominalRecord {
             type_id: definition.type_id,
             fields,
+        })
+    }
+    fn enum_variant_construction(
+        &mut self,
+        path: &[orna_syntax_v1::NameSegment],
+        supplied: &[orna_syntax_v1::RecordField],
+        scope: &Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        // ORNA-ENUM-003: `Enum.variant { field: value }` constructs a payload
+        // variant whose record fields are exactly the declared payload fields.
+        let [owner @ .., variant] = path else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        if owner.is_empty() {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        }
+        let owner = owner
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let Some((type_id, declaration)) =
+            enum_variant_identity(scope, &owner, &variant.text)
+        else {
+            return Err(error("ORNA-EVAL-UNSUPPORTED"));
+        };
+        let mut supplied_names = BTreeSet::new();
+        for field in supplied {
+            if !declaration.payload_fields.contains(&field.name)
+                || !supplied_names.insert(field.name.clone())
+            {
+                return Err(error("ORNA-EVAL-ARGUMENT"));
+            }
+        }
+        if supplied_names.len() != declaration.payload_fields.len() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        let mut payload = BTreeMap::new();
+        for field in supplied {
+            let value = self.evaluate(&field.value, &mut scope.clone(), depth + 1)?;
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
+            }
+            payload.insert(field.name.clone(), value);
+        }
+        let payload = (!declaration.payload_fields.is_empty())
+            .then(|| Box::new(Value::Record(payload)));
+        Ok(Value::Enum {
+            type_id: type_id.clone(),
+            variant_id: declaration.variant_id.clone(),
+            payload,
         })
     }
     fn nominal_field(
@@ -7999,11 +8080,13 @@ impl Context<'_, '_> {
                     | "__rate"
                     | "__integrate"
             );
-            if self.restrict_function_names
-                && nullable
-                && !matches!(value, Value::Null | Value::Option(_))
-            {
-                Ok(Value::Option(Some(Box::new(value))))
+            if self.restrict_function_names && nullable {
+                // ORNA-TYPE-001: `T?` is Option<T>; absence is Option none, not a bare null.
+                Ok(match value {
+                    Value::Null => Value::Option(None),
+                    Value::Option(_) => value,
+                    value => Value::Option(Some(Box::new(value))),
+                })
             } else {
                 Ok(value)
             }
@@ -13031,13 +13114,13 @@ fn enum_variant_identity<'scope>(
     scope: &'scope Scope,
     owner: &str,
     variant: &str,
-) -> Option<(&'scope Raw, &'scope Raw)> {
+) -> Option<(&'scope Raw, &'scope NominalVariant)> {
     if let Some(definition) = scope.3.get(owner) {
         return definition
             .variants
             .iter()
             .find(|candidate| candidate.name == variant)
-            .map(|candidate| (&definition.type_id, &candidate.variant_id));
+            .map(|candidate| (&definition.type_id, candidate));
     }
     if owner.contains('.') {
         return None;
@@ -13057,7 +13140,7 @@ fn enum_variant_identity<'scope>(
         if found.is_some() {
             return None;
         }
-        found = Some((&definition.type_id, &candidate.variant_id));
+        found = Some((&definition.type_id, candidate));
     }
     found
 }
@@ -13099,6 +13182,7 @@ fn bind_constructor(
     let variant = context.string(path.last().expect("path length checked").text.clone())?;
     let qualified_name = context.string(format!("{owner}.{variant}"))?;
     let Some((expected_type, expected_variant)) = enum_variant_identity(scope, &owner, &variant)
+        .map(|(type_id, candidate)| (type_id, &candidate.variant_id))
         .or_else(|| {
             scope.0.get(&qualified_name).and_then(|value| match value {
                 Value::Enum {
