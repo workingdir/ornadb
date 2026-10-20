@@ -83,6 +83,13 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- MIME and file-name code reads one MIME-1 registry pinned to the Orna 1.1.0
+  `profiles/media-1.json`. Octet-stream and unregistered media types accept any
+  safe suffix hint, and stored Blob annotations with quoted parameters or `_`
+  hints read back. `sys.blob.capture_file` now supplies the
+  `application/octet-stream` annotation with no suffix instead of guessing from
+  the file extension; declare the media type with `sys.blob.annotate`.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
