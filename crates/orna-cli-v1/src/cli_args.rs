@@ -81,8 +81,12 @@ pub(super) enum Command {
         format: LegendFormat,
         limit: Option<usize>,
     },
+    /// `serve [--port PORT] [--allow-push]`: loopback Git transport, listing
+    /// pages and live sessions. Smart-HTTP push is refused unless
+    /// `--allow-push` is given.
     Serve {
         port: u16,
+        allow_push: bool,
     },
     /// `mount DIR --at SELECTOR`: one read-only view of an exactly-resolved
     /// snapshot (VFS-1).
@@ -539,30 +543,36 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         Some("migrate") => Command::Migrate(words.by_ref().map(str::to_owned).collect()),
         Some("serve") => {
             let mut port = 8080;
+            let mut allow_push = false;
             while let Some(option) = words.next() {
-                if option != "--port" {
-                    return Err(Diagnostic::usage(
-                        "E1002",
-                        "unsupported `serve` option",
-                        "use `serve` or `serve --port PORT`; the listener stays on loopback",
-                    ));
+                match option {
+                    "--allow-push" => allow_push = true,
+                    "--port" => {
+                        let value = words.next().ok_or_else(|| {
+                            Diagnostic::usage(
+                                "E1001",
+                                "`serve --port` needs a value",
+                                "supply a port from 0 through 65535 after `--port`",
+                            )
+                        })?;
+                        port = value.parse().map_err(|_| {
+                            Diagnostic::usage(
+                                "E1002",
+                                "`serve --port` is invalid",
+                                "supply a port from 0 through 65535 after `--port`",
+                            )
+                        })?;
+                    }
+                    _ => {
+                        return Err(Diagnostic::usage(
+                            "E1002",
+                            "unsupported `serve` option",
+                            "use `serve [--port PORT] [--allow-push]`; the listener stays on loopback",
+                        ));
+                    }
                 }
-                let value = words.next().ok_or_else(|| {
-                    Diagnostic::usage(
-                        "E1001",
-                        "`serve --port` needs a value",
-                        "supply a port from 0 through 65535 after `--port`",
-                    )
-                })?;
-                port = value.parse().map_err(|_| {
-                    Diagnostic::usage(
-                        "E1002",
-                        "`serve --port` is invalid",
-                        "supply a port from 0 through 65535 after `--port`",
-                    )
-                })?;
             }
-            Command::Serve { port }
+            Command::Serve { port, allow_push }
         }
         Some("diff") => {
             let mut arguments = Vec::new();
@@ -661,6 +671,35 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    /// ORNA-TRUST-003, A13-live-serving-09: smart-HTTP push is an explicit
+    /// operator opt-in; plain `serve` refuses it.
+    #[test]
+    fn serve_git_push_is_an_explicit_opt_in() {
+        assert_eq!(
+            parse_cli(&args(&["serve"])).unwrap().command,
+            Command::Serve {
+                port: 8080,
+                allow_push: false,
+            }
+        );
+        for arguments in [
+            ["serve", "--allow-push", "--port", "0"],
+            ["serve", "--port", "0", "--allow-push"],
+        ] {
+            assert_eq!(
+                parse_cli(&args(&arguments)).unwrap().command,
+                Command::Serve {
+                    port: 0,
+                    allow_push: true,
+                }
+            );
+        }
+        assert_eq!(
+            parse_cli(&args(&["serve", "--push"])).unwrap_err().code,
+            "E1002"
+        );
     }
 
     #[test]
