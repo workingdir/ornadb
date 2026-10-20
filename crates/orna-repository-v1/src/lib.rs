@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
 mod blob_store;
+mod crash_barrier;
 mod compact;
 pub mod complete_copy;
 mod init;
@@ -59,7 +60,7 @@ pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
-pub use mount::{MountError, MountStatus, MountView};
+pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};
 pub use native_graph::RowRevision;
 pub use native_graph::{
     AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,
@@ -72,6 +73,7 @@ pub use orna_value_v1::BlobMetadata;
 pub use publication_transaction::{
     ProtectedBlobRowInsert, PublicationTransactionError, commit_protected_blob_row,
 };
+pub use crash_barrier::publication_crash_barrier;
 pub use row_store::{
     AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowDependency,
     RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,

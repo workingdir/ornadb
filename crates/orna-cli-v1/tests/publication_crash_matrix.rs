@@ -1,7 +1,6 @@
 //! Process-kill recovery checks for the real `orna publish` executable.
 use std::{
     fs::File,
-    io::{self, Read},
     path::Path,
     process::{Child, Command, Output},
     thread,
@@ -26,13 +25,13 @@ const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 const REIMPORT_FIXTURE: &str = include_str!("fixtures/media/reimport-image-capture.orna");
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
-const CRASH_MARKER: &str = "ORNA_TEST_PUBLICATION_CRASH_MARKER";
+const CRASH_DIR: &str = "ORNA_TEST_PUBLICATION_CRASH_DIR";
+const MARKER_FILE: &str = "publication-crash-marker";
 const CAPTURE_ROOT: &str = "ORNA_TEST_CAPTURE_ROOT";
 const CAPTURE_SOURCE: &str = "ORNA_TEST_CAPTURE_SOURCE";
 const CAPTURE_RELATION: &str = "ORNA_TEST_CAPTURE_RELATION";
 const CAPTURE_SCHEMA_ROOT: &str = "ORNA_TEST_CAPTURE_SCHEMA_ROOT";
 const CAPTURE_STORE_ROOT: &str = "ORNA_TEST_CAPTURE_STORE_ROOT";
-const CAPTURE_AT: &str = "ORNA_TEST_CAPTURE_CRASH_AT";
 
 async fn commit_capture(
     repository: &Repository,
@@ -62,7 +61,6 @@ async fn commit_capture(
         expression, &Default::default(), Limits::default(), bindings,
     ).unwrap();
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    capture_crash_barrier("pin");
     let admitted = admit_source_row_with_owner_fields(
         &project,
         logical_path,
@@ -107,7 +105,6 @@ async fn commit_capture(
         TerminalOutcome::new(vec![25]).unwrap(), &NoFault,
     ).await.unwrap();
     assert_eq!(commit.request.state, RequestState::Completed);
-    capture_crash_barrier("row-commit");
     drop(source_bindings);
 }
 
@@ -122,41 +119,15 @@ fn cli(directory: &Path, arguments: &[&str]) -> Output {
     command.args(arguments).output().expect("CLI process starts")
 }
 
-fn launch(directory: &Path, boundary: &str, marker: &Path) -> Child {
+fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
     command.current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env(CRASH_AT, boundary)
-        .env(CRASH_MARKER, marker);
+        .env(CRASH_DIR, crash_dir);
     command.args(["publish"]);
     command.spawn().expect("publication child starts")
-}
-
-fn capture_crash_barrier(boundary: &str) {
-    let Ok(selected) = std::env::var(CAPTURE_AT) else { return; };
-    if selected != boundary { return; }
-    let marker = std::env::var(CRASH_MARKER).expect("capture crash marker path");
-    std::fs::write(marker, boundary).expect("write capture crash marker");
-    loop { thread::sleep(Duration::from_millis(10)); }
-}
-
-struct MidstreamCrashRead<R> {
-    inner: R,
-    reads: usize,
-}
-
-impl<R: Read> Read for MidstreamCrashRead<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = self.inner.read(buffer)?;
-        if count > 0 {
-            self.reads += 1;
-            if self.reads == 2 {
-                capture_crash_barrier("capture");
-            }
-        }
-        Ok(count)
-    }
 }
 
 fn launch_capture_child(
@@ -166,20 +137,20 @@ fn launch_capture_child(
     schema_root: &str,
     store_root: &str,
     boundary: &str,
-    marker: &Path,
+    crash_dir: &Path,
 ) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("test executable path"));
     command
         .current_dir(repository_root)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env(CAPTURE_AT, boundary)
+        .env(CRASH_AT, boundary)
         .env(CAPTURE_ROOT, repository_root)
         .env(CAPTURE_SOURCE, source)
         .env(CAPTURE_RELATION, hex(&relation_id))
         .env(CAPTURE_SCHEMA_ROOT, schema_root)
         .env(CAPTURE_STORE_ROOT, store_root)
-        .env(CRASH_MARKER, marker);
+        .env(CRASH_DIR, crash_dir);
     for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] {
         command.env_remove(name);
     }
@@ -189,7 +160,7 @@ fn launch_capture_child(
 
 #[tokio::test]
 async fn capture_crash_child() {
-    let Ok(boundary) = std::env::var(CAPTURE_AT) else { return; };
+    let Ok(boundary) = std::env::var(CRASH_AT) else { return; };
     let repository_root = std::env::var(CAPTURE_ROOT).expect("repository root");
     let source_path = std::env::var(CAPTURE_SOURCE).expect("capture source path");
     let relation = std::env::var(CAPTURE_RELATION).expect("capture relation id");
@@ -200,19 +171,10 @@ async fn capture_crash_child() {
     let repository = Repository::discover(&repository_root).unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     match boundary.as_str() {
-        "capture" => {
-            let reader = MidstreamCrashRead {
-                inner: File::open(&source_path).unwrap(),
-                reads: 0,
-            };
-            let _candidate = capability.capture_blob_candidate(reader, 1 << 20).unwrap();
-        }
-        "pack-install" => {
-            let candidate = capability
+        "capture-read" | "pack-install" => {
+            let _candidate = capability
                 .capture_blob_candidate(File::open(&source_path).unwrap(), 1 << 20)
                 .unwrap();
-            capture_crash_barrier("pack-install");
-            drop(candidate);
         }
         "pin" | "row-commit" => {
             let base = repository.head().unwrap().unwrap();
@@ -389,11 +351,32 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
     // The repository observer fires after each ref/index stage is durable;
     // ref-index remains the existing boundary after both stages complete.
     for boundary in ["capture", "row", "candidate", "ref-cas", "index", "ref-index", "tail"] {
-        let (directory, _source, repository, state, base, _relation_id, _format_context) =
+        let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
-        let marker = root.join("crash-marker");
-        let mut child = launch(root, boundary, &marker);
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+        let base = repository.head().unwrap().unwrap();
+        std::fs::write(root.join("unrelated-staged.txt"), b"staged before crash\n").unwrap();
+        git(root, &["add", "--", "unrelated-staged.txt"]);
+        std::fs::write(root.join("unrelated-tracked.txt"), b"unstaged before crash\n").unwrap();
+        let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+        let unstaged_before = git_output(root, &["diff", "--binary"], None);
+        assert!(!staged_before.is_empty() && !unstaged_before.is_empty());
+        // Pin refs that exist before the publisher child starts. The fixture's
+        // accepted pending pin must survive the kill and recovery (ORNA-PUB-018).
+        let seeded_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
+        assert_eq!(String::from_utf8_lossy(&seeded_pins).lines().count(), 1, "fixture pin set changed before {boundary}");
+        let abandoned = state
+            .current_lease()
+            .await
+            .unwrap()
+            .expect("seeded project leaves a writer lease for the abandoned owner");
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
@@ -404,24 +387,44 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         assert!(!status.success(), "child unexpectedly returned at {boundary}");
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
         std::fs::remove_file(&marker).unwrap();
+        let pre_journal = repository.read_publication_journal().unwrap().is_some();
+        let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
+        assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
+        assert!(pre_journal == matches!(boundary, "ref-cas" | "index" | "ref-index"), "unexpected journal state at {boundary}");
         drop(state);
 
         let resumed = cli(root, &["publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
-        if boundary == "capture" || boundary == "candidate" {
-            assert_ne!(once, base.as_str(), "pending range not published after {boundary}");
-        } else {
-            assert_ne!(once, base.as_str(), "candidate not retained after {boundary}");
-        }
+        assert_ne!(once, base.as_str(), "candidate not retained after {boundary}");
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
+        assert_eq!(git_output(root, &["diff", "--cached", "--binary"], None), staged_before, "staged work lost after {boundary}");
+        assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work lost after {boundary}");
+        let fsck = Command::new("git").args(["fsck", "--no-dangling", "--no-progress"]).current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(fsck.status.success(), "fsck after {boundary}: {}", String::from_utf8_lossy(&fsck.stderr));
+        // ORNA-PUB-018: pending pins stay protected through publication/recovery.
+        let post_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
+        assert_eq!(post_pins, seeded_pins, "accepted pending pin not retained through recovery at {boundary}");
         let (identity, digest) = cli_runtime_identity(&repository);
-        RuntimeState::open(&repository, identity, digest)
+        let reopened = RuntimeState::open(&repository, identity, digest)
             .await
             .unwrap_or_else(|error| panic!("runtime reopen after {boundary}: {error:?}"));
+        assert_eq!(reopened.pending_count().await.unwrap(), 0, "pending range remains after {boundary}");
         let second = cli(root, &["publish"]);
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        // Fence last: takeover_lease may leave takeover_recovery_pending set.
+        let fresh = [0x5a; 16];
+        let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
+        assert_eq!(replacement.owner_id, fresh);
+        assert_eq!(replacement.epoch, abandoned.epoch + 1);
+        assert!(matches!(
+            reopened.takeover_lease(abandoned, [0x5b; 16]).await,
+            Err(orna_runtime_v1::RuntimeError::OwnerLost)
+        ), "abandoned lease took over twice after {boundary}");
+        assert!(reopened.acquire_lease(abandoned.owner_id).await.is_err(), "abandoned owner regained writer lease after {boundary}");
         println!(
             "{boundary}: SIGKILL recovery_publish_exit={}, second_publish_exit={}",
             resumed.status.code().unwrap(),
@@ -430,6 +433,8 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
     }
 }
 
+/// ORNA-PUB-007: recovery after ref advancement completes index/worktree reconciliation and Turso cleanup.
+/// ORNA-PUB-016: recovery retains distinct staged and unstaged changes across the crash boundary.
 #[tokio::test]
 async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let (directory, source, repository, state, source_commit, relation_id, format_context) =
@@ -451,8 +456,9 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     assert!(!staged_before.is_empty(), "fixture has staged unrelated work");
     assert!(!unstaged_before.is_empty(), "fixture has unstaged unrelated work");
 
-    let marker = root.join("crash-marker");
-    let mut child = launch(root, "ref-cas", &marker);
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch(root, "ref-cas", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
@@ -641,7 +647,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
 
 #[tokio::test]
 async fn capture_and_row_commit_recover_after_process_kill() {
-    for boundary in ["capture", "pack-install", "pin", "row-commit"] {
+    for boundary in ["capture-read", "pack-install", "pin", "row-commit"] {
         let source = TempDir::new().unwrap();
         std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel.png"), source.path().join("pixel.png")).unwrap();
         let payload = vec![0x6d; 128 * 1024];
@@ -651,7 +657,8 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         let base = head(&repository);
         let schema_root = hex(format_context.schema_root().as_bytes());
         let store_root = hex(format_context.store_root().as_bytes());
-        let marker = directory.path().join("capture-crash-marker");
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
         let mut child = launch_capture_child(
             directory.path(),
             &source_path,
@@ -659,7 +666,7 @@ async fn capture_and_row_commit_recover_after_process_kill() {
             &schema_root,
             &store_root,
             boundary,
-            &marker,
+            crash.path(),
         );
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {

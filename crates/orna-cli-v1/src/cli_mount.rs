@@ -129,6 +129,7 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
         view.context(),
         status.mountpoint(),
         source,
+        view.row_baselines(),
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -153,6 +154,20 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     view.detach()
         .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
 }
+
+#[cfg(target_os = "linux")]
+fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
+    match error {
+        crate::fuse_mount::EditError::Stale(detail) => Diagnostic::target_with_detail(
+            "E2000",
+            "Edit is stale against the mounted baseline",
+            "run mount DIR --cwd to read the current row, then reapply the retained draft",
+            detail,
+        ),
+        crate::fuse_mount::EditError::Failed(detail) => mount_error("Edit was not accepted", detail),
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
@@ -168,14 +183,22 @@ pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(),
             view.context(),
             edit_path,
             row,
+            Some(view.row_baselines()),
         )
-        .map_err(|error| mount_error("Edit was not accepted", error));
+        .map_err(edit_refusal);
     }
     let context = repository
         .open_format_context_at_selector("HEAD")
         .map_err(|error| mount_error("Edit was not accepted", format!("workspace snapshot could not be pinned: {error:?}")))?;
-    crate::fuse_mount::edit_path(&repository, context.commit(), &context, path.to_str().unwrap_or_default(), row)
-        .map_err(|error| mount_error("Edit was not accepted", error))
+    crate::fuse_mount::edit_path(
+        &repository,
+        context.commit(),
+        &context,
+        path.to_str().unwrap_or_default(),
+        row,
+        None,
+    )
+        .map_err(edit_refusal)
 }
 
 #[cfg(target_os = "linux")]
@@ -267,6 +290,38 @@ pub(super) fn run_edit(_endpoint: &Endpoint, _path: &str, _row: bool) -> Result<
     Err(mount_error("Workspace editing is unavailable", "orna edit requires Linux VFS support"))
 }
 
+/// Grace period for a termination-signal unmount. A non-lazy unmount fails
+/// with EBUSY while a reference into the mount is in flight; those references
+/// are transient, so the unmount is retried within this window.
+#[cfg(target_os = "linux")]
+const SIGNAL_UNMOUNT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(target_os = "linux")]
+const SIGNAL_UNMOUNT_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Unmounts a live FUSE session after a termination signal.
+///
+/// The session keeps serving requests while this retries, so a transient holder
+/// can finish and release the mount. A mount still busy after the grace period
+/// is reported as a failure, and the caller falls back to a lazy detach.
+#[cfg(target_os = "linux")]
+async fn unmount_after_signal(
+    session: &fuser::BackgroundSession,
+    mountpoint: &Path,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
+    loop {
+        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if session.guard.is_finished() || std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        tokio::time::sleep(SIGNAL_UNMOUNT_RETRY).await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct MountSignalHandler {
     runtime: tokio::runtime::Runtime,
@@ -332,7 +387,9 @@ impl MountSignalHandler {
                     .as_ref()
                     .is_some_and(|session| !session.guard.is_finished());
                 if still_mounted {
-                    let unmount_error = crate::fuse_mount::unmount_mountpoint(&mountpoint)
+                    let live = session.as_ref().expect("live FUSE session is retained");
+                    let unmount_error = unmount_after_signal(live, &mountpoint)
+                        .await
                         .err()
                         .map(|error| format!("FUSE unmount failed after {signal}: {error}"));
                     if let Some(error) = unmount_error
@@ -345,6 +402,8 @@ impl MountSignalHandler {
                             .expect("live FUSE session is retained")
                             .umount_and_join();
                         return match fallback {
+                            // The graceful unmount failed. Report that failure even though the
+                            // lazy detach cleaned up, so a busy mount never exits as success.
                             Ok(()) => Err(error),
                             Err(fallback_error) => Err(format!(
                                 "{error}; FUSE session cleanup also failed: {fallback_error}"
