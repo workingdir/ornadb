@@ -5100,13 +5100,13 @@ impl AdmittedBlobReference {
 /// the content capability that serves its bytes.
 #[derive(Clone, Debug)]
 pub struct AdmittedStoredBlob {
-    annotation: crate::blob_store::BlobAnnotation,
+    annotation: MediaAnnotation,
     reference: AdmittedBlobReference,
 }
 
 impl AdmittedStoredBlob {
     /// The canonical declared metadata stored beside this reference.
-    pub fn annotation(&self) -> &crate::blob_store::BlobAnnotation {
+    pub fn annotation(&self) -> &MediaAnnotation {
         &self.annotation
     }
 
@@ -11139,10 +11139,7 @@ fn option_payload_value(value: &CborValue) -> Result<Option<&CborValue>, GraphEr
 /// Option None contributes nothing; Some recursively visits its value.
 fn collect_blob_value_fields(
     value: &CborValue,
-    output: &mut Vec<(
-        crate::blob_store::BlobAnnotation,
-        crate::blob_store::ContentIdentity,
-    )>,
+    output: &mut Vec<(MediaAnnotation, crate::blob_store::ContentIdentity)>,
 ) -> Result<(), GraphError> {
     match value {
         CborValue::Tag(60013, _) => match option_payload_value(value)? {
@@ -11172,13 +11169,12 @@ fn collect_blob_value_fields(
                 Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
                 _ => return Err(GraphError::NonCanonicalData),
             };
-            validate_canonical_mime1_annotation(media_type, suffix)?;
+            let annotation = MediaAnnotation::new(media_type, suffix)
+                .map_err(|_| GraphError::InvalidBlobAnnotation)?;
             let mut digest_bytes = [0u8; 32];
             digest_bytes.copy_from_slice(digest);
             let identity = crate::blob_store::ContentIdentity::new(*length, digest_bytes)
                 .map_err(|_| GraphError::InvalidLength(*length))?;
-            let annotation = crate::blob_store::BlobAnnotation::new(media_type.clone(), suffix)
-                .map_err(|_| GraphError::InvalidBlobAnnotation)?;
             output.push((annotation, identity));
             Ok(())
         }
@@ -12077,6 +12073,36 @@ mod option_value_tests {
         );
         collect_blob_value_fields(&option_some, &mut metadata).unwrap();
         assert_eq!(metadata.len(), 1);
+    }
+
+    /// ORNA-MIME-002/-004 (A08-09): every annotation MIME-1 admits when a row is
+    /// written stays readable from the stored row, including a quoted
+    /// parameter, an `_` hint and a hint on octet-stream.
+    #[test]
+    fn stored_blob_metadata_keeps_every_canonical_mime1_annotation() {
+        for (media_type, suffix) in [
+            ("text/plain;title=\"a b\"", None),
+            ("application/x-example", Some("my_ext")),
+            ("application/octet-stream", Some("dat")),
+        ] {
+            let stored = CborValue::Tag(
+                60112,
+                Box::new(CborValue::Array(vec![
+                    CborValue::Unsigned(7),
+                    CborValue::Bytes(vec![0x22; 32]),
+                    CborValue::Text(media_type.into()),
+                    suffix.map_or(CborValue::Null, |suffix| CborValue::Text(suffix.into())),
+                ])),
+            );
+            let mut metadata = Vec::new();
+            collect_blob_value_fields(&stored, &mut metadata).unwrap();
+            let [(annotation, identity)] = metadata.as_slice() else {
+                panic!("one Blob value yields one annotation");
+            };
+            assert_eq!(annotation.media_type(), media_type);
+            assert_eq!(annotation.suffix(), suffix);
+            assert_eq!(identity.length(), 7);
+        }
     }
 
     #[test]
