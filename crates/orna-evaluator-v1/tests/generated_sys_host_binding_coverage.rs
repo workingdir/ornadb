@@ -14,6 +14,7 @@ struct BindingProof {
 
 const PROCESS_ENVIRONMENT_PROOFS: &str = include_str!("standard_library_process_environment.rs");
 const FILESYSTEM_NETWORK_PROOFS: &str = include_str!("standard_library_filesystem_network.rs");
+const CAPTURE_FILE_PROOFS: &str = include_str!("../../orna-cli-v1/tests/sys_blob_capture_file.rs");
 
 #[test]
 fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
@@ -23,7 +24,7 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
             provider: "orna.sys.host.environment.v1",
             fixture: include_str!("fixtures/stdlib-io-environment-get-host-call-xbf3n.orna"),
             call: "io.environment.get(",
-            behavior_test: "typed_sys_environment_bindings_execute_native_allowlisted_provider",
+            behavior_test: "emitted_environment_declarations_parse_typecheck_and_dispatch_to_native_provider",
             behavior_source: PROCESS_ENVIRONMENT_PROOFS,
             observable: "fixture-home",
         },
@@ -32,7 +33,7 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
             provider: "orna.sys.host.environment.v1",
             fixture: include_str!("fixtures/stdlib-io-environment-require-host-call-xbf3n.orna"),
             call: "io.environment.require(",
-            behavior_test: "typed_sys_environment_bindings_execute_native_allowlisted_provider",
+            behavior_test: "emitted_environment_declarations_parse_typecheck_and_dispatch_to_native_provider",
             behavior_source: PROCESS_ENVIRONMENT_PROOFS,
             observable: "fixture-path",
         },
@@ -197,6 +198,15 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
             behavior_test: "sys_http_start_wait_and_cancel_dispatch_real_native_behavior",
             behavior_source: FILESYSTEM_NETWORK_PROOFS,
             observable: "cancellation reports that it stopped the in-flight request",
+        },
+        BindingProof {
+            operation: "sys.blob.capture_file",
+            provider: "orna.sys.host.filesystem.v1",
+            fixture: include_str!("fixtures/sys-blob-capture-file-authored.orna"),
+            call: "sys.blob.capture_file(",
+            behavior_test: "cli_consumer_commits_captured_annotated_blob_with_its_request",
+            behavior_source: CAPTURE_FILE_PROOFS,
+            observable: "audio/mp4",
         },
     ];
 
