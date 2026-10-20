@@ -7674,7 +7674,7 @@ fn validate_loop_transfers(
                     }
                     Statement::Break { value, .. } => match loops.last() {
                         Some(LoopTransferContext::Typed(expected)) => {
-                            let actual = value.as_ref().map_or(Type::Null, |value| {
+                            let actual = value.as_ref().map_or(Type::Unit, |value| {
                                 infer(value, scope, &block_locals, &mut Vec::new()).ty
                             });
                             require_same(expected, &actual, diagnostics);
@@ -7734,7 +7734,7 @@ fn validate_loop_transfers(
             }
             let loop_context = match kind {
                 ControlKind::For | ControlKind::While => {
-                    Some(LoopTransferContext::Typed(Type::Null))
+                    Some(LoopTransferContext::Typed(Type::Unit))
                 }
                 ControlKind::Loop => Some(LoopTransferContext::Unsupported),
                 ControlKind::If | ControlKind::Case => None,
@@ -9601,10 +9601,12 @@ fn infer_node(
                     }
                 }
             }
+            // A block without a final expression completes with `Unit`
+            // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
             let tail = final_control
                 .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
                 .unwrap_or(Inferred {
-                    ty: Type::Null,
+                    ty: Type::Unit,
                     effects: EffectSummary::default(),
                 });
             effects.join(&tail.effects);
@@ -10447,9 +10449,10 @@ fn infer_if(
     let Some(alternate) = alternate else {
         let mut effects = condition.effects;
         effects.join(&body.effects);
+        // The untaken branch completes without a value (ORNA-CFLOW-001).
         if body.ty == Type::Bottom {
             return Inferred {
-                ty: Type::Null,
+                ty: Type::Unit,
                 effects,
             };
         }
@@ -16156,7 +16159,7 @@ fn infer_table_operation(
     let (parameters, result, effect) = match name.as_str() {
         "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
         "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
-        "delete" => (1, Type::Null, Some("database write")),
+        "delete" => (1, Type::Unit, Some("database write")),
         "count" => (0, Type::Int, Some("database read")),
         "first" => (
             0,
@@ -16405,6 +16408,7 @@ fn diagnostic_type_name(ty: &Type) -> String {
         Type::Text => "Str".into(),
         Type::Bool => "Bool".into(),
         Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
         Type::List(element) => format!("[{}]", diagnostic_type_name(element)),
         Type::Optional(element) => format!("{}?", diagnostic_type_name(element)),
         Type::Named(name) if diagnostic_identifier(name) => name.clone(),
