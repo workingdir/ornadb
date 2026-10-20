@@ -30,14 +30,32 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
     vfs::{
-        EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
-        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates,
-        VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
+        EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
+        VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
+        project_component, unproject_component,
     },
 };
+use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax_v1::{Expr, parse_row};
 use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
+
+/// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
+/// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec
+/// bound. A write or truncate that grows a file past it is quota-rejected
+/// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
+const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
+
+/// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
+/// for the per-file quota, EIO for other draft failures.
+fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
+    match result {
+        Err(EditDraftError::FileTooLarge) => Errno::EDQUOT,
+        _ => Errno::EIO,
+    }
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -374,6 +392,7 @@ struct MountWriter {
     runtime: tokio::runtime::Runtime,
     state: RuntimeState,
     repository: Repository,
+    identities: ObjectIdentityManifest,
     project: Arc<orna_project_v1::LoadedProject>,
     runtime_commit: GitCommitRef,
     mount_snapshot: OnceLock<RuntimeTableActivationSnapshot>,
@@ -400,6 +419,8 @@ impl MountWriter {
         let state = runtime
             .block_on(RuntimeState::open(repository, identity, initial_digest))
             .map_err(|error| format!("mounted editor runtime could not be opened: {error:?}"))?;
+        let identities = ObjectIdentityManifest::read_committed(repository, commit)
+            .map_err(|error| format!("committed source identities could not be loaded: {error:?}"))?;
         let runtime_commit = repository
             .head()
             .map_err(|error| format!("mounted editor runtime source commit is unavailable: {error:?}"))?
@@ -412,6 +433,7 @@ impl MountWriter {
             runtime,
             state,
             repository: repository.clone(),
+            identities,
             project: Arc::new(project),
             runtime_commit,
             mount_snapshot: OnceLock::new(),
@@ -639,6 +661,7 @@ impl MountWriter {
         .map_err(orna_runtime_v1::TableActivationError::Runtime)?;
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
+            &self.identities,
             coordinates.cwd_generation().clone(),
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
@@ -838,13 +861,50 @@ fn row_save_context(
 /// Why a document save did not commit. `NoCandidate` means the handle never
 /// submitted bytes, so there is nothing to accept or discard. `Stale` means the
 /// mounted baseline no longer matches the durable row and nothing was written.
-/// `Stale` and `Failed` both mean a save was attempted and did not commit, so
-/// the draft stays unresolved.
+/// `Rejected` means the submitted draft is malformed or fails semantic
+/// admission (profiles/vfs-1 EINVAL). `Stale`, `Rejected` and `Failed` all mean
+/// a save was attempted and did not commit, so the draft stays unresolved.
 #[derive(Debug)]
 enum DocumentCommitError {
     NoCandidate,
     Stale,
+    Rejected(String),
     Failed(String),
+}
+
+impl DocumentCommitError {
+    /// Errno for a save that did not commit (profiles/vfs-1 errno table):
+    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EIO for backing I/O.
+    fn errno(&self) -> Errno {
+        match self {
+            Self::Rejected(_) => Errno::EINVAL,
+            Self::Stale => Errno::EAGAIN,
+            Self::NoCandidate | Self::Failed(_) => Errno::EIO,
+        }
+    }
+}
+
+/// Classifies a failed durable save. Semantic admission and malformed-draft
+/// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
+/// backing I/O `Failed`.
+fn save_failure(
+    context: &str,
+    error: VfsSaveError<orna_runtime_v1::TableActivationError>,
+) -> DocumentCommitError {
+    match error {
+        VfsSaveError::Activation(orna_runtime_v1::TableActivationError::ValidationFailed(
+            diagnostic,
+        )) => DocumentCommitError::Rejected(format!("{context}: {diagnostic:?}")),
+        VfsSaveError::Activation(orna_runtime_v1::TableActivationError::Runtime(
+            orna_runtime_v1::RuntimeError::InvalidTableMutation,
+        )) => DocumentCommitError::Rejected(format!("{context}: malformed draft")),
+        VfsSaveError::Rejected { diagnostic, .. } => {
+            DocumentCommitError::Rejected(format!("{context}: {diagnostic:?}"))
+        }
+        VfsSaveError::Stale { .. } => DocumentCommitError::Stale,
+        VfsSaveError::NoCandidate => DocumentCommitError::NoCandidate,
+        error => DocumentCommitError::Failed(format!("{context}: {error:?}")),
+    }
 }
 
 impl From<String> for DocumentCommitError {
@@ -857,8 +917,10 @@ impl std::fmt::Display for DocumentCommitError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCandidate => formatter.write_str("mounted row save failed: NoCandidate"),
-            Self::Stale => formatter.write_str("mounted save is stale against its captured baseline"),
-            Self::Failed(message) => formatter.write_str(message),
+            Self::Stale => {
+                formatter.write_str("mounted save is stale against its captured baseline")
+            }
+            Self::Rejected(message) | Self::Failed(message) => formatter.write_str(message),
         }
     }
 }
@@ -977,15 +1039,11 @@ impl RowSaveContext {
                 self.record_accepted_row(accepted_row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted row document was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(VfsSaveError::NoCandidate) => Err(DocumentCommitError::NoCandidate),
-            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(DocumentCommitError::Failed(format!(
-                "mounted row save failed: {error:?}"
-            ))),
+            Err(error) => Err(save_failure("mounted row save failed", error)),
         }
     }
 
@@ -1064,14 +1122,11 @@ impl RowSaveContext {
                 self.record_accepted_row(row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted Blob replacement was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(DocumentCommitError::Failed(format!(
-                "mounted Blob replacement failed: {error:?}"
-            ))),
+            Err(error) => Err(save_failure("mounted Blob replacement failed", error)),
         }
     }
 
@@ -1079,7 +1134,7 @@ impl RowSaveContext {
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
         expected_baseline_row: Option<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
@@ -1112,13 +1167,11 @@ impl RowSaveContext {
                 self.record_accepted_row(accepted_row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => {
-                Err("temporary mounted row document was rejected by semantic admission".into())
-            }
-            Ok(TemporaryRenameOutcome::Stale { .. }) => {
-                Err("temporary mounted row document is stale against its captured baseline".into())
-            }
-            Err(error) => Err(format!("temporary mounted row save failed: {error:?}")),
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
+                "temporary mounted row document was rejected by semantic admission".into(),
+            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(error) => Err(save_failure("temporary mounted row save failed", error)),
         }
     }
 }
@@ -1126,8 +1179,11 @@ const ROOT_INODE: u64 = 1;
 const ROW_PAGE_LIMIT: usize = 256;
 // Do not let cached attributes hide ENOTCONN when the FUSE session dies.
 const ENTRY_TTL: Duration = Duration::ZERO;
-// Private editor drafts must bypass the shared kernel page cache.
+// Private editor drafts bypass the shared kernel page cache. Writeback cache is
+// intentionally not requested: it can mix a later database generation into an
+// already-open draft.
 const EDITABLE_OPEN_FLAGS: fuser::FopenFlags = fuser::FopenFlags::FOPEN_DIRECT_IO;
+const EDITOR_INIT_CAPABILITIES: fuser::InitFlags = fuser::InitFlags::FUSE_ATOMIC_O_TRUNC;
 pub(super) fn spawn_read_only(
     repository: &Repository,
     commit: &GitCommitRef,
@@ -1283,7 +1339,7 @@ pub(super) fn edit_path(
                 let scratch = Arc::new(
                     writer
                         .runtime
-                        .block_on(target.begin_temporary_replacement(usize::MAX)),
+                        .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                 );
                 (save, initial, Some((target, scratch, field, expected)))
             }
@@ -1300,7 +1356,7 @@ pub(super) fn edit_path(
         Some(Arc::new(
             writer
                 .runtime
-                .block_on(save.target.open_draft(64 * 1024 * 1024)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         ))
     } else {
         None
@@ -1718,7 +1774,7 @@ impl WorkspaceFilesystem {
         let scratch = Arc::new(
             writer
                 .runtime
-                .block_on(target.begin_temporary_replacement(usize::MAX)),
+                .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
         writer
             .runtime
@@ -1846,7 +1902,7 @@ impl Filesystem for WorkspaceFilesystem {
             .is_some();
         if editor {
             config
-                .add_capabilities(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC)
+                .add_capabilities(EDITOR_INIT_CAPABILITIES)
                 .map_err(|unsupported| {
                     std::io::Error::new(
                         std::io::ErrorKind::Unsupported,
@@ -1856,6 +1912,41 @@ impl Filesystem for WorkspaceFilesystem {
         }
         Ok(())
     }
+    fn mknod(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
+    fn symlink(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _link_name: &OsStr,
+        _target: &Path,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
+    fn link(
+        &self,
+        _request: &Request,
+        _inode: INodeNo,
+        _new_parent: INodeNo,
+        _new_name: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::EOPNOTSUPP);
+    }
+
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = self
             .state
@@ -1984,19 +2075,16 @@ impl Filesystem for WorkspaceFilesystem {
             }
         }
         if let Some(scratch) = scratch {
-            if let Some(size) = truncate_size
-                && save
-                    .writer
-                    .runtime
-                    .block_on(scratch.truncate(size))
-                    .is_err()
-            {
-                draft_state.unresolved_handles.remove(&handle);
-                if is_scratch && !had_retained_scratch {
-                    draft_state.retained_scratch.remove(&inode.0);
+            if let Some(size) = truncate_size {
+                let result = save.writer.runtime.block_on(scratch.truncate(size));
+                if result.is_err() {
+                    draft_state.unresolved_handles.remove(&handle);
+                    if is_scratch && !had_retained_scratch {
+                        draft_state.retained_scratch.remove(&inode.0);
+                    }
+                    reply.error(draft_errno(&result));
+                    return;
                 }
-                reply.error(Errno::EIO);
-                return;
             }
             self.open_files
                 .lock()
@@ -2014,14 +2102,15 @@ impl Filesystem for WorkspaceFilesystem {
         let draft = Arc::new(
             save.writer
                 .runtime
-                .block_on(save.target.open_draft(usize::MAX)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         );
-        if let Some(size) = truncate_size
-            && save.writer.runtime.block_on(draft.truncate(size)).is_err()
-        {
-            draft_state.unresolved_handles.remove(&handle);
-            reply.error(Errno::EIO);
-            return;
+        if let Some(size) = truncate_size {
+            let result = save.writer.runtime.block_on(draft.truncate(size));
+            if result.is_err() {
+                draft_state.unresolved_handles.remove(&handle);
+                reply.error(draft_errno(&result));
+                return;
+            }
         }
         self.open_files
             .lock()
@@ -2117,7 +2206,7 @@ impl Filesystem for WorkspaceFilesystem {
             let scratch = Arc::new(
                 save.writer
                     .runtime
-                    .block_on(target.begin_temporary_replacement(usize::MAX)),
+                    .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
             );
             let inode = match state.add_file(
                 parent.0,
@@ -2272,15 +2361,13 @@ impl Filesystem for WorkspaceFilesystem {
             )
         };
         let committed = match &blob_field {
-            Some(field) => save
-                .commit_blob_temporary(&target, &scratch, field, baseline)
-                .map_err(|error| error.to_string()),
+            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
             None => save.commit_temporary(&scratch, baseline),
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
             draft_state.rejected_scratch.insert(source_inode);
-            reply.error(Errno::EIO);
+            reply.error(error.errno());
             return;
         }
         let accepted_bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
@@ -2584,7 +2671,7 @@ impl Filesystem for WorkspaceFilesystem {
             if is_scratch && !had_retained_scratch {
                 draft_state.retained_scratch.remove(&inode.0);
             }
-            reply.error(Errno::EIO);
+            reply.error(draft_errno(&result));
         } else {
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
@@ -2673,13 +2760,17 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            Err(DocumentCommitError::Stale | DocumentCommitError::Failed(_)) => {
+            Err(
+                error @ (DocumentCommitError::Rejected(_)
+                | DocumentCommitError::Stale
+                | DocumentCommitError::Failed(_)),
+            ) => {
                 // A submission that did not commit (rejected, stale or failed I/O)
                 // stays unresolved until a later sync of the same file is accepted.
                 if is_document {
                     draft_state.rejected_documents.insert(inode.0);
                 }
-                reply.error(Errno::EIO);
+                reply.error(error.errno());
             }
         }
     }
@@ -2801,7 +2892,7 @@ impl Filesystem for WorkspaceFilesystem {
                     if is_scratch && !had_retained_scratch {
                         draft_state.retained_scratch.remove(&inode.0);
                     }
-                    reply.error(Errno::EIO);
+                    reply.error(draft_errno(&result));
                     return;
                 }
                 if let Some(bytes) = candidate_bytes {
@@ -2817,6 +2908,10 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(NodeKind::Document { .. })
                 ) {
                     reply.error(Errno::EROFS);
+                    return;
+                }
+                if size > DRAFT_FILE_BOUND_BYTES as u64 {
+                    reply.error(Errno::EDQUOT);
                     return;
                 }
                 draft_state.pending_truncates.insert(inode.0, size);
@@ -2851,51 +2946,40 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        if state.ensure_readdir(inode.0, start).is_err() {
-            reply.error(Errno::EIO);
+        let parent = match state.nodes.get(&inode.0) {
+            Some(node) => node.parent,
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+        };
+        if state.directory(inode.0).is_none() {
+            reply.error(Errno::ENOTDIR);
             return;
         }
-        let Some(directory) = state.directory(inode.0) else {
-            if state.nodes.contains_key(&inode.0) {
-                reply.error(Errno::ENOTDIR);
-            } else {
-                reply.error(Errno::ENOENT);
-            }
-            return;
-        };
-        let Some(node) = state.nodes.get(&inode.0) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
         if start == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
             reply.ok();
             return;
         }
         if start <= 1
-            && reply.add(
-                INodeNo(node.parent),
-                2,
-                FileType::Directory,
-                OsStr::new(".."),
-            )
+            && reply.add(INodeNo(parent), 2, FileType::Directory, OsStr::new(".."))
         {
             reply.ok();
             return;
         }
-        for (index, entry) in directory
-            .entries
-            .iter()
-            .enumerate()
-            .skip(start.saturating_sub(2))
+        if state
+            .readdir_page(inode.0, start, |index, entry| {
+                reply.add(
+                    INodeNo(entry.inode),
+                    u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
+                    entry.kind,
+                    entry.name.as_os_str(),
+                )
+            })
+            .is_err()
         {
-            if reply.add(
-                INodeNo(entry.inode),
-                u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
-                entry.kind,
-                entry.name.as_os_str(),
-            ) {
-                break;
-            }
+            reply.error(Errno::EIO);
+            return;
         }
         reply.ok();
     }
@@ -3038,6 +3122,7 @@ impl FsBuilder {
             lower: None,
             exhausted: false,
             error: None,
+            indexed_rows: HashMap::new(),
         });
         Ok(())
     }
@@ -3083,6 +3168,11 @@ impl FsBuilder {
         {
             return Ok(Some(inode));
         }
+        if matches!(self.nodes.get(&parent).map(|node| &node.kind), Some(NodeKind::Table(_)))
+            && let Some(inode) = self.lookup_indexed_text_row(parent, name)?
+        {
+            return Ok(Some(inode));
+        }
         let table_inode = match self.nodes.get(&parent).map(|node| &node.kind) {
             Some(NodeKind::Table(_)) => Some(parent),
             Some(NodeKind::KeyDirectory(directory)) => Some(directory.table_inode),
@@ -3111,6 +3201,61 @@ impl FsBuilder {
             }
             self.load_next_key_page(table_inode)?;
         }
+    }
+
+    fn lookup_indexed_text_row(&mut self, table_inode: u64, name: &OsStr) -> Result<Option<u64>, String> {
+        let (source, cached) = match self.nodes.get(&table_inode).map(|node| &node.kind) {
+            Some(NodeKind::Table(table)) => (
+                Arc::clone(&table.source),
+                table.indexed_rows.get(name).copied(),
+            ),
+            _ => return Ok(None),
+        };
+        if let Some(inode) = cached {
+            return Ok(Some(inode));
+        }
+        let Some(projected) = name.to_str() else {
+            return Ok(None);
+        };
+        let Ok(VfsComponent::Canonical(key_text)) = unproject_component(projected) else {
+            return Ok(None);
+        };
+        let key = TypedKey::Text(key_text);
+        let scope = source
+            .graph
+            .open_read_scope()
+            .map_err(|error| format!("indexed row lookup scope could not be opened: {error:?}"))?;
+        let row = source
+            .graph
+            .lookup_row(&key, &scope)
+            .map_err(|error| format!("indexed row lookup failed: {error:?}"))?;
+        if row.is_none() {
+            return Ok(None);
+        }
+        let inode = self.next_inode;
+        let next_inode = inode
+            .checked_add(1)
+            .ok_or_else(|| "mount tree has too many entries".to_owned())?;
+        self.nodes.insert(
+            inode,
+            FsNode {
+                parent: table_inode,
+                kind: NodeKind::Row(RowDirectory {
+                    directory: Directory::new(),
+                    source,
+                    key,
+                    state: RowLoadState::Unloaded,
+                }),
+            },
+        );
+        self.next_inode = next_inode;
+        let Some(NodeKind::Table(table)) =
+            self.nodes.get_mut(&table_inode).map(|node| &mut node.kind)
+        else {
+            return Err("mount table directory is missing".into());
+        };
+        table.indexed_rows.insert(name.to_os_string(), inode);
+        Ok(Some(inode))
     }
 
     fn ensure_readdir(&mut self, inode: u64, start: usize) -> Result<(), String> {
@@ -3156,6 +3301,29 @@ impl FsBuilder {
             }
             self.load_next_key_page(table_inode)?;
         }
+    }
+
+    fn readdir_page(
+        &mut self,
+        inode: u64,
+        start: usize,
+        mut visit: impl FnMut(usize, &DirectoryEntry) -> bool,
+    ) -> Result<(), String> {
+        self.ensure_readdir(inode, start)?;
+        let directory = self
+            .directory(inode)
+            .ok_or_else(|| "mount directory is missing".to_owned())?;
+        for (index, entry) in directory
+            .entries
+            .iter()
+            .enumerate()
+            .skip(start.saturating_sub(2))
+        {
+            if !visit(index, entry) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn load_next_key_page(&mut self, table_inode: u64) -> Result<(), String> {
@@ -3315,6 +3483,31 @@ impl FsBuilder {
             } else {
                 Err("committed row key path collides with another projected entry".into())
             };
+        }
+        let indexed = match self.nodes.get_mut(&parent).map(|node| &mut node.kind) {
+            Some(NodeKind::Table(table)) => table.indexed_rows.remove(OsStr::new(name)),
+            _ => None,
+        };
+        if let Some(inode) = indexed {
+            let matches = self
+                .nodes
+                .get(&inode)
+                .is_some_and(|node| matches!(&node.kind, NodeKind::Row(row) if row.key == key));
+            if !matches {
+                return Err("indexed row key path collides with another projected entry".into());
+            }
+            let directory = self
+                .directory_mut(parent)
+                .ok_or_else(|| "mount row parent is not a directory".to_owned())?;
+            let entry_name = OsString::from(name);
+            let index = directory.entries.len();
+            directory.by_name.insert(entry_name.clone(), index);
+            directory.entries.push(DirectoryEntry {
+                inode,
+                name: entry_name,
+                kind: FileType::Directory,
+            });
+            return Ok(inode);
         }
         self.insert_node(
             parent,
@@ -3702,6 +3895,7 @@ struct TableDirectory {
     lower: Option<TypedKey>,
     exhausted: bool,
     error: Option<String>,
+    indexed_rows: HashMap<OsString, u64>,
 }
 
 struct KeyDirectory {
@@ -4113,6 +4307,7 @@ mod tests {
         key_directory, parse_row, runtime_row_baseline_from_rows, runtime_table_key_bytes,
         select_runtime_row_fields, source_without_fields,
     };
+    use super::{EDITABLE_OPEN_FLAGS, EDITOR_INIT_CAPABILITIES, ROW_PAGE_LIMIT, WorkspaceFilesystem};
     use orna_repository_v1::TypedKey;
     use orna_runtime_v1::{
         RuntimeTableIdentity, RuntimeTableRows, TableObjectId, vfs::project_component,
@@ -4374,5 +4569,133 @@ mod tests {
             .entry(OsStr::new(&project_component("7")))
             .unwrap();
         assert_eq!(second.inode, row);
+    }
+    #[test]
+    fn editor_open_flags_bypass_kernel_cache_without_writeback_capability() {
+        assert!(EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC));
+        assert!(!EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_WRITEBACK_CACHE));
+        assert_eq!(EDITABLE_OPEN_FLAGS, fuser::FopenFlags::FOPEN_DIRECT_IO);
+    }
+
+    #[tokio::test]
+    async fn workspace_readdir_uses_lazy_indexed_pages() {
+        const SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+        let fixture_rows = (0..ROW_PAGE_LIMIT)
+            .map(|index| {
+                let key = format!("row-{index:03}");
+                let source = format!("{{ title: \"{key}\", }}\n");
+                (key, source)
+            })
+            .collect::<Vec<_>>();
+        let paths = fixture_rows
+            .iter()
+            .map(|(key, source)| (format!("Music/{key}.orna"), source.clone()))
+            .collect::<Vec<_>>();
+        let path_sources = paths
+            .iter()
+            .map(|(path, source)| (path.as_str(), source.as_str()))
+            .collect::<Vec<_>>();
+        let (_repository_directory, repository, relation_id, format_context) =
+            crate::format3::format3_repository_for_table_with_source_rows(
+                SOURCE,
+                "Music",
+                &path_sources,
+            );
+        let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
+        let state = orna_runtime_v1::RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+        let mut bindings = orna_evaluator_v1::SysHostBindingRegistry::new(
+            orna_sys_v1::EnvironmentProvider::default(),
+        );
+        let captures = fixture_rows
+            .iter()
+            .enumerate()
+            .map(|(index, (key, source))| crate::media_commit::SourceCaptureRow {
+                key,
+                blob_fields: &[],
+                source_row: Some(source),
+                ordinal: u8::try_from(index).unwrap(),
+                insert_only: true,
+            })
+            .collect::<Vec<_>>();
+        crate::media_commit::commit_source_captures_for_table(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            relation_id,
+            &format_context,
+            "Music",
+            &captures,
+        )
+        .await;
+        drop(state);
+
+        let context = repository.open_format_context_at_selector("HEAD").unwrap();
+        let filesystem = WorkspaceFilesystem::from_snapshot(
+            &repository,
+            context.commit(),
+            &context,
+            None,
+        )
+        .unwrap();
+        let mut builder = filesystem.state.lock().unwrap();
+        let table_inode = builder
+            .directory(ROOT_INODE)
+            .unwrap()
+            .entry(OsStr::new("Music"))
+            .unwrap()
+            .inode;
+
+        let indexed_name = project_component("row-255");
+        let indexed_inode = builder
+            .lookup_child(table_inode, OsStr::new(&indexed_name))
+            .unwrap()
+            .expect("indexed row lookup finds a stored text key");
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert!(table.directory.entries.is_empty(), "lookup does not materialize a readdir page");
+        assert!(table.lower.is_none(), "indexed lookup leaves the page cursor untouched");
+        assert_eq!(table.indexed_rows.len(), 1, "the direct lookup is retained outside the ordered page");
+
+        let mut first_page = Vec::with_capacity(ROW_PAGE_LIMIT);
+        builder
+            .readdir_page(table_inode, 0, |_, entry| {
+                first_page.push(entry.name.to_string_lossy().into_owned());
+                true
+            })
+            .unwrap();
+        assert_eq!(first_page.len(), ROW_PAGE_LIMIT);
+        assert_eq!(first_page.first().map(String::as_str), Some("row-000"));
+        assert_eq!(first_page.last().map(String::as_str), Some("row-255"));
+        assert!(builder.nodes.get(&indexed_inode).is_some());
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert_eq!(table.directory.entries.len(), ROW_PAGE_LIMIT);
+        assert!(table.indexed_rows.is_empty(), "enumeration absorbs the cached indexed row in key order");
+        assert!(!table.exhausted, "a full page does not prove that another page is absent");
+
+        let mut next_page = Vec::new();
+        builder
+            .readdir_page(table_inode, ROW_PAGE_LIMIT + 2, |_, entry| {
+                next_page.push(entry.name.to_string_lossy().into_owned());
+                true
+            })
+            .unwrap();
+        assert!(next_page.is_empty(), "the exact page boundary does not duplicate the inclusive cursor");
+        let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
+            panic!("projected Music path is a table directory");
+        };
+        assert!(table.exhausted, "the empty final page marks the directory exhausted");
+        assert_eq!(
+            builder
+                .lookup_child(table_inode, OsStr::new(&indexed_name))
+                .unwrap(),
+            Some(indexed_inode),
+        );
     }
 }

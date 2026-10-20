@@ -132,6 +132,20 @@ fn native_sys_blob_annotate_reports_mime_policy_failures() {
     }
 }
 
+#[test]
+fn legacy_ovb1_source_rejects_native_blob_annotation_with_codec_code() {
+    let legacy = ContextValue::new(ValueFormat::Ovb1, Raw::Bytes(b"payload".to_vec()))
+        .expect("canonical OVB-1 bytes");
+    let environment = BTreeMap::from([("asset".to_owned(), legacy)]);
+    let error = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-annotate-mime1.orna").trim(),
+        &environment,
+        Limits::default(),
+    )
+    .expect_err("OVB-1 source must not satisfy the annotated Blob interface");
+    assert_eq!(error.code(), "sys.codec.unsupported_value_profile");
+}
+
 struct AnnotatedBlobEcho {
     received: Option<ContextValue>,
 }
