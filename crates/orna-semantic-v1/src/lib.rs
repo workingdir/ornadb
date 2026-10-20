@@ -59,6 +59,12 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Published typecheck classification for an operand whose static type does
+/// not fit its operator (the spec's "expected X, found Y" type mismatch).
+pub const DIAG_TYPE_MISMATCH: &str = "E2001";
+/// Published classification for adding or subtracting quantities whose
+/// reduced dimensions differ (ORNA-UNIT-004).
+pub const DIAG_INCOMPATIBLE_DIMENSIONS: &str = "E5001";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -9343,18 +9349,9 @@ fn infer_node(
         }
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
-            if op == "!" {
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-                Inferred {
-                    ty: if inferred.ty == Type::Bool {
-                        Type::Bool
-                    } else {
-                        Type::Error
-                    },
-                    effects: inferred.effects,
-                }
-            } else {
-                inferred
+            Inferred {
+                ty: infer_unary_operator(op, &inferred.ty, diagnostics),
+                effects: inferred.effects,
             }
         }
         Expr::Range { lower, upper, .. } => {
@@ -9608,8 +9605,7 @@ fn infer_node(
                     Type::Bool
                 }
             } else {
-                require_same(&left.ty, &right.ty, diagnostics);
-                left.ty
+                infer_arithmetic_operator(op, &left.ty, &right.ty, diagnostics)
             };
             Inferred { ty, effects }
         }
@@ -9811,6 +9807,359 @@ fn infer_node(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+/// Types a prefix operator. `!` requires `Bool` because Orna has no implicit
+/// truthiness (ORNA-CFLOW-009); a numeric sign keeps its operand's type.
+fn infer_unary_operator(op: &str, operand: &Type, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    if matches!(operand, Type::Error | Type::Bottom) {
+        return operand.clone();
+    }
+    if op == "!" {
+        require_same(&Type::Bool, operand, diagnostics);
+        return if *operand == Type::Bool {
+            Type::Bool
+        } else {
+            Type::Error
+        };
+    }
+    let signed = matches!(op, "-" | "+")
+        && (matches!(
+            operand,
+            Type::Int | Type::Decimal | Type::Float | Type::Quantity { affine: false, .. }
+        ) || money_currency(operand).is_some()
+            || unit_suffix_scalar(operand).is_some()
+            // Negated elapsed time, and a negated instant used as a descending
+            // sort key (`examples/valid/sys-run-history.orna`).
+            || (op == "-"
+                && (matches!(operand, Type::Instant)
+                    || matches!(operand, Type::Named(name) if name == "std.DURATION"))));
+    if signed {
+        return operand.clone();
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {}",
+            diagnostic_type_name(operand)
+        ),
+    ));
+    Type::Error
+}
+
+/// Types `+ - * / % ^` once both operands are inferred (ORNA-INFER-001,
+/// ORNA-TYPE-008). Orna has no implicit numeric promotion and no string or
+/// calendar-date arithmetic, so every pair the table does not admit is
+/// reported. Elapsed-time and money-rate pairs are typed by the caller first.
+fn infer_arithmetic_operator(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    if matches!(left, Type::Error) || matches!(right, Type::Error) {
+        return Type::Error;
+    }
+    // A diverging operand means the operation itself never completes.
+    if matches!(left, Type::Bottom) || matches!(right, Type::Bottom) {
+        return Type::Bottom;
+    }
+    if let Some(ty) = arithmetic_operator_type(op, left, right, diagnostics) {
+        return ty;
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {} and {}",
+            diagnostic_type_name(left),
+            diagnostic_type_name(right),
+        ),
+    ));
+    Type::Error
+}
+
+/// The admitted arithmetic table. `None` is an undefined operand pair; a rule
+/// with its own published diagnostic reports it and returns `Error`.
+fn arithmetic_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (left, right) {
+        // Int, Decimal and Float never mix implicitly (ORNA-NUM-001..003).
+        (Type::Int, Type::Int) | (Type::Decimal, Type::Decimal) | (Type::Float, Type::Float) => {
+            Some(left.clone())
+        }
+        _ if money_currency(left).is_some() || money_currency(right).is_some() => {
+            money_operator_type(op, left, right, diagnostics)
+        }
+        (Type::MoneyPerUnit { .. }, Type::MoneyPerUnit { .. }) => {
+            (matches!(op, "+" | "-") && left == right).then(|| left.clone())
+        }
+        (Type::Quantity { .. }, _) | (_, Type::Quantity { .. }) => {
+            quantity_operator_type(op, left, right, diagnostics)
+        }
+        _ => unit_suffix_operator_type(op, left, right, diagnostics),
+    }
+}
+
+/// Money keeps its currency and exact decimal semantics: same-currency
+/// addition and exact scaling only (ORNA-MONEY-001..003).
+fn money_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let binary_float = |ty: &Type| {
+        is_binary_float(ty)
+            || matches!(ty, Type::Quantity { numeric, .. } if **numeric == Type::Float)
+    };
+    if binary_float(left) || binary_float(right) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "binary Float cannot enter an exact Money calculation implicitly",
+        ));
+        return Some(Type::Error);
+    }
+    let money = |ty: &Type| money_currency(ty).is_some();
+    let exact = |ty: &Type| matches!(ty, Type::Int | Type::Decimal);
+    match op {
+        "+" | "-"
+            if money(left)
+                && money(right)
+                && (types_match(left, right) || types_match(right, left)) =>
+        {
+            Some(left.clone())
+        }
+        "*" | "/" if money(left) && exact(right) => Some(left.clone()),
+        "*" if exact(left) && money(right) => Some(right.clone()),
+        _ => None,
+    }
+}
+
+/// Declared-unit quantities follow dimension-basis algebra (ORNA-UNIT-001,
+/// ORNA-UNIT-004) and the affine point/vector rules (ORNA-UNIT-005).
+fn quantity_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (op, left, right) {
+        ("+" | "-", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_sum_type(op, left, right, diagnostics)
+        }
+        ("*" | "/", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_product_type(op == "/", left, right)
+        }
+        ("%", Type::Quantity { affine: false, .. }, _) if left == right => Some(left.clone()),
+        (
+            "*" | "/",
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+            scalar,
+        ) if numeric.as_ref() == scalar => Some(left.clone()),
+        (
+            "*",
+            scalar,
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+        ) if numeric.as_ref() == scalar => Some(right.clone()),
+        ("/", scalar, Type::Quantity { numeric, .. }) if numeric.as_ref() == scalar => {
+            let dimensionless = Type::Quantity {
+                numeric: numeric.clone(),
+                dimension_basis: BTreeMap::new(),
+                scale: UnitFraction::one().public(),
+                offset: UnitFraction::zero().public(),
+                affine: false,
+            };
+            quantity_product_type(true, &dimensionless, right)
+        }
+        _ => None,
+    }
+}
+
+fn quantity_sum_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            offset: right_offset,
+            affine: right_affine,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if dimension_basis != right_basis {
+        diagnostics.push(diag(
+            DIAG_INCOMPATIBLE_DIMENSIONS,
+            if op == "+" {
+                "cannot add quantities with incompatible dimensions"
+            } else {
+                "cannot subtract quantities with incompatible dimensions"
+            },
+        ));
+        return Some(Type::Error);
+    }
+    // Different scales need an explicit unit conversion first.
+    if numeric != right_numeric || scale != right_scale {
+        return None;
+    }
+    let zero = UnitFraction::zero().public();
+    match (op, *affine, *right_affine) {
+        ("+", true, true) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "cannot add two absolute affine temperatures",
+            ));
+            Some(Type::Error)
+        }
+        // Absolute<U> - Absolute<U> -> Delta<U>
+        ("-", true, true) if offset == right_offset => Some(Type::Quantity {
+            numeric: numeric.clone(),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: zero,
+            affine: false,
+        }),
+        // Absolute<U> + Delta<U> and Absolute<U> - Delta<U> -> Absolute<U>
+        (_, true, false) if *right_offset == zero => Some(left.clone()),
+        // Delta<U> + Absolute<U> -> Absolute<U>
+        ("+", false, true) if *offset == zero => Some(right.clone()),
+        (_, false, false) if offset == right_offset => Some(left.clone()),
+        _ => None,
+    }
+}
+
+/// `*` and `/` over non-affine quantities add or subtract dimension exponents
+/// and multiply or divide the exact unit scales.
+fn quantity_product_type(divide: bool, left: &Type, right: &Type) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            affine: false,
+            ..
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            affine: false,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if numeric != right_numeric {
+        return None;
+    }
+    let mut basis = dimension_basis.clone();
+    for (dimension, exponent) in right_basis {
+        let current = basis.entry(dimension.clone()).or_insert(0);
+        *current = if divide {
+            current.checked_sub(*exponent)?
+        } else {
+            current.checked_add(*exponent)?
+        };
+    }
+    basis.retain(|_, exponent| *exponent != 0);
+    let left_scale = unit_fraction(scale)?;
+    let right_scale = unit_fraction(right_scale)?;
+    let scale = if divide {
+        left_scale.divide(&right_scale)?
+    } else {
+        left_scale.multiply(&right_scale)?
+    };
+    if basis.is_empty() && scale == UnitFraction::one() {
+        return Some(numeric.as_ref().clone());
+    }
+    Some(Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis: basis,
+        scale: scale.public(),
+        offset: UnitFraction::zero().public(),
+        affine: false,
+    })
+}
+
+fn unit_fraction(rational: &SourceUnitRational) -> Option<UnitFraction> {
+    UnitFraction::new(
+        rational.numerator.parse().ok()?,
+        rational.denominator.parse().ok()?,
+    )
+}
+
+/// Unit-suffixed numerics such as `Int<kWh>` keep their unit through
+/// same-unit addition and exact scalar scaling. Their dimensions are not
+/// resolved here, so products of two such quantities are unsupported.
+fn unit_suffix_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let left_scalar = unit_suffix_scalar(left);
+    let right_scalar = unit_suffix_scalar(right);
+    let same_unit = types_match(left, right) || types_match(right, left);
+    match (op, left_scalar, right_scalar) {
+        ("+" | "-" | "%", Some(_), Some(_)) if same_unit => Some(left.clone()),
+        ("/", Some(scalar), Some(_)) if left == right => Some(scalar),
+        ("*" | "/", Some(scalar), None) if &scalar == right => Some(left.clone()),
+        ("*", None, Some(scalar)) if &scalar == left => Some(right.clone()),
+        ("*" | "/", Some(_), Some(_)) | ("^", Some(_), None) => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        ("/", None, Some(scalar)) if &scalar == left => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        _ => None,
+    }
+}
+
+/// The scalar of a unit-suffixed numeric such as `Int<kWh>`.
+fn unit_suffix_scalar(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Applied { base, arguments } if arguments.len() == 1 => match base.as_str() {
+            "Int" => Some(Type::Int),
+            "Decimal" => Some(Type::Decimal),
+            "Float" => Some(Type::Float),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
