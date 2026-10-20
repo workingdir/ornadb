@@ -7,6 +7,9 @@ license = "Apache-2.0"
 description = "Private, single-writer local runtime state for Orna 1.0"
 publish = false
 
+[features]
+crash-barriers = ["orna-repository-v1/crash-barriers"]
+
 [dependencies]
 orna-core = { path = "../orna-core" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
