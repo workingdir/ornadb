@@ -1388,6 +1388,108 @@ impl NativeGraphContext {
             .clone())
     }
 
+    /// Reads every relation entry of one `.orna/store` root in ascending
+    /// relation-UUID order. The store root node, the relation map's
+    /// `["relations", database_uuid]` domain, every page's key order, fences
+    /// and exact counts, and each relation value's shape are validated
+    /// before any entry is returned (store-format-3 §2).
+    pub(crate) fn read_store_relations(
+        repository: &crate::Repository,
+        algorithm: GitHashAlgorithm,
+        database_id: [u8; 16],
+        store_root: &NativeOid,
+    ) -> Result<Vec<StoreRelationEntry>, GraphError> {
+        if store_root.algorithm() != algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: algorithm.width(),
+                actual: store_root.as_bytes().len(),
+            });
+        }
+        let mut reader = PinnedNativeGraphReader::new(repository.clone(), algorithm);
+        let store = reader.read_native_node(store_root)?;
+        let NodeData::StoreRoot { relation_map } = store else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::StoreRoot,
+                actual: store.kind(),
+            });
+        };
+        let domain = canonical_domain(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]);
+        let root = reader.read_native_node(&relation_map)?;
+        let count = match &root {
+            NodeData::OrderedLeaf { entries, .. } => entries.len() as u64,
+            NodeData::OrderedBranch { entries, .. } => {
+                entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.row_count)
+                        .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                        .ok_or(GraphError::InvalidCount(usize::MAX))
+                })?
+            }
+            other => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: other.kind(),
+                });
+            }
+        };
+        validate_ordered_root_node(&root, &domain, count)?;
+        let limit = usize::try_from(count).map_err(|_| GraphError::InvalidCount(usize::MAX))?;
+        let mut read_node = |oid: &NativeOid| reader.read_native_node(oid);
+        let mut nodes = BTreeSet::from([relation_map.clone()]);
+        let mut payload = BTreeSet::new();
+        let mut validated_contexts = BTreeSet::new();
+        collect_ordered_index_objects_with(
+            &mut read_node,
+            &root,
+            &relation_map,
+            &domain,
+            None,
+            &mut nodes,
+            &mut payload,
+            &mut validated_contexts,
+        )?;
+        let mut raw = Vec::new();
+        collect_ordered_range_with(
+            &mut read_node,
+            root,
+            &domain,
+            None,
+            None,
+            None,
+            None,
+            limit,
+            &mut raw,
+        )?;
+        if raw.len() != limit {
+            return Err(GraphError::InvalidCount(raw.len()));
+        }
+        raw.into_iter()
+            .map(|entry| {
+                let crate::row_store::TypedKey::Bytes(relation_id) =
+                    crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map_err(|_| GraphError::NonCanonicalData)?
+                else {
+                    return Err(GraphError::InvalidDomain);
+                };
+                let relation_id = relation_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| GraphError::InvalidDomain)?;
+                let (schema_oid, primary_root, secondary_root, row_count) =
+                    decode_relation_value(&entry.value, algorithm)?;
+                Ok(StoreRelationEntry {
+                    relation_id,
+                    schema_oid,
+                    primary_root,
+                    secondary_root,
+                    row_count,
+                })
+            })
+            .collect()
+    }
+
 
     /// Projects the payload-free Blob metadata of one admitted row field.
     ///
@@ -5075,6 +5177,18 @@ struct RelationIndexCandidate {
     primary_root: NativeOid,
     row_count: u64,
     store_root: NativeOid,
+}
+
+/// One relation entry of a `.orna/store` relation map: the stable relation
+/// UUID key and its `[schema_oid, primary_map_oid, secondary_map_or_null,
+/// row_count]` value (store-format-3 §2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreRelationEntry {
+    pub(crate) relation_id: [u8; 16],
+    pub(crate) schema_oid: NativeOid,
+    pub(crate) primary_root: NativeOid,
+    pub(crate) secondary_root: Option<NativeOid>,
+    pub(crate) row_count: u64,
 }
 
 /// Upper bound on commits one revision walk may list.
