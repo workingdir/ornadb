@@ -7,7 +7,7 @@
 //! or host-call capability.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fmt,
     fmt::Write as _,
     sync::Arc,
@@ -3674,7 +3674,7 @@ const CALL_REUSE_CAPACITY: usize = 256;
 struct CallReuse {
     enabled: bool,
     epoch: u64,
-    entries: Vec<CallReuseEntry>,
+    entries: VecDeque<CallReuseEntry>,
     stats: CallReuseStats,
 }
 
@@ -3683,7 +3683,7 @@ impl Default for CallReuse {
         Self {
             enabled: true,
             epoch: 0,
-            entries: Vec::new(),
+            entries: VecDeque::new(),
             stats: CallReuseStats::default(),
         }
     }
@@ -3793,10 +3793,10 @@ impl Context<'_, '_> {
         if let Ok(value) = &result {
             if self.reuse.enabled && self.reuse.epoch == epoch && reusable_value(value) {
                 if self.reuse.entries.len() == CALL_REUSE_CAPACITY {
-                    self.reuse.entries.remove(0);
+                    self.reuse.entries.pop_front();
                 }
                 self.reuse.stats.stores += 1;
-                self.reuse.entries.push(CallReuseEntry {
+                self.reuse.entries.push_back(CallReuseEntry {
                     key,
                     epoch,
                     value: value.clone(),
