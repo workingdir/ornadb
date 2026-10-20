@@ -2892,6 +2892,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
     {
         let destination = self.state.lock().await;
         let mut draft_state = draft.state.lock().await;
+        // A draft that never submitted bytes has nothing to accept or reject, so a
+        // moved baseline does not make it stale; no rejection is retained for it.
+        if draft_state.candidate.is_none() {
+            return Err(VfsSaveError::NoCandidate);
+        }
         if destination.unlinked || !Arc::ptr_eq(&destination.image, &draft_state.baseline) {
             let diagnostic = stale_baseline_diagnostic();
             let generation = *self.cache_epoch.generation.lock().await;
