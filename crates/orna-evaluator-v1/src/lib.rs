@@ -7851,7 +7851,9 @@ impl Context<'_, '_> {
         }
         let native_collection = native_binding.is_some_and(|binding| {
             binding.kind == StandardBindingKind::Collection
-                && (binding.operation.starts_with("__") || binding.operation == "map")
+                && (binding.operation.starts_with("__")
+                    || (binding.operation == "map"
+                        && !captured_collection_map_is_loop(self.functions)))
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -13992,6 +13994,26 @@ fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
     )
 }
 
+fn captured_collection_map_is_loop(functions: &Functions) -> bool {
+    let Some(map_from) = functions.get("std.collection.map_from") else {
+        return false;
+    };
+    matches!(
+        &map_from.body,
+        Expr::Block { statements, .. }
+            if statements.iter().any(|statement| matches!(
+                statement,
+                Statement::Control {
+                    value: Expr::Control {
+                        kind: ControlKind::While,
+                        ..
+                    },
+                    ..
+                }
+            ))
+    )
+}
+
 fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationError> {
     let (locale, zone) = match context {
         None => ("en", "UTC"),
@@ -15136,6 +15158,50 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// `std.collection.map_from` at the historical pin a987024 (recursive).
+    const HISTORICAL_MAP_FROM: &str = "fn map_from<T, U>(
+    values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]
+): [U] =
+    if index >= end {
+        output
+    } else {
+        map_from(values, transform, index + 1, end, append(output, transform(values[index])))
+    };
+";
+
+    #[test]
+    fn captured_collection_map_gate_follows_the_pinned_map_from_shape() {
+        let functions_for = |source: &str| {
+            let parsed = orna_syntax_v1::parse_module(source);
+            assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+            let mut functions = Functions::new();
+            for item in parsed.value.items {
+                let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+                else {
+                    continue;
+                };
+                if signature.name == "map_from" {
+                    functions.insert(
+                        String::from("std.collection.map_from"),
+                        PureFunction {
+                            parameters: signature.parameters,
+                            body,
+                            environment: Environment::new(),
+                        },
+                    );
+                }
+            }
+            functions
+        };
+        // Historical pins keep the native map binding: their body is not a loop.
+        assert!(!captured_collection_map_is_loop(&functions_for(HISTORICAL_MAP_FROM)));
+        // The current pin defines map_from as a while loop, so the Orna body shadows native map.
+        assert!(captured_collection_map_is_loop(&functions_for(include_str!(
+            "../../../stdlib/std/collection.orna"
+        ))));
+        assert!(!captured_collection_map_is_loop(&Functions::new()));
+    }
 
     #[test]
     fn registry_covers_pinned_intrinsic_and_sys_host_stubs() {
