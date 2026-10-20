@@ -115,6 +115,60 @@ async fn local_embedded_state_rolls_back_row_and_checkpoint_together() {
     assert!(state_db.with_file_name("state.db-wal").is_file());
 }
 
+/// ORNA-HOT-001: high-rate writes are queryable from embedded Turso before publication.
+#[tokio::test]
+async fn committed_high_rate_rows_survive_runtime_reopen_before_publication() {
+    let (_temp, repository) = repository();
+    let identity = RuntimeIdentity {
+        database_id: [41; 16],
+        repository_id: [42; 16],
+    };
+    let owner_id = [43; 16];
+    let published_head_before = repository.head().unwrap();
+    let runtime = RuntimeState::open_with_owner_id(&repository, identity, [44; 32], owner_id)
+        .await
+        .unwrap();
+    let lease = runtime.acquire_lease(owner_id).await.unwrap();
+
+    let mutations = (0..128u16)
+        .map(|index| {
+            TableMutation::new(
+                [index as u8 + 1; 16],
+                "Contact",
+                index.to_be_bytes().to_vec(),
+                Some(format!("contact-{index}").into_bytes()),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let context = runtime.begin_activation().await.unwrap();
+    runtime
+        .commit_table_activation(lease, &context, &mutations, [45; 32], &NoFault)
+        .await
+        .unwrap();
+    assert_eq!(runtime.pending().await.unwrap().len(), 128);
+    drop(runtime);
+
+    let reopened = RuntimeState::open_with_owner_id(&repository, identity, [44; 32], owner_id)
+        .await
+        .unwrap();
+    for index in 0..128u16 {
+        assert_eq!(
+            reopened
+                .committed_table_row("Contact", &index.to_be_bytes())
+                .await
+                .unwrap(),
+            Some(format!("contact-{index}").into_bytes()),
+            "row {index} must be queryable before publication after reopening embedded Turso"
+        );
+    }
+    assert_eq!(reopened.pending().await.unwrap().len(), 128);
+    assert_eq!(
+        repository.head().unwrap(),
+        published_head_before,
+        "the 128 durable rows remain unpublished in Git"
+    );
+}
 /// ORNA-TURSO-004: one worktree runtime owns the local owner lock; a second owner is a secondary participant.
 /// ORNA-TURSO-005: a second local writer with a different owner identity fails to acquire the writer lease.
 /// ORNA-TURSO-006: replacement ownership increments the lease fence and rejects writes from the stale owner.
