@@ -14,9 +14,10 @@ const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
 const GENERATED_API_SYS_VERSION: &str = "1.1";
 const GENERATED_API_STATUS: &str =
     "Final 1.1.0 specification contract; engine execution not claimed";
-/// Frozen final compatibility artifact. Native metadata is projected and
-/// validated against these reviewed bytes; it does not regenerate them.
-pub const FINAL_API_AUTHORITY_JSON: &str = include_str!("../../api/sys.json");
+/// Publication source-of-truth label for the generated sys API. Rust owns this
+/// value; the former frozen `api/sys.json` file is no longer read at build time.
+const SYS_API_SOURCE_OF_TRUTH: &str =
+    "api/sys.json; normative semantics in source chapters and generated system reference";
 #[derive(Clone, Debug)]
 pub struct Function {
     #[allow(dead_code)] // Read by collector proofs; not needed while emitting API JSON.
@@ -101,41 +102,27 @@ pub fn generate_sys_artifacts(
     schema: &Value,
 ) -> Result<GeneratedSysArtifacts, String> {
     validate_collection(functions)?;
-    let authority: Value = serde_json::from_str(FINAL_API_AUTHORITY_JSON)
-        .map_err(|error| format!("parse frozen final system API authority: {error}"))?;
-    validate_api_document(&authority)?;
-
-    // `source_of_truth` belongs to the frozen publication authority, not to
-    // the native registry inventory. Add it only to this in-memory semantic
-    // projection so the registry can be compared without declaring itself
-    // normative.
-    let authority_source = authority
-        .get("source_of_truth")
-        .cloned()
-        .ok_or_else(|| "frozen final system API authority has no source_of_truth".to_owned())?;
+    // The Rust registry is the authority. `source_of_truth` is a Rust constant
+    // added only to this projection, so the inventory itself stays non-normative.
     let mut projected_registry = registry;
     projected_registry
         .as_object_mut()
         .ok_or_else(|| "system API registry inventory must be a JSON object".to_owned())?
-        .insert("source_of_truth".to_owned(), authority_source);
+        .insert(
+            "source_of_truth".to_owned(),
+            Value::String(SYS_API_SOURCE_OF_TRUTH.to_owned()),
+        );
     let function_metadata = functions
         .iter()
         .filter(|function| function_is_admitted_to_format_3(&function.metadata))
         .map(|function| published_function_metadata(&function.metadata))
         .collect::<Vec<_>>();
     let published_schema = generated_api_schema(schema)?;
-    let projected_api = generate_system_api_document(projected_registry, function_metadata)?;
-    if projected_api != authority {
-        return Err(
-            "native sys metadata does not project the frozen final api/sys.json authority"
-                .to_owned(),
-        );
-    }
-    validate_published_schema_shape(&authority, &published_schema)?;
-    // The authority bytes are the only source for this compatibility artifact.
-    // Keep the semantic projection above as a validation proof, not a serializer.
-    let api = authority;
-    let api_json = FINAL_API_AUTHORITY_JSON.to_owned();
+    let api = generate_system_api_document(projected_registry, function_metadata)?;
+    validate_api_document(&api)?;
+    validate_published_schema_shape(&api, &published_schema)?;
+    let api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
+    let api_json = format!("{api_json}\n");
 
     let mut schema_json =
         canonical_pretty_json(&published_schema).map_err(|error| error.to_string())?;
