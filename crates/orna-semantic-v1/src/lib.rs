@@ -2621,6 +2621,13 @@ fn declared_enum_variants(item: &Item) -> BTreeSet<String> {
         .map(|variant| variant.name.clone())
         .collect()
 }
+/// Converts one declared source type expression to the unresolved semantic
+/// type recorded by table and nominal declarations. Named types keep their
+/// source spelling; callers resolve them against the analysed module scope.
+pub fn declared_type(ty: &TypeExpr) -> Type {
+    type_of(ty)
+}
+
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
         TypeExpr::Name {
