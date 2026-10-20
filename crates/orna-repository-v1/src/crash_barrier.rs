@@ -1,43 +1,60 @@
 //! Process-kill barriers at publication and capture durability boundaries.
 //!
-//! The barrier is inert unless a test harness sets both
-//! `ORNA_TEST_PUBLICATION_CRASH_AT` (the exact boundary name) and
-//! `ORNA_TEST_PUBLICATION_CRASH_MARKER` (a file path). When the selected
-//! boundary is reached, the marker receives the boundary name and the process
-//! parks forever so the harness can SIGKILL it at that exact point.
+//! Compiled to a no-op unless the non-default `crash-barriers` feature is
+//! enabled. Only feature-enabled test builds can read the harness environment,
+//! so release binaries contain neither the arming code nor its variable names.
+//!
+//! With the feature enabled, a harness sets `ORNA_TEST_PUBLICATION_CRASH_AT` to
+//! the exact boundary name and `ORNA_TEST_PUBLICATION_CRASH_DIR` to a directory
+//! it owns. When the selected boundary is reached, the process creates
+//! `publication-crash-marker` in that directory exclusively (failing rather than
+//! overwriting) and parks forever so the harness can SIGKILL it at that point.
 
-use std::{path::PathBuf, sync::LazyLock, thread};
+#[cfg(feature = "crash-barriers")]
+mod armed {
+    use std::{io::Write, path::PathBuf, sync::LazyLock, thread};
 
-const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
-const CRASH_MARKER: &str = "ORNA_TEST_PUBLICATION_CRASH_MARKER";
+    const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
+    const CRASH_DIR: &str = "ORNA_TEST_PUBLICATION_CRASH_DIR";
+    /// Fixed marker name inside the harness-named directory.
+    pub const MARKER_FILE_NAME: &str = "publication-crash-marker";
 
-struct SelectedBarrier {
-    boundary: String,
-    marker: PathBuf,
+    /// Environment is read once per process.
+    static SELECTED: LazyLock<Option<(String, PathBuf)>> = LazyLock::new(|| {
+        let boundary = std::env::var(CRASH_AT).ok()?;
+        let directory = PathBuf::from(std::env::var_os(CRASH_DIR)?);
+        Some((boundary, directory.join(MARKER_FILE_NAME)))
+    });
+
+    pub fn publication_crash_barrier(boundary: &str) {
+        let Some((selected, marker)) = &*SELECTED else {
+            return;
+        };
+        if selected != boundary {
+            return;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+            .expect("create new publication crash marker");
+        file.write_all(boundary.as_bytes())
+            .expect("write publication crash marker");
+        file.sync_all().expect("sync publication crash marker");
+        loop {
+            thread::park();
+        }
+    }
 }
 
-/// Environment is read once per process so production paths pay only a cached
-/// load when no barrier is configured.
-static SELECTED: LazyLock<Option<SelectedBarrier>> = LazyLock::new(|| {
-    let boundary = std::env::var(CRASH_AT).ok()?;
-    let marker = std::env::var_os(CRASH_MARKER)?;
-    Some(SelectedBarrier {
-        boundary,
-        marker: PathBuf::from(marker),
-    })
-});
-
-/// Parks the calling thread when `boundary` is the harness-selected crash
-/// point.
+/// Parks the calling process at `boundary` when the `crash-barriers` test
+/// feature is enabled and the harness selected that boundary.
+#[cfg(feature = "crash-barriers")]
 pub fn publication_crash_barrier(boundary: &str) {
-    let Some(selected) = &*SELECTED else {
-        return;
-    };
-    if selected.boundary != boundary {
-        return;
-    }
-    std::fs::write(&selected.marker, boundary).expect("write publication crash marker");
-    loop {
-        thread::park();
-    }
+    armed::publication_crash_barrier(boundary);
 }
+
+/// Release-build form: no environment access and no code path.
+#[cfg(not(feature = "crash-barriers"))]
+#[inline(always)]
+pub fn publication_crash_barrier(_boundary: &str) {}
