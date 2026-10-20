@@ -917,6 +917,11 @@ impl EffectHandler for SysHostBindingRegistry {
 }
 
 impl Ovb2EffectHandler for SysHostBindingRegistry {
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
+        self.explain_catalogue.as_deref()
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
