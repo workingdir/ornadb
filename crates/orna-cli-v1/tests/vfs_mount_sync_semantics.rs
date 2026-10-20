@@ -1,0 +1,367 @@
+#![cfg(target_os = "linux")]
+
+//! Gate E: acknowledged versus draft state on the writable mount for
+//! fsync/fdatasync, repeated flush, dup/fork, temporary sync and rename,
+//! writes after sync, and close-error ignorance (VFS-007/008/009, EDIT-1).
+
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+};
+
+#[allow(dead_code)]
+#[path = "support/format3.rs"]
+mod format3;
+#[allow(dead_code)]
+#[path = "support/media_commit.rs"]
+mod media_commit;
+
+#[path = "support/editor_mount.rs"]
+mod editor_mount;
+use editor_mount::{EditorMount, durable_row_contains, require_fuse_or_skip, start_editor_mount};
+
+const EIO: i32 = 5;
+
+fn row(title: &str) -> String {
+    format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
+}
+
+/// Title that the schema rejects: `artist` must be Str, so the draft fails at sync.
+fn invalid_row(title: &str) -> String {
+    format!("{{ title: \"{title}\", artist: 123, }}\n")
+}
+
+fn open_rw(fixture: &EditorMount) -> File {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fixture.data_path)
+        .expect("open data.orna read-write")
+}
+
+fn replace_draft(file: &mut File, document: &str) {
+    file.set_len(0).expect("truncate private candidate");
+    file.seek(SeekFrom::Start(0)).expect("seek to start");
+    file.write_all(document.as_bytes())
+        .expect("write private candidate");
+}
+
+fn read_own_draft(file: &mut File) -> String {
+    let mut text = String::new();
+    file.seek(SeekFrom::Start(0)).expect("seek to start");
+    file.read_to_string(&mut text).expect("read own draft");
+    text
+}
+
+fn fresh_view(fixture: &EditorMount) -> String {
+    std::fs::read_to_string(&fixture.data_path).expect("read accepted state through a new open")
+}
+
+fn assert_eio(result: std::io::Result<()>, context: &str) {
+    let error = result.expect_err(context);
+    assert_eq!(error.raw_os_error(), Some(EIO), "{context}: {error}");
+}
+
+/// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
+/// returns EIO, stays visible to its own handle, and is never admitted.
+#[tokio::test]
+async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+
+    replace_draft(&mut file, &row("Fsync accepted"));
+    file.sync_all().expect("valid draft fsync is acknowledged");
+    assert!(fresh_view(&fixture).contains("Fsync accepted"));
+
+    replace_draft(&mut file, &invalid_row("Bad fsync draft"));
+    assert_eio(file.sync_all(), "invalid draft fsync must fail with EIO");
+    assert!(
+        read_own_draft(&mut file).contains("Bad fsync draft"),
+        "the rejected draft stays visible to its own handle",
+    );
+    assert!(!fresh_view(&fixture).contains("Bad fsync draft"));
+    assert!(
+        fresh_view(&fixture).contains("Fsync accepted"),
+        "a new open reads accepted state, never the rejected draft",
+    );
+}
+
+/// ORNA-VFS-008: fdatasync acknowledges and rejects with the same contract as fsync.
+#[tokio::test]
+async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+
+    replace_draft(&mut file, &row("Datasync accepted"));
+    file.sync_data()
+        .expect("valid draft fdatasync is acknowledged");
+    assert!(fresh_view(&fixture).contains("Datasync accepted"));
+
+    replace_draft(&mut file, &invalid_row("Bad datasync draft"));
+    assert_eio(
+        file.sync_data(),
+        "invalid draft fdatasync must fail with EIO",
+    );
+    assert!(!fresh_view(&fixture).contains("Bad datasync draft"));
+    assert!(fresh_view(&fixture).contains("Datasync accepted"));
+}
+
+/// ORNA-VFS-008: repeated fsync/fdatasync/flush of one accepted candidate
+/// return the recorded outcome and never create a second acceptance.
+#[tokio::test]
+async fn repeated_sync_and_flush_do_not_accept_the_candidate_twice() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Repeated once"));
+    file.sync_all().expect("first fsync accepts the candidate");
+    let after_first = fresh_view(&fixture);
+    assert!(after_first.contains("Repeated once"));
+
+    file.sync_all()
+        .expect("repeated fsync returns the recorded outcome");
+    file.sync_data()
+        .expect("repeated fdatasync returns the recorded outcome");
+    for _ in 0..3 {
+        // Dropping a dup'd descriptor issues a FUSE flush for the shared handle.
+        drop(file.try_clone().expect("dup for a flush cycle"));
+    }
+    file.sync_all()
+        .expect("fsync after flush cycles is still idempotent");
+    assert_eq!(
+        fresh_view(&fixture),
+        after_first,
+        "repeated sync and flush must not admit the same candidate again",
+    );
+}
+
+/// ORNA-VFS-008: a dup shares one handle; syncing through either descriptor
+/// acknowledges the same single candidate.
+#[tokio::test]
+async fn dup_descriptors_share_one_draft_and_one_acceptance() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    let dup = file.try_clone().expect("dup the handle");
+    replace_draft(&mut file, &row("Dup shared"));
+    dup.sync_all()
+        .expect("sync through the dup acknowledges the shared draft");
+    assert!(fresh_view(&fixture).contains("Dup shared"));
+    file.sync_all()
+        .expect("sync through the original is idempotent");
+    drop(dup);
+    assert!(fresh_view(&fixture).contains("Dup shared"));
+}
+
+/// ORNA-VFS-007/008: a close flush of an unsynced draft is not acceptance; the
+/// close succeeds, and after unmount only acknowledged bytes are durable.
+#[tokio::test]
+async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Never synced"));
+    let dup = file.try_clone().expect("dup the handle");
+    drop(dup);
+    drop(file);
+
+    assert!(
+        fresh_view(&fixture).contains("Original"),
+        "a new open after close sees only accepted state",
+    );
+    assert!(!fresh_view(&fixture).contains("Never synced"));
+
+    let EditorMount {
+        _mounted,
+        repository,
+        relation_id,
+        ..
+    } = fixture;
+    drop(_mounted);
+    let rows = format3::committed_store_rows(&repository, relation_id);
+    assert!(durable_row_contains(&rows, "Original"));
+    assert!(
+        !durable_row_contains(&rows, "Never synced"),
+        "unmount must not retain or accept an unsynced draft as durable",
+    );
+}
+
+/// ORNA-VFS-008 close-error ignorance: a rejected draft that is closed without
+/// a successful sync leaves the durable row unchanged.
+#[tokio::test]
+async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &invalid_row("Bad close draft"));
+    assert_eio(file.sync_all(), "invalid draft fsync must fail with EIO");
+    let before_close = fresh_view(&fixture);
+    drop(file);
+    assert_eq!(
+        fresh_view(&fixture),
+        before_close,
+        "closing after a rejected sync must not change the durable row",
+    );
+    assert!(fresh_view(&fixture).contains("Original"));
+}
+
+/// ORNA-VFS-008: a child process that inherits the handle's open file
+/// description (the shared-description effect of dup/fork) writes through it;
+/// the parent's sync acknowledges that write, and a later unsynced parent write
+/// is not acknowledged. A literal `fork(2)` cannot be called here because the
+/// crate forbids `unsafe_code`; this gap is recorded on the Gate E bead.
+#[tokio::test]
+async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_is_not() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    file.set_len(0).expect("truncate private candidate");
+    file.seek(SeekFrom::Start(0)).expect("seek to start");
+
+    let shared = file.try_clone().expect("dup for the child's stdout");
+    let child_document = row("Inherited child");
+    let status = std::process::Command::new("/bin/sh")
+        .args(["-c", "printf '%s' \"$ORNA_CHILD_DOCUMENT\""])
+        .env("ORNA_CHILD_DOCUMENT", &child_document)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(shared))
+        .status()
+        .expect("run child sharing the open file description");
+    assert!(
+        status.success(),
+        "child write through the inherited handle must succeed"
+    );
+    file.sync_all()
+        .expect("parent sync acknowledges the child's write");
+    assert!(fresh_view(&fixture).contains("Inherited child"));
+
+    replace_draft(&mut file, &row("Parent unsynced"));
+    drop(file);
+    let accepted = fresh_view(&fixture);
+    assert!(accepted.contains("Inherited child"));
+    assert!(
+        !accepted.contains("Parent unsynced"),
+        "the parent's unsynced write after the shared handle was used must not be acknowledged",
+    );
+}
+
+/// ORNA-VFS-008: writes after a successful sync form a new candidate; only the
+/// next sync acknowledges them.
+#[tokio::test]
+async fn writes_after_sync_start_a_new_candidate_until_the_next_sync() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("After first"));
+    file.sync_all().expect("first sync acknowledges");
+
+    replace_draft(&mut file, &row("After second"));
+    assert!(
+        read_own_draft(&mut file).contains("After second"),
+        "the writing handle sees its own new candidate",
+    );
+    let accepted = fresh_view(&fixture);
+    assert!(accepted.contains("After first"));
+    assert!(
+        !accepted.contains("After second"),
+        "an unsynced write after a sync is not acknowledged",
+    );
+    assert!(fresh_view(&fixture).contains("After first"));
+
+    file.sync_all()
+        .expect("second sync acknowledges the new candidate");
+    let accepted = fresh_view(&fixture);
+    assert!(accepted.contains("After second"));
+    assert!(!accepted.contains("After first"));
+}
+
+/// ORNA-VFS-008/EDIT-1: fsync and fdatasync on a clean handle with no pending
+/// write do not invent a candidate and must succeed without changing the row.
+#[tokio::test]
+async fn clean_handle_sync_succeeds_without_changing_the_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let before = fresh_view(&fixture);
+    let file = open_rw(&fixture);
+    file.sync_all()
+        .expect("fsync of a clean handle is not a failure");
+    file.sync_data()
+        .expect("fdatasync of a clean handle is not a failure");
+    drop(file);
+    assert_eq!(fresh_view(&fixture), before);
+}
+
+/// ORNA-VFS-009/EDIT-1: `fsync(temp)` preserves scratch bytes only; the row
+/// changes when the temporary is renamed onto data.orna, not before.
+#[tokio::test]
+async fn temporary_sync_is_not_acceptance_and_rename_applies_it() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let temporary = fixture.row_directory.join(".data.orna.sync-semantics-tmp");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("create temporary sibling");
+    scratch
+        .write_all(row("Temp synced").as_bytes())
+        .expect("write temporary");
+    scratch.sync_all().expect("fsync(temp) succeeds");
+    scratch.sync_data().expect("fdatasync(temp) succeeds");
+    assert!(
+        !fresh_view(&fixture).contains("Temp synced"),
+        "fsync(temp) must not be row acceptance",
+    );
+    assert!(fresh_view(&fixture).contains("Original"));
+
+    drop(scratch);
+    std::fs::rename(&temporary, &fixture.data_path)
+        .expect("rename applies the validated temporary");
+    assert!(fresh_view(&fixture).contains("Temp synced"));
+}
+
+/// ORNA-VFS-009: a synced temporary that is abandoned instead of renamed never
+/// reaches the row.
+#[tokio::test]
+async fn abandoned_synced_temporary_never_reaches_the_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let temporary = fixture.row_directory.join(".data.orna.abandoned-tmp");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("create temporary sibling");
+    scratch
+        .write_all(row("Abandoned temp").as_bytes())
+        .expect("write temporary");
+    scratch.sync_all().expect("fsync(temp) succeeds");
+    drop(scratch);
+    std::fs::remove_file(&temporary).expect("unlink abandoned temporary");
+    assert!(fresh_view(&fixture).contains("Original"));
+    assert!(!fresh_view(&fixture).contains("Abandoned temp"));
+}
