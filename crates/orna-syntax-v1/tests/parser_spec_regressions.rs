@@ -356,7 +356,8 @@ fn assert_is_a_contextual_name_outside_assertion_statements() {
     let enumeration = parse_module("pub enum Op { assert, deny }");
     assert!(enumeration.is_ok(), "{:?}", enumeration.diagnostics);
     let source = "pub fn label(audit: Audit, ok: Bool): Bool {\n    f(assert: true);\n    let r = { assert: 1 };\n    g(audit.assert);\n    audit.assert;\n    assert if ok { true } else { false };\n    true\n}";
-    let (statements, _) = block_parts(&function_body(source));
+    let body = function_body(source);
+    let (statements, _) = block_parts(&body);
     assert_eq!(statements.len(), 5, "{statements:?}");
     assert!(
         matches!(
