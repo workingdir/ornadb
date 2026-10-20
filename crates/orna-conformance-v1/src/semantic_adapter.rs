@@ -4318,6 +4318,7 @@ struct TransactionalTableCandidateValidator {
     cwd_generation: orna_repository_v1::CwdGeneration,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
+    candidate_table_fields: TableFields,
     functions: Functions,
     limits: EvaluatorLimits,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
@@ -4350,6 +4351,7 @@ pub fn transactional_table_candidate_validator(
 /// admission path as project-backed transactions.
 pub fn transactional_loaded_project_candidate_validator(
     loaded: &orna_project_v1::LoadedProject,
+    identities: &orna_project_v1::ObjectIdentityManifest,
     cwd_generation: orna_repository_v1::CwdGeneration,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
     limits: EvaluatorLimits,
@@ -4402,7 +4404,14 @@ pub fn transactional_loaded_project_candidate_validator(
     };
     let admitted = admit_transaction_project(&project, limits, "")
         .map_err(|failure| *failure)?;
-    Ok(Box::new(TransactionalTableCandidateValidator::new(
+    let candidate_table_fields = candidate_table_fields_in_stable_id_order(
+        loaded,
+        identities,
+        &project,
+        &admitted.table_fields,
+    )
+    .map_err(|reason| StageOutcome::Skipped { reason })?;
+    let mut validator = TransactionalTableCandidateValidator::new(
         cwd_generation,
         &admitted.functions,
         &admitted.key_fields,
@@ -4412,7 +4421,46 @@ pub fn transactional_loaded_project_candidate_validator(
         &admitted.module_assertions,
         table_object_ids,
         limits,
-    )))
+    );
+    validator.candidate_table_fields = candidate_table_fields;
+    Ok(Box::new(validator))
+}
+
+fn candidate_table_fields_in_stable_id_order(
+    loaded: &orna_project_v1::LoadedProject,
+    identities: &orna_project_v1::ObjectIdentityManifest,
+    project: &ProjectUnit,
+    source_fields: &TableFields,
+) -> Result<TableFields, String> {
+    let mut ordered_fields = source_fields.clone();
+    for unit in &project.modules {
+        if is_standard_source(unit) {
+            continue;
+        }
+        let source_path = unit
+            .source_id
+            .strip_prefix("mounted/")
+            .ok_or_else(|| "candidate table source has no committed module path".to_owned())?;
+        let identity = loaded
+            .identities()
+            .iter()
+            .find(|identity| identity.logical_path() == source_path)
+            .ok_or_else(|| format!("candidate module {source_path} has no committed identity"))?;
+        let schema_namespace = identity.namespace().join(".");
+        for item in parse_module(&unit.source).value.items {
+            let Declaration::Table { name, .. } = item.declaration else {
+                continue;
+            };
+            let fields = ordered_fields
+                .get_mut(&name)
+                .ok_or_else(|| format!("candidate table {name} has no admitted fields"))?;
+            let schema = loaded
+                .source_table_schema(identities, &schema_namespace, &name)
+                .map_err(|_| format!("candidate table {name} has no stable schema"))?;
+            *fields = order_field_names_by_stable_id(fields, schema.field_object_ids())?;
+        }
+    }
+    Ok(ordered_fields)
 }
 
 impl TransactionalTableCandidateValidator {
@@ -4441,6 +4489,7 @@ impl TransactionalTableCandidateValidator {
             table_object_ids,
             table_assertions: table_assertions.clone(),
             module_assertions: module_assertions.clone(),
+            candidate_table_fields: table_fields.clone(),
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
             limits,
             tables: tables.into_iter().collect(),
@@ -4492,7 +4541,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     self.limits
                         .check_items(candidate_rows)
                         .map_err(|_| table_assertion_diagnostic())?;
-                    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+                    let row = candidate_assertion_row(table, encoded, &self.candidate_table_fields)?;
                     let environment = Environment::from([(binding.to_owned(), row)]);
                     let value = evaluate_with_functions_and_budget(
                         predicate,
@@ -6181,7 +6230,7 @@ impl TableFloatFields {
             .is_some_and(|fields| fields.contains(field))
     }
 }
-type TableFields = BTreeMap<String, BTreeSet<String>>;
+type TableFields = BTreeMap<String, Vec<String>>;
 /// Complete admission result for one transactional entry point: lowered
 /// functions plus every declared table and assertion surface.
 struct AdmittedTransaction {
@@ -9174,6 +9223,52 @@ enum TableAssertionKind {
     AllUnique,
 }
 
+fn candidate_assertion_row(
+    table: &str,
+    encoded: &[u8],
+    table_fields: &TableFields,
+) -> Result<Value, SafeDiagnostic> {
+    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+    let OvbRaw::Array(values) = row.raw() else {
+        return Ok(row);
+    };
+    let names = table_fields
+        .get(table)
+        .ok_or_else(table_assertion_diagnostic)?;
+    let mut fields = names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| {
+            let key = OvbRaw::Text(name.clone());
+            let encoded_key = Value::new(key.clone())
+                .and_then(|value| value.encode())
+                .map_err(|_| table_assertion_diagnostic())?;
+            Ok((encoded_key, (key, value.clone())))
+        })
+        .collect::<Result<Vec<_>, SafeDiagnostic>>()?;
+    fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let fields = fields.into_iter().map(|(_, field)| field).collect();
+    Value::new(OvbRaw::Map(fields)).map_err(|_| table_assertion_diagnostic())
+}
+
+fn order_field_names_by_stable_id(
+    fields: &[String],
+    field_object_ids: &BTreeMap<String, [u8; 16]>,
+) -> Result<Vec<String>, String> {
+    let mut ordered = fields
+        .iter()
+        .map(|name| {
+            field_object_ids
+                .get(name)
+                .copied()
+                .map(|id| (id, name.clone()))
+                .ok_or_else(|| format!("stored table field {name} has no stable object identity"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ordered.sort_unstable_by_key(|(id, _)| *id);
+    Ok(ordered.into_iter().map(|(_, name)| name).collect())
+}
+
 fn table_assertion_predicate(
     assertion: &Expr,
 ) -> Result<(TableAssertionKind, &str, &Expr), EvaluationError> {
@@ -9671,7 +9766,7 @@ mod transaction_admission_tests {
     use num_bigint::BigInt;
     use orna_evaluator_v1::{EffectHandler, Limits, StepBudget};
     use orna_foundation_v1::{OvbRaw, Value};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     #[test]
     fn transaction_key_order_uses_logical_integer_and_composite_components() {
@@ -9709,6 +9804,37 @@ mod transaction_admission_tests {
     }
 
     #[test]
+    fn candidate_assertion_rows_bind_names_in_stable_field_id_order() {
+        let declared_fields = vec!["first_declared".to_owned(), "second_declared".to_owned()];
+        let field_ids = BTreeMap::from([
+            ("first_declared".to_owned(), [0x20; 16]),
+            ("second_declared".to_owned(), [0x10; 16]),
+        ]);
+        let ordered_fields =
+            super::order_field_names_by_stable_id(&declared_fields, &field_ids).unwrap();
+        assert_eq!(ordered_fields, ["second_declared", "first_declared"]);
+
+        let table_fields = BTreeMap::from([("main.Note".to_owned(), ordered_fields)]);
+        let encoded = Value::new(OvbRaw::Array(vec![
+            OvbRaw::Text("value-for-second".into()),
+            OvbRaw::Text("value-for-first".into()),
+        ]))
+        .unwrap()
+        .encode()
+        .unwrap();
+        let row = super::candidate_assertion_row("main.Note", &encoded, &table_fields).unwrap();
+        let OvbRaw::Map(fields) = row.raw() else {
+            panic!("candidate assertion row is a record map");
+        };
+        let value_for = |name: &str| {
+            fields.iter().find_map(|(key, value)| {
+                (key == &OvbRaw::Text(name.to_owned())).then_some(value)
+            })
+        };
+        assert_eq!(value_for("first_declared"), Some(&OvbRaw::Text("value-for-first".into())));
+        assert_eq!(value_for("second_declared"), Some(&OvbRaw::Text("value-for-second".into())));
+    }
+
     fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {
         let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
         assert!(matches!(
@@ -9837,7 +9963,9 @@ mod transaction_admission_tests {
                     )
                     .expect("valid Note key schema"),
                 )]);
-                let table_fields = BTreeMap::from([("Note".into(), BTreeSet::from(["id".into()]))]);
+                let table_fields = BTreeMap::from([
+                    ("Note".into(), vec!["id".into()]),
+                ]);
                 let mut mutations = Vec::new();
                 let limits = Limits::default();
                 let mut handler = TableEffectHandler {
@@ -10146,7 +10274,7 @@ mod transaction_admission_tests {
         let key_fields = BTreeMap::from([("Stock".into(), schema.clone())]);
         let table_fields = BTreeMap::from([(
             "Stock".into(),
-            BTreeSet::from(["location".into(), "sku".into()]),
+            vec!["location".into(), "sku".into()],
         )]);
         let rows = [
             (
@@ -10341,7 +10469,7 @@ mod transaction_admission_tests {
         let key_fields = BTreeMap::from([("Pair".into(), schema.clone())]);
         let table_fields = BTreeMap::from([(
             "Pair".into(),
-            BTreeSet::from(["left".into(), "right".into(), "label".into()]),
+            vec!["left".into(), "right".into(), "label".into()],
         )]);
         let row = |left: i64, right: i64, label: &str| {
             Value::new(OvbRaw::Map(vec![
@@ -10734,7 +10862,7 @@ mod durable_tests {
     use super::{
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
-        admitted_transaction_module, admit_transaction_project, lower_relation_bindings,
+        admitted_transaction_module, lower_relation_bindings,
         replay_request_terminal,
         request_terminal,
     };

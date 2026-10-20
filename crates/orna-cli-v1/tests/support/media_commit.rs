@@ -256,6 +256,9 @@ pub async fn commit_source_captures_for_table(
                 .expect("accept the captured Blob for this row");
             blob_fields.push(((*field_name).to_owned(), blob_binding));
         }
+        // Keep source ids non-zero while preserving every 8-bit fixture ordinal.
+        let mut source_row_id = [capture.ordinal; 16];
+        source_row_id[0] = 1;
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
@@ -264,7 +267,7 @@ pub async fn commit_source_captures_for_table(
             format_context,
             blob_fields,
             vec![],
-            [capture.ordinal.wrapping_add(3); 16],
+            source_row_id,
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -318,11 +321,14 @@ pub async fn commit_source_captures_for_table(
         mutations.push(mutation);
     }
     let ordinal = captures[0].ordinal;
+    let mut request_id = [ordinal; 16];
+    request_id[0] = 0xA5;
     let request_identity = RequestIdentity {
         session_id: [0x91; 16],
-        request_id: [ordinal; 16],
+        request_id,
     };
-    let fingerprint = [ordinal; 32];
+    let mut fingerprint = [ordinal; 32];
+    fingerprint[0] = 0x5A;
     let (_, admission) = state
         .reserve_request_with_admission(request_identity, fingerprint)
         .await
