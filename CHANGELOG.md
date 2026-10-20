@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
+- Remounted writable workspace views capture one runtime activation and project
+  current row values only when table identity, exact key, and ordered stored
+  field layout match. Rekeys without row-lineage metadata stay pinned; Blob
+  bindings remain pinned.
 - Blob annotation binding canonicalizes caller-supplied MIME-1 values (including
   the preferred suffix) before storing the canonical wire annotation.
 - JSON encoding supports Money values when their registered nominal Currency metadata is available. It preserves the exact decimal amount as a string and emits the registered currency code.
