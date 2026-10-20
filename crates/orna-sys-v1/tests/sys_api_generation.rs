@@ -414,6 +414,7 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
                 "signature": "fn sys.fixture(value: Int): Str", "purpose": "first label"
             }),
             role: None,
+            failures: Vec::new(),
         },
         build_support::Function {
             method: "second".into(),
@@ -422,6 +423,7 @@ fn annotation_metadata_and_generated_inventory_fail_closed() {
                 "signature": "fn sys.fixture(value: Int): Bool", "purpose": "second label"
             }),
             role: None,
+            failures: Vec::new(),
         },
     ];
     let duplicate_error = build_support::validate_collection(&duplicate_callables).unwrap_err();
