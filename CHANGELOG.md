@@ -6,6 +6,8 @@ been published.
 
 ## Unreleased
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
+- Remounted writable workspace views project accepted row edits from the current
+  runtime snapshot while keeping the row's committed Blob bindings intact.
 - Blob annotation binding canonicalizes caller-supplied MIME-1 values (including
   the preferred suffix) before storing the canonical wire annotation.
 - JSON encoding supports Money values when their registered nominal Currency metadata is available. It preserves the exact decimal amount as a string and emits the registered currency code.

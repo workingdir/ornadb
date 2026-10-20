@@ -76,8 +76,8 @@ fn pinned_runtime() -> (Functions, NominalDefinitions) {
 
     let result_definition = NominalDefinition::new([1; 16], Some("std.result".into()), Vec::new())
         .with_enum_variants(vec![
-            NominalVariant::new([2; 16], "Ok"),
-            NominalVariant::new([3; 16], "Err"),
+            NominalVariant::new([2; 16], "Ok").with_payload_fields(vec!["value".into()]),
+            NominalVariant::new([3; 16], "Err").with_payload_fields(vec!["error".into()]),
         ]);
     let nominal_definitions =
         NominalDefinitions::from([("std.result.Result".into(), result_definition)]);
