@@ -1518,6 +1518,68 @@ impl Filesystem for WorkspaceFilesystem {
         state.nodes.remove(&source_inode);
         reply.ok();
     }
+    fn unlink(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Some(name) = name.to_str() else {
+            reply.error(Errno::EINVAL);
+            return;
+        };
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.nodes.get(&parent.0).map(|node| &node.kind),
+            Some(NodeKind::Row(_))
+        ) {
+            reply.error(Errno::EROFS);
+            return;
+        }
+        let inode = match state.lookup_child(parent.0, OsStr::new(name)) {
+            Ok(Some(inode)) => inode,
+            Ok(None) => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
+            Err(_) => {
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
+        if !matches!(
+            state.nodes.get(&inode).map(|node| &node.kind),
+            Some(NodeKind::Temporary { .. })
+        ) {
+            reply.error(Errno::EROFS);
+            return;
+        }
+        if draft_state
+            .unresolved_handles
+            .values()
+            .any(|open| *open == inode)
+        {
+            reply.error(Errno::EBUSY);
+            return;
+        }
+        if state
+            .directory_mut(parent.0)
+            .and_then(|directory| directory.remove_entry(OsStr::new(name)))
+            .is_none()
+        {
+            reply.error(Errno::EIO);
+            return;
+        }
+        state.nodes.remove(&inode);
+        draft_state.retained_scratch.remove(&inode);
+        reply.ok();
+    }
     fn read(
         &self,
         _request: &Request,
@@ -1746,6 +1808,11 @@ impl Filesystem for WorkspaceFilesystem {
                     draft_state.unresolved_handles.remove(&handle.0);
                     draft_state.rejected_documents.remove(&inode.0);
                 }
+                reply.ok();
+            }
+            Err(DocumentCommitError::NoCandidate) => {
+                // Nothing was submitted, so there is nothing to accept or reject;
+                // POSIX requires fsync of an unmodified handle to succeed.
                 reply.ok();
             }
             Err(error) => {
