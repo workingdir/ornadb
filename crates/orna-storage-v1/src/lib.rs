@@ -2556,8 +2556,8 @@ fn map_compact_runtime_error(error: RuntimeError) -> Error {
         | RuntimeError::InvalidObservationReference
         | RuntimeError::ObservationCoordinateMismatch
         | RuntimeError::ProcedureMaterializationConflict
-        | RuntimeError::InvocationObservationConflict
-        | RuntimeError::InvocationStateConflict
+        | RuntimeError::InvocationObservationConflict | RuntimeError::QueryObservationConflict
+        | RuntimeError::InvocationStateConflict | RuntimeError::QueryStateConflict
         | RuntimeError::InvocationChildrenActive
         | RuntimeError::InvocationOwnerInvalid
         | RuntimeError::InvocationTailInvalid

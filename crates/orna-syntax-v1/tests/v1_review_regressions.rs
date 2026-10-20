@@ -299,6 +299,7 @@ fn assertion_aliases_are_accepted_in_ordinary_identifier_positions() {
     }
 }
 
+// Specified: ORNA-REFINE-004; the removed `where self` refined-type spelling (fixtures 034 and 035) is rejected with ORNA-A091-001.
 #[test]
 fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
     for (source, expected) in [

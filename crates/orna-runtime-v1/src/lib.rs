@@ -62,6 +62,7 @@ pub use activation::{
 mod catalogue;
 mod checkpoint_bootstrap;
 mod invocation;
+mod query;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
 pub use catalogue::{
@@ -75,6 +76,11 @@ pub use invocation::{
     InvocationLaunchOwner, InvocationObservation, InvocationObservationRegistration,
     InvocationObservationStatus, InvocationObservationTailCursor, InvocationObservationTailEntry,
     InvocationObservationTailPage, MaterializedProcedure, MaterializedProcedureParameter,
+};
+
+pub use query::{
+    QueryObservation, QueryObservationRegistration, SysMaterializationProjection,
+    SysQueryProjection, SYS_MATERIALIZATION_TABLE_ID, SYS_QUERY_TABLE_ID,
 };
 
 const SCHEMA: &str = r#"
@@ -442,6 +448,25 @@ CREATE TABLE IF NOT EXISTS sys_run_observation (
     diagnostic_class INTEGER,
     CHECK ((diagnostic_code IS NULL) = (diagnostic_class IS NULL))
 );
+CREATE TABLE IF NOT EXISTS sys_query_observation (
+    query_id BLOB PRIMARY KEY CHECK (length(query_id) = 16),
+    expression TEXT CHECK (expression IS NULL OR length(expression) BETWEEN 1 AND 16384),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 0),
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER,
+    observed_ms INTEGER NOT NULL,
+    status INTEGER NOT NULL CHECK (status BETWEEN 1 AND 6),
+    CHECK ((status IN (1, 2) AND ended_ms IS NULL)
+        OR (status IN (3, 4, 5, 6) AND ended_ms IS NOT NULL)),
+    CHECK (started_ms <= observed_ms
+        AND (ended_ms IS NULL OR (started_ms <= ended_ms AND ended_ms <= observed_ms)))
+);
+CREATE INDEX IF NOT EXISTS sys_query_observation_by_runtime
+    ON sys_query_observation(runtime_id, started_ms, query_id);
+
 CREATE TABLE IF NOT EXISTS sys_invocation_observation (
     invocation_id BLOB PRIMARY KEY CHECK (length(invocation_id) = 16),
     function_object_id BLOB NOT NULL CHECK (length(function_object_id) = 16),
@@ -1317,6 +1342,7 @@ impl RuntimeObservationFence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeObservationView {
     pub capture: CwdCapture,
+    pub queries: Vec<QueryObservation>,
     pub runs: Vec<RunObservation>,
     pub streams: Vec<StreamObservation>,
 }
@@ -1331,6 +1357,7 @@ pub struct RuntimeObservationView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysCurrentRuntimeProjection {
     pub capture: CwdCapture,
+    pub queries: Vec<SysQueryProjection>,
     pub runs: Vec<SysRunProjection>,
     pub streams: Vec<SysStreamProjection>,
 }
@@ -1346,6 +1373,7 @@ pub struct SysCurrentRuntimeProjection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SysRetainedObservationProjection {
     pub capture: CwdCapture,
+    pub queries: Vec<SysQueryProjection>,
     pub runs: Vec<SysRunProjection>,
     pub streams: Vec<SysStreamProjection>,
 }
@@ -2278,6 +2306,7 @@ fn project_current_runtime_observations(
     let retained = project_retained_observations(view)?;
     Ok(SysCurrentRuntimeProjection {
         capture: retained.capture,
+        queries: retained.queries,
         runs: retained.runs,
         streams: retained.streams,
     })
@@ -2286,6 +2315,7 @@ fn project_current_runtime_observations(
 fn project_retained_observations(
     view: RuntimeObservationView,
 ) -> Result<SysRetainedObservationProjection, RuntimeError> {
+    let queries = crate::query::project_query_observations(&view.queries)?;
     let runs = view
         .runs
         .iter()
@@ -2305,6 +2335,7 @@ fn project_retained_observations(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SysRetainedObservationProjection {
         capture: view.capture,
+        queries,
         runs,
         streams,
     })
@@ -2377,6 +2408,8 @@ pub enum RuntimeError {
     ProcedureMaterializationConflict,
     InvocationObservationConflict,
     InvocationStateConflict,
+    QueryObservationConflict,
+    QueryStateConflict,
     InvocationChildrenActive,
     InvocationOwnerInvalid,
     InvocationTailInvalid,
@@ -2451,6 +2484,8 @@ impl fmt::Display for RuntimeError {
                 "runtime invocation observation conflicts with retained state"
             }
             Self::InvocationStateConflict => "runtime invocation state transition conflicts",
+            Self::QueryObservationConflict => "runtime query observation conflicts with retained state",
+            Self::QueryStateConflict => "runtime query state transition conflicts",
             Self::InvocationChildrenActive => "runtime invocation has active child invocations",
             Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
             Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
@@ -5153,6 +5188,7 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let capture = capture_tx(&tx).await?;
+        let queries = crate::query::load_query_observations(&tx).await?;
         let runs = load_run_observations(&tx, &capture).await?;
         let streams = load_stream_observations(&tx, &capture).await?;
         tx.commit()
@@ -5160,6 +5196,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         project_retained_observations(RuntimeObservationView {
             capture,
+            queries,
             runs,
             streams,
         })
@@ -5210,6 +5247,11 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
+        let queries = crate::query::load_query_observations(&tx)
+            .await?
+            .into_iter()
+            .filter(|query| query.runtime_id == capture.runtime_id())
+            .collect();
         let runs = load_run_observations(&tx, &capture)
             .await?
             .into_iter()
@@ -5225,6 +5267,7 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(RuntimeObservationView {
             capture,
+            queries,
             runs,
             streams,
         })
@@ -35342,6 +35385,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sys_query_and_materialization_producers_publish_durable_rows() {
+        assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(80)).await.unwrap();
+        let capture = state.capture().await.unwrap();
+
+        let query = state
+            .begin_query_observation(
+                writer,
+                QueryObservationRegistration {
+                    id: id(81),
+                    expression: Some("SELECT 1".to_owned()),
+                    capture: capture.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(query.status, InvocationObservationStatus::Running);
+        let query = state
+            .finish_query_observation(
+                writer,
+                query.id,
+                InvocationObservationStatus::Succeeded,
+            )
+            .await
+            .unwrap();
+        assert_eq!(query.snapshot, capture);
+        assert!(query.ended_ms.is_some());
+
+        let fence = state.runtime_observation_fence(writer).await.unwrap();
+        let runtime = state.current_runtime_sys_projections(&fence).await.unwrap();
+        assert_eq!(runtime.queries.len(), 1);
+        let projected_query = &runtime.queries[0];
+        assert_eq!(projected_query.id, query.id);
+        assert_eq!(
+            projected_query.snapshot,
+            snapshot_reference(capture.database_id(), capture.snapshot().clone()).unwrap()
+        );
+        assert_eq!(projected_query.started, observation_instant(query.started_ms).unwrap());
+        assert_eq!(
+            projected_query.ended,
+            query.ended_ms.map(observation_instant).transpose().unwrap()
+        );
+        assert_eq!(projected_query.status, query.status);
+        assert_eq!(projected_query.reference.table_id, SYS_QUERY_TABLE_ID);
+
+        let procedure = materialize_echo_procedure(&state, writer).await;
+        let materializations = state.sys_materialization_projections().await.unwrap();
+        assert_eq!(materializations.len(), 1);
+        let materialization = &materializations[0];
+        assert_eq!(materialization.snapshot, *procedure.snapshot());
+        assert_eq!(
+            materialization.created,
+            observation_instant(procedure.materialized_ms()).unwrap(),
+        );
+        assert!(materialization.valid);
+        assert_ne!(materialization.digest, [0; 32]);
+        assert_eq!(materialization.reference.table_id, SYS_MATERIALIZATION_TABLE_ID);
+
+        drop(state);
+        let reopened = open_state(&repo).await;
+        assert_eq!(reopened.query_observations().await.unwrap(), [query]);
+        assert_eq!(reopened.sys_materialization_projections().await.unwrap().len(), 1);
+    }
+    #[tokio::test]
     async fn sys_lifecycle_procedure_materialization_admits_durable_invocation() {
         assert!(orna_syntax_v1::parse_module(PROCEDURE_INVOCATION_FIXTURE).is_ok());
         let (_temp, repo) = repository();
@@ -48422,6 +48531,7 @@ mod tests {
 
         let retained = RuntimeObservationView {
             capture: projections.capture,
+            queries: Vec::new(),
             runs: Vec::new(),
             streams: state.stream_observations().await.unwrap(),
         };
@@ -48463,6 +48573,7 @@ mod tests {
         assert_eq!(
             project_retained_observations(RuntimeObservationView {
                 capture: historical_run.snapshot.clone(),
+                queries: Vec::new(),
                 runs: vec![historical_run],
                 streams: vec![stream],
             }),
@@ -48547,6 +48658,7 @@ mod tests {
             project_current_runtime_observations(RuntimeObservationView {
                 capture: view.capture.clone(),
                 runs: Vec::new(),
+                queries: Vec::new(),
                 streams: view.streams.clone(),
             }),
             Err(RuntimeError::ObservationCoordinateMismatch)
@@ -48557,6 +48669,7 @@ mod tests {
             project_current_runtime_observations(RuntimeObservationView {
                 capture: view.capture.clone(),
                 runs: vec![historical_run],
+                queries: Vec::new(),
                 streams: Vec::new(),
             }),
             Err(RuntimeError::RecoveryInvalid)
@@ -48565,6 +48678,7 @@ mod tests {
             project_current_runtime_observations(RuntimeObservationView {
                 capture: view.capture.clone(),
                 runs: view.runs.clone(),
+                queries: Vec::new(),
                 streams: vec![historical_stream],
             }),
             Err(RuntimeError::RecoveryInvalid)
@@ -48574,6 +48688,7 @@ mod tests {
         assert_eq!(
             project_current_runtime_observations(RuntimeObservationView {
                 capture: view.capture.clone(),
+                queries: Vec::new(),
                 runs: vec![malformed_run],
                 streams: Vec::new(),
             }),
