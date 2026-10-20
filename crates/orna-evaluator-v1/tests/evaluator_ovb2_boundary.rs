@@ -15,6 +15,7 @@ fn annotated_blob_value(bytes: &[u8]) -> ContextValue {
     ContextValue::from_blob(&blob, ValueFormat::Ovb2).expect("encode OVB-2 Blob value")
 }
 
+/// ORNA-FORMAT-005: New annotated Blob values MUST preserve annotations through OVB-2 and MUST NOT silently lose them on old wire/export interfaces.
 #[test]
 fn ovb2_evaluator_preserves_annotated_blob_at_top_level_and_in_a_list() {
     let bytes = [0xff, 0xd8, 0x00, 0xff, 0xd9];
