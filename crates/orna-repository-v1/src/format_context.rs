@@ -4001,12 +4001,22 @@ mod graph_bridge_tests {
         assert_eq!(small.miss_key, None);
         assert_eq!(large.miss_key, None);
         // A missing key is an absent result rather than an error, and it reads
-        // index pages only. It is deliberately not pruned to the key's path:
-        // the contract is that a later child's fence may still cover the key,
-        // so the probe reads the index to rule them out. It still fetches no
-        // row or media payload, which is what keeps a miss cheap.
-        assert_eq!(small.miss, small.full);
-        assert_eq!(large.miss, large.full);
+        // only the path to where the key would be. ORP-1 child ranges are
+        // nonoverlapping and exhaustive, so exactly one child per level can
+        // hold the key and a miss in it ends the lookup: later siblings are
+        // never probed. Both shapes are three levels high (root, middle
+        // branch, leaf page), and every native node is read as its envelope
+        // tree and data blob, plus a refs tree when it names children, so a
+        // miss visits exactly one node per level: two branches and one leaf.
+        let tree_height = 3u64;
+        let path_objects = (tree_height - 1) * 3 + 2;
+        assert_eq!(small.miss, path_objects);
+        assert_eq!(large.miss, path_objects);
+        assert!(large.miss < large.full && small.miss < small.full);
+        // The hit walks the same single path; its inline row value costs no
+        // further object read.
+        assert_eq!(small.point, path_objects);
+        assert_eq!(large.point, path_objects);
         // A row read charges payload bytes only for a media closure, so an
         // index query that stops at root, index and row pages reports zero.
         assert_eq!(small.payload_bytes, 0);
@@ -4027,7 +4037,8 @@ mod graph_bridge_tests {
         );
 
         // A malformed branch whose fence lies about its child's range is still
-        // rejected: bounding the read must not silence that check.
+        // rejected when the lookup's path descends into that child: bounding
+        // the read must not silence that check.
         let pinned = context(root);
         let malformed_relation = [0x77; 16];
         install_branch_row_store(
@@ -4041,7 +4052,7 @@ mod graph_bridge_tests {
         let tampered_graph = tampered.open_native_graph(&tampered_snapshot).unwrap();
         let tampered_scope = tampered_graph.open_read_scope().unwrap();
         assert!(matches!(
-            tampered_graph.lookup_row(&TypedKey::UInt(20), &tampered_scope),
+            tampered_graph.lookup_row(&TypedKey::UInt(50), &tampered_scope),
             Err(crate::native_graph::GraphError::InvalidCount(_))
         ));
         assert!(matches!(
@@ -4226,14 +4237,17 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn repository_point_lookup_checks_later_fences_after_candidate_miss() {
+    fn repository_point_lookup_miss_stops_at_the_covering_child() {
         let directory = repository();
         let root = directory.path();
         let relation_id = [0x72; 16];
         let initial = context(root);
-        // Key 20 falls within child 2's claimed max (30), but is absent there.
-        // The next child is an invalid overlapping range hidden behind fence
-        // 50; point lookup must continue far enough to reject it.
+        // Key 20 falls within child 2's range (10, 30] but is absent there.
+        // ORP-1 child ranges are nonoverlapping and exhaustive, so child 2 is
+        // the only child that can hold key 20 and the lookup is a miss. The
+        // third child is an invalid overlapping range hidden behind fence 50;
+        // it is off the miss's path and is rejected only by a lookup whose
+        // path descends into it.
         install_branch_row_store(
             root,
             &initial,
@@ -4247,19 +4261,30 @@ mod graph_bridge_tests {
         let graph = pinned.open_native_graph(&snapshot).unwrap();
         let scope = graph.open_read_scope().unwrap();
 
-        // The final profile caps each ORP page at 256 direct refs and height
-        // at 64. This four-child graph isolates the point-lookup miss path;
-        // the production scope additionally caps one operation at 2,048
-        // native Git objects, which is measured below.
-        let before_point = scope.objects_read_for_test();
+        // The graph is two levels high: a root branch (envelope tree, data
+        // blob and refs tree) over leaf pages (envelope tree and data blob).
+        // A point lookup reads one node per level, whether it hits or misses.
+        let path_objects = 3 + 2;
+        let before_miss = scope.objects_read_for_test();
+        assert_eq!(
+            graph
+                .lookup_row(&TypedKey::UInt(20), &scope)
+                .expect("a miss is an absent row"),
+            None
+        );
+        assert_eq!(scope.objects_read_for_test() - before_miss, path_objects);
+
+        let before_malformed = scope.objects_read_for_test();
         assert!(matches!(
-            graph.lookup_row(&TypedKey::UInt(20), &scope),
+            graph.lookup_row(&TypedKey::UInt(50), &scope),
             Err(crate::native_graph::GraphError::InvalidCount(_))
         ));
-        let point_objects = scope.objects_read_for_test() - before_point;
-        assert!(point_objects > 0 && point_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        assert_eq!(
+            scope.objects_read_for_test() - before_malformed,
+            path_objects
+        );
         println!(
-            "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
+            "git-backed ORP point lookup object reads: {path_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
     }
 
