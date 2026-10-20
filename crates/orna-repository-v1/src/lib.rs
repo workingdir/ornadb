@@ -59,7 +59,7 @@ pub use init::{
     DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     initialize_repository, inspect_metadata,
 };
-pub use mount::{MountError, MountStatus, MountView};
+pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};
 pub use native_graph::RowRevision;
 pub use native_graph::{
     AdmittedBlobReference, AdmittedRowField, AdmittedRowFields, CapturedBlobCandidate,

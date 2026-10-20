@@ -340,6 +340,15 @@ impl MountView {
     pub fn context(&self) -> &HistoricalFormatContext {
         &self.context
     }
+
+    /// The accepted-row baselines this view's saves persist across processes.
+    pub fn row_baselines(&self) -> MountRowBaselines {
+        MountRowBaselines {
+            repository: self.repository.clone(),
+            view_id: self.view_id,
+        }
+    }
+
     fn record_path(&self) -> PathBuf {
         mount_record_path(self.repository.runtime_paths(), &self.mountpoint)
     }
@@ -468,7 +477,14 @@ read_only true
             &self.pin_oid_hex,
         )
         .map_err(|_| MountError::SnapshotPinUnavailable)?;
-        remove_registry_file(&path)
+        remove_registry_file(&path)?;
+        // Accepted-row baselines belong to this view alone; a released view
+        // leaves nothing a later attach could inherit.
+        let _ = fs::remove_dir_all(mount_baseline_dir(
+            self.repository.runtime_paths(),
+            &self.view_id,
+        ));
+        Ok(())
     }
 }
 
@@ -632,6 +648,57 @@ fn parse_mount_pin_oid(value: &str) -> Result<String, MountError> {
 }
 fn mount_registry_dir(paths: &RuntimePaths) -> PathBuf {
     paths.root().join("mounts")
+}
+
+/// Accepted-row baselines one mounted view persists across the processes that
+/// save through it. A row with no record keeps the caller's own baseline.
+#[derive(Clone)]
+pub struct MountRowBaselines {
+    repository: Repository,
+    view_id: [u8; 32],
+}
+
+impl MountRowBaselines {
+    /// The row bytes this view last accepted for `table` and `key`, if any.
+    pub fn accepted_row(&self, table: &str, key: &[u8]) -> Result<Option<Vec<u8>>, MountError> {
+        match fs::read(self.path(table, key)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(MountError::HostFilesystem),
+        }
+    }
+
+    /// Persists `row` as the baseline the next save of `table` and `key`
+    /// through this view must match.
+    pub fn record_accepted_row(
+        &self,
+        table: &str,
+        key: &[u8],
+        row: &[u8],
+    ) -> Result<(), MountError> {
+        let path = self.path(table, key);
+        let directory = path.parent().ok_or(MountError::HostFilesystem)?;
+        fs::create_dir_all(directory).map_err(|_| MountError::HostFilesystem)?;
+        let staging = path.with_extension(format!("staging-{}", std::process::id()));
+        fs::write(&staging, row).map_err(|_| MountError::HostFilesystem)?;
+        fs::rename(&staging, &path).map_err(|_| MountError::HostFilesystem)
+    }
+
+    fn path(&self, table: &str, key: &[u8]) -> PathBuf {
+        let mut digest = Sha256::new();
+        digest.update(MOUNT_VIEW_DOMAIN);
+        digest.update(b"row-baseline\0");
+        digest.update((table.len() as u64).to_le_bytes());
+        digest.update(table.as_bytes());
+        digest.update((key.len() as u64).to_le_bytes());
+        digest.update(key);
+        mount_baseline_dir(self.repository.runtime_paths(), &self.view_id)
+            .join(hex(&digest.finalize()))
+    }
+}
+
+fn mount_baseline_dir(paths: &RuntimePaths, view_id: &[u8; 32]) -> PathBuf {
+    paths.root().join("mount-baselines").join(hex(view_id))
 }
 
 fn mount_record_path(paths: &RuntimePaths, mountpoint: &Path) -> PathBuf {

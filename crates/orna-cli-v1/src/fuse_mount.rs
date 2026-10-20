@@ -22,6 +22,7 @@ use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
     HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding, Repository,
     RowMapSnapshot, RuntimeGeneration, TypedKey,
+    MountRowBaselines,
 };
 use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
@@ -44,10 +45,15 @@ struct MountWriter {
     mount_snapshot: OnceLock<RuntimeTableActivationSnapshot>,
     cache: Arc<VfsRepositoryCache>,
     owner_id: [u8; 16],
+    row_baselines: Option<MountRowBaselines>,
 }
 
 impl MountWriter {
-    fn open(repository: &Repository, commit: &GitCommitRef) -> Result<Arc<Self>, String> {
+    fn open(
+        repository: &Repository,
+        commit: &GitCommitRef,
+        row_baselines: Option<MountRowBaselines>,
+    ) -> Result<Arc<Self>, String> {
         let (identity, initial_digest) = super::runtime_identity(repository)
             .map_err(|error| format!("repository runtime identity is unavailable: {error}"))?;
         let owner_id = super::invocation_owner_id(identity);
@@ -75,6 +81,7 @@ impl MountWriter {
             mount_snapshot: OnceLock::new(),
             cache: Arc::new(VfsRepositoryCache::new()),
             owner_id,
+            row_baselines,
         }))
     }
 
@@ -442,13 +449,22 @@ fn row_save_context(
     )
     .map_err(|error| format!("committed table identity is invalid: {error:?}"))?;
     let key_bytes = runtime_table_key_bytes(key)?;
-    let expected_baseline_row = source
+    let live_baseline_row = source
         .runtime_table
         .as_ref()
         .map(|runtime_table| writer.row_baseline(runtime_table, &key_bytes))
         .transpose()?
         .flatten()
         .map(|row| row.to_vec());
+    // A row this view already accepted keeps that baseline across the processes
+    // that save through it; the live durable row is only the first baseline.
+    let expected_baseline_row = match (&writer.row_baselines, &source.runtime_table) {
+        (Some(baselines), Some(table)) => baselines
+            .accepted_row(table.table(), &key_bytes)
+            .map_err(|error| format!("mounted row baseline is unavailable: {error}"))?
+            .or(live_baseline_row),
+        _ => live_baseline_row,
+    };
     let mut components = Vec::new();
     flatten_key_components(key, &mut components)?;
     let Some((leaf, prefixes)) = components.split_last() else {
@@ -483,18 +499,28 @@ fn row_save_context(
     }))
 }
 /// Why a document save did not commit. `NoCandidate` means the handle never
-/// submitted bytes, so there is nothing to accept or discard; `Failed` means a
-/// save was attempted and did not commit, so the draft stays unresolved.
+/// submitted bytes, so there is nothing to accept or discard. `Stale` means the
+/// mounted baseline no longer matches the durable row and nothing was written.
+/// `Stale` and `Failed` both mean a save was attempted and did not commit, so
+/// the draft stays unresolved.
 #[derive(Debug)]
 enum DocumentCommitError {
     NoCandidate,
+    Stale,
     Failed(String),
+}
+
+impl From<String> for DocumentCommitError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
 }
 
 impl std::fmt::Display for DocumentCommitError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCandidate => formatter.write_str("mounted row save failed: NoCandidate"),
+            Self::Stale => formatter.write_str("mounted save is stale against its captured baseline"),
             Self::Failed(message) => formatter.write_str(message),
         }
     }
@@ -526,12 +552,23 @@ impl RowSaveContext {
     }
 
     fn record_accepted_row(&self, row: Option<Vec<u8>>) {
-        if let Some(row) = row {
-            *self
-                .expected_baseline_row
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row);
+        let Some(row) = row else {
+            return;
+        };
+        if let Some(baselines) = &self.writer.row_baselines {
+            let recorded = runtime_table_key_bytes(&self.key).and_then(|key| {
+                baselines
+                    .record_accepted_row(self.table.table(), &key, &row)
+                    .map_err(|error| error.to_string())
+            });
+            if let Err(error) = recorded {
+                eprintln!("mounted row baseline could not be recorded: {error}");
+            }
         }
+        *self
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row);
     }
 
     fn commit_document(
@@ -573,10 +610,9 @@ impl RowSaveContext {
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
                 "mounted row document was rejected by semantic admission".into(),
             )),
-            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Failed(
-                "mounted row document is stale against its captured baseline".into(),
-            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
             Err(VfsSaveError::NoCandidate) => Err(DocumentCommitError::NoCandidate),
+            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
             Err(error) => Err(DocumentCommitError::Failed(format!(
                 "mounted row save failed: {error:?}"
             ))),
@@ -589,7 +625,7 @@ impl RowSaveContext {
         scratch: &TemporarySave<RowMapSnapshot>,
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), DocumentCommitError> {
         let replacement_bytes = self.writer.runtime.block_on(scratch.candidate_bytes());
         let length = u64::try_from(replacement_bytes.len())
             .map_err(|_| "replacement Blob length is invalid".to_owned())?;
@@ -647,7 +683,9 @@ impl RowSaveContext {
                 {
                     field.replacement_bytes = Some(replacement_bytes);
                 } else {
-                    return Err("replaced Blob field disappeared from its row".into());
+                    return Err(DocumentCommitError::Failed(
+                        "replaced Blob field disappeared from its row".into(),
+                    ));
                 }
                 let row = accepted_row
                     .lock()
@@ -656,13 +694,14 @@ impl RowSaveContext {
                 self.record_accepted_row(row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => {
-                Err("mounted Blob replacement was rejected by semantic admission".into())
-            }
-            Ok(TemporaryRenameOutcome::Stale { .. }) => {
-                Err("mounted Blob replacement is stale against its captured baseline".into())
-            }
-            Err(error) => Err(format!("mounted Blob replacement failed: {error:?}")),
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+                "mounted Blob replacement was rejected by semantic admission".into(),
+            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(error) => Err(DocumentCommitError::Failed(format!(
+                "mounted Blob replacement failed: {error:?}"
+            ))),
         }
     }
     fn fsync_temporary(&self, scratch: &TemporarySave<RowMapSnapshot>) -> Result<(), String> {
@@ -750,8 +789,9 @@ pub(super) fn spawn_editor(
     context: &HistoricalFormatContext,
     mountpoint: &Path,
     source: String,
+    row_baselines: MountRowBaselines,
 ) -> Result<fuser::BackgroundSession, String> {
-    let writer = MountWriter::open(repository, commit)?;
+    let writer = MountWriter::open(repository, commit, Some(row_baselines))?;
     let filesystem = WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer))?;
     let mut config = Config::default();
     config.mount_options = vec![
@@ -763,14 +803,36 @@ pub(super) fn spawn_editor(
     fuser::spawn_mount(filesystem, mountpoint, &config)
         .map_err(|error| format!("FUSE editor mount could not be created: {error}"))
 }
+
+/// Why an explicit edit was not accepted. `Stale` means the mounted baseline no
+/// longer matches the durable row: nothing was written and the draft is retained.
+#[derive(Debug)]
+pub(super) enum EditError {
+    Stale(String),
+    Failed(String),
+}
+
+impl From<String> for EditError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for EditError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_owned())
+    }
+}
+
 pub(super) fn edit_path(
     repository: &Repository,
     commit: &GitCommitRef,
     context: &HistoricalFormatContext,
     path: &str,
     grouped_row: bool,
-) -> Result<(), String> {
-    let writer = MountWriter::open(repository, commit)?;
+    row_baselines: Option<MountRowBaselines>,
+) -> Result<(), EditError> {
+    let writer = MountWriter::open(repository, commit, row_baselines)?;
     let filesystem = WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
     let relative = Path::new(path);
     if relative.is_absolute() {
@@ -834,12 +896,20 @@ pub(super) fn edit_path(
         .map_err(|error| format!("explicit edit draft could not be initialized: {error}; retained at {}", draft_path.display()))?;
     drop(file);
     let Some(editor) = std::env::var_os("EDITOR") else {
-        return Err(format!("EDITOR is not set; initial draft retained at {}", draft_path.display()));
+        return Err(format!(
+            "EDITOR is not set; initial draft retained at {}",
+            draft_path.display()
+        )
+        .into());
     };
     let status = std::process::Command::new(editor).arg(&draft_path).status()
         .map_err(|error| format!("editor could not be started: {error}; draft retained at {}", draft_path.display()))?;
     if !status.success() {
-        return Err(format!("editor exited unsuccessfully; draft retained at {}", draft_path.display()));
+        return Err(format!(
+            "editor exited unsuccessfully; draft retained at {}",
+            draft_path.display()
+        )
+        .into());
     }
     let candidate = std::fs::read(&draft_path)
         .map_err(|error| format!("edited candidate could not be read: {error}; draft retained at {}", draft_path.display()))?;
@@ -857,12 +927,20 @@ pub(super) fn edit_path(
             draft.write_at(0, &candidate).await.map_err(|error| format!("edited candidate exceeds draft limits: {error:?}"))
         })
         .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_document(&draft).map_err(|error| error.to_string())
+        save.commit_document(&draft)
     };
     match admission {
-        Ok(()) => std::fs::remove_file(&draft_path)
-            .map_err(|error| format!("edit was accepted but its explicit draft could not be removed: {error}")),
-        Err(error) => Err(format!("edit candidate was rejected or stale: {error}; draft retained at {}", draft_path.display())),
+        Ok(()) => std::fs::remove_file(&draft_path).map_err(|error| {
+            EditError::Failed(format!("edit was accepted but its explicit draft could not be removed: {error}"))
+        }),
+        Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
+            "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+            draft_path.display()
+        ))),
+        Err(error) => Err(EditError::Failed(format!(
+            "edit candidate was rejected: {error}; draft retained at {}",
+            draft_path.display()
+        ))),
     }
 }
 #[derive(Debug)]
@@ -1608,7 +1686,9 @@ impl Filesystem for WorkspaceFilesystem {
             )
         };
         let committed = match &blob_field {
-            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
+            Some(field) => save
+                .commit_blob_temporary(&target, &scratch, field, baseline)
+                .map_err(|error| error.to_string()),
             None => save.commit_temporary(&scratch, baseline),
         };
         if let Err(error) = committed {
@@ -1888,7 +1968,9 @@ impl Filesystem for WorkspaceFilesystem {
             Err(error) => {
                 // An unmodified handle submits no candidate, so there is nothing
                 // rejected to keep unresolved; only a failed submission blocks unmount.
-                if is_document && matches!(error, DocumentCommitError::Failed(_)) {
+                if is_document
+                    && matches!(error, DocumentCommitError::Failed(_) | DocumentCommitError::Stale)
+                {
                     draft_state.rejected_documents.insert(inode.0);
                 }
                 reply.error(Errno::EIO);
