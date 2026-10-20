@@ -837,13 +837,15 @@ enum OpenFile {
         Option<BlobField>,
     ),
 }
-/// Document drafts live only on their open handles and are discarded on release;
-/// replacement scratch drafts remain unresolved until their rename is accepted.
+/// Unsynced Document drafts are discarded on release; a Document whose fsync was
+/// rejected stays unresolved until a later sync of the same file is accepted.
+/// Replacement scratch drafts remain unresolved until their rename is accepted.
 #[derive(Default)]
 struct DraftState {
     pending_truncates: HashMap<u64, u64>,
     unresolved_handles: HashMap<u64, u64>,
     retained_scratch: HashSet<u64>,
+    rejected_documents: HashSet<u64>,
     quiescing: bool,
 }
 
@@ -852,6 +854,7 @@ impl DraftState {
         !self.pending_truncates.is_empty()
             || !self.unresolved_handles.is_empty()
             || !self.retained_scratch.is_empty()
+            || !self.rejected_documents.is_empty()
     }
 }
 
@@ -1486,6 +1489,7 @@ impl Filesystem for WorkspaceFilesystem {
             .unresolved_handles
             .retain(|_, dirty_inode| *dirty_inode != source_inode);
         draft_state.retained_scratch.remove(&source_inode);
+        draft_state.rejected_documents.remove(&source_inode);
         draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
@@ -1711,9 +1715,13 @@ impl Filesystem for WorkspaceFilesystem {
         if result.is_ok() {
             if is_document {
                 draft_state.unresolved_handles.remove(&handle.0);
+                draft_state.rejected_documents.remove(&inode.0);
             }
             reply.ok();
         } else {
+            if is_document {
+                draft_state.rejected_documents.insert(inode.0);
+            }
             reply.error(Errno::EIO);
         }
     }
