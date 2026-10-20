@@ -7,30 +7,33 @@
 //! host provider must reach the host effect boundary.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
-    StepBudget, invoke_named_with_effects,
+    EffectHandler, Environment, EvaluationError, ExplainCatalogue, Functions, Limits,
+    PureFunction, RelationPage, StepBudget, invoke_named_with_effects,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_sys_v1::{
-    SystemProviderHost, SystemSurfaceMember, system_api_json, system_dispatch_table,
-    system_provider_linkage,
+    ObjectRef, SnapshotRef, SystemProviderHost, SystemSurfaceMember, system_api_json,
+    system_dispatch_table, system_provider_linkage,
 };
 use orna_syntax_v1::{Expr, parse_expression};
 
-/// Callables the evaluator intercepts natively whose provider is a capability
-/// the host must install. No production host installs one, so the linkage
-/// leaves them unlinked. Each probe runs without the capability, as every
-/// production host does, and must fail with the listed code.
-const HOST_CAPABILITY_CALLABLES: [(&str, &str, &str); 1] = [
-    // `sys.explain(Query)` lowers through an `ExplainCatalogue`.
-    (
-        "sys.explain",
-        "sys.Storage | sys.explain()",
-        "sys.abi.unavailable",
-    ),
-];
+/// A host catalogue that pins one relation source for `sys.explain(Query)`.
+#[derive(Debug)]
+struct PinnedSource(&'static str);
+
+impl ExplainCatalogue for PinnedSource {
+    fn resolve_source(&self, source: &str) -> Option<(SnapshotRef, ObjectRef)> {
+        (source == self.0).then(|| {
+            (
+                SnapshotRef::descriptive("snapshot-linkage"),
+                ObjectRef::descriptive("object-linkage"),
+            )
+        })
+    }
+}
 
 /// Records what reaches the host effect boundary and answers nothing, so every
 /// observation comes from the evaluator alone.
@@ -38,6 +41,7 @@ const HOST_CAPABILITY_CALLABLES: [(&str, &str, &str); 1] = [
 struct RecordingHost {
     forwarded: Vec<String>,
     relation_sources: BTreeSet<String>,
+    catalogue: Option<Arc<PinnedSource>>,
 }
 
 impl EffectHandler for RecordingHost {
@@ -68,6 +72,12 @@ impl EffectHandler for RecordingHost {
             rows: Vec::new(),
             next: None,
         }))
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
+        self.catalogue
+            .as_deref()
+            .map(|catalogue| catalogue as &dyn ExplainCatalogue)
     }
 }
 
@@ -171,13 +181,9 @@ fn native_sys_callables_are_exactly_the_evaluator_links() {
         }
     }
 
-    let capability = HOST_CAPABILITY_CALLABLES
-        .iter()
-        .map(|(name, ..)| *name)
-        .collect::<BTreeSet<_>>();
     assert_eq!(
         intercepted,
-        &linked_callables(SystemProviderHost::Evaluator) | &capability,
+        linked_callables(SystemProviderHost::Evaluator),
         "every sys callable the evaluator executes natively must be linked to \
          SystemProviderHost::Evaluator, and nothing else"
     );
@@ -194,22 +200,31 @@ fn native_sys_callables_are_exactly_the_evaluator_links() {
 }
 
 #[test]
-fn host_capability_callables_stay_unlinked_without_their_capability() {
+fn linked_explain_query_is_dispatched_natively_through_the_host_catalogue() {
     let linkage = system_provider_linkage();
-    for (name, probe, code) in HOST_CAPABILITY_CALLABLES {
-        let mut host = RecordingHost::default();
-        let error = evaluate(probe, &mut host)
-            .expect_err("no production host installs the provider capability");
-        assert_eq!(error.code(), code, "{probe}");
-        assert!(host.forwarded.is_empty(), "{probe} is native dispatch");
-        assert!(
-            !linkage.links().any(|link| matches!(
-                link.member,
-                SystemSurfaceMember::Callable(label) if callable_name(label) == name
-            )),
-            "{name} is linked although no production host installs its capability"
-        );
+    assert!(linkage.links().any(|link| {
+        link.member == SystemSurfaceMember::Callable("sys.explain(Query)")
+            && link.host == SystemProviderHost::Evaluator
+    }));
+    for unlinked in ["sys.explain(FunctionRef)", "sys.explain(Diagnostic)"] {
+        assert!(!linkage.is_linked(SystemSurfaceMember::Callable(unlinked)));
     }
+
+    let mut pinned = RecordingHost {
+        catalogue: Some(Arc::new(PinnedSource("sys.Storage"))),
+        ..RecordingHost::default()
+    };
+    evaluate("sys.Storage | sys.explain()", &mut pinned).unwrap_or_else(|error| {
+        panic!("explain lowers a pinned query: {}", error.code())
+    });
+    assert!(pinned.forwarded.is_empty(), "explain is native dispatch");
+    assert!(pinned.relation_sources.is_empty(), "explain never scans rows");
+
+    let mut uncatalogued = RecordingHost::default();
+    let error = evaluate("sys.Storage | sys.explain()", &mut uncatalogued)
+        .expect_err("a host without a catalogue cannot pin the query source");
+    assert_eq!(error.code(), "sys.abi.unavailable");
+    assert!(uncatalogued.forwarded.is_empty(), "explain is native dispatch");
 }
 
 #[test]
