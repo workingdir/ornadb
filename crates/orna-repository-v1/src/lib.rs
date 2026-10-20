@@ -4242,7 +4242,9 @@ impl Repository {
             &base_index,
             &git_lock,
         )?;
-
+        // Gate D boundary: the reconciled index is installed but its stage is
+        // not yet durable, so recovery must recognise the installed index.
+        crate::publication_crash_barrier("index-install");
         journal.advance(PublicationJournalStage::IndexReconciled)?;
         self.write_publication_journal_locked(journal)?;
         on_stage(PublicationJournalStage::IndexReconciled);
@@ -7289,15 +7291,19 @@ impl Repository {
         candidate: &PrivateCommit,
         path: &ManagedPath,
     ) -> Result<Option<(String, String)>, RepositoryError> {
+        self.tree_entry(candidate.commit.as_str(), path)
+    }
+
+    /// Reads the entry at `path` in `treeish`. Only a blob, or the tree at
+    /// the fixed `.orna/store` position, is admitted.
+    fn tree_entry(
+        &self,
+        treeish: &str,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
         let mut command = self.command();
         command
-            .args([
-                "ls-tree",
-                "-z",
-                "--full-tree",
-                candidate.commit.as_str(),
-                "--",
-            ])
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
             .arg(path.as_path());
         let output = self.run(command)?.stdout;
         let Some(entry) = output.split(|byte| *byte == 0).next() else {
@@ -7389,6 +7395,20 @@ impl Repository {
         journal: &PublicationJournal,
     ) -> Result<bool, RepositoryError> {
         for path in self.publication_index_paths(candidate, journal)? {
+            let expected = self.candidate_tree_entry(candidate, &path)?;
+            if expected.as_ref().is_some_and(|(mode, _)| mode == "040000") {
+                // The index holds a bound tree as its leaf entries, never as
+                // one `040000` record, so compare the subtree the index writes
+                // at this path with the candidate's store root (ORNA-PUB-007).
+                let index = self.git_path("index")?;
+                let Some(tree) = self.index_tree_from_file(&index)? else {
+                    return Ok(false);
+                };
+                if self.tree_entry(tree.as_str(), &path)? != expected {
+                    return Ok(false);
+                }
+                continue;
+            }
             let mut command = self.command();
             command
                 .args(["ls-files", "--stage", "-z", "--"])
@@ -7398,7 +7418,6 @@ impl Repository {
                 .split(|byte| *byte == 0)
                 .filter(|record| !record.is_empty())
                 .collect::<Vec<_>>();
-            let expected = self.candidate_tree_entry(candidate, &path)?;
             match (expected, records.as_slice()) {
                 (None, []) => {}
                 (Some((mode, object)), [record]) => {
@@ -10449,6 +10468,114 @@ mod tests {
             fs::read(root.path().join(path.as_path())).unwrap(),
             b"second\n"
         );
+    }
+
+    /// ORNA-PUB-007: a publisher killed after installing the reconciled index
+    /// but before IndexReconciled is durable leaves `.orna/store` bound as
+    /// leaf entries. Recovery must recognise that index as the candidate's
+    /// rather than report it as stale.
+    #[test]
+    fn recovery_recognises_an_installed_store_index_before_its_journal_stage() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        let database = include_str!("../tests/fixtures/format-context/database-final.orna");
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), database).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/data").unwrap(),
+                        Some(b"store root two".to_vec()),
+                    ),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/refs/node/data").unwrap(),
+                        Some(b"child node".to_vec()),
+                    ),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/refs/node/chunk").unwrap(),
+                        Some(b"payload chunk".to_vec()),
+                    ),
+                ],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let store_root = git(
+            root.path(),
+            &[
+                "rev-parse",
+                &format!("{}:.orna/store", candidate.commit().as_str()),
+            ],
+        );
+        let algorithm = if store_root.len() == 64 {
+            super::GitHashAlgorithm::Sha256
+        } else {
+            super::GitHashAlgorithm::Sha1
+        };
+        let marker = ManagedPath::new(".orna/database.orna").unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [61; 16],
+            vec![PublicationJournalEntry::new(
+                marker.clone(),
+                Some(database.as_bytes().to_vec()),
+                Some(database.as_bytes().to_vec()),
+            )],
+        )
+        .unwrap()
+        .with_store_root(&super::NativeOid::from_hex(algorithm, &store_root).unwrap())
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository.advance_current_ref(&head, &candidate).unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        let installed = repository
+            .reconcile_published_index(
+                &index,
+                &candidate,
+                &[marker, ManagedPath::new(".orna/store").unwrap()],
+            )
+            .unwrap();
+        assert!(
+            git(root.path(), &["ls-files", "--stage", "--", ".orna/store"])
+                .lines()
+                .count()
+                > 1
+        );
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        let mut recovered = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            recovered.stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(repository.index_generation().unwrap(), installed);
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"store root two"
+        );
+        repository
+            .mark_runtime_complete([61; 16], &mut recovered)
+            .unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
     }
 
     #[test]
