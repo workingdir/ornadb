@@ -48,9 +48,13 @@ orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persiste
 ```
 
 `--annotation-defaults N` must be the count derived from decoded legacy
-annotation metadata. `--no-persistent-consumers` is an explicit declaration
-that no persistent consumer continuity needs to be carried. The source
-repository, including its commit and dirty workspace, remains unchanged. This
+annotation metadata. `--no-persistent-consumers` acknowledges that persistent
+consumer checkpoints are carried into the candidate under identity
+correspondence recorded there before any row is imported, so a migrated
+stream resumes without resetting its consumer identity. A source holding live
+per-attempt stream state (leases, claims, failures, receipts) is refused and
+its state is left unchanged. The source repository, including its commit and
+dirty workspace, remains unchanged. This
 command prepares a journalled candidate only; it does not convert legacy rows
 into a format-3 store or activate a writable format-3 repository.
 
