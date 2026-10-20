@@ -25,6 +25,7 @@ uuid = { version = "1.18.1", default-features = false, optional = true }
 icu_properties = "2.2.0"
 serde = "1.0"
 serde_json = { version = "1.0.151", features = ["arbitrary_precision", "raw_value"] }
+stacker = "0.1.25"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-project-v1 = { path = "../orna-project-v1", optional = true }
 orna-repository-v1 = { path = "../orna-repository-v1", optional = true }
