@@ -7551,8 +7551,11 @@ fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJ
             }
             total_work > u128::from(u64::MAX)
         });
-    if has_partial_or_mutable_statistics
-        || has_complex_pipeline
+    // Declared order is kept for complex plans over partial or mutable statistics
+    // whose every join has known estimates: cumulative estimates are order-sensitive.
+    if (has_partial_or_mutable_statistics
+        && has_complex_pipeline
+        && joins.iter().all(|join| join.statistics.is_some()))
         || has_boundary_scan_work
         || has_join_cardinality_overflow_risk
     {
