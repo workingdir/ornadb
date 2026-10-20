@@ -4,9 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use syn::{
-    Expr, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
+    Expr, ExprLit, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
     visit::{self, Visit},
 };
 
@@ -121,7 +121,7 @@ pub fn generate_sys_artifacts(
     let api = generate_system_api_document(projected_registry, function_metadata)?;
     validate_api_document(&api)?;
     validate_published_schema_shape(&api, &published_schema)?;
-    let api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
+    let api_json = authored_pretty_json(&api).map_err(|error| error.to_string())?;
     let api_json = format!("{api_json}\n");
 
     let mut schema_json =
@@ -200,12 +200,35 @@ fn function_is_admitted_to_format_3(metadata: &Value) -> bool {
         .is_none_or(|contexts| contexts.iter().any(|context| context == "format-3"))
 }
 
+/// Member order of a published function after its authored head (`name`,
+/// `effect`, `signature`, kept in annotation order). The tail is fixed so the
+/// frozen `api/sys.json` bytes do not depend on section order in doc comments.
+const PUBLISHED_FUNCTION_TAIL_ORDER: [&str; 7] = [
+    "purpose",
+    "documentation",
+    "since",
+    "preconditions",
+    "snapshot_rule",
+    "ownership",
+    "contract",
+];
+
 fn published_function_metadata(metadata: &Value) -> Value {
-    let mut metadata = metadata.clone();
-    if let Some(object) = metadata.as_object_mut() {
-        object.remove("contexts");
+    let Some(object) = metadata.as_object() else {
+        return metadata.clone();
+    };
+    let mut ordered = serde_json::Map::new();
+    for (key, value) in object {
+        if key != "contexts" && !PUBLISHED_FUNCTION_TAIL_ORDER.contains(&key.as_str()) {
+            ordered.insert(key.clone(), value.clone());
+        }
     }
-    metadata
+    for key in PUBLISHED_FUNCTION_TAIL_ORDER {
+        if let Some(value) = object.get(key) {
+            ordered.insert(key.to_owned(), value.clone());
+        }
+    }
+    Value::Object(ordered)
 }
 
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
@@ -353,6 +376,33 @@ pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error>
     serde_json::to_string_pretty(&sort(value.clone()))
 }
 
+/// Serialize the published sys API document in its authored key order. The
+/// frozen `api/sys.json` pins these bytes (SHA256SUMS, ORNA-SYS-138/141), so
+/// object keys are emitted in insertion order rather than sorted.
+pub fn authored_pretty_json(value: &Value) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(value)
+}
+
+/// Top-level member order of the published sys API document (`api/sys.json`).
+const PUBLISHED_API_TOP_LEVEL_ORDER: [&str; 16] = [
+    "title",
+    "language_version",
+    "sys_version",
+    "status",
+    "removed_names",
+    "singletons",
+    "opaque_identifiers",
+    "reference_aliases",
+    "value_types",
+    "enums",
+    "relations",
+    "functions",
+    "failure_codes",
+    "counts",
+    "source_of_truth",
+    "value_profiles",
+];
+
 /// Assemble the published artifact from the registry-owned non-operation
 /// graph and operation descriptors collected from annotated implementations.
 /// Counts are derived here so the checked-in artifact cannot become an input
@@ -397,27 +447,43 @@ pub fn generate_system_api_document(
         "opaque_identifiers",
         "reference_aliases",
         "value_types",
+        "enums",
         "relations",
         "functions",
         "failure_codes",
     ] {
-        let count = object
-            .get(name)
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("system API registry inventory `{name}` must be an array"))?
-            .len();
+        let count = if name == "enums" {
+            object
+                .get(name)
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "system API registry inventory `enums` must be an object".to_owned()
+                })?
+                .len()
+        } else {
+            object
+                .get(name)
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("system API registry inventory `{name}` must be an array")
+                })?
+                .len()
+        };
         counts.insert(name.to_owned(), Value::from(count));
     }
-    let enum_count = object
-        .get("enums")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "system API registry inventory `enums` must be an object".to_owned())?
-        .len();
-    counts.insert("enums".to_owned(), Value::from(enum_count));
     object.insert("counts".to_owned(), Value::Object(counts));
 
-    validate_api_document(&inventory)?;
-    Ok(inventory)
+    let mut members = std::mem::take(object);
+    let mut document = serde_json::Map::new();
+    for name in PUBLISHED_API_TOP_LEVEL_ORDER {
+        if let Some(value) = members.remove(name) {
+            document.insert(name.to_owned(), value);
+        }
+    }
+    document.extend(members);
+    let document = Value::Object(document);
+    validate_api_document(&document)?;
+    Ok(document)
 }
 
 /// Verify that the unchanged published JSON Schema covers exactly the emitted
@@ -630,7 +696,7 @@ impl Collector {
             return;
         }
         if let Some(attribute) = annotations.first() {
-            match parse_function_attributes(attribute) {
+            match parse_function_attributes(attribute, attrs) {
                 Ok((metadata, role, type_graph, schema)) => {
                     self.load_registry_json(type_graph, "type_graph");
                     self.load_registry_json(schema, "schema");
@@ -758,13 +824,19 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
 
 fn parse_function_attributes(
     attribute: &syn::Attribute,
+    attrs: &[syn::Attribute],
 ) -> Result<(Value, Option<String>, Option<String>, Option<String>), String> {
-    let mut function_json = None;
+    let mut fields = Map::new();
     let mut role = None;
     let mut type_graph = None;
     let mut schema = None;
     attribute
         .parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .ok_or_else(|| meta.error("#[ornasys] metadata keys must be identifiers"))?;
             let value = meta.value()?;
             let expression: Expr = value.parse()?;
             let Expr::Lit(expression) = expression else {
@@ -773,36 +845,146 @@ fn parse_function_attributes(
             let Lit::Str(value) = expression.lit else {
                 return Err(meta.error("#[ornasys] metadata must be a string literal"));
             };
-            if meta.path.is_ident("function") {
-                if function_json.replace(value.value()).is_some() {
-                    return Err(meta.error("only one function metadata value is allowed"));
+            let value = value.value();
+            match key.as_str() {
+                "name" | "effect" | "signature" => {
+                    if fields.insert(key.clone(), Value::String(value)).is_some() {
+                        return Err(meta.error(format!("only one `{key}` value is allowed")));
+                    }
                 }
-            } else if meta.path.is_ident("role") {
-                if role.replace(value.value()).is_some() {
-                    return Err(meta.error("only one semantic role may be declared"));
+                "contexts" => {
+                    let contexts = value
+                        .split(',')
+                        .map(|context| Value::String(context.trim().to_owned()))
+                        .collect();
+                    if fields.insert(key.clone(), Value::Array(contexts)).is_some() {
+                        return Err(meta.error("only one `contexts` value is allowed"));
+                    }
                 }
-            } else if meta.path.is_ident("type_graph") {
-                if type_graph.replace(value.value()).is_some() {
-                    return Err(meta.error("only one type_graph source may be declared"));
+                "role" => {
+                    if role.replace(value).is_some() {
+                        return Err(meta.error("only one semantic role may be declared"));
+                    }
                 }
-            } else if meta.path.is_ident("schema") {
-                if schema.replace(value.value()).is_some() {
-                    return Err(meta.error("only one schema source may be declared"));
+                "type_graph" => {
+                    if type_graph.replace(value).is_some() {
+                        return Err(meta.error("only one type_graph source may be declared"));
+                    }
                 }
-            } else {
-                return Err(meta.error("expected function, role, type_graph, or schema metadata"));
+                "schema" => {
+                    if schema.replace(value).is_some() {
+                        return Err(meta.error("only one schema source may be declared"));
+                    }
+                }
+                _ => {
+                    return Err(meta.error(
+                        "expected name, effect, signature, contexts, role, type_graph, or schema metadata",
+                    ));
+                }
             }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    let source = function_json.ok_or_else(|| "missing function JSON metadata".to_owned())?;
-    let metadata: Value = serde_json::from_str(&source)
-        .map_err(|error| format!("invalid function JSON metadata: {error}"))?;
+    fields.extend(parse_doc_metadata(attrs)?);
+    let metadata = Value::Object(fields);
     validate_function_metadata(&metadata)?;
     if let Some(role) = &role {
         parse_role_version(role)?;
     }
     Ok((metadata, role, type_graph, schema))
+}
+
+/// Extracts portable API metadata from a method's `///` doc comment. The first
+/// paragraph is the purpose; `# Heading` sections (each followed by one body
+/// paragraph) map to fixed keys; any other later paragraphs form `documentation`.
+fn parse_doc_metadata(attrs: &[syn::Attribute]) -> Result<Map<String, Value>, String> {
+    let mut lines = Vec::new();
+    for attribute in attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("doc"))
+    {
+        let syn::Meta::NameValue(meta) = &attribute.meta else {
+            return Err("doc comments must use `///` line form".to_owned());
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(text),
+            ..
+        }) = &meta.value
+        else {
+            return Err("doc comment must be a string literal".to_owned());
+        };
+        let text = text.value();
+        if text.contains('\n') {
+            return Err("doc comments must use `///` line form".to_owned());
+        }
+        lines.push(text);
+    }
+    let mut paragraphs: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(line.to_owned());
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+    let mut paragraphs = paragraphs.into_iter();
+    let purpose = match paragraphs.next() {
+        Some(lines) if !is_doc_heading(&lines) => lines.join(" "),
+        _ => {
+            return Err("#[ornasys] doc comment must begin with a purpose paragraph".to_owned());
+        }
+    };
+    let mut fields = Map::new();
+    fields.insert("purpose".to_owned(), Value::String(purpose));
+    let mut documentation = Vec::new();
+    while let Some(lines) = paragraphs.next() {
+        if !is_doc_heading(&lines) {
+            documentation.push(lines.join(" "));
+            continue;
+        }
+        let heading = match lines.as_slice() {
+            [heading] => heading.strip_prefix("# ").map(str::trim),
+            _ => None,
+        }
+        .ok_or_else(|| "doc section headings must be a single `# Heading` line".to_owned())?;
+        let key = match heading {
+            "Contract" => "contract",
+            "Preconditions" => "preconditions",
+            "Ownership" => "ownership",
+            "Snapshot rule" => "snapshot_rule",
+            "Since" => "since",
+            other => return Err(format!("unknown #[ornasys] doc section `# {other}`")),
+        };
+        let body = match paragraphs.next() {
+            Some(body) if !is_doc_heading(&body) => body.join(" "),
+            _ => {
+                return Err(format!(
+                    "doc section `# {heading}` must be followed by one body paragraph"
+                ));
+            }
+        };
+        if fields.insert(key.to_owned(), Value::String(body)).is_some() {
+            return Err(format!("duplicate doc section `# {heading}`"));
+        }
+    }
+    if !documentation.is_empty() {
+        fields.insert(
+            "documentation".to_owned(),
+            Value::String(documentation.join("\n\n")),
+        );
+    }
+    Ok(fields)
+}
+
+fn is_doc_heading(lines: &[String]) -> bool {
+    lines.first().is_some_and(|line| line.starts_with('#'))
 }
 
 pub fn parse_role_version(value: &str) -> Result<(&str, u16, u16), String> {
