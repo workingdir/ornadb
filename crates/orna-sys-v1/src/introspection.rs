@@ -1311,34 +1311,45 @@ impl Plan {
     }
 }
 
+/// Planner failures. These are diagnostics for the planner's own callers; the
+/// provider boundary reports every one as the shared `sys.abi.provider_failed`
+/// code, because the `sys.explain(Query)` failure vocabulary is fixed by the
+/// published `api/sys.json` (which has no `sys.explain` codes).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainError {
+    /// The query snapshot is empty or cannot be resolved.
     InvalidSnapshot,
+    /// The query source object is empty or cannot be resolved.
     InvalidObject,
+    /// A query expression is malformed or of an incompatible type.
     InvalidExpression,
+    /// The plan exceeds the node bound.
     TooManyNodes,
+    /// The plan exceeds the expression bound.
     TooManyExpressions,
+    /// Snapshot objects required for dependency resolution are absent.
     InvalidDependency,
+    /// The plan tree contradicts its structural profile.
     InvalidPlanTree,
 }
 
 impl ExplainError {
-    pub const fn code(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
-            Self::InvalidSnapshot => "sys.explain.invalid_snapshot",
-            Self::InvalidObject => "sys.explain.invalid_object",
-            Self::InvalidExpression => "sys.explain.invalid_expression",
-            Self::TooManyNodes => "sys.explain.plan_limit",
-            Self::TooManyExpressions => "sys.explain.expression_limit",
-            Self::InvalidDependency => "sys.explain.invalid_dependency",
-            Self::InvalidPlanTree => "sys.explain.invalid_plan_tree",
+            Self::InvalidSnapshot => "invalid_snapshot",
+            Self::InvalidObject => "invalid_object",
+            Self::InvalidExpression => "invalid_expression",
+            Self::TooManyNodes => "too_many_nodes",
+            Self::TooManyExpressions => "too_many_expressions",
+            Self::InvalidDependency => "invalid_dependency",
+            Self::InvalidPlanTree => "invalid_plan_tree",
         }
     }
 }
 
 impl fmt::Display for ExplainError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.code())
+        formatter.write_str(self.name())
     }
 }
 
