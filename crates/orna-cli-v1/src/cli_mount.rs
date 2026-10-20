@@ -129,6 +129,7 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
         view.context(),
         status.mountpoint(),
         source,
+        view.row_baselines(),
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -153,6 +154,20 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
     view.detach()
         .map_err(|error| mount_error("Mount view could not be detached", error.to_string()))
 }
+
+#[cfg(target_os = "linux")]
+fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
+    match error {
+        crate::fuse_mount::EditError::Stale(detail) => Diagnostic::target_with_detail(
+            "E2000",
+            "Edit is stale against the mounted baseline",
+            "run mount DIR --cwd to read the current row, then reapply the retained draft",
+            detail,
+        ),
+        crate::fuse_mount::EditError::Failed(detail) => mount_error("Edit was not accepted", detail),
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
@@ -168,14 +183,22 @@ pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(),
             view.context(),
             edit_path,
             row,
+            Some(view.row_baselines()),
         )
-        .map_err(|error| mount_error("Edit was not accepted", error));
+        .map_err(edit_refusal);
     }
     let context = repository
         .open_format_context_at_selector("HEAD")
         .map_err(|error| mount_error("Edit was not accepted", format!("workspace snapshot could not be pinned: {error:?}")))?;
-    crate::fuse_mount::edit_path(&repository, context.commit(), &context, path.to_str().unwrap_or_default(), row)
-        .map_err(|error| mount_error("Edit was not accepted", error))
+    crate::fuse_mount::edit_path(
+        &repository,
+        context.commit(),
+        &context,
+        path.to_str().unwrap_or_default(),
+        row,
+        None,
+    )
+        .map_err(edit_refusal)
 }
 
 #[cfg(target_os = "linux")]
