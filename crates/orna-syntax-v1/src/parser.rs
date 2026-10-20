@@ -3423,7 +3423,14 @@ impl Parser {
         });
         match value {
             Some(value) if self.within_depth(expr_depth(&value)) => value,
-            _ => self.error_expr(),
+            Some(_) => self.error_expr(),
+            None => {
+                // The nesting limit is already reported and nothing was
+                // consumed; skip the keyword so the block loop progresses.
+                let error = self.error_expr();
+                self.bump();
+                error
+            }
         }
     }
     fn continues_control_expression(&self) -> bool {
