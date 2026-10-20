@@ -121,7 +121,7 @@ pub fn generate_sys_artifacts(
     let api = generate_system_api_document(projected_registry, function_metadata)?;
     validate_api_document(&api)?;
     validate_published_schema_shape(&api, &published_schema)?;
-    let api_json = canonical_pretty_json(&api).map_err(|error| error.to_string())?;
+    let api_json = authored_pretty_json(&api).map_err(|error| error.to_string())?;
     let api_json = format!("{api_json}\n");
 
     let mut schema_json =
@@ -200,12 +200,35 @@ fn function_is_admitted_to_format_3(metadata: &Value) -> bool {
         .is_none_or(|contexts| contexts.iter().any(|context| context == "format-3"))
 }
 
+/// Member order of a published function after its authored head (`name`,
+/// `effect`, `signature`, kept in annotation order). The tail is fixed so the
+/// frozen `api/sys.json` bytes do not depend on section order in doc comments.
+const PUBLISHED_FUNCTION_TAIL_ORDER: [&str; 7] = [
+    "purpose",
+    "documentation",
+    "since",
+    "preconditions",
+    "snapshot_rule",
+    "ownership",
+    "contract",
+];
+
 fn published_function_metadata(metadata: &Value) -> Value {
-    let mut metadata = metadata.clone();
-    if let Some(object) = metadata.as_object_mut() {
-        object.remove("contexts");
+    let Some(object) = metadata.as_object() else {
+        return metadata.clone();
+    };
+    let mut ordered = serde_json::Map::new();
+    for (key, value) in object {
+        if key != "contexts" && !PUBLISHED_FUNCTION_TAIL_ORDER.contains(&key.as_str()) {
+            ordered.insert(key.clone(), value.clone());
+        }
     }
-    metadata
+    for key in PUBLISHED_FUNCTION_TAIL_ORDER {
+        if let Some(value) = object.get(key) {
+            ordered.insert(key.to_owned(), value.clone());
+        }
+    }
+    Value::Object(ordered)
 }
 
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
@@ -353,6 +376,33 @@ pub fn canonical_pretty_json(value: &Value) -> Result<String, serde_json::Error>
     serde_json::to_string_pretty(&sort(value.clone()))
 }
 
+/// Serialize the published sys API document in its authored key order. The
+/// frozen `api/sys.json` pins these bytes (SHA256SUMS, ORNA-SYS-138/141), so
+/// object keys are emitted in insertion order rather than sorted.
+pub fn authored_pretty_json(value: &Value) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(value)
+}
+
+/// Top-level member order of the published sys API document (`api/sys.json`).
+const PUBLISHED_API_TOP_LEVEL_ORDER: [&str; 16] = [
+    "title",
+    "language_version",
+    "sys_version",
+    "status",
+    "removed_names",
+    "singletons",
+    "opaque_identifiers",
+    "reference_aliases",
+    "value_types",
+    "enums",
+    "relations",
+    "functions",
+    "failure_codes",
+    "counts",
+    "source_of_truth",
+    "value_profiles",
+];
+
 /// Assemble the published artifact from the registry-owned non-operation
 /// graph and operation descriptors collected from annotated implementations.
 /// Counts are derived here so the checked-in artifact cannot become an input
@@ -416,8 +466,17 @@ pub fn generate_system_api_document(
     counts.insert("enums".to_owned(), Value::from(enum_count));
     object.insert("counts".to_owned(), Value::Object(counts));
 
-    validate_api_document(&inventory)?;
-    Ok(inventory)
+    let mut members = std::mem::take(object);
+    let mut document = serde_json::Map::new();
+    for name in PUBLISHED_API_TOP_LEVEL_ORDER {
+        if let Some(value) = members.remove(name) {
+            document.insert(name.to_owned(), value);
+        }
+    }
+    document.extend(members);
+    let document = Value::Object(document);
+    validate_api_document(&document)?;
+    Ok(document)
 }
 
 /// Verify that the unchanged published JSON Schema covers exactly the emitted
