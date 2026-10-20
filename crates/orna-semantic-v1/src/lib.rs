@@ -8305,7 +8305,26 @@ fn infer_contextual_lambda(
     }
 }
 
+/// Native stack headroom kept before inference requests a fresh stack segment.
+const SEMANTIC_STACK_RED_ZONE: usize = 128 * 1024;
+/// Size of each fresh stack segment used by deep expression inference.
+const SEMANTIC_STACK_SEGMENT: usize = 2 * 1024 * 1024;
+
+/// Nested expressions recurse once per level, and debug frames for
+/// `infer_node`'s large match arms can exhaust a test thread's default stack
+/// at a few dozen levels. Grow onto a fresh segment near the limit.
 fn infer(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    stacker::maybe_grow(SEMANTIC_STACK_RED_ZONE, SEMANTIC_STACK_SEGMENT, || {
+        infer_node(expr, scope, local, diagnostics)
+    })
+}
+
+fn infer_node(
     expr: &Expr,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
@@ -8757,6 +8776,7 @@ fn infer(
                                 Type::Record(fields) => fields.get(name).cloned(),
                                 _ => None,
                             })
+                            .or_else(|| error_value_field_type(nominal, name))
                             .unwrap_or_else(|| {
                                 diagnostics.push(diag(
                                     DIAG_TYPE,
@@ -9272,16 +9292,35 @@ fn infer(
             if op == "|?" {
                 return infer_recovery_pipeline(lhs, rhs, scope, local, diagnostics);
             }
-            let left = infer(lhs, scope, local, diagnostics);
-            let right = if op == "??" {
-                match &left.ty {
-                    Type::Optional(inner) => {
-                        infer_contextual(rhs, inner, scope, local, diagnostics)
-                    }
-                    _ => infer(rhs, scope, local, diagnostics),
-                }
+            let equality = matches!(op.as_str(), "==" | "!=");
+            let (left, right) = if equality
+                && is_empty_list_literal(lhs)
+                && !is_empty_list_literal(rhs)
+            {
+                let right = infer(rhs, scope, local, diagnostics);
+                let left = match &right.ty {
+                    Type::List(_) => infer_contextual(lhs, &right.ty, scope, local, diagnostics),
+                    _ => infer(lhs, scope, local, diagnostics),
+                };
+                (left, right)
             } else {
-                infer(rhs, scope, local, diagnostics)
+                let left = infer(lhs, scope, local, diagnostics);
+                let right = if op == "??" {
+                    match &left.ty {
+                        Type::Optional(inner) => {
+                            infer_contextual(rhs, inner, scope, local, diagnostics)
+                        }
+                        _ => infer(rhs, scope, local, diagnostics),
+                    }
+                } else if equality
+                    && is_empty_list_literal(rhs)
+                    && matches!(left.ty, Type::List(_))
+                {
+                    infer_contextual(rhs, &left.ty, scope, local, diagnostics)
+                } else {
+                    infer(rhs, scope, local, diagnostics)
+                };
+                (left, right)
             };
             let mut effects = left.effects;
             effects.join(&right.effects);
@@ -15507,6 +15546,20 @@ fn infer_error_call(
 
 fn error_value_type() -> Type {
     Type::Named("Error".into())
+}
+
+/// Static field types of the portable `Error` value (ORNA-FAILURE-005).
+/// `safe_details` is a text-keyed map of arbitrary values with no static
+/// field type, so it is intentionally not listed.
+fn error_value_field_type(nominal: &str, name: &str) -> Option<Type> {
+    if nominal != "Error" {
+        return None;
+    }
+    match name {
+        "code" | "message" => Some(Type::Text),
+        "causes" => Some(Type::List(Box::new(error_value_type()))),
+        _ => None,
+    }
 }
 
 fn pipeline_lambda(expression: &Expr) -> Option<&Expr> {
