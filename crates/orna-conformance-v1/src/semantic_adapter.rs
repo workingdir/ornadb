@@ -1822,6 +1822,7 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
 }
 
 impl TransactionalEvaluator {
@@ -1833,6 +1834,7 @@ impl TransactionalEvaluator {
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
+            mutation_scope: [0; 32],
         }
     }
 
@@ -1843,6 +1845,11 @@ impl TransactionalEvaluator {
 
     fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    fn with_mutation_scope(mut self, scope: [u8; 32]) -> Self {
+        self.mutation_scope = scope;
         self
     }
 
@@ -2003,6 +2010,7 @@ impl TransactionalEvaluator {
                 limits,
                 activation_time: self.activation_time,
                 publication_rows: self.publication_rows.clone(),
+                mutation_scope: self.mutation_scope,
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_and_budget(
@@ -2391,7 +2399,8 @@ impl DurableTransactionalEvaluator {
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_mutation_scope(request_mutation_scope(&request));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -3687,7 +3696,8 @@ impl DurableTransactionalEvaluator {
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
             .with_activation_time(context.activation_time())
-            .with_publication_rows(publication_rows);
+            .with_publication_rows(publication_rows)
+            .with_mutation_scope(request_mutation_scope(&request));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -5498,6 +5508,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -6104,6 +6115,7 @@ impl TableEffectHandler<'_, '_> {
         self.next_mutation = self.next_mutation.saturating_add(1);
         let mut digest = Sha256::new();
         digest.update(b"ORNA-SOURCE-MUTATION\0");
+        digest.update(self.mutation_scope);
         digest.update(table.as_bytes());
         digest.update([0]);
         digest.update(&key);
@@ -6547,6 +6559,14 @@ fn project_transaction_namespace(
         return Err("project transaction modules need a non-empty logical namespace".into());
     }
     Ok(stem.replace('/', "."))
+}
+
+fn request_mutation_scope(request: &RequestIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-SOURCE-MUTATION-SCOPE\0");
+    digest.update(request.session_id);
+    digest.update(request.request_id);
+    digest.finalize().into()
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -9829,6 +9849,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
 
@@ -10177,6 +10198,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
@@ -10365,6 +10387,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
