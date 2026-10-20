@@ -9,10 +9,24 @@ fn canonical(raw: Raw) -> CanonicalValue {
 fn ints(values: &[i64]) -> Raw {
     Raw::Array(values.iter().map(|value| Raw::Int((*value).into())).collect())
 }
+fn tuple(components: Vec<Raw>) -> Raw {
+    Raw::Tag(60015, Box::new(Raw::Array(components)))
+}
+
 
 fn option_int(value: i64) -> CanonicalValue {
     CanonicalValue::new(
         Value::option(Some(Value::int(value.into())))
+            .unwrap()
+            .raw()
+            .clone(),
+    )
+    .unwrap()
+}
+
+fn optional_none() -> CanonicalValue {
+    CanonicalValue::new(
+        Value::option(None)
             .unwrap()
             .raw()
             .clone(),
@@ -74,52 +88,60 @@ fn pinned_collection_helpers_bind_for_collection_and_query_exports() {
         (
             "partition",
             include_str!("fixtures/stdlib-collection-partition-2213.orna"),
-            Raw::Array(vec![ints(&[1, 3]), ints(&[2])]),
+            tuple(vec![ints(&[1, 3]), ints(&[2])]),
         ),
         (
             "zip",
             include_str!("fixtures/stdlib-collection-zip-2213.orna"),
-            Raw::Array(vec![Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())])]),
+            Raw::Array(vec![tuple(vec![Raw::Int(1.into()), Raw::Text("a".into())])]),
         ),
         (
             "zip_exact",
             include_str!("fixtures/stdlib-collection-zip-exact-2213.orna"),
             Raw::Array(vec![
-                Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
-                Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
+                tuple(vec![Raw::Int(1.into()), Raw::Text("a".into())]),
+                tuple(vec![Raw::Int(2.into()), Raw::Text("b".into())]),
             ]),
         ),
         (
             "group_by",
             include_str!("fixtures/stdlib-collection-group-by-2213.orna"),
             Raw::Array(vec![
-                Raw::Array(vec![Raw::Int(1.into()), ints(&[31])]),
-                Raw::Array(vec![Raw::Int(2.into()), ints(&[12, 22])]),
-                Raw::Array(vec![Raw::Int(3.into()), ints(&[13, 33])]),
+                tuple(vec![Raw::Int(1.into()), ints(&[31])]),
+                tuple(vec![Raw::Int(2.into()), ints(&[12, 22])]),
+                tuple(vec![Raw::Int(3.into()), ints(&[13, 33])]),
             ]),
         ),
         (
             "pairs",
             include_str!("fixtures/stdlib-collection-pairs-2213.orna"),
-            Raw::Array(vec![ints(&[1, 2]), ints(&[2, 3])]),
+            Raw::Array(vec![
+                tuple(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                tuple(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+            ]),
         ),
         (
             "rank",
             include_str!("fixtures/stdlib-collection-rank-2213.orna"),
-            Raw::Array(vec![ints(&[1, 1]), ints(&[1, 1]), ints(&[2, 3]), ints(&[3, 4])]),
+            Raw::Array(vec![
+                tuple(vec![Raw::Int(1.into()), Raw::Int(1.into())]),
+                tuple(vec![Raw::Int(1.into()), Raw::Int(1.into())]),
+                tuple(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                tuple(vec![Raw::Int(3.into()), Raw::Int(4.into())]),
+            ]),
         ),
         (
             "asof_join",
             include_str!("fixtures/stdlib-collection-asof-join-2213.orna"),
             Raw::Array(vec![
-                Raw::Array(vec![
+                tuple(vec![
                     Raw::Int(10.into()),
                     Value::option(Some(Value::int(9.into())))
                         .unwrap()
                         .raw()
                         .clone(),
                 ]),
-                Raw::Array(vec![Raw::Int(1.into()), Raw::Null]),
+                tuple(vec![Raw::Int(1.into()), Raw::Null]),
             ]),
         ),
         (
@@ -185,24 +207,20 @@ fn pinned_collection_asof_selectors_keep_captured_values() {
     assert_eq!(
         actual,
         Some(canonical(Raw::Array(vec![
-            Raw::Array(vec![
-                Raw::Array(vec![
-                    Raw::Int(5.into()),
-                    Value::option(Some(Value::int(1.into())))
-                        .unwrap()
-                        .raw()
-                        .clone(),
-                ]),
-            ]),
-            Raw::Array(vec![
-                Raw::Array(vec![
-                    Raw::Int(11.into()),
-                    Value::option(Some(Value::int(1.into())))
-                        .unwrap()
-                        .raw()
-                        .clone(),
-                ]),
-            ]),
+            Raw::Array(vec![tuple(vec![
+                Raw::Int(5.into()),
+                Value::option(Some(Value::int(1.into())))
+                    .unwrap()
+                    .raw()
+                    .clone(),
+            ])]),
+            Raw::Array(vec![tuple(vec![
+                Raw::Int(11.into()),
+                Value::option(Some(Value::int(1.into())))
+                    .unwrap()
+                    .raw()
+                    .clone(),
+            ])]),
         ])))
     );
 }
@@ -226,7 +244,7 @@ fn asof_join_excludes_future_rows_and_uses_final_canonical_tie_key() {
         (Raw::Text("time".into()), Raw::Int(4.into())),
         (Raw::Text("group".into()), Raw::Text("g".into())),
     ]);
-    let expected = Raw::Array(vec![Raw::Array(vec![
+    let expected = Raw::Array(vec![tuple(vec![
         left,
         Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(1.into()), right]))),
     ])]);
@@ -303,7 +321,7 @@ fn pinned_stats_aggregates_require_the_captured_std_module() {
         ),
         (
             include_str!("fixtures/stdlib-stats-empty-ymou.orna"),
-            CanonicalValue::new(Raw::Null).unwrap(),
+            optional_none(),
         ),
     ] {
         let actual = session
