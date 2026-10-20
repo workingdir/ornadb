@@ -1,22 +1,18 @@
-//! Canonical compact-manifest publication witnesses.
+//! Canonical compact-manifest readers for legacy format-1/2 snapshots.
 //!
-//! This module deliberately owns only the committed Git witness for compact
-//! storage.  Encoding rows, choosing physical Parquet columns, and consuming
-//! the runtime prefix remain separate boundaries.  The witness is nevertheless
-//! real: it writes canonical tracked manifest/shard records, proves every
-//! named data blob is in the candidate tree, and binds that proof into the
-//! restart journal before a ref can become visible.
+//! The compact row writer is retired (ORNA-UPGRADE-003): this module only
+//! verifies committed manifests, shards and Parquet segments and projects
+//! their rows read-only. The candidate builder survives solely as a test
+//! fixture writer (`legacy-fixture-writer`) so the legacy readers stay
+//! tested; production builds never contain it.
 
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
-    fs::{self, OpenOptions},
-    io::Read,
 };
 
 use bytes::Bytes;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 use parquet::{
@@ -29,9 +25,10 @@ use uuid::{Uuid, Version};
 
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
-    PublicationJournal, PublicationJournalEntry, PublicationJournalStage, Repository,
-    RepositoryError,
+    PublicationJournal, Repository, RepositoryError,
 };
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+use crate::PublicationJournalEntry;
 
 /// Maximum number of entries in one canonical compact-manifest shard.
 pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
@@ -310,8 +307,10 @@ impl CompactCommittedSegmentProjection {
 /// paired with their validated shard/data paths.
 type CompactInventoryPaths = (BTreeSet<Uuid>, BTreeMap<Uuid, BTreeSet<String>>);
 
-/// One newly encoded immutable compact segment.  Its generation and native
-/// object ID are allocated only after the base manifest has been verified.
+/// One newly encoded immutable compact segment for the test-only legacy
+/// fixture writer. Its generation and native object ID are allocated only
+/// after the base manifest has been verified.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactSegment {
     segment_id: Uuid,
@@ -330,6 +329,7 @@ pub struct CompactSegment {
     bloom: bool,
 }
 
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
 impl CompactSegment {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -488,6 +488,7 @@ impl CompactManifestEntry {
         &self.max_key
     }
 
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     fn from_segment(
         table: Uuid,
         segment: &CompactSegment,
@@ -554,10 +555,11 @@ impl CompactManifestEntry {
     }
 }
 
-/// Reads only the physical representation boundary needed by this repository
-/// witness.  Logical row decoding and the complete descriptor/OVB semantics
-/// remain owned by the storage reader; publication nevertheless rejects a
-/// non-Parquet blob or a manifest that lies about its required file metadata.
+/// Reads only the physical representation boundary needed by the fixture
+/// writer. Logical row decoding and the complete descriptor/OVB semantics
+/// remain owned by the storage reader; the fixture writer nevertheless rejects
+/// a non-Parquet blob or a manifest that lies about its required file metadata.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
 fn verify_physical_segment(
     table: Uuid,
     segment: &CompactSegment,
@@ -2286,6 +2288,7 @@ impl CompactManifest {
         Ok(files)
     }
 
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     fn witness(
         &self,
         base_sha256: [u8; 32],
@@ -2486,26 +2489,20 @@ impl CompactManifestWitness {
     }
 }
 
-/// An opaque compact candidate and its journal binding.
-///
-/// A caller can prepare this value but cannot inspect, publish, or finalize
-/// its raw candidate. Compact publication has a distinct, runtime-backed API;
-/// ordinary [`Repository::publish_candidate`] deliberately refuses this type
-/// of journal.
+/// A compact candidate and the journal a retired compact writer would have
+/// recorded for it. Only the test-only legacy fixture writer creates one, and
+/// nothing can publish it.
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactPublicationPlan {
-    expected_index: IndexGeneration,
     candidate: PrivateCommit,
     manifest: CompactManifest,
     journal: PublicationJournal,
 }
 
-/// The visible result of the repository half of compact publication.
-///
-/// This is deliberately a pending value: runtime cleanup and journal
-/// finalization have not happened. Callers that need a completed compact
-/// publication must use the runtime-backed coordinator instead of treating
-/// this boundary as completion.
+/// The pending identity of a compact publication recorded by a retired
+/// compact writer. No build of this repository produces one any more; the
+/// type stays only for the runtime's legacy compact receipt records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactPublicationPending {
     index: IndexGeneration,
@@ -2514,84 +2511,6 @@ pub struct CompactPublicationPending {
     cleanup_watermark: [u8; 32],
     journal_verifier: [u8; 32],
 }
-
-/// A durable compact journal whose candidate can no longer be finalized at
-/// the selected branch head.
-///
-/// The repository has reloaded the current committed manifest, but does not
-/// rebuild or advance a stale candidate itself. Callers must make an explicit
-/// reconciliation decision using a fresh manifest generation. The original
-/// journal remains durable until that decision is completed safely.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactPublicationReconciliation {
-    candidate: GitCommitRef,
-    current_head: GitCommitRef,
-    current_manifest: Option<CompactManifest>,
-    stage: PublicationJournalStage,
-    runtime_intent_id: [u8; 16],
-    cleanup_watermark: [u8; 32],
-}
-
-impl CompactPublicationReconciliation {
-    /// Returns the compact candidate that must not be force-published.
-    pub fn candidate(&self) -> &GitCommitRef {
-        &self.candidate
-    }
-
-    /// Returns the current selected-branch head observed during recovery.
-    pub fn current_head(&self) -> &GitCommitRef {
-        &self.current_head
-    }
-
-    /// Returns the verified manifest reloaded from `current_head`.
-    pub fn current_manifest(&self) -> Option<&CompactManifest> {
-        self.current_manifest.as_ref()
-    }
-
-    /// Returns the persisted stage at which recovery became stale.
-    pub const fn stage(&self) -> PublicationJournalStage {
-        self.stage
-    }
-
-    /// Returns the runtime intent retained by the durable journal.
-    pub const fn runtime_intent_id(&self) -> [u8; 16] {
-        self.runtime_intent_id
-    }
-
-    /// Returns the frozen-prefix watermark retained by the durable journal.
-    pub const fn cleanup_watermark(&self) -> [u8; 32] {
-        self.cleanup_watermark
-    }
-
-    /// Whether a runtime receipt may already have consumed the frozen prefix.
-    /// A caller must not create a replacement cleanup receipt in this state.
-    pub const fn runtime_completion_may_have_committed(&self) -> bool {
-        runtime_completion_may_have_committed(self.stage)
-    }
-}
-
-/// A compact journal crosses the runtime boundary only after the receipt has
-/// been durably recorded.  Recovery must therefore retain the frozen prefix
-/// whenever it observes either post-receipt stage, rather than treating the
-/// earlier repository-only stage as runtime completion.
-const fn runtime_completion_may_have_committed(stage: PublicationJournalStage) -> bool {
-    matches!(
-        stage,
-        PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
-    )
-}
-
-/// The safe result of recovering a compact publication boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CompactPublicationRecovery {
-    /// Repository reconciliation is complete and the runtime may provide the
-    /// receipt for this exact pending candidate.
-    PendingRuntimeReceipt(CompactPublicationPending),
-    /// The selected branch advanced beyond the compact candidate. The journal
-    /// remains retained while the caller rebuilds or explicitly reconciles.
-    ReconciliationRequired(CompactPublicationReconciliation),
-}
-
 impl CompactPublicationPending {
     pub fn index(&self) -> &IndexGeneration {
         &self.index
@@ -2618,43 +2537,27 @@ impl CompactPublicationPending {
     }
 }
 
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
 impl CompactPublicationPlan {
-    /// Returns the logical compact manifest prepared for publication. The
-    /// private Git candidate and durable journal remain inaccessible here.
+    /// Returns the canonical compact manifest committed by the candidate.
     pub fn manifest(&self) -> &CompactManifest {
         &self.manifest
     }
 
-    /// Reports whether this candidate is durably bound to the supplied
-    /// runtime freeze. Storage checks this before allowing the candidate's
-    /// ref to become visible.
-    pub fn matches_runtime_freeze(
-        &self,
-        runtime_intent_id: [u8; 16],
-        cleanup_watermark: [u8; 32],
-    ) -> bool {
-        self.journal.runtime_intent_id() == Some(runtime_intent_id)
-            && self.journal.compact_manifest().is_some_and(|witness| {
-                witness.runtime_intent_id() == runtime_intent_id
-                    && witness.cleanup_watermark() == cleanup_watermark
-            })
+    /// Returns the private candidate commit built by the fixture writer.
+    pub fn candidate(&self) -> &PrivateCommit {
+        &self.candidate
     }
 
-    /// Returns only the opaque Git identity of the prepared candidate.
+    /// Returns the Git identity of the candidate commit.
     pub fn candidate_commit(&self) -> &GitCommitRef {
         self.candidate.commit()
     }
-}
 
-/// Fixed verification material loaded only from runtime initialization state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct CompactRuntimeReceiptVerificationKey(VerifyingKey);
-
-impl CompactRuntimeReceiptVerificationKey {
-    fn from_bytes(bytes: [u8; 32]) -> Result<Self, RepositoryError> {
-        VerifyingKey::from_bytes(&bytes)
-            .map(Self)
-            .map_err(|_| RepositoryError::InvalidPublicationJournal)
+    /// Returns the compact journal the retired writer would have persisted
+    /// before advancing its ref.
+    pub fn journal(&self) -> &PublicationJournal {
+        &self.journal
     }
 }
 
@@ -2788,30 +2691,7 @@ impl CompactRuntimeReceipt {
     pub const fn signature(&self) -> &[u8; 64] {
         &self.signature
     }
-
-    fn verify(&self, key: &CompactRuntimeReceiptVerificationKey) -> bool {
-        let Ok(payload) = Self::signing_bytes(
-            self.runtime_intent_id,
-            self.cleanup_watermark,
-            &self.commit,
-            self.journal_verifier,
-        ) else {
-            return false;
-        };
-        key.0
-            .verify(&payload, &Signature::from_bytes(&self.signature))
-            .is_ok()
-    }
 }
-
-/// Holds the repository coordination lock across the separately owned runtime
-/// transaction. It is private so only the repository-owned operation can
-/// finalize a compact journal.
-struct CompactRuntimeCompletionFence {
-    _coordination_lock: crate::CoordinationLock,
-}
-
-impl CompactRuntimeCompletionFence {}
 
 impl Repository {
     /// Returns the bytes of one committed compact segment after rechecking its
@@ -2914,8 +2794,7 @@ impl Repository {
     }
 
     /// Projects rows from an immutable commit even after another commit has
-    /// advanced the selected ref. Recovery uses this only to prove the compact
-    /// candidate against its recorded base; it does not publish or finalize.
+    /// advanced the selected ref.
     pub fn read_compact_committed_base_from_commit<T, F>(
         &self,
         commit: &GitCommitRef,
@@ -3031,401 +2910,6 @@ impl Repository {
             projected.push(project(entry, projection)?);
         }
         Ok(projected)
-    }
-
-    /// Persists a prepared compact journal without advancing the selected ref.
-    /// This is the crash-before-publication boundary used by restart tests and
-    /// recovery callers; runtime cleanup remains pending.
-    pub fn persist_compact_publication(
-        &self,
-        plan: &CompactPublicationPlan,
-    ) -> Result<(), RepositoryError> {
-        {
-            let _lock = self.acquire_coordination_lock()?;
-            self.require_no_pending_checkout_recovery_locked()?;
-        }
-        if self.read_publication_journal()?.is_some()
-            || self.head()?.as_ref() != Some(plan.journal.old_head())
-            || self.index_generation()? != plan.expected_index
-        {
-            return Err(RepositoryError::PublicationPending);
-        }
-        self.verify_compact_publication_binding(&plan.journal, &plan.candidate)?;
-        self.write_publication_journal(&plan.journal)
-    }
-
-    /// Publishes the repository half of a compact operation and returns only
-    /// its typed pending identity. The journal deliberately remains pending
-    /// until the runtime-owned frozen prefix has been durably consumed.
-    pub fn publish_compact_repository_boundary(
-        &self,
-        mut plan: CompactPublicationPlan,
-    ) -> Result<CompactPublicationPending, RepositoryError> {
-        let index = self.publish_compact_plan(&mut plan)?;
-        Ok(CompactPublicationPending {
-            index,
-            commit: plan.candidate.commit().clone(),
-            runtime_intent_id: plan
-                .journal
-                .runtime_intent_id()
-                .ok_or(RepositoryError::InvalidPublicationJournal)?,
-            cleanup_watermark: plan
-                .journal
-                .compact_manifest()
-                .ok_or(RepositoryError::InvalidPublicationJournal)?
-                .cleanup_watermark(),
-            journal_verifier: compact_journal_verifier(&plan.journal)?,
-        })
-    }
-
-    /// Reconciles an interrupted compact publication and returns its pending
-    /// receipt request. This function never runs runtime work and never
-    /// clears a compact journal.
-    pub fn recover_compact_repository_boundary(
-        &self,
-    ) -> Result<Option<CompactPublicationPending>, RepositoryError> {
-        match self.recover_compact_publication_boundary()? {
-            None => Ok(None),
-            Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => Ok(Some(pending)),
-            Some(CompactPublicationRecovery::ReconciliationRequired(_)) => {
-                Err(RepositoryError::CompactReconciliationRequired)
-            }
-        }
-    }
-
-    /// Recovers the repository portion of a compact publication without
-    /// running runtime cleanup. If an external writer advanced the selected
-    /// branch after this compact candidate, returns the reloaded current
-    /// manifest as an explicit reconciliation boundary and retains the
-    /// journal. In particular, it never forces the stale candidate or treats
-    /// a previously consumed frozen prefix as reusable.
-    pub fn recover_compact_publication_boundary(
-        &self,
-    ) -> Result<Option<CompactPublicationRecovery>, RepositoryError> {
-        {
-            let _lock = self.acquire_coordination_lock()?;
-            self.require_no_pending_checkout_recovery_locked()?;
-        }
-        let Some(existing) = self.read_publication_journal()? else {
-            return Ok(None);
-        };
-        if existing.compact_manifest().is_none() {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        match self.recover_publication() {
-            Ok(_) => return Ok(None),
-            Err(RepositoryError::RuntimeCompletionRequired) => {}
-            Err(RepositoryError::StaleHead) => {
-                let journal = self
-                    .read_publication_journal()?
-                    .ok_or(RepositoryError::InvalidPublicationJournal)?;
-                return self.compact_reconciliation_boundary(&journal).map(Some);
-            }
-            Err(error) => return Err(error),
-        }
-        let pending = self
-            .pending_compact_publication()?
-            .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        if self.head()?.as_ref() == Some(pending.commit()) {
-            return Ok(Some(CompactPublicationRecovery::PendingRuntimeReceipt(
-                pending,
-            )));
-        }
-        let journal = self
-            .read_publication_journal()?
-            .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        self.compact_reconciliation_boundary(&journal).map(Some)
-    }
-
-    /// Returns the persisted compact receipt request when the selected HEAD is
-    /// a strict descendant of this reconciliation's candidate. This exposes
-    /// no replacement writer plan; callers may only finalize a matching
-    /// durable runtime receipt, leaving the descendant ref and worktree intact.
-    pub fn compact_descendant_receipt_request(
-        &self,
-        reconciliation: &CompactPublicationReconciliation,
-    ) -> Result<Option<CompactPublicationPending>, RepositoryError> {
-        let _lock = self.acquire_coordination_lock()?;
-        self.require_no_pending_checkout_recovery_locked()?;
-        self.ensure_no_git_operation_in_progress()?;
-        let Some(journal) = self.read_publication_journal_locked()? else {
-            return Ok(None);
-        };
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if journal.stage() != PublicationJournalStage::WorktreeReconciled
-            || journal.new_head() != reconciliation.candidate()
-            || journal.runtime_intent_id() != Some(reconciliation.runtime_intent_id())
-            || witness.cleanup_watermark() != reconciliation.cleanup_watermark()
-        {
-            return Ok(None);
-        }
-        let candidate = self.candidate_from_journal(&journal)?;
-        self.verify_compact_publication_binding(&journal, &candidate)?;
-        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        if &current_head == journal.new_head()
-            || !self.compact_commit_is_ancestor(journal.new_head(), &current_head)?
-        {
-            return Ok(None);
-        }
-        Ok(Some(CompactPublicationPending {
-            index: self.index_generation()?,
-            commit: journal.new_head().clone(),
-            runtime_intent_id: witness.runtime_intent_id(),
-            cleanup_watermark: witness.cleanup_watermark(),
-            journal_verifier: compact_journal_verifier(&journal)?,
-        }))
-    }
-
-    /// Authenticates a durable runtime receipt using the fixed verification
-    /// key configured for this repository, then finalizes the compact journal
-    /// if its candidate is still HEAD or an ancestor of HEAD. Finalization only
-    /// advances and clears the journal; it never rewrites refs, index, or files.
-
-    pub fn finish_compact_with_receipt(
-        &self,
-        receipt: &CompactRuntimeReceipt,
-    ) -> Result<IndexGeneration, RepositoryError> {
-        {
-            let _lock = self.acquire_coordination_lock()?;
-            self.require_no_pending_checkout_recovery_locked()?;
-        }
-        let key = self.compact_runtime_receipt_verification_key()?;
-        let journal = self
-            .read_publication_journal()?
-            .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        let fence = self.begin_compact_runtime_completion(&journal)?;
-        self.verify_compact_runtime_receipt(&journal, receipt, &key)?;
-        let mut journal = journal;
-        self.mark_fenced_compact_runtime_complete(&mut journal, fence)?;
-        self.index_generation()
-    }
-
-    fn publish_compact_plan(
-        &self,
-        plan: &mut CompactPublicationPlan,
-    ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl(
-            &plan.expected_index,
-            &plan.candidate,
-            &mut plan.journal,
-            true,
-        )
-    }
-
-    fn pending_compact_publication(
-        &self,
-    ) -> Result<Option<CompactPublicationPending>, RepositoryError> {
-        let Some(journal) = self.read_publication_journal()? else {
-            return Ok(None);
-        };
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if journal.stage() != PublicationJournalStage::WorktreeReconciled {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        Ok(Some(CompactPublicationPending {
-            index: self.index_generation()?,
-            commit: journal.new_head().clone(),
-            runtime_intent_id: witness.runtime_intent_id(),
-            cleanup_watermark: witness.cleanup_watermark(),
-            journal_verifier: compact_journal_verifier(&journal)?,
-        }))
-    }
-
-    fn compact_reconciliation_boundary(
-        &self,
-        journal: &PublicationJournal,
-    ) -> Result<CompactPublicationRecovery, RepositoryError> {
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::InvalidPublicationJournal)?;
-        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        let current_manifest = self.read_compact_manifest(&current_head, witness.table())?;
-        Ok(CompactPublicationRecovery::ReconciliationRequired(
-            CompactPublicationReconciliation {
-                candidate: journal.new_head().clone(),
-                current_head,
-                current_manifest,
-                stage: journal.stage(),
-                runtime_intent_id: witness.runtime_intent_id(),
-                cleanup_watermark: witness.cleanup_watermark(),
-            },
-        ))
-    }
-    fn compact_commit_is_ancestor(
-        &self,
-        candidate: &GitCommitRef,
-        head: &GitCommitRef,
-    ) -> Result<bool, RepositoryError> {
-        if candidate == head {
-            return Ok(true);
-        }
-        let mut command = self.command();
-        command.args([
-            "merge-base",
-            "--is-ancestor",
-            candidate.as_str(),
-            head.as_str(),
-        ]);
-        let output = command
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if output.status.success() {
-            Ok(true)
-        } else if output.status.code() == Some(1) {
-            Ok(false)
-        } else {
-            Err(RepositoryError::GitOperationFailed)
-        }
-    }
-
-    fn begin_compact_runtime_completion(
-        &self,
-        journal: &PublicationJournal,
-    ) -> Result<CompactRuntimeCompletionFence, RepositoryError> {
-        let coordination_lock = self.acquire_coordination_lock()?;
-        self.require_no_pending_checkout_recovery_locked()?;
-        if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if journal.stage() != PublicationJournalStage::WorktreeReconciled
-            || journal.runtime_intent_id() != Some(witness.runtime_intent_id())
-        {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        let candidate = self.candidate_from_journal(journal)?;
-        self.verify_compact_publication_binding(journal, &candidate)?;
-        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        if &current_head != journal.new_head() {
-            return Err(RepositoryError::StaleHead);
-        }
-        Ok(CompactRuntimeCompletionFence {
-            _coordination_lock: coordination_lock,
-        })
-    }
-
-    fn verify_compact_runtime_receipt(
-        &self,
-        journal: &PublicationJournal,
-        receipt: &CompactRuntimeReceipt,
-        key: &CompactRuntimeReceiptVerificationKey,
-    ) -> Result<(), RepositoryError> {
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if receipt.runtime_intent_id != witness.runtime_intent_id()
-            || receipt.cleanup_watermark != witness.cleanup_watermark()
-            || &receipt.commit != journal.new_head()
-            || receipt.journal_verifier != compact_journal_verifier(journal)?
-            || !receipt.verify(key)
-        {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        Ok(())
-    }
-
-    /// Loads the fixed, runtime-initialized verification key without ever
-    /// creating or replacing it. The private runtime owner must provision an
-    /// exact 32-byte key atomically before compact publication is allowed.
-    fn compact_runtime_receipt_verification_key(
-        &self,
-    ) -> Result<CompactRuntimeReceiptVerificationKey, RepositoryError> {
-        let path = self.runtime_paths().compact_runtime_receipt_public_key();
-        let before =
-            fs::symlink_metadata(&path).map_err(|_| RepositoryError::RuntimeCompletionRequired)?;
-        if !before.file_type().is_file() || before.file_type().is_symlink() || before.len() != 32 {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
-        }
-        #[cfg(not(unix))]
-        {
-            return Err(RepositoryError::PlatformUnsupported);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|_| RepositoryError::RuntimeCompletionRequired)?;
-        let opened = file
-            .metadata()
-            .map_err(|_| RepositoryError::RuntimeCompletionRequired)?;
-        if !opened.file_type().is_file() || opened.file_type().is_symlink() || opened.len() != 32 {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if before.dev() != opened.dev() || before.ino() != opened.ino() {
-                return Err(RepositoryError::RuntimeCompletionRequired);
-            }
-        }
-
-        let mut bytes = [0_u8; 32];
-        file.read_exact(&mut bytes)
-            .map_err(|_| RepositoryError::RuntimeCompletionRequired)?;
-        let mut extra = [0_u8; 1];
-        if file
-            .read(&mut extra)
-            .map_err(|_| RepositoryError::RuntimeCompletionRequired)?
-            != 0
-        {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        let after =
-            fs::symlink_metadata(&path).map_err(|_| RepositoryError::RuntimeCompletionRequired)?;
-        if !after.file_type().is_file() || after.file_type().is_symlink() || after.len() != 32 {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if before.dev() != after.dev() || before.ino() != after.ino() {
-                return Err(RepositoryError::RuntimeCompletionRequired);
-            }
-        }
-        CompactRuntimeReceiptVerificationKey::from_bytes(bytes)
-            .map_err(|_| RepositoryError::RuntimeCompletionRequired)
-    }
-
-    fn mark_fenced_compact_runtime_complete(
-        &self,
-        journal: &mut PublicationJournal,
-        _fence: CompactRuntimeCompletionFence,
-    ) -> Result<(), RepositoryError> {
-        self.require_no_pending_checkout_recovery_locked()?;
-        if self.read_publication_journal_locked()?.as_ref() != Some(journal) {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        let witness = journal
-            .compact_manifest()
-            .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-        if journal.stage() != PublicationJournalStage::WorktreeReconciled
-            || journal.runtime_intent_id() != Some(witness.runtime_intent_id())
-        {
-            return Err(RepositoryError::RuntimeCompletionRequired);
-        }
-        let candidate = self.candidate_from_journal(journal)?;
-        self.verify_compact_publication_binding(journal, &candidate)?;
-        let current_head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        if &current_head != journal.new_head() {
-            return Err(RepositoryError::StaleHead);
-        }
-        journal.advance(PublicationJournalStage::RuntimeCompleted)?;
-        self.write_publication_journal_locked(journal)?;
-        journal.advance(PublicationJournalStage::Complete)?;
-        self.write_publication_journal_locked(journal)?;
-        self.clear_publication_journal_locked()
     }
 }
 
@@ -4018,10 +3502,13 @@ impl Repository {
         parse_tree_entry(&output, path, self.observer_native_object_id_length()?)
     }
 
-    /// Builds a compact publication from the manifest committed by
-    /// `expected_head`.  The candidate generation is taken solely from that
-    /// verified base manifest, and the returned journal binds all resulting
-    /// manifest/data identities before publication can advance a ref.
+    /// Test-only fixture writer for legacy compact reader tests. It assembles
+    /// a compact candidate (Parquet segments plus the canonical manifest and
+    /// shards) on top of `expected_head`, and the journal the retired compact
+    /// writer would have recorded for it. Nothing can publish the candidate:
+    /// tests read its commit directly or adopt it as a committed fixture.
+    /// Production builds never contain it (ORNA-UPGRADE-003).
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_compact_publication(
         &self,
@@ -4115,60 +3602,10 @@ impl Repository {
         )?
         .with_compact_manifest(witness)?;
         Ok(CompactPublicationPlan {
-            expected_index,
             candidate,
             manifest,
             journal,
         })
-    }
-
-    /// Rebuilds a failed compact publication against the actual current head.
-    /// Immutable segment bytes are supplied again, but their generation is
-    /// derived afresh from the reloaded committed manifest and is never forced
-    /// from the stale candidate.
-    pub fn rebuild_compact_publication(
-        &self,
-        table: Uuid,
-        empty_schema: [u8; 32],
-        runtime_intent_id: [u8; 16],
-        segments: &[CompactSegment],
-        message: &str,
-    ) -> Result<CompactPublicationPlan, RepositoryError> {
-        self.rebuild_compact_publication_with_watermark(
-            table,
-            empty_schema,
-            runtime_intent_id,
-            [0; 32],
-            segments,
-            message,
-        )
-    }
-
-    /// Rebuilds a failed compact publication using the durable frozen cleanup
-    /// watermark supplied by the runtime owner. This boundary records that
-    /// watermark only; it never consumes runtime state itself.
-    pub fn rebuild_compact_publication_with_watermark(
-        &self,
-        table: Uuid,
-        empty_schema: [u8; 32],
-        runtime_intent_id: [u8; 16],
-        cleanup_watermark: [u8; 32],
-        segments: &[CompactSegment],
-        message: &str,
-    ) -> Result<CompactPublicationPlan, RepositoryError> {
-        let head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        let base = self
-            .read_compact_manifest(&head, table)?
-            .unwrap_or_else(|| CompactManifest::empty(table, empty_schema));
-        self.prepare_compact_publication(
-            &head,
-            self.index_generation()?,
-            base,
-            runtime_intent_id,
-            cleanup_watermark,
-            segments,
-            message,
-        )
     }
 
     pub(crate) fn verify_compact_journal(
@@ -4276,6 +3713,7 @@ impl Repository {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     fn manifest_digest_at_commit(
         &self,
         commit: &GitCommitRef,
@@ -4288,6 +3726,7 @@ impl Repository {
         }
     }
 
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     fn verify_candidate_compact_manifest(
         &self,
         candidate: &PrivateCommit,
@@ -4976,22 +4415,6 @@ fn is_selected_ref(value: &str) -> bool {
         && value.bytes().all(|byte| is_safe_atom(byte) || byte == b'/')
 }
 
-fn compact_journal_verifier(journal: &PublicationJournal) -> Result<[u8; 32], RepositoryError> {
-    let witness = journal
-        .compact_manifest()
-        .ok_or(RepositoryError::RuntimeCompletionRequired)?;
-    let mut witness_bytes = Vec::new();
-    witness.encode(&mut witness_bytes)?;
-    let mut digest = Sha256::new();
-    digest.update(b"orna.compact.runtime.receipt.journal.v1\0");
-    digest.update(journal.old_head().as_str().as_bytes());
-    digest.update([0]);
-    digest.update(journal.new_head().as_str().as_bytes());
-    digest.update([0]);
-    digest.update(witness_bytes);
-    Ok(digest.finalize().into())
-}
-
 fn put_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), RepositoryError> {
     let value = u32::try_from(value).map_err(|_| RepositoryError::InvalidPublicationJournal)?;
     bytes.extend_from_slice(&value.to_be_bytes());
@@ -5475,11 +4898,12 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
         repository
-            .read_verified_compact_segment(pending.commit(), NESTED_TABLE, &manifest.entries()[0])
+            .read_verified_compact_segment(
+                plan.candidate_commit(),
+                NESTED_TABLE,
+                &manifest.entries()[0],
+            )
             .unwrap();
         drop(root);
     }
@@ -6147,12 +5571,13 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
+        repository
+            .advance_current_ref(&head, plan.candidate())
             .unwrap();
+        let committed = plan.candidate_commit();
         let entry = &manifest.entries()[0];
         let verified = repository
-            .read_verified_compact_segment(pending.commit(), BOOL_TABLE, entry)
+            .read_verified_compact_segment(committed, BOOL_TABLE, entry)
             .unwrap();
         let reader = SerializedFileReader::new(Bytes::from(verified)).unwrap();
         let group = reader.get_row_group(0).unwrap();
@@ -6168,7 +5593,7 @@ mod tests {
         assert_eq!(values, [false, true]);
         let projected = repository
             .read_compact_committed_base(
-                pending.commit(),
+                committed,
                 BOOL_TABLE,
                 schema,
                 COMPACT_PROFILE,
@@ -6276,12 +5701,12 @@ mod tests {
                 "schema history projection",
             )
             .unwrap();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
+        repository
+            .advance_current_ref(&head, plan.candidate())
             .unwrap();
         let projected = repository
             .read_compact_committed_base_with_schema_history(
-                pending.commit(),
+                plan.candidate_commit(),
                 BOOL_TABLE,
                 target_schema,
                 &target_descriptor,
@@ -6386,11 +5811,12 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
         repository
-            .read_verified_compact_segment(pending.commit(), NESTED_TABLE, &manifest.entries()[0])
+            .read_verified_compact_segment(
+                plan.candidate_commit(),
+                NESTED_TABLE,
+                &manifest.entries()[0],
+            )
             .unwrap();
         drop(root);
     }
@@ -6590,28 +6016,6 @@ mod tests {
                 &bytes,
             ),
             Err(RepositoryError::InvalidCompactManifest)
-        ));
-    }
-
-    #[test]
-    fn compact_recovery_marks_only_post_receipt_stages_as_runtime_completed() {
-        assert!(!runtime_completion_may_have_committed(
-            PublicationJournalStage::Prepared
-        ));
-        assert!(!runtime_completion_may_have_committed(
-            PublicationJournalStage::RefAdvanced
-        ));
-        assert!(!runtime_completion_may_have_committed(
-            PublicationJournalStage::IndexReconciled
-        ));
-        assert!(!runtime_completion_may_have_committed(
-            PublicationJournalStage::WorktreeReconciled
-        ));
-        assert!(runtime_completion_may_have_committed(
-            PublicationJournalStage::RuntimeCompleted
-        ));
-        assert!(runtime_completion_may_have_committed(
-            PublicationJournalStage::Complete
         ));
     }
 
