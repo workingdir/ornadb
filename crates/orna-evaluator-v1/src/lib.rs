@@ -7,7 +7,7 @@
 //! or host-call capability.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     fmt,
     fmt::Write as _,
     sync::Arc,
@@ -43,6 +43,8 @@ mod relation;
 mod repl;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
+#[cfg(feature = "system-host-bindings")]
+mod explain_bindings;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
@@ -59,6 +61,8 @@ pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
+#[cfg(feature = "system-host-bindings")]
+pub use explain_bindings::ExplainCatalogue;
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
     ZonedLocalDateTime, resolve_time_zone,
@@ -829,6 +833,13 @@ pub trait EffectHandler {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
     }
 
+    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
+    /// without one report `sys.abi.unavailable` for explain calls.
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        None
+    }
+
     /// Forks an activation-owned handler for one structured child task.
     ///
     /// Returning `None` leaves child host effects unavailable. Implementors
@@ -1047,6 +1058,13 @@ pub trait Ovb2EffectHandler {
     ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
         Ok(None)
     }
+
+    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
+    /// without one report `sys.abi.unavailable` for explain calls.
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        None
+    }
 }
 
 struct Ovb2EffectHandlerAdapter<'a> {
@@ -1068,6 +1086,11 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
 
     fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
         Some(self.handler)
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
     }
 }
 
@@ -1244,6 +1267,11 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     fn accepts_context_values(&self) -> bool {
         true
     }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
+    }
 }
 
 impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
@@ -1262,6 +1290,11 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         EffectHandler::handle_with_budget(self.handler, callee, arguments, budget)
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
     }
 
     fn handle_registered_with_budget(
@@ -1458,6 +1491,7 @@ pub fn planner_metadata(
         effects: None,
         namespace: None,
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation: None,
     };
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -1590,6 +1624,7 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
         effects,
         namespace: None,
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation,
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
@@ -1697,6 +1732,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         effects: Some(effects),
         namespace: None,
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation,
     };
     context.items(functions.len())?;
@@ -1834,6 +1870,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
         effects: None,
         namespace: None,
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation: None,
     };
     let result = (|| {
@@ -1875,6 +1912,7 @@ pub fn evaluate_function(
         effects: None,
         namespace: None,
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation: None,
     };
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
@@ -1922,6 +1960,7 @@ pub fn invoke_named_with_nominals(
         effects: None,
         namespace: function_namespace(name),
         transfer: None,
+        reuse: CallReuse::default(),
         cancellation: None,
     };
     context.items(functions.len())?;
@@ -1954,6 +1993,32 @@ pub fn invoke_named_with_effects_and_budget(
     effects: &mut dyn EffectHandler,
     budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
+    invoke_named_with_effects_and_reuse(name, functions, arguments, limits, effects, budget)
+        .map(|(value, _)| value)
+}
+
+/// Invokes an admitted function with a fresh budget and reports the
+/// activation-local call reuse decisions (ORNA-CALL-004). Reuse never changes
+/// the returned value.
+pub fn invoke_named_with_effects_and_reuse_report(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+) -> Result<(CanonicalValue, CallReuseStats), EvaluationError> {
+    let mut budget = StepBudget::new(limits.max_steps);
+    invoke_named_with_effects_and_reuse(name, functions, arguments, limits, effects, &mut budget)
+}
+
+fn invoke_named_with_effects_and_reuse(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+    budget: &mut StepBudget,
+) -> Result<(CanonicalValue, CallReuseStats), EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
         limits,
@@ -1968,6 +2033,7 @@ pub fn invoke_named_with_effects_and_budget(
         namespace: function_namespace(name),
         transfer: None,
         cancellation: None,
+        reuse: CallReuse::default(),
     };
     let result = (|| {
         context.items(functions.len())?;
@@ -1984,8 +2050,9 @@ pub fn invoke_named_with_effects_and_budget(
         )
         .and_then(Value::canonical)
     })();
+    let stats = context.reuse.stats;
     *budget = StepBudget::new(limits.max_steps.saturating_sub(context.steps));
-    result
+    result.map(|value| (value, stats))
 }
 
 /// Invokes an admitted function with one effect handler. Nested pure calls and
@@ -2046,6 +2113,7 @@ pub fn invoke_named_with_context_effects(
             effects: Some(&mut profiled_effects),
             namespace: function_namespace(name),
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         };
         let result = (|| {
@@ -3620,6 +3688,65 @@ impl Scope {
     }
 }
 
+/// Counts activation-local call reuse decisions. The counters are observational
+/// only: reuse never changes a logical result (ORNA-PLAN-001).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CallReuseStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub invalidations: u64,
+    pub stores: u64,
+}
+
+/// Bounds the per-activation memo so long activations cannot grow it without limit.
+const CALL_REUSE_CAPACITY: usize = 256;
+
+/// Activation-local memo for admitted named calls (ORNA-CALL-001..003). `epoch`
+/// advances at every external boundary, so an entry is reused only while no
+/// effect, write, observation or fork has happened since it was stored.
+struct CallReuse {
+    enabled: bool,
+    epoch: u64,
+    entries: VecDeque<CallReuseEntry>,
+    stats: CallReuseStats,
+}
+
+impl Default for CallReuse {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            epoch: 0,
+            entries: VecDeque::new(),
+            stats: CallReuseStats::default(),
+        }
+    }
+}
+
+impl CallReuse {
+    /// Fork children run concurrently with their parent, so their memo is never used.
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+}
+
+struct CallReuseEntry {
+    key: CallReuseKey,
+    epoch: u64,
+    value: Value,
+}
+
+#[derive(PartialEq)]
+struct CallReuseKey {
+    callable: Value,
+    captured: Scope,
+    supplied: BTreeMap<ArgumentKey, Value>,
+    repl_bindings: bool,
+    namespace: Option<String>,
+}
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -3633,6 +3760,102 @@ struct Context<'functions, 'effects> {
     namespace: Option<String>,
     transfer: Option<Transfer>,
     cancellation: Option<&'functions CancellationToken>,
+    reuse: CallReuse,
+}
+
+impl Context<'_, '_> {
+    /// Advances the activation epoch at an external boundary. Entries stored
+    /// before this point are stale and are never returned.
+    fn invalidate_call_reuse(&mut self) {
+        self.reuse.epoch = self.reuse.epoch.saturating_add(1);
+    }
+
+    /// Concurrent fork children may write while the parent continues, so the
+    /// parent stops reusing results for the rest of the activation.
+    fn disable_call_reuse_for_fork(&mut self) {
+        self.invalidate_call_reuse();
+        self.reuse.enabled = false;
+        self.reuse.entries.clear();
+    }
+
+    /// Invokes an admitted named function through the activation memo. A result
+    /// is stored only when its inputs and output are reusable and no external
+    /// boundary was crossed while its body ran.
+    fn invoke_pure_reusing(
+        &mut self,
+        callable: &Value,
+        parameters: &[Parameter],
+        body: &Expr,
+        captured: Scope,
+        supplied: BTreeMap<ArgumentKey, Value>,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        if !self.reuse.enabled
+            || !reusable_value(callable)
+            || !captured.0.values().all(reusable_value)
+            || !supplied.values().all(reusable_value)
+        {
+            return invoke_pure(self, parameters, body, captured, supplied, depth);
+        }
+        let key = CallReuseKey {
+            callable: callable.clone(),
+            captured,
+            supplied,
+            repl_bindings: self.repl_bindings,
+            namespace: self.namespace.clone(),
+        };
+        let epoch = self.reuse.epoch;
+        if let Some(position) = self.reuse.entries.iter().position(|entry| entry.key == key) {
+            if self.reuse.entries[position].epoch == epoch {
+                self.reuse.stats.hits += 1;
+                self.step()?;
+                return Ok(self.reuse.entries[position].value.clone());
+            }
+            self.reuse.entries.remove(position);
+            self.reuse.stats.invalidations += 1;
+        }
+        self.reuse.stats.misses += 1;
+        let result = invoke_pure(
+            self,
+            parameters,
+            body,
+            key.captured.clone(),
+            key.supplied.clone(),
+            depth,
+        );
+        if let Ok(value) = &result {
+            if self.reuse.enabled && self.reuse.epoch == epoch && reusable_value(value) {
+                if self.reuse.entries.len() == CALL_REUSE_CAPACITY {
+                    self.reuse.entries.pop_front();
+                }
+                self.reuse.stats.stores += 1;
+                self.reuse.entries.push_back(CallReuseEntry {
+                    key,
+                    epoch,
+                    value: value.clone(),
+                });
+            }
+        }
+        result
+    }
+}
+
+/// Closures and lazy stream/relation plans carry live evaluation state, so
+/// they are never stored or matched as reusable values.
+fn reusable_value(value: &Value) -> bool {
+    match value {
+        Value::Closure(_) | Value::Stream { .. } | Value::Relation(_) => false,
+        Value::List(values) | Value::Tuple(values) => values.iter().all(reusable_value),
+        Value::Record(fields) => fields.values().all(reusable_value),
+        Value::NominalRecord { fields, .. } => fields.iter().all(|(_, field)| reusable_value(field)),
+        Value::Enum { payload, .. } => payload.as_deref().map_or(true, reusable_value),
+        Value::Option(payload) => payload.as_deref().map_or(true, reusable_value),
+        Value::Range { lower, upper, .. } => {
+            lower.as_deref().map_or(true, reusable_value)
+                && upper.as_deref().map_or(true, reusable_value)
+        }
+        _ => true,
+    }
 }
 
 /// An evaluator-only non-local control transfer. It never crosses the public
@@ -3713,6 +3936,7 @@ fn invoke_task_callback(
             .map(|handler| handler as &mut dyn EffectHandler),
         namespace: None,
         transfer: None,
+        reuse: CallReuse::disabled(),
         cancellation: Some(&cancellation),
     };
     context.invoke_callable(&callback, Vec::new(), depth)
@@ -3995,6 +4219,7 @@ impl Context<'_, '_> {
             return Value::from_canonical(&key, self, depth + 1);
         }
 
+        self.invalidate_call_reuse();
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let target = self
@@ -6761,6 +6986,7 @@ impl Context<'_, '_> {
             Contextual(ContextValueRelationPage),
         }
 
+        self.invalidate_call_reuse();
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let result = self
@@ -7018,6 +7244,40 @@ impl Context<'_, '_> {
         })
     }
 
+    #[cfg(feature = "system-host-bindings")]
+    fn call_sys_explain(
+        &mut self,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        // Mirrors semantic admission: piped input is the query and takes no
+        // argument; otherwise exactly one query argument is required.
+        let query = match input {
+            Some(input) => {
+                if !arguments.is_empty() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                input
+            }
+            None => {
+                if arguments.len() != 1 {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                self.evaluate(&arguments[0].value, scope, depth + 1)?
+            }
+        };
+        let Value::Relation(plan) = query else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let catalogue = self
+            .effects
+            .as_deref()
+            .and_then(|handler| handler.explain_catalogue());
+        explain_bindings::explain(&plan, catalogue)
+    }
+
     /// Dispatches one portable annotated-Blob call declared by the generated
     /// typed registry.
     ///
@@ -7208,6 +7468,7 @@ impl Context<'_, '_> {
             if input.is_some() || !arguments.is_empty() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
+            self.invalidate_call_reuse();
             let remaining = self.limits.max_steps.saturating_sub(self.steps);
             let mut budget = StepBudget::new(remaining);
             if self.has_ovb2_effects() {
@@ -7251,6 +7512,7 @@ impl Context<'_, '_> {
             if input.is_some() || !arguments.is_empty() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
+            self.invalidate_call_reuse();
             let remaining = self.limits.max_steps.saturating_sub(self.steps);
             let mut budget = StepBudget::new(remaining);
             if self.has_ovb2_effects() {
@@ -7365,6 +7627,14 @@ impl Context<'_, '_> {
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
         let source_function_name = function_name(callee);
+        // `sys.explain(Query)` is lowered by the host catalogue, never by a
+        // provider invoke. An unshadowed call therefore stays on this path.
+        #[cfg(feature = "system-host-bindings")]
+        if source_function_name.as_deref() == Some("sys.explain")
+            && !scope.0.contains_key("sys")
+        {
+            return self.call_sys_explain(arguments, input, scope, depth);
+        }
         // A portable Blob call is admitted only when the generated typed
         // registry declares the operation. The resolved name wins when a
         // declaration was reachable; an unresolved, unshadowed source-level
@@ -7434,6 +7704,7 @@ impl Context<'_, '_> {
                         self.effect_context_value(value)
                     })
                     .collect::<Result<Vec<_>, EvaluationError>>()?;
+                self.invalidate_call_reuse();
                 let remaining = self.limits.max_steps.saturating_sub(self.steps);
                 let mut budget = StepBudget::new(remaining);
                 let cancellation = self.cancellation;
@@ -7465,6 +7736,7 @@ impl Context<'_, '_> {
                             .canonical()
                     })
                     .collect::<Result<Vec<_>, EvaluationError>>()?;
+                self.invalidate_call_reuse();
                 let remaining = self.limits.max_steps.saturating_sub(self.steps);
                 let mut budget = StepBudget::new(remaining);
                 let result = self
@@ -7644,6 +7916,7 @@ impl Context<'_, '_> {
                         .into_iter()
                         .map(|value| self.effect_context_value(value))
                         .collect::<Result<Vec<_>, _>>()?;
+                    self.invalidate_call_reuse();
                     let remaining = self.limits.max_steps.saturating_sub(self.steps);
                     let mut budget = StepBudget::new(remaining);
                     let result = self
@@ -7663,6 +7936,7 @@ impl Context<'_, '_> {
                         .into_iter()
                         .map(Value::canonical)
                         .collect::<Result<Vec<_>, _>>()?;
+                    self.invalidate_call_reuse();
                     let remaining = self.limits.max_steps.saturating_sub(self.steps);
                     let mut budget = StepBudget::new(remaining);
                     let result = self
@@ -7786,7 +8060,14 @@ impl Context<'_, '_> {
             self.repl_bindings = session_owned;
             let previous_namespace = self.namespace.clone();
             self.namespace = namespace;
-            let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
+            let result = self.invoke_pure_reusing(
+                &callable,
+                parameters,
+                body,
+                captured,
+                supplied,
+                depth + 1,
+            );
             self.namespace = previous_namespace;
             self.repl_bindings = previous_repl_bindings;
             return result;
@@ -8223,6 +8504,7 @@ impl Context<'_, '_> {
             Option<&CancellationToken>,
         ) -> Result<T, EvaluationError>,
     ) -> Result<T, EvaluationError> {
+        self.invalidate_call_reuse();
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
@@ -9268,6 +9550,7 @@ impl Context<'_, '_> {
                 self.depth(depth.saturating_add(1))?;
                 let parent = self.cancellation.cloned();
                 let mut child_effects = Vec::with_capacity(callbacks.len());
+                self.disable_call_reuse_for_fork();
                 if let Some(effects) = self.effects.as_deref_mut() {
                     for index in 0..callbacks.len() {
                         child_effects.push(effects.fork_task_child(index));
@@ -9320,6 +9603,7 @@ impl Context<'_, '_> {
                 self.depth(depth.saturating_add(1))?;
                 let parent = self.cancellation.cloned();
                 let mut child_effects = Vec::with_capacity(callbacks.len());
+                self.disable_call_reuse_for_fork();
                 if let Some(effects) = self.effects.as_deref_mut() {
                     for index in 0..callbacks.len() {
                         child_effects.push(effects.fork_task_child(index));
@@ -9386,6 +9670,7 @@ impl Context<'_, '_> {
                 let repl_bindings = self.repl_bindings;
                 let restrict_function_names = self.restrict_function_names;
                 let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
+                self.disable_call_reuse_for_fork();
                 let child_effects = self
                     .effects
                     .as_deref_mut()
@@ -9722,6 +10007,7 @@ impl Context<'_, '_> {
 
     fn random_entropy(&mut self, callee: &Expr, count: usize) -> Result<Vec<u8>, EvaluationError> {
         let expected_count = count;
+        self.invalidate_call_reuse();
         let remaining = self.limits.max_steps.saturating_sub(self.steps);
         let mut budget = StepBudget::new(remaining);
         let cancellation = self.cancellation;
@@ -14933,6 +15219,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         }
     }
@@ -16407,6 +16694,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16480,6 +16768,7 @@ mod tests {
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16629,6 +16918,7 @@ mod tests {
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation,
         };
         let mut scope = Scope(
@@ -16773,6 +17063,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16807,6 +17098,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: None,
         };
         let plan = RelationPlan::new("Note".into());
@@ -17272,6 +17564,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -17304,6 +17597,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -17335,6 +17629,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation: Some(&cancellation),
         };
         let mut callbacks = 0;
