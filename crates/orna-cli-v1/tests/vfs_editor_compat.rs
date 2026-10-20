@@ -20,8 +20,8 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EditorMount, mountinfo_contains, require_fuse_or_skip, spawn_editor_mount, start_editor_mount,
-    write_and_sync,
+    EditorMount, mountinfo_contains, repository_with_music_row, require_fuse_or_skip,
+    run_orna_unmount, spawn_editor_mount, spawn_mount_process, start_editor_mount, write_and_sync,
 };
 
 #[tokio::test]
@@ -223,10 +223,9 @@ fn save_with_emacs_temp_rename(path: &Path) {
 
 #[tokio::test]
 async fn real_editors_save_through_the_mounted_linux_vfs() {
-    assert!(
-        require_fuse_or_skip(),
-        "real editor compatibility requires a mounted Linux FUSE view",
-    );
+    if !require_fuse_or_skip() {
+        return;
+    }
     let fixture = start_editor_mount(false).await;
     assert!(mountinfo_contains(fixture._mounted.mountpoint()));
 
@@ -266,10 +265,9 @@ async fn real_editors_save_through_the_mounted_linux_vfs() {
 
 #[tokio::test]
 async fn fsynced_temporary_scratch_survives_mount_restart() {
-    assert!(
-        require_fuse_or_skip(),
-        "temporary scratch durability requires a mounted Linux FUSE view",
-    );
+    if !require_fuse_or_skip() {
+        return;
+    }
     let fixture = start_editor_mount(false).await;
     let head_before_restart = fixture.repository.head().unwrap().unwrap();
     let repository = fixture.repository.clone();
@@ -322,4 +320,120 @@ async fn fsynced_temporary_scratch_survives_mount_restart() {
             .contains("Original"),
         "fsync of temporary scratch must not accept the row",
     );
+}
+
+/// Must match the scratch directory name used by the mount.
+const SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
+
+#[tokio::test]
+async fn unlinked_fsynced_temporary_scratch_is_gone_after_mount_restart() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let scratch_path = fixture.row_directory.join(".data.orna.unlinked-scratch");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch_path)
+        .expect("create temporary scratch through FUSE");
+    scratch.write_all(b"unlinked editor scratch").unwrap();
+    scratch
+        .sync_all()
+        .expect("fsync persists the private scratch");
+    drop(scratch);
+    std::fs::remove_file(&scratch_path).expect("unlink persisted scratch");
+
+    let EditorMount {
+        _mounted: previous_mount,
+        _mount_parent: mount_parent,
+        _repository_directory: repository_directory,
+        ..
+    } = fixture;
+    drop(previous_mount);
+    let restarted_mountpoint = mount_parent.path().join("restarted");
+    let _restarted_mount = spawn_editor_mount(repository_directory.path(), &restarted_mountpoint);
+    assert!(
+        !restarted_mountpoint
+            .join("Music/london/.data.orna.unlinked-scratch")
+            .exists(),
+        "an unlinked temporary scratch must not reappear after mount restart",
+    );
+    run_orna_unmount(repository_directory.path(), &restarted_mountpoint);
+}
+
+#[tokio::test]
+async fn stale_persisted_temporary_scratch_is_skipped_at_mount_start() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let scratch_path = fixture.row_directory.join(".data.orna.stale-scratch");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch_path)
+        .expect("create temporary scratch through FUSE");
+    scratch.write_all(b"stale editor scratch").unwrap();
+    scratch
+        .sync_all()
+        .expect("fsync persists the private scratch");
+    drop(scratch);
+    let source_store = fixture
+        .repository
+        .runtime_paths()
+        .root()
+        .join(SCRATCH_DIRECTORY);
+
+    let EditorMount {
+        _mounted: previous_mount,
+        _mount_parent: mount_parent,
+        _repository_directory: source_directory,
+        ..
+    } = fixture;
+    drop(previous_mount);
+
+    // The target repository has no `london` row, so the copied record cannot resolve.
+    let initial = "{ title: \"Other\", artist: \"Kieran\", }\n";
+    let (target_directory, target_repository, _) =
+        repository_with_music_row("paris", 0x93, initial, false).await;
+    let target_store = target_repository
+        .runtime_paths()
+        .root()
+        .join(SCRATCH_DIRECTORY);
+    std::fs::create_dir_all(&target_store).unwrap();
+    for entry in std::fs::read_dir(&source_store).expect("read persisted scratch records") {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), target_store.join(entry.file_name())).unwrap();
+    }
+    drop(source_directory);
+
+    let mountpoint = mount_parent.path().join("stale");
+    let mounted = spawn_mount_process(target_directory.path(), &mountpoint);
+    let mut stderr = mounted.stderr_text();
+    for _ in 0..500 {
+        if stderr.contains("skipped unresolved persisted temporary scratch") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        stderr = mounted.stderr_text();
+    }
+    assert!(
+        stderr.contains("skipped unresolved persisted temporary scratch")
+            && stderr.contains("persisted temporary scratch target"),
+        "mount must report the skipped stale scratch; stderr={stderr:?}",
+    );
+    assert!(
+        std::fs::read_to_string(mountpoint.join("Music/paris/data.orna"))
+            .unwrap()
+            .contains("Other"),
+        "the mount must still serve the remaining rows",
+    );
+    assert!(
+        !mountpoint
+            .join("Music/paris/.data.orna.stale-scratch")
+            .exists(),
+        "an unresolved temporary scratch must not be restored",
+    );
+    run_orna_unmount(target_directory.path(), &mountpoint);
 }
