@@ -1,7 +1,7 @@
 //! Parser regressions for bead ornadb-5il1.118, the A01 syntax audit of the
 //! Orna 1.1.0 grammar. Each test pins one audited reproducer.
 
-use orna_syntax_v1::{ControlKind, Declaration, Expr, Statement, parse_module};
+use orna_syntax_v1::{ControlKind, Declaration, Expr, Statement, TableMember, parse_module};
 
 fn function_body(source: &str) -> Expr {
     let parsed = parse_module(source);
@@ -287,5 +287,43 @@ fn unparenthesized_header_constructor_is_rejected() {
     assert!(
         matches!(rhs, Expr::Group { inner, .. } if matches!(inner.as_ref(), Expr::Nominal { .. })),
         "{rhs:?}"
+    );
+}
+
+// A01-06 (grammar `assertion_clause`, `subjectless_predicate`): a table
+// assertion keeps its leading comparison operator, so `assert == true;` is
+// a predicate over the table subject rather than the constant `true`.
+#[test]
+fn table_subjectless_predicates_keep_their_comparison_operator() {
+    let parsed = parse_module(
+        "pub table Gate(id: Int) {\n    open: Bool,\n    assert == true;\n    assert > 0;\n    assert in allowed;\n}",
+    );
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let [item] = parsed.value.items.as_slice() else {
+        panic!("expected one table, got {:?}", parsed.value.items);
+    };
+    let Declaration::Table { members, .. } = &item.declaration else {
+        panic!("expected a table, got {:?}", item.declaration);
+    };
+    let predicates = members
+        .iter()
+        .filter_map(|member| match member {
+            TableMember::Assertion {
+                value: Expr::Unary { op, rhs, .. },
+                ..
+            } => Some((op.as_str(), rhs.as_ref())),
+            TableMember::Assertion { value, .. } => {
+                panic!("expected a subjectless predicate, got {value:?}")
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(predicates.as_slice(), [
+            ("==", Expr::Literal { text: equal, .. }),
+            (">", Expr::Literal { text: greater, .. }),
+            ("in", Expr::Name { text: member, .. }),
+        ] if equal == "true" && greater == "0" && member == "allowed"),
+        "{predicates:?}"
     );
 }

@@ -3474,13 +3474,6 @@ impl Parser {
             if self.keyword() == Some(Keyword::Assert) {
                 let start = self.current().span.clone();
                 self.bump();
-                if matches!(
-                    self.current().kind,
-                    TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=")
-                        | TokenKind::Keyword(Keyword::In)
-                ) {
-                    self.bump();
-                }
                 let value = self.parse_assertion_expression();
                 if self.is_punct(";") {
                     self.bump()
