@@ -1789,7 +1789,14 @@ impl NativeGraphContext {
                 }
                 Ok(CborValue::Map(transformed))
             }
-            CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+            // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+            CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+            // Other typed values keep their tag; only nested Blob and
+            // overflow references change between ROV-3 and SOV-3.
+            CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
+                tag,
+                Box::new(self.to_sov_value(*payload, scope, objects, active)?),
+            )),
             scalar => Ok(scalar),
         }
     }
@@ -10526,6 +10533,147 @@ mod persisted_orp_tests {
         drop(directory);
     }
 
+    /// The registered-tag rule of store-format-3 §2 and `final_model.decode`:
+    /// node data admits bignums 2 and 3, UUID 37, the value tags
+    /// 60000..=60025 and the profile tags 60110..=60113, and every negative
+    /// 64-bit head.
+    #[test]
+    fn canonical_reader_admits_exactly_the_format3_registered_tags() {
+        let tagged = |tag: u64, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            cbor_head(&mut bytes, 6, tag);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        for tag in [
+            37, 60_000, 60_001, 60_002, 60_005, 60_008, 60_009, 60_015, 60_025, 60_110, 60_113,
+        ] {
+            assert!(
+                decode_canonical_cbor(&tagged(tag, &[0x80])).is_ok(),
+                "tag {tag} is registered for format-3 nodes"
+            );
+        }
+        for tag in [0, 1, 4, 36, 38, 59_999, 60_026, 60_027, 60_109, 60_114] {
+            assert!(
+                matches!(
+                    decode_canonical_cbor(&tagged(tag, &[0x80])),
+                    Err(GraphError::NonCanonicalData)
+                ),
+                "tag {tag} is not registered for format-3 nodes"
+            );
+        }
+
+        // A bignum spells only an Int beyond the 64-bit heads.
+        let mut two_to_the_64 = vec![0x49, 0x01];
+        two_to_the_64.extend_from_slice(&[0; 8]);
+        let mut leading_zero = vec![0x49, 0x00];
+        leading_zero.extend_from_slice(&[0xff; 8]);
+        let mut narrow = vec![0x48];
+        narrow.extend_from_slice(&[0xff; 8]);
+        for tag in [2, 3] {
+            assert!(decode_canonical_cbor(&tagged(tag, &two_to_the_64)).is_ok());
+            for payload in [&leading_zero[..], &narrow[..], &[0x61, b'x'][..]] {
+                assert!(matches!(
+                    decode_canonical_cbor(&tagged(tag, payload)),
+                    Err(GraphError::NonCanonicalData)
+                ));
+            }
+        }
+        // -2^64 is the last Int a negative head spells.
+        let mut most_negative = vec![0x3b];
+        most_negative.extend_from_slice(&[0xff; 8]);
+        assert_eq!(
+            decode_canonical_cbor(&most_negative),
+            Ok(CborValue::Negative(u64::MAX))
+        );
+    }
+
+    /// Blob and overflow references nested in records, enum payloads, tuples
+    /// and options are row dependencies (`final_model.blob_references`);
+    /// other typed values add none, and OVB-2 or SOV-3 Blob tags are refused.
+    #[test]
+    fn row_dependencies_recurse_into_typed_value_payloads() {
+        let algorithm = GitHashAlgorithm::Sha1;
+        let descriptor = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
+        let overflow = NativeObjectId::new(algorithm, &[0x55; 20]).unwrap();
+        let uuid = |byte: u8| CborValue::Tag(37, Box::new(CborValue::Bytes(vec![byte; 16])));
+        let blob = CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(1),
+                CborValue::Bytes(vec![0x66; 32]),
+                CborValue::Text("text/plain".to_owned()),
+                CborValue::Null,
+                CborValue::Bytes(descriptor.as_bytes().to_vec()),
+            ])),
+        );
+        let record = CborValue::Tag(
+            60009,
+            Box::new(CborValue::Array(vec![
+                uuid(0x10),
+                CborValue::Array(vec![CborValue::Array(vec![uuid(0x11), blob])]),
+            ])),
+        );
+        let decimal = CborValue::Tag(
+            60000,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(15),
+                CborValue::Negative(0),
+            ])),
+        );
+        let overflow_value = CborValue::Tag(
+            60113,
+            Box::new(CborValue::Array(vec![CborValue::Bytes(
+                overflow.as_bytes().to_vec(),
+            )])),
+        );
+        let fields = CborValue::Array(vec![
+            decimal.clone(),
+            CborValue::Tag(
+                60008,
+                Box::new(CborValue::Array(vec![uuid(0x20), uuid(0x21), record])),
+            ),
+            CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![
+                    decimal,
+                    CborValue::Tag(
+                        60013,
+                        Box::new(CborValue::Array(vec![
+                            CborValue::Unsigned(1),
+                            overflow_value,
+                        ])),
+                    ),
+                ])),
+            ),
+        ]);
+        let dependencies = row_fields_dependencies(&canonical_value_bytes(&fields))
+            .expect("typed values are admitted in a stored row");
+        assert_eq!(
+            dependencies,
+            vec![
+                NativeDependency::new(descriptor, NativeObjectKind::Tree),
+                NativeDependency::new(overflow, NativeObjectKind::Tree),
+            ]
+        );
+        // The nested kind-3 value is charged to its own inline threshold.
+        assert_eq!(direct_blob_reference_count(&fields), Ok(1));
+
+        for refused in [60110, 60112] {
+            let nested = CborValue::Array(vec![CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![CborValue::Tag(
+                    refused,
+                    Box::new(CborValue::Array(Vec::new())),
+                )])),
+            )]);
+            assert!(matches!(
+                row_fields_dependencies(&canonical_value_bytes(&nested)),
+                Err(GraphError::NonCanonicalData)
+            ));
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10976,7 +11124,7 @@ fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
     decode_canonical_cbor(bytes).map(|_| ())
 }
 
-fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+pub(crate) fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
     let mut bytes = Vec::new();
     value.encode(&mut bytes);
     bytes
@@ -11198,7 +11346,10 @@ fn collect_blob_value_fields(
         // A canonical overflow value cannot appear here: `to_sov_value`
         // dereferences it before this walk sees the value.
         CborValue::Tag(60113, _) => Err(GraphError::UnsupportedRowValueForm),
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        // A semantic value carries only SOV-3 Blob tags.
+        CborValue::Tag(60110 | 60111, _) => Err(GraphError::NonCanonicalData),
+        // Records, enum payloads, tuples and other typed values can hold Blobs.
+        CborValue::Tag(_, payload) => collect_blob_value_fields(payload, output),
         _ => Ok(()),
     }
 }
@@ -11318,7 +11469,9 @@ fn collect_overflow_oids(
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
         CborValue::Tag(60111 | 60021, _) => {}
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+        CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => collect_overflow_oids(payload, algorithm, output)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_overflow_oids(value, algorithm, output)?;
@@ -11467,8 +11620,11 @@ fn collect_row_dependencies(
             crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
                 .map_err(|_| GraphError::NonCanonicalData)?;
         }
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
         CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // Every other admitted tag is a typed value; its references, if any,
+        // are nested in its payload (store-format-3 §2, final_model.py).
+        CborValue::Tag(_, payload) => collect_row_dependencies(payload, dependencies)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_row_dependencies(value, dependencies)?;
@@ -11507,7 +11663,8 @@ fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
                 _ => Err(GraphError::NonCanonicalData),
             }
         },
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => direct_blob_reference_count(payload),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
             count
                 .checked_add(direct_blob_reference_count(value)?)
@@ -11651,7 +11808,8 @@ impl<'a> CborReader<'a> {
         let length = self.argument(additional)?;
         match major {
             0 => Ok(CborValue::Unsigned(length)),
-            1 if length <= i64::MAX as u64 => Ok(CborValue::Negative(length)),
+            // Every negative head is an Orna Int; values below -2^64 use tag 3.
+            1 => Ok(CborValue::Negative(length)),
             2 => {
                 let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
                 let end = self
@@ -11716,10 +11874,18 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 37 | 60013 | 60021 | 60110..=60113) {
+                if !orna_value_v1::is_format3_node_tag(length) {
                     return Err(GraphError::NonCanonicalData);
                 }
-                Ok(CborValue::Tag(length, Box::new(self.value()?)))
+                let payload = self.value()?;
+                // A bignum spells only an Int beyond the 64-bit heads: at least
+                // nine big-endian bytes without a leading zero.
+                if matches!(length, 2 | 3)
+                    && !matches!(&payload, CborValue::Bytes(bytes) if bytes.len() >= 9 && bytes[0] != 0)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(length, Box::new(payload)))
             }
             _ => Err(GraphError::NonCanonicalData),
         }
