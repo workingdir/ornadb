@@ -752,7 +752,7 @@ impl NativeGraphContext {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
             let root_node = read_node(&root)?;
             validate_ordered_root_node(&root_node, &domain, expected_count)?;
-            find_ordered_entry_with(&mut read_node, root_node, &domain, None, None, key)?
+            find_ordered_entry_with(&mut read_node, root_node, &domain, key)?
         };
         let Some(entry) = entry else {
             return Ok(None);
@@ -855,8 +855,6 @@ impl NativeGraphContext {
                 &mut read_node,
                 relation_node,
                 &relations_domain,
-                None,
-                None,
                 &relation_key,
             )?
         }
@@ -2845,15 +2843,8 @@ impl NativeGraphContext {
         let key = crate::row_store::TypedKey::Bytes(version.relation_id().to_vec());
         let relation = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            find_ordered_entry_with(
-                &mut read_node,
-                relation_node.clone(),
-                &domain,
-                None,
-                None,
-                &key,
-            )?
-            .ok_or(GraphError::ContextMismatch)?
+            find_ordered_entry_with(&mut read_node, relation_node.clone(), &domain, &key)?
+                .ok_or(GraphError::ContextMismatch)?
         };
         let (schema_oid, old_primary, secondary, old_count) =
             decode_relation_value(&relation.value, self.algorithm)?;
@@ -3043,7 +3034,7 @@ impl NativeGraphContext {
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
         validate_ordered_root_node(&node, &domain, candidate.row_count)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-        let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
+        let entry = find_ordered_entry_with(&mut read_node, node, &domain, key)?;
         entry
             .map(|entry| {
                 decode_candidate_blob_metadata(
@@ -6463,7 +6454,7 @@ impl PinnedNativeGraphReader {
     ) -> Result<Option<OrderedLeafEntry>, GraphError> {
         let node = self.read_native_node(root)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid);
-        find_ordered_entry_with(&mut read_node, node, expected_domain, None, None, key)
+        find_ordered_entry_with(&mut read_node, node, expected_domain, key)
     }
 
     fn read_native_node(&mut self, oid: &NativeObjectId) -> Result<NodeData, GraphError> {
@@ -6760,8 +6751,6 @@ fn find_ordered_entry_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
     expected_domain: &[u8],
-    expected_height: Option<u8>,
-    lower_exclusive: Option<&crate::row_store::TypedKey>,
     key: &crate::row_store::TypedKey,
 ) -> Result<Option<OrderedLeafEntry>, GraphError> {
     // ORP-1 child ranges are nonoverlapping and exhaustive in fence order
@@ -6777,8 +6766,9 @@ fn find_ordered_entry_with(
     // the path is rejected; overlap between children off the path is left to
     // full admission and to range reads, which read those children anyway.
     let mut node = node;
-    let mut expected_height = expected_height;
-    let mut lower_exclusive = lower_exclusive.cloned();
+    // The root's height is whatever it records, and it has no lower bound.
+    let mut expected_height: Option<u8> = None;
+    let mut lower_exclusive: Option<crate::row_store::TypedKey> = None;
     // The parent's claim for `node`: its exact row count and inclusive
     // maximum key. The root has no parent entry and so no claim.
     let mut claim: Option<(u64, crate::row_store::TypedKey)> = None;
