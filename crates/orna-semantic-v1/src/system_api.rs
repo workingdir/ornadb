@@ -21,7 +21,7 @@ fn generated_system_api_json() -> &'static str {
 
 #[cfg(target_arch = "wasm32")]
 fn generated_system_api_json() -> &'static str {
-    include_str!("../../../api/sys.json")
+    include_str!("../generated/sys_api.json")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2000,6 +2000,18 @@ mod tests {
 
     fn document() -> serde_json::Value {
         serde_json::from_str(generated_system_api_json()).unwrap()
+    }
+
+    // Wasm builds read the committed copy; native builds read the generator.
+    // This pins them together so the copy cannot drift silently.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn committed_wasm_copy_matches_generated_system_api() {
+        assert_eq!(
+            include_str!("../generated/sys_api.json"),
+            orna_sys_v1::system_api_json(),
+            "generated/sys_api.json is stale; regenerate it from orna-sys-v1"
+        );
     }
 
     fn value_type(document: &mut serde_json::Value) -> &mut serde_json::Value {
