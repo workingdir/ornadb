@@ -4003,33 +4003,64 @@ impl Parser {
         self.within_depth(expr_depth(&expr)).then_some(expr)
     }
 
+    /// Cheap pre-filter for a generic call: a `<` whose matching `>` is
+    /// immediately followed by `(`. Tokens that cannot occur inside type
+    /// arguments, or a closer of an enclosing delimiter, end the scan.
     fn generic_call_ahead(&self) -> bool {
         if !self.is_punct("<") {
             return false;
         }
-        let mut depth = 0usize;
-        let mut index = self.at;
-        while let Some(token) = self.tokens.get(index) {
+        let mut angles = 0usize;
+        let mut delimiters = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.at) {
             match token.kind {
-                TokenKind::Punct("<") => depth += 1,
-                TokenKind::Punct(">") if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
+                TokenKind::Punct("<") => angles += 1,
+                TokenKind::Punct(">") if angles > 0 => {
+                    angles -= 1;
+                    if angles == 0 {
                         return matches!(
                             self.tokens.get(index + 1).map(|next| &next.kind),
                             Some(TokenKind::Punct("("))
                         );
                     }
                 }
-                TokenKind::Punct(";" | "=" | "=>") => return false,
-                TokenKind::Eof => return false,
+                TokenKind::Punct("(" | "[" | "{") => delimiters += 1,
+                TokenKind::Punct(")" | "]" | "}") => match delimiters.checked_sub(1) {
+                    Some(depth) => delimiters = depth,
+                    None => return false,
+                },
+                TokenKind::Punct(";" | "=" | "=>" | "&&" | "||") | TokenKind::Eof => return false,
                 _ => {}
             }
-            index += 1;
         }
         false
     }
 
+    /// Tentatively parses the type arguments of a generic call. A declined
+    /// attempt rewinds every parser side effect, so a comparison such as
+    /// `a < b { .. } else if a > (b + 1)` keeps all of its tokens
+    /// (ORNA-OP-001) instead of silently losing `< b`.
+    fn generic_call_type_arguments(&mut self) -> Option<Vec<TypeExpr>> {
+        if !self.generic_call_ahead() {
+            return None;
+        }
+        let at = self.at;
+        let errors = self.errors.len();
+        let incomplete_errors = self.incomplete_errors;
+        let syntax_limit_reported = self.syntax_limit_reported;
+        let arguments = self.parse_generic_type_arguments();
+        if arguments.is_none() {
+            self.at = at;
+            self.errors.truncate(errors);
+            self.incomplete_errors = incomplete_errors;
+            self.syntax_limit_reported = syntax_limit_reported;
+        }
+        arguments
+    }
+
+    /// Parses `<type_arguments>` before a generic call's `(`. An empty list
+    /// or a trailing comma still commits to the call with a targeted
+    /// diagnostic; `None` means the tokens are not type arguments at all.
     fn parse_generic_type_arguments(&mut self) -> Option<Vec<TypeExpr>> {
         if !self.is_punct("<") {
             return None;
@@ -4041,7 +4072,7 @@ impl Parser {
                 "generic calls require at least one type argument",
             );
             self.bump();
-            return None;
+            return Some(Vec::new());
         }
         let mut arguments = Vec::new();
         while !self.eof() && !self.is_punct(">") {
@@ -4054,7 +4085,7 @@ impl Parser {
                         "trailing commas are not allowed in generic type arguments",
                     );
                     self.bump();
-                    return None;
+                    return Some(arguments);
                 }
             } else {
                 break;
@@ -4143,8 +4174,7 @@ impl Parser {
                         span: SourceSpan::new(start, t.span.end),
                     };
                     if nominal_path(&lhs).is_some()
-                        && self.generic_call_ahead()
-                        && let Some(type_arguments) = self.parse_generic_type_arguments()
+                        && let Some(type_arguments) = self.generic_call_type_arguments()
                     {
                         let arguments = self.parse_arguments();
                         let end = self.previous().span.end;
@@ -4326,9 +4356,7 @@ impl Parser {
                         body: Box::new(body),
                     });
                 }
-                if self.generic_call_ahead()
-                    && let Some(type_arguments) = self.parse_generic_type_arguments()
-                {
+                if let Some(type_arguments) = self.generic_call_type_arguments() {
                     let arguments = self.parse_arguments();
                     let end = self.previous().span.end;
                     return Some(Expr::GenericCall {
