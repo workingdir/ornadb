@@ -4006,7 +4006,8 @@ impl Repository {
     ) -> Result<IndexGeneration, RepositoryError> {
         self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, None, |_| {})
     }
-    /// Executes publication and observes durable ref/index journal stages.
+    /// Executes publication and observes each durable journal stage, from
+    /// the Prepared intent through the reconciled index.
     pub fn publish_candidate_with_stage_hook(
         &self,
         expected_index: &IndexGeneration,
@@ -4208,10 +4209,20 @@ impl Repository {
         }
         self.reconcile_store_worktree_transition(expected_index, candidate, false)?;
         self.write_publication_journal_locked(journal)?;
-        if let Err(error) =
-            self.advance_current_ref_bound(journal.old_head(), candidate, selected_ref)
-        {
-            // After a lost or refused CAS, a HEAD that lacks the candidate
+        on_stage(PublicationJournalStage::Prepared);
+        // PUB-3 step 7: the reconciled index is built from `base_index`, so
+        // the ordinary index must still hold exactly those bytes when the ref
+        // moves. A write that landed after capture, including one just before
+        // this attempt took Git's lock, is refused here rather than replaced
+        // by an index that stages the inverse of the batch (ORNA-PUB-011,
+        // ORNA-PUB-017).
+        let advanced = self
+            .require_index_unchanged(expected_index, &index, &base_index)
+            .and_then(|()| {
+                self.advance_current_ref_bound(journal.old_head(), candidate, selected_ref)
+            });
+        if let Err(error) = advanced {
+            // After a refused or lost CAS, a HEAD that lacks the candidate
             // shows that the journal this attempt wrote names nothing that was
             // published: discard it and keep the batch pending. A journal
             // retained from an earlier attempt stays with recovery.
@@ -4991,6 +5002,27 @@ impl Repository {
             });
         }
         Ok(base_index)
+    }
+
+    /// Refuses publication when the ordinary index no longer holds the bytes
+    /// captured as the reconciliation base.
+    fn require_index_unchanged(
+        &self,
+        expected: &IndexGeneration,
+        index: &Path,
+        base_index: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let current = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current == base_index {
+            return Ok(());
+        }
+        Err(RepositoryError::StaleIndex {
+            expected: expected.clone(),
+            actual: IndexGeneration {
+                head: self.head()?,
+                tree: self.index_tree_from_file(index)?,
+            },
+        })
     }
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.

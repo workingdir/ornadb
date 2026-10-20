@@ -6222,6 +6222,42 @@ fn publication_that_loses_its_ref_cas_leaves_no_blocking_journal() {
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
+/// PUB-3 step 7: an index write that lands after the base was captured is
+/// refused before the ref CAS, so publication never installs an index that
+/// stages the inverse of its batch.
+#[test]
+fn publication_refuses_an_index_write_that_lands_before_the_ref_cas() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [18; 16]);
+    let index_path = root.path().join(".git/index");
+    let captured = fs::read(&index_path).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "raced staging\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let raced = fs::read(&index_path).unwrap();
+    fs::write(&index_path, &captured).unwrap();
+
+    let published =
+        repo.publish_candidate_with_stage_hook(&index, &candidate, &mut journal, |stage| {
+            if stage == PublicationJournalStage::Prepared {
+                // A writer outside Git's lock protocol lands its staged change.
+                fs::write(&index_path, &raced).unwrap();
+            }
+        });
+
+    assert!(matches!(published, Err(RepositoryError::StaleIndex { .. })));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(fs::read(&index_path).unwrap(), raced);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "raced staging"
+    );
+}
+
 /// A Prepared journal is discarded once HEAD moves to a commit that lacks the
 /// candidate, and kept as a recovery conflict once HEAD descends from it.
 #[test]
