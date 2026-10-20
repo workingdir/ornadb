@@ -2898,12 +2898,14 @@ impl Repository {
         Ok(reference)
     }
 
-    fn advance_current_ref_bound(
+    /// Resolves the branch a publication may advance. `HEAD` must still name
+    /// `expected_head` through an attached `refs/heads/*` symbolic ref, and a
+    /// branch bound by the journal must be that ref (ORNA-PUB-009).
+    fn advance_target_ref(
         &self,
         expected_head: &GitCommitRef,
-        candidate: &PrivateCommit,
         expected_ref: Option<&str>,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<String, RepositoryError> {
         let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
@@ -2912,11 +2914,53 @@ impl Repository {
         if expected_ref.is_some_and(|expected| expected != reference) {
             return Err(RepositoryError::StaleHead);
         }
+        Ok(reference)
+    }
+
+    fn advance_current_ref_bound(
+        &self,
+        expected_head: &GitCommitRef,
+        candidate: &PrivateCommit,
+        expected_ref: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let reference = self.advance_target_ref(expected_head, expected_ref)?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
         Ok(())
+    }
+
+    /// Whether `HEAD` names `commit` or descends from it. A commit that is not
+    /// in the object database is contained by no ref.
+    fn head_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
+        let Some(head) = self.head()? else {
+            return Ok(false);
+        };
+        if &head == commit {
+            return Ok(true);
+        }
+        if self
+            .commit_optional(&format!("{}^{{commit}}", commit.as_str()))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let mut command = self.command();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            commit.as_str(),
+            head.as_str(),
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
     }
 
     /// Installs the ordinary index image for a published candidate. Only the
@@ -3951,7 +3995,9 @@ impl Repository {
         Ok(())
     }
 
-    /// returned error leaves the journal available for recovery.
+    /// Publishes a prepared candidate through the ref, index and worktree
+    /// boundaries. A refusal before the ref CAS leaves no journal behind; an
+    /// error after the CAS leaves the journal available for recovery.
     pub fn publish_candidate(
         &self,
         expected_index: &IndexGeneration,
@@ -4111,15 +4157,16 @@ impl Repository {
         // candidate. Never replace it with another publisher's prepared
         // journal: doing so would discard the first candidate's exact
         // ref/index/worktree evidence before recovery can reconcile it.
-        if let Some(retained) = self.read_publication_journal_locked()? {
+        let resumes_retained_journal = match self.read_publication_journal_locked()? {
             // Compact publication persists this exact prepared journal before
             // it invokes the common PUB-1 boundary, so an exact retry is the
             // same recovery operation, not a second publisher. Any differing
             // journal remains fenced rather than replacing its evidence.
-            if retained != *journal {
+            Some(retained) if retained != *journal => {
                 return Err(RepositoryError::PublicationPending);
             }
-        }
+            retained => retained.is_some(),
+        };
         let paths = self.publication_index_paths(candidate, journal)?;
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
@@ -4130,8 +4177,14 @@ impl Repository {
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
-        self.write_publication_journal_locked(journal)?;
+        // PUB-3 step 7: every precondition of the ref CAS is revalidated under
+        // the lock before the Prepared journal exists. A refusal here leaves
+        // no record that could fence the pending batch (ORNA-PUB-006).
         self.ensure_no_git_operation_in_progress()?;
+        let selected_ref = journal
+            .compact_manifest()
+            .map(|witness| witness.selected_ref());
+        self.advance_target_ref(journal.old_head(), selected_ref)?;
         if let Some(review) = review {
             let bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
             if Sha256::digest(bytes).as_slice() != review.index_bytes_digest
@@ -4139,7 +4192,6 @@ impl Repository {
                 || self.current_branch()? != review.head_ref
                 || self.worktree_state()? != *review.cwd.worktree()
             {
-                drop(git_lock);
                 return Err(RepositoryError::StaleReviewedCandidate);
             }
         }
@@ -4151,28 +4203,23 @@ impl Repository {
             let target = self.managed_target(&entry.path)?;
             let current = self.read_managed_file(&target)?;
             if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
-                drop(git_lock);
                 return Err(RepositoryError::ManagedContentConflict);
             }
         }
+        self.reconcile_store_worktree_transition(expected_index, candidate, false)?;
+        self.write_publication_journal_locked(journal)?;
         if let Err(error) =
-            self.reconcile_store_worktree_transition(expected_index, candidate, false)
+            self.advance_current_ref_bound(journal.old_head(), candidate, selected_ref)
         {
-            // A failed pre-ref store check has no observable publication to recover.
-            // Remove its prepared journal so the preserved pending batch can be retried.
-            if self.head()?.as_ref() == Some(journal.old_head()) {
+            // After a lost or refused CAS, a HEAD that lacks the candidate
+            // shows that the journal this attempt wrote names nothing that was
+            // published: discard it and keep the batch pending. A journal
+            // retained from an earlier attempt stays with recovery.
+            if !resumes_retained_journal && !self.head_contains_commit(candidate.commit())? {
                 self.clear_publication_journal_locked()?;
             }
-            drop(git_lock);
             return Err(error);
         }
-        self.advance_current_ref_bound(
-            journal.old_head(),
-            candidate,
-            journal
-                .compact_manifest()
-                .map(|witness| witness.selected_ref()),
-        )?;
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
@@ -4229,7 +4276,9 @@ impl Repository {
 
     /// Resumes a persisted publication after a process interruption. The
     /// journal is advanced only after each observable boundary is verified;
-    /// unexpected ref, index, or worktree state remains a typed conflict.
+    /// unexpected ref, index, or worktree state remains a typed conflict. When
+    /// `HEAD` does not contain a prepared publication's candidate, the journal
+    /// is discarded and its batch stays pending in the runtime.
     pub fn recover_publication(&self) -> Result<Option<IndexGeneration>, RepositoryError> {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
@@ -4245,6 +4294,22 @@ impl Repository {
             head: Some(journal.old_head().clone()),
             tree: Some(base_tree),
         };
+        // Recovery row "Ref still at H": Orna changes the ordinary index and
+        // worktree only after RefAdvanced is durable. While HEAD lacks the
+        // candidate, a Prepared publication journal therefore records nothing
+        // that was published. Drop it and keep the batch pending in the
+        // runtime, whether or not the unreferenced candidate still exists and
+        // whatever the user staged since (ORNA-PUB-006, ORNA-PUB-012). Compact
+        // and legacy-migration journals carry evidence their publishers resume
+        // from, so they keep their own boundaries below.
+        if journal.stage() == PublicationJournalStage::Prepared
+            && journal.compact_manifest().is_none()
+            && journal.migration_continuity().is_none()
+            && !self.head_contains_commit(journal.new_head())?
+        {
+            self.clear_publication_journal_locked()?;
+            return Ok(Some(self.index_generation()?));
+        }
         let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
         let candidate_commit = self.commit_optional(&commit_expression)?;
         if journal.stage() == PublicationJournalStage::Prepared
