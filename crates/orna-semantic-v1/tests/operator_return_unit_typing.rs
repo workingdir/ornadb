@@ -193,34 +193,51 @@ pub fn warmed(start: Float<C>, delta: Float<deltaC>) = start + delta;
     ));
     assert!(valid.is_ok(), "{:?}", diagnostics(&valid));
 
-    let Type::Quantity {
-        numeric,
-        dimension_basis,
-        affine,
-        ..
-    } = result(&valid, "speed")
-    else {
-        panic!("speed is a quantity: {:?}", result(&valid, "speed"));
+    // Exported parameters keep their surface spelling; inferred results carry
+    // the structural quantity, so compare dimensions and affinity.
+    let shape = |name: &str| match result(&valid, name) {
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            affine,
+            ..
+        } => (
+            numeric.as_ref().clone(),
+            dimension_basis
+                .iter()
+                .map(|(dimension, exponent)| (dimension.name.clone(), *exponent))
+                .collect::<BTreeMap<_, _>>(),
+            *affine,
+        ),
+        other => panic!("`{name}` is not a quantity: {other:?}"),
     };
-    assert_eq!(numeric.as_ref(), &Type::Float);
-    assert!(!affine);
-    let exponents = dimension_basis
-        .iter()
-        .map(|(dimension, exponent)| (dimension.name.as_str(), *exponent))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(exponents, BTreeMap::from([("Length", 1), ("Time", -1)]));
-
-    let (scaled_parameters, scaled) = signature(&valid, "scaled");
-    assert_eq!(scaled, &scaled_parameters[0]);
-    assert_eq!(result(&valid, "ratio"), &Type::Float);
-    let (warmed_parameters, warmed) = signature(&valid, "warmed");
+    let dimensions = |pairs: &[(&str, i64)]| {
+        pairs
+            .iter()
+            .map(|(name, exponent)| ((*name).to_owned(), *exponent))
+            .collect::<BTreeMap<_, _>>()
+    };
     assert_eq!(
-        warmed, &warmed_parameters[0],
+        shape("speed"),
+        (
+            Type::Float,
+            dimensions(&[("Length", 1), ("Time", -1)]),
+            false
+        )
+    );
+    assert_eq!(
+        shape("scaled"),
+        (Type::Float, dimensions(&[("Length", 1)]), false)
+    );
+    assert_eq!(result(&valid, "ratio"), &Type::Float);
+    assert_eq!(
+        shape("warmed"),
+        (Type::Float, dimensions(&[("Temperature", 1)]), true),
         "absolute + delta is absolute"
     );
     assert_eq!(
-        result(&valid, "difference"),
-        &warmed_parameters[1],
+        shape("difference"),
+        (Type::Float, dimensions(&[("Temperature", 1)]), false),
         "absolute - absolute is the delta quantity"
     );
 
