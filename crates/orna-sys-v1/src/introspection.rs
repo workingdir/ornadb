@@ -7484,22 +7484,76 @@ fn source_cardinality(statistics: Option<&QuerySourceStatistics>) -> Cardinality
     })
 }
 
-/// Selects a deterministic physical order for the right-hand join inputs.
-/// ORNA permits internal reordering when results and observable order are
-/// preserved, but does not prescribe a cost heuristic. This explain-only
-/// adapter ranks complete row-and-byte estimates for a simple pipeline. It
-/// preserves declared order when partial or mutable statistics, cardinality
-/// overflow risk, or downstream operators can make cumulative estimates
-/// order-sensitive. Fully unknown scans follow known-cost joins.
+/// Selects the physical order for right-hand join inputs. ORNA-ORDER-004 lets
+/// an optimizer reorder internally only if the declared observable order is
+/// restored before values are observed; this explain-only adapter reports that
+/// physical order. ORNA prescribes no cost model, so the rule below is a
+/// fixture-pinned heuristic, not a derived one. Declared order is kept when
+/// (a) a complex pipeline (predicate, distinct, ordering, limit, mutations, or
+/// materialization) has partial or mutable statistics and every join carries
+/// statistics, (b) any scan work reaches `u64::MAX`, or (c) the explain model
+/// cannot price the source or its cumulative rows could overflow. Otherwise
+/// known-cost joins are reordered ahead of the unknown tail, and equal costs
+/// keep declaration order.
+fn scan_work(statistics: &QuerySourceStatistics) -> Option<u128> {
+    statistics
+        .estimated_rows
+        .zip(statistics.estimated_bytes)
+        .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)))
+}
+
+/// Work for an input with any known estimate; missing rows or bytes contribute
+/// nothing. Returns `None` only when neither is known.
+fn estimate_work(statistics: &QuerySourceStatistics) -> Option<u128> {
+    match (statistics.estimated_rows, statistics.estimated_bytes) {
+        (None, None) => None,
+        (rows, bytes) => Some(
+            u128::from(rows.unwrap_or(0))
+                + u128::from(bytes.map_or(0, |bytes| ceil_div(bytes, 4096))),
+        ),
+    }
+}
+
+/// Prices the candidate reorder with the explain model: source scan work, then
+/// each estimated join's work in ascending order, plus its left and right rows
+/// while cumulative rows are known. Cumulative rows multiply through every join
+/// that has a row estimate, even when its bytes are unknown. Returns true when
+/// any checked product overflows or the total work exceeds `u64::MAX`.
+fn join_cardinality_overflows(query: &QueryPlanDescription) -> bool {
+    let Some(source) = query.source_statistics.as_ref() else {
+        return true;
+    };
+    let (Some(source_work), Some(source_rows)) = (scan_work(source), source.estimated_rows)
+    else {
+        return true;
+    };
+    let mut estimated = query
+        .joins
+        .iter()
+        .filter_map(|join| join.statistics.as_ref())
+        .filter_map(|statistics| Some((estimate_work(statistics)?, statistics)))
+        .collect::<Vec<_>>();
+    estimated.sort_by_key(|(work, _)| *work);
+    let mut total_work = source_work;
+    let mut cumulative_rows = Some(source_rows);
+    for (work, statistics) in estimated {
+        total_work += work;
+        match (cumulative_rows, statistics.estimated_rows) {
+            (Some(left), Some(right)) => {
+                total_work += u128::from(left) + u128::from(right);
+                cumulative_rows = left.checked_mul(right);
+                if cumulative_rows.is_none() {
+                    return true;
+                }
+            }
+            _ => cumulative_rows = None,
+        }
+    }
+    total_work > u128::from(u64::MAX)
+}
 
 fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJoinDescription)> {
     let joins = &query.joins;
-    let scan_work = |statistics: &QuerySourceStatistics| {
-        statistics
-            .estimated_rows
-            .zip(statistics.estimated_bytes)
-            .map(|(rows, bytes)| u128::from(rows) + u128::from(ceil_div(bytes, 4096)))
-    };
     let has_partial_or_mutable_statistics = query
         .source_statistics
         .iter()
@@ -7520,24 +7574,11 @@ fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJ
         .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
         .filter_map(scan_work)
         .any(|work| work >= u128::from(u64::MAX));
-    let has_join_cardinality_overflow_risk = query
-        .source_statistics
-        .as_ref()
-        .and_then(scan_work)
-        .and_then(|rows| u64::try_from(rows).ok())
-        .map_or(true, |source_rows| {
-            joins
-                .iter()
-                .try_fold(source_rows, |product, join| {
-                    let input_rows = scan_work(join.statistics.as_ref()?)?;
-                    product.checked_mul(u64::try_from(input_rows).ok()?)
-                })
-                .is_none()
-        });
-    if has_partial_or_mutable_statistics
-        || has_complex_pipeline
+    if (has_partial_or_mutable_statistics
+        && has_complex_pipeline
+        && joins.iter().all(|join| join.statistics.is_some()))
         || has_boundary_scan_work
-        || has_join_cardinality_overflow_risk
+        || join_cardinality_overflows(query)
     {
         return joins.iter().enumerate().collect();
     }
@@ -18845,5 +18886,162 @@ mod paired_window_cost_restore_envelope_carry_tests {
             changed_restore.cost_window_restore_envelope_chain_carry_transition,
             Some("advanced_cost_restore_envelope_carry")
         );
+    }
+}
+
+#[cfg(test)]
+mod planned_join_order_tests {
+    use super::*;
+
+    fn statistics(rows: Option<u64>, bytes: Option<u64>) -> QuerySourceStatistics {
+        QuerySourceStatistics {
+            estimated_rows: rows,
+            estimated_bytes: bytes,
+            mutable_branch: None,
+        }
+    }
+
+    fn join(source: &str, statistics: Option<QuerySourceStatistics>) -> QueryJoinDescription {
+        QueryJoinDescription {
+            source: ObjectRef::descriptive(source),
+            statistics,
+            predicate: None,
+        }
+    }
+
+    fn plan(
+        source: Option<QuerySourceStatistics>,
+        joins: Vec<QueryJoinDescription>,
+    ) -> QueryPlanDescription {
+        QueryPlanDescription {
+            snapshot: SnapshotRef::descriptive("snapshot:join-order"),
+            source: ObjectRef::descriptive("table:anchor"),
+            source_statistics: source,
+            joins,
+            predicate: None,
+            projections: Vec::new(),
+            distinct: false,
+            ordering: Vec::new(),
+            limit: None,
+            mutations: Vec::new(),
+            materialize_into: None,
+        }
+    }
+
+    fn order(query: &QueryPlanDescription) -> Vec<usize> {
+        planned_query_join_order(query)
+            .into_iter()
+            .map(|(position, _)| position)
+            .collect()
+    }
+
+    // Declared joins: wide (work 60), narrow (work 6), unknown tail.
+    fn simple_joins(narrow: QuerySourceStatistics) -> Vec<QueryJoinDescription> {
+        vec![
+            join("table:wide", Some(statistics(Some(50), Some(40_000)))),
+            join("table:narrow", Some(narrow)),
+            join("table:unknown", None),
+        ]
+    }
+
+    #[test]
+    fn simple_complete_plan_reorders_known_joins_before_unknown_tail() {
+        let query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            simple_joins(statistics(Some(5), Some(4_096))),
+        );
+        assert_eq!(order(&query), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn simple_plan_with_partial_join_statistics_still_reorders_known_joins() {
+        // Pinned heuristic: partial statistics block reordering only for complex plans.
+        let query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            vec![
+                join("table:partial", Some(statistics(Some(5), None))),
+                join("table:wide", Some(statistics(Some(50), Some(40_000)))),
+            ],
+        );
+        assert_eq!(order(&query), vec![1, 0]);
+    }
+
+    #[test]
+    fn simple_plan_with_mutable_branch_statistics_still_reorders_known_joins() {
+        let mut narrow = statistics(Some(5), Some(4_096));
+        narrow.mutable_branch = Some(MutableBranchSnapshot {
+            name: "branch:overlay".to_owned(),
+            generation: 1,
+        });
+        let query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            vec![
+                join("table:wide", Some(statistics(Some(50), Some(40_000)))),
+                join("table:mutable", Some(narrow)),
+            ],
+        );
+        assert_eq!(order(&query), vec![1, 0]);
+    }
+
+    #[test]
+    fn simple_plan_with_partial_source_statistics_keeps_declared_order() {
+        // Source work cannot be priced, so the explain model keeps declared order.
+        let query = plan(
+            Some(statistics(Some(100), None)),
+            vec![
+                join("table:wide", Some(statistics(Some(50), Some(40_000)))),
+                join("table:narrow", Some(statistics(Some(5), Some(4_096)))),
+            ],
+        );
+        assert_eq!(order(&query), vec![0, 1]);
+    }
+
+    #[test]
+    fn complex_plan_with_complete_non_mutable_statistics_still_reorders() {
+        let mut query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            simple_joins(statistics(Some(5), Some(4_096))),
+        );
+        query.limit = Some(10);
+        assert_eq!(order(&query), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn complex_plan_with_partial_statistics_and_all_joins_estimated_keeps_declared_order() {
+        let mut query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            vec![
+                join("table:partial", Some(statistics(Some(5), None))),
+                join("table:wide", Some(statistics(Some(50), Some(40_000)))),
+            ],
+        );
+        query.limit = Some(10);
+        assert_eq!(order(&query), vec![0, 1]);
+    }
+
+    #[test]
+    fn rows_only_join_multiplies_cumulative_rows_for_overflow() {
+        // Source rows 2 times a partial join with u64::MAX rows overflows u64,
+        // even though the known join's bytes are absent from the partial join.
+        let query = plan(
+            Some(statistics(Some(2), Some(8_192))),
+            vec![
+                join(
+                    "table:large",
+                    Some(statistics(Some(1 << 40), Some(8_192))),
+                ),
+                join("table:partial", Some(statistics(Some(u64::MAX), None))),
+            ],
+        );
+        assert!(join_cardinality_overflows(&query));
+    }
+
+    #[test]
+    fn known_small_joins_do_not_report_cardinality_overflow() {
+        let query = plan(
+            Some(statistics(Some(100), Some(4_000))),
+            simple_joins(statistics(Some(5), Some(4_096))),
+        );
+        assert!(!join_cardinality_overflows(&query));
     }
 }
