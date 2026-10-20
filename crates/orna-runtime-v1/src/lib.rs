@@ -6753,7 +6753,10 @@ impl RuntimeState {
                     .await?;
                 Err(error)
             }
-            Ok(committed) => Ok(committed),
+            Ok(committed) => {
+                orna_repository_v1::publication_crash_barrier("row-commit");
+                Ok(committed)
+            }
             Err(RequestActivationTransactionError::Runtime(error)) => Err(error),
             Err(RequestActivationTransactionError::RolledBackValidation(_)) => {
                 unreachable!("unvalidated request activation cannot reject a candidate")
@@ -13570,7 +13573,7 @@ impl RuntimeState {
                 "SELECT checkpoint.generation, checkpoint.digest, checkpoint.mutation_sequence, pending_mutation.sequence, \
                         (SELECT publication_commit.intent_id FROM publication_freeze \
                          JOIN publication_commit ON publication_commit.intent_id = publication_freeze.intent_id \
-                         WHERE publication_freeze.checkpoint_mutation_sequence = checkpoint.mutation_sequence LIMIT 1) \
+                         WHERE publication_freeze.checkpoint_mutation_sequence >= checkpoint.mutation_sequence LIMIT 1) \
                  FROM checkpoint LEFT JOIN pending_mutation ON pending_mutation.sequence = checkpoint.mutation_sequence \
                  ORDER BY checkpoint.generation",
                 (),
@@ -13601,8 +13604,9 @@ impl RuntimeState {
             let completed: Option<Vec<u8>> =
                 row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
             // Generations can advance without a new mutation, so repeated mutation
-            // sequence numbers are valid. A committed publication anchors later
-            // checkpoints at the same sequence after its pending row is consumed.
+            // sequence numbers are valid. A committed publication consumes every
+            // pending row through its frozen sequence, so an earlier checkpoint whose
+            // pending row was consumed by a later committed publication is anchored.
             if sequence == 0
                 || sequence < previous_sequence
                 || (referenced.and_then(|value| u64::try_from(value).ok()) != Some(sequence)

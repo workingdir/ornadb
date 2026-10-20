@@ -128,6 +128,16 @@ callers use the logical table interface and do not branch on physical
 placement. Compact files and manifests must be treated as immutable published
 artifacts and verified before they become authoritative.
 
+## Linux FUSE editor drafts
+
+When an editor writes a replacement file and calls `fsync`, the writable
+Linux FUSE mount stores that private scratch candidate in the worktree runtime
+directory before acknowledging the call. The next writable mount restores each
+synced scratch under its row directory after the mount process exits.
+The scratch remains a draft: the VFS accepts it and creates the row mutation
+only after it validates a temporary-file rename. Keep the runtime directory
+intact; don't edit or delete its scratch records manually.
+
 ## Focused maintenance checks
 
 Run the smallest check that covers the change. These are package-scoped checks,
@@ -136,6 +146,7 @@ not a claim that the whole product is validated:
 ```text
 cargo test --locked -p orna-cli-v1 --test init
 cargo test --locked -p orna-cli-v1 --test project_runtime
+ORNA_REQUIRE_FUSE=1 cargo test --locked -p orna-cli-v1 --test vfs_editor_compat
 cargo test --locked -p orna-runtime-v1 --lib
 ```
 

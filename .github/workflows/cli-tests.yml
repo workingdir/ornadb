@@ -32,6 +32,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
+      - name: Install Emacs for the editor compatibility suite
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+
       - name: Test the orna-cli-v1 integration suite
         env:
           ORNA_REQUIRE_FUSE: "1"
