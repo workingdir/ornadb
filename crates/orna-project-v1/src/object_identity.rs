@@ -1609,9 +1609,9 @@ fn apply_explicit_renames(
                 (ObjectKind::Variant, 0),
                 (ObjectKind::VariantField, 1),
             ],
+            ObjectKind::Variant => &[(ObjectKind::VariantField, 0)],
             ObjectKind::Field
             | ObjectKind::Unit
-            | ObjectKind::Variant
             | ObjectKind::TypeField
             | ObjectKind::VariantField => &[],
         };
@@ -3043,5 +3043,29 @@ pub table Invoice(id: Str) {
             assert_eq!(next.id(kind, new), first.id(kind, old), "{kind:?} {new}");
             assert!(next.id(kind, old).is_none(), "{kind:?} {old}");
         }
+
+        // A renamed variant carries its payload field identities too.
+        let reshaped = ModuleInput::new(
+            "main.orna",
+            "type Alias = Str;\npub type Location {\n    x: Int,\n    y: Int,\n}\npub enum Figure {\n    dot,\n    round { radius: Float },\n}\n",
+        );
+        let last = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&reshaped),
+            Some(&next),
+            &[ObjectIdentityRename::new(
+                ObjectKind::Variant,
+                "Figure.circle",
+                "Figure.round",
+            )],
+        )
+        .expect("explicit variant rename");
+        assert_eq!(
+            last.id(ObjectKind::Variant, "Figure.round"),
+            first.id(ObjectKind::Variant, "Shape.circle")
+        );
+        assert_eq!(
+            last.id(ObjectKind::VariantField, "Figure.round.radius"),
+            first.id(ObjectKind::VariantField, "Shape.circle.radius")
+        );
     }
 }
