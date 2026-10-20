@@ -2517,7 +2517,9 @@ fn pinned_std_formats_normalized_elapsed_arithmetic() {
             .submit(include_str!("fixtures/stdlib-time-instant-calendar-period-y2w0.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-S021-TYPE"
+        // Instant plus a calendar period is an undefined operand pair; the
+        // spec names no calendar-arithmetic code, so it is a type mismatch.
+        "E2001"
     );
 }
 
