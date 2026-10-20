@@ -3627,6 +3627,9 @@ impl Scope {
             if name.len() > context.limits.max_string_bytes {
                 return Err(error("ORNA-EVAL-LIMIT"));
             }
+            if value.format() == ValueFormat::Ovb1 {
+                return Err(error("sys.codec.unsupported_value_profile"));
+            }
             if value.format() != ValueFormat::Ovb2 {
                 return Err(error("ORNA-EVAL-VALUE"));
             }
