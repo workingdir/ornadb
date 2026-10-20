@@ -22,8 +22,10 @@ fn instant() -> CanonicalValue {
     .expect("instant is canonical")
 }
 
+#[derive(Clone)]
 struct StorageEffects {
     rows: Vec<i64>,
+    clock: bool,
 }
 
 impl EffectHandler for StorageEffects {
@@ -32,7 +34,7 @@ impl EffectHandler for StorageEffects {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if matches!(callee, Expr::Name { text, .. } if text == "now") {
+        if self.clock && matches!(callee, Expr::Name { text, .. } if text == "now") {
             assert!(arguments.is_empty());
             return Ok(Some(instant()));
         }
@@ -63,9 +65,17 @@ impl EffectHandler for StorageEffects {
             next: (index + 1 < self.rows.len()).then(|| vec![(index + 1) as u8]),
         }))
     }
+
+    fn fork_task_child(&mut self, _child_index: usize) -> Option<Box<dyn EffectHandler + Send>> {
+        Some(Box::new(self.clone()))
+    }
 }
 
 fn run(source: &str, rows: Vec<i64>) -> CanonicalValue {
+    run_with(source, rows, true)
+}
+
+fn run_with(source: &str, rows: Vec<i64>, clock: bool) -> CanonicalValue {
     let parsed = parse_expression(source);
     assert!(
         parsed.is_ok(),
@@ -80,7 +90,7 @@ fn run(source: &str, rows: Vec<i64>) -> CanonicalValue {
             environment: Environment::new(),
         },
     )]);
-    let mut effects = StorageEffects { rows };
+    let mut effects = StorageEffects { rows, clock };
     invoke_named_with_effects(
         "query",
         &functions,
@@ -112,7 +122,7 @@ fn each_buffered_decision_is_visible_to_later_introspection_in_the_same_activati
 
     assert_eq!(
         result.raw(),
-        &Raw::Array(vec![integer(3), integer(3), integer(2)])
+        &Raw::Array(vec![integer(3), integer(3), integer(1)])
     );
 }
 
@@ -125,9 +135,75 @@ fn materialization_digest_is_deterministic_for_equal_rows_and_differs_otherwise(
     let same_b = run(query, vec![2, 1]);
     let different = run(query, vec![5, 1]);
 
-    assert_eq!(same_a, same_b, "equal buffered rows must yield equal digests");
+    assert_eq!(
+        same_a, same_b,
+        "equal buffered rows must yield equal digests"
+    );
     assert_ne!(
         same_a, different,
         "different buffered rows must yield different digests"
     );
+}
+
+#[test]
+fn distinct_stages_over_the_same_relation_get_distinct_keys() {
+    // Equal outputs from different stages must not collapse: the natural key
+    // is object (stages) + snapshot (output), so each stage is its own row.
+    let result = run(
+        "[sys.Storage | filter(value => value >= 0) | sum(),
+          sys.Storage | filter(value => value >= 1) | sum(),
+          sys.Materialization | count()]",
+        vec![2, 1],
+    );
+
+    assert_eq!(
+        result.raw(),
+        &Raw::Array(vec![integer(3), integer(3), integer(2)])
+    );
+}
+
+#[test]
+fn parallel_child_decisions_reach_the_parent_log() {
+    let result = run(
+        "[std.concurrent.parallel([() => sys.Storage | filter(value => value >= 0) | sum()]),
+          sys.Materialization | count()]",
+        vec![2, 1],
+    );
+
+    assert_eq!(
+        result.raw(),
+        &Raw::Array(vec![Raw::Array(vec![integer(3)]), integer(1)])
+    );
+}
+
+#[test]
+fn materialization_created_is_the_activation_instant() {
+    let result = run(
+        "[sys.Storage | filter(value => value >= 0) | sum(),
+          sys.Materialization | project(m => m.created) | first()]",
+        vec![2, 1],
+    );
+
+    assert_eq!(
+        result.raw(),
+        &Raw::Array(vec![
+            integer(3),
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![integer(1), instant().raw().clone()])),
+            ),
+        ])
+    );
+}
+
+#[test]
+fn materialization_does_not_require_a_clock_handler() {
+    let result = run_with(
+        "[sys.Storage | filter(value => value >= 0) | sum(),
+          sys.Materialization | count()]",
+        vec![2, 1],
+        false,
+    );
+
+    assert_eq!(result.raw(), &Raw::Array(vec![integer(3), integer(1)]));
 }

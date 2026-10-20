@@ -3614,15 +3614,32 @@ impl Scope {
     }
 }
 
-/// One relation buffering decision made during this activation. Entries are
-/// append-only so `sys.Materialization` pages can use an index cursor.
+/// One materialization decision, keyed by `sys.Materialization`'s natural key
+/// (`object` + `snapshot`). Decisions with the same key upsert one row.
 struct MaterializationRecord {
+    /// Deterministic identity of the relation stages that produced the value.
     object: [u8; 32],
-    read_scope: u64,
+    /// Deterministic identity of the produced output (its canonical digest).
+    snapshot: [u8; 32],
     digest: [u8; 32],
     rows: usize,
     bytes: Option<usize>,
     valid: bool,
+    /// Activation instant captured when the decision was made. `None` when no
+    /// effect handler resolved `now` at that point.
+    created: Option<Value>,
+}
+
+/// Materialization decisions produced by one callback, drained by its parent
+/// in callback index order so the parent log stays deterministic.
+type MaterializationSink = Arc<std::sync::Mutex<Vec<MaterializationRecord>>>;
+
+fn take_materializations(sink: &MaterializationSink) -> Vec<MaterializationRecord> {
+    std::mem::take(
+        &mut *sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 struct Context<'functions, 'effects> {
@@ -3704,6 +3721,7 @@ fn invoke_task_callback(
     reject_unhandled_field_calls: bool,
     depth: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
+    materializations: &MaterializationSink,
 ) -> Result<Value, EvaluationError> {
     let mut context = Context {
         limits,
@@ -3722,7 +3740,12 @@ fn invoke_task_callback(
         materializations: Vec::new(),
         cancellation: Some(&cancellation),
     };
-    context.invoke_callable(&callback, Vec::new(), depth)
+    let result = context.invoke_callable(&callback, Vec::new(), depth);
+    materializations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(std::mem::take(&mut context.materializations));
+    result
 }
 
 /// Run finite callback lists with a bounded number of owned worker threads.
@@ -3743,7 +3766,11 @@ fn run_task_callbacks(
     reject_unhandled_field_calls: bool,
     cancel_after_failure: bool,
     cancel_after_success: bool,
-) -> (Vec<Option<Result<Value, EvaluationError>>>, Option<Value>) {
+) -> (
+    Vec<Option<Result<Value, EvaluationError>>>,
+    Option<Value>,
+    Vec<Vec<MaterializationRecord>>,
+) {
     const MAX_TASK_WORKERS: usize = 32;
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let worker_count = callbacks.len().min(available).min(MAX_TASK_WORKERS).max(1);
@@ -3751,13 +3778,19 @@ fn run_task_callbacks(
     let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
 
-    std::thread::scope(|scope| {
+    let sinks: Arc<Vec<MaterializationSink>> = Arc::new(
+        (0..callbacks.len())
+            .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+            .collect(),
+    );
+    let (results, winner) = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..worker_count {
             let sender = sender.clone();
             let next = Arc::clone(&next);
             let shared_cancel = Arc::clone(&shared_cancel);
             let child_effects = Arc::clone(&child_effects);
+            let sinks = Arc::clone(&sinks);
             let parent = parent.clone();
             scope.spawn(move || {
                 loop {
@@ -3790,6 +3823,7 @@ fn run_task_callbacks(
                             reject_unhandled_field_calls,
                             callback_depth,
                             effects,
+                            &sinks[index],
                         )
                     }))
                     .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
@@ -3819,7 +3853,9 @@ fn run_task_callbacks(
             results[index] = Some(result);
         }
         (results, winner)
-    })
+    });
+    let records = sinks.iter().map(take_materializations).collect();
+    (results, winner, records)
 }
 
 impl Context<'_, '_> {
@@ -6186,7 +6222,7 @@ impl Context<'_, '_> {
             context.items(values.len())?;
             Ok(true)
         })?;
-        self.record_materialization(plan, &values);
+        self.record_materialization(plan, &values)?;
         Ok(values)
     }
 
@@ -6558,7 +6594,7 @@ impl Context<'_, '_> {
             context.items(values.len())?;
             Ok(true)
         })?;
-        self.record_materialization(&prefix, &values);
+        self.record_materialization(&prefix, &values)?;
         let sorted = self.collection("sort_by", vec![Value::List(values), key.clone()], depth)?;
         let Value::List(sorted) = sorted else {
             unreachable!("sort_by returns a list")
@@ -6788,46 +6824,68 @@ impl Context<'_, '_> {
         Ok((rows, next))
     }
 
-    /// Buffers a materialization decision for `sys.Materialization`. Only the
-    /// canonical digest, count, and byte size are retained; rows are not copied.
-    fn record_materialization(&mut self, plan: &RelationPlan, values: &[Value]) {
+    /// Records a materialization decision for `sys.Materialization`. The key
+    /// is `object` (stage identity) plus `snapshot` (output digest). A repeated
+    /// key is already in the log and is not recorded again. Only the canonical
+    /// digest, count, and byte size are retained; rows are not copied.
+    fn record_materialization(
+        &mut self,
+        plan: &RelationPlan,
+        values: &[Value],
+    ) -> Result<(), EvaluationError> {
         if plan.source == SYS_MATERIALIZATION_SOURCE {
-            return;
+            return Ok(());
         }
-        let read_scope = plan.source_identity.0.to_be_bytes();
-        let object = sha256_parts(
-            "orna.materialization.object.v1",
-            &[plan.source.as_bytes(), &read_scope[..]],
-        );
-        let mut digest = Sha256::new();
-        digest.update(b"orna.materialization.digest.v1\0");
-        let mut bytes = 0usize;
-        let mut valid = true;
-        for value in values {
-            let encoded = value
-                .clone()
-                .canonical()
-                .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")));
-            match encoded {
-                Ok(encoded) => {
-                    digest.update((encoded.len() as u64).to_be_bytes());
-                    digest.update(&encoded);
-                    bytes = bytes.saturating_add(encoded.len());
-                }
-                Err(_) => {
-                    valid = false;
-                    break;
-                }
-            }
+        let object = relation_stage_digest(plan);
+        let (digest, bytes, valid) = output_digest(values);
+        let snapshot = sha256_parts("orna.materialization.snapshot.v1", &[&digest]);
+        if self.has_materialization(&object, &snapshot) {
+            return Ok(());
         }
-        self.materializations.push(MaterializationRecord {
+        let created = self.activation_now(&materialization_clock_callee())?;
+        self.admit_materialization(MaterializationRecord {
             object,
-            read_scope: plan.source_identity.0,
-            digest: digest.finalize().into(),
+            snapshot,
+            digest,
             rows: values.len(),
-            bytes: valid.then_some(bytes),
+            bytes,
             valid,
-        });
+            created,
+        })
+    }
+
+    fn has_materialization(&self, object: &[u8; 32], snapshot: &[u8; 32]) -> bool {
+        self.materializations
+            .iter()
+            .any(|record| record.object == *object && record.snapshot == *snapshot)
+    }
+
+    /// Appends a decision unless its key is already logged. The log holds one
+    /// row per distinct key and is bounded by `max_collection_items`.
+    fn admit_materialization(
+        &mut self,
+        record: MaterializationRecord,
+    ) -> Result<(), EvaluationError> {
+        if self.has_materialization(&record.object, &record.snapshot) {
+            return Ok(());
+        }
+        if self.materializations.len() >= self.limits.max_collection_items {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        self.materializations.push(record);
+        Ok(())
+    }
+
+    /// Admits materialization decisions made by task callbacks. Batches are
+    /// given in callback index order, so the parent log is deterministic.
+    fn absorb_materializations(
+        &mut self,
+        batches: Vec<Vec<MaterializationRecord>>,
+    ) -> Result<(), EvaluationError> {
+        for record in batches.into_iter().flatten() {
+            self.admit_materialization(record)?;
+        }
+        Ok(())
     }
 
     /// Serves one page of the activation's materialization log. The cursor is
@@ -6855,21 +6913,10 @@ impl Context<'_, '_> {
         if end - start > self.limits.max_collection_items {
             return Err(error("ORNA-EVAL-VALUE"));
         }
-        let callee = Expr::Name {
-            text: "now".to_owned(),
-            span: orna_syntax_v1::SyntaxSpan::new(0, 0),
-        };
-        let created = self
-            .activation_now(&callee)?
-            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
         let mut rows = Vec::with_capacity(end - start);
-        for ordinal in start..end {
+        for index in start..end {
             self.step()?;
-            rows.push(materialization_row(
-                &self.materializations[ordinal],
-                ordinal,
-                &created,
-            ));
+            rows.push(materialization_row(&self.materializations[index]));
         }
         let next = (end < total).then(|| (end as u64).to_be_bytes().to_vec());
         Ok((rows, next))
@@ -9319,7 +9366,7 @@ impl Context<'_, '_> {
                 } else {
                     child_effects.resize_with(callbacks.len(), || None);
                 }
-                let (results, _) = run_task_callbacks(
+                let (results, _, records) = run_task_callbacks(
                     callbacks,
                     child_effects,
                     depth.saturating_add(1),
@@ -9334,6 +9381,7 @@ impl Context<'_, '_> {
                     true,
                     false,
                 );
+                self.absorb_materializations(records)?;
                 if parent.as_ref().is_some_and(CancellationToken::is_requested) {
                     return Err(error("ORNA-EVAL-CANCELLED"));
                 }
@@ -9371,7 +9419,7 @@ impl Context<'_, '_> {
                 } else {
                     child_effects.resize_with(callbacks.len(), || None);
                 }
-                let (results, winner) = run_task_callbacks(
+                let (results, winner, records) = run_task_callbacks(
                     callbacks,
                     child_effects,
                     depth.saturating_add(1),
@@ -9386,6 +9434,7 @@ impl Context<'_, '_> {
                     false,
                     true,
                 );
+                self.absorb_materializations(records)?;
                 if parent.as_ref().is_some_and(CancellationToken::is_requested) {
                     return Err(error("ORNA-EVAL-CANCELLED"));
                 }
@@ -9434,11 +9483,14 @@ impl Context<'_, '_> {
                     .effects
                     .as_deref_mut()
                     .and_then(|effects| effects.fork_task_child(0));
+                let materializations: MaterializationSink =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
                 let result = std::thread::scope(|scope| {
                     let (sender, receiver) = std::sync::mpsc::channel();
                     let shared_for_task = Arc::clone(&shared_cancel);
                     let callback = callback.clone();
                     let task_parent = parent.clone();
+                    let sink_for_task = Arc::clone(&materializations);
                     scope.spawn(move || {
                         let cancellation =
                             CancellationToken::child(Arc::clone(&shared_for_task), task_parent);
@@ -9455,6 +9507,7 @@ impl Context<'_, '_> {
                                 reject_unhandled_field_calls,
                                 depth.saturating_add(1),
                                 child_effects,
+                                &sink_for_task,
                             )
                         }))
                         .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
@@ -9491,8 +9544,9 @@ impl Context<'_, '_> {
                             }
                         }
                     }
-                })?;
-                Ok(result)
+                });
+                self.absorb_materializations(vec![take_materializations(&materializations)])?;
+                result
             }
             ("parallel" | "race", [_]) | ("timeout", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -14412,29 +14466,96 @@ fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
     hash.finalize().into()
 }
 
-fn materialization_row(record: &MaterializationRecord, ordinal: usize, created: &Value) -> Value {
-    let ordinal = (ordinal as u64).to_be_bytes();
+fn materialization_row(record: &MaterializationRecord) -> Value {
     let reference = sha256_parts(
         "orna.materialization.reference.v1",
-        &[&record.object[..], &ordinal[..]],
-    );
-    let snapshot = sha256_parts(
-        "orna.materialization.snapshot.v1",
-        &[&record.read_scope.to_be_bytes()[..]],
+        &[&record.object[..], &record.snapshot[..]],
     );
     let count = |value: Option<usize>| {
         Value::Option(value.map(|count| Box::new(Value::Int(BigInt::from(count)))))
     };
-    Value::Record(BTreeMap::from([
+    let mut fields = BTreeMap::from([
         ("reference".to_owned(), Value::Blob(reference.to_vec())),
         ("object".to_owned(), Value::Blob(record.object.to_vec())),
-        ("snapshot".to_owned(), Value::Blob(snapshot.to_vec())),
+        ("snapshot".to_owned(), Value::Blob(record.snapshot.to_vec())),
         ("digest".to_owned(), Value::Blob(record.digest.to_vec())),
         ("rows".to_owned(), count(Some(record.rows))),
         ("bytes".to_owned(), count(record.bytes)),
-        ("created".to_owned(), created.clone()),
         ("valid".to_owned(), Value::Bool(record.valid)),
-    ]))
+    ]);
+    if let Some(created) = &record.created {
+        fields.insert("created".to_owned(), created.clone());
+    }
+    Value::Record(fields)
+}
+
+/// Callee used to read the activation clock for `created`. It is never a user
+/// annotation; the host effect handler decides whether a clock exists.
+fn materialization_clock_callee() -> Expr {
+    Expr::Name {
+        text: "now".to_owned(),
+        span: orna_syntax_v1::SyntaxSpan::new(0, 0),
+    }
+}
+
+/// Canonical digest, encoded byte count, and validity of one materialized
+/// output. Encoding stops at the first value that has no canonical form.
+fn output_digest(values: &[Value]) -> ([u8; 32], Option<usize>, bool) {
+    let mut digest = Sha256::new();
+    digest.update(b"orna.materialization.digest.v1\0");
+    let mut bytes = 0usize;
+    let mut valid = true;
+    for value in values {
+        let encoded = value
+            .clone()
+            .canonical()
+            .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")));
+        match encoded {
+            Ok(encoded) => {
+                digest.update((encoded.len() as u64).to_be_bytes());
+                digest.update(&encoded);
+                bytes = bytes.saturating_add(encoded.len());
+            }
+            Err(_) => {
+                valid = false;
+                break;
+            }
+        }
+    }
+    (digest.finalize().into(), valid.then_some(bytes), valid)
+}
+
+/// Stage identity of a relation plan: its source name, union children, inline
+/// source rows, and every stage in order. Read-scope identities are not part
+/// of it, so the same logical stages over the same source share one key.
+fn relation_stage_digest(plan: &RelationPlan) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.materialization.object.v1\0");
+    update_relation_identity(&mut hash, plan);
+    hash.finalize().into()
+}
+
+fn update_relation_identity(hash: &mut Sha256, plan: &RelationPlan) {
+    hash_identity_part(hash, b"source", plan.source.as_bytes());
+    if let Some((left, right)) = &plan.source_union {
+        hash_identity_part(hash, b"union", &[]);
+        update_relation_identity(hash, left);
+        update_relation_identity(hash, right);
+    }
+    if let Some(values) = &plan.source_values {
+        hash_identity_part(hash, b"values", format!("{values:?}").as_bytes());
+    }
+    for stage in &plan.stages {
+        hash_identity_part(hash, b"stage", stage.fingerprint().as_bytes());
+    }
+    hash_identity_part(hash, b"end", &[]);
+}
+
+fn hash_identity_part(hash: &mut Sha256, tag: &[u8], payload: &[u8]) {
+    hash.update((tag.len() as u64).to_be_bytes());
+    hash.update(tag);
+    hash.update((payload.len() as u64).to_be_bytes());
+    hash.update(payload);
 }
 
 fn function_namespace(name: &str) -> Option<String> {
