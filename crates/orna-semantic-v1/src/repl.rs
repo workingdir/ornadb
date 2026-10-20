@@ -11,7 +11,8 @@ use orna_syntax_v1::{Declaration, EntryPoint, Item, ReplInput, SyntaxSpan, Synta
 
 use crate::{
     Analysis, Catalogue, DIAG_DUPLICATE, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, Namespace,
-    Scope, Symbol, SymbolKind, Type, check_item, declared_symbol, diag, infer, resolve_imports,
+    Scope, Symbol, SymbolKind, SystemProviders, Type, check_item, declared_symbol, diag, infer,
+    report_unlinked_system_members, resolve_imports,
 };
 
 /// Semantic state for one ephemeral REPL module.
@@ -28,6 +29,7 @@ pub struct ReplContext {
     symbols: BTreeMap<String, Symbol>,
     imports: Vec<Item>,
     last_result: Option<Type>,
+    system_providers: SystemProviders,
 }
 
 /// A staged semantic transition.  Its successor state is intentionally opaque
@@ -51,7 +53,8 @@ pub enum ReplCommitError {
 }
 
 impl ReplContext {
-    /// Builds a context from a fully admitted project analysis.
+    /// Builds a context from a fully admitted project analysis. It admits
+    /// `sys` members against the same provider linkage as `analysis`.
     pub fn from_analysis(analysis: &Analysis) -> Result<Self, Vec<Diagnostic>> {
         if !analysis.is_ok() {
             return Err(analysis.diagnostics.clone());
@@ -74,10 +77,13 @@ impl ReplContext {
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
+            system_providers: analysis.system_providers(),
         })
     }
 
     /// Starts an empty REPL with the authoritative core declaration catalogue.
+    /// It checks `sys` members against the declared surface only; a REPL that
+    /// evaluates its inputs starts with [`ReplContext::with_providers`].
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -87,6 +93,16 @@ impl ReplContext {
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
+            system_providers: SystemProviders::DeclaredSurface,
+        }
+    }
+
+    /// Starts an empty REPL that admits `sys` members against `providers`.
+    #[must_use]
+    pub fn with_providers(providers: SystemProviders) -> Self {
+        Self {
+            system_providers: providers,
+            ..Self::empty()
         }
     }
 
@@ -105,6 +121,9 @@ impl ReplContext {
             ReplInput::Expression(expression) | ReplInput::ExpressionStatement(expression) => {
                 let scope = self.scope(&self.imports, &self.symbols, &mut diagnostics);
                 let inferred = infer(expression, &scope, &BTreeMap::new(), &mut diagnostics);
+                if let Some(record) = &scope.unlinked_system_members {
+                    report_unlinked_system_members(record, &mut diagnostics);
+                }
                 if matches!(input, ReplInput::Expression(_)) {
                     next.last_result = Some(inferred.ty.clone());
                 }
@@ -134,6 +153,9 @@ impl ReplContext {
                         &mut plans,
                         &mut diagnostics,
                     );
+                    if let Some(record) = &scope.unlinked_system_members {
+                        report_unlinked_system_members(record, &mut diagnostics);
+                    }
                     next.symbols = symbols;
                     let declaration_effects =
                         if matches!(item.declaration, Declaration::Function { .. }) {
@@ -264,7 +286,7 @@ impl ReplContext {
             items: imports.to_vec(),
             span: SyntaxSpan::new(0, 0),
         };
-        resolve_imports(
+        let mut scope = resolve_imports(
             &Namespace(Vec::new()),
             &tree,
             &header,
@@ -272,7 +294,9 @@ impl ReplContext {
             &BTreeMap::new(),
             &BTreeMap::new(),
             diagnostics,
-        )
+        );
+        scope.unlinked_system_members = self.system_providers.admission_record();
+        scope
     }
 }
 
