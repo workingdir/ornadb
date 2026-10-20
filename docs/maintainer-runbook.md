@@ -186,14 +186,24 @@ Bump procedure:
    `git -C stdlib/std fetch --depth 1 origin <sha>`, check it out with
    `git -C stdlib/std checkout --detach <sha>`, then stage the gitlink with
    `git add stdlib/std`. Do not change git configuration.
-3. Mirror the changed files in `crates/orna-standard-sources/src/lib.rs`. Every
-   tracked `.orna` file must have an `include_str!` entry, or an entry in
-   `UNMIRRORED_SOURCES` in `scripts/check_standard_library_pin.py` with a reason.
-4. If the changed bytes belong to a snapshot whose digest is pinned, do not edit
-   the `ACCEPTED_*` digests to match. Either the change is a new immutable
-   `orna.std/N` snapshot with new revision, catalogue, bundle, source, and unit
-   identities and new `ACCEPTED_*` constants (ADR 0055/0059 pattern), or the
-   change is reverted. Regenerate goldens only inside that new snapshot.
+3. Mirror the changed files in `crates/orna-standard-sources/src/lib.rs`. A
+   changed file keeps its `include_str!` path, so only a new file needs edits:
+   a source const, a `REFERENCE_STANDARD_*_PATH_V1` const, an entry in
+   `reference_standard_sources_v1`, and the `[(String, String); N]` length bumped
+   everywhere that type appears. Every tracked `.orna` file must have an
+   `include_str!` entry, or an entry in `UNMIRRORED_SOURCES` in
+   `scripts/check_standard_library_pin.py` with a reason. The checker fails when
+   a path const and its source const do not pair.
+4. Do not treat the `orna.std/N` ids or the `ACCEPTED_*_SOURCE_REVISION_DIGEST`
+   constants as part of a stdlib change. They cover only the retained SQL-era
+   database snapshots (ADR 0055/0059) and are unrelated to the mirrored
+   `stdlib/std` modules, whose digests are derived from their bytes at load time.
+   The Rust evaluator's `STANDARD_BINDING_MODULES` registry is keyed by function
+   name only, so removing a Rust shadow can break historical pins whose stub
+   bodies self-recurse (`bit_or = __bit_or = std.bits.bit_or`). Gate any shadow
+   removal on the module's pinned digest or stub shape, following
+   `captured_timezone_snapshot_matches`. Keep the shadow for the old stub digests
+   so ORNA-LIB-001 holds for historical pins.
 5. Run the drift check and the pin-checker tests from the worktree root:
 
 ```text
@@ -209,6 +219,37 @@ blob. CI runs the same two commands in the `fixture-and-editor-artifacts` job of
 Then run the package-scoped Rust checks that cover the snapshot you changed
 (for example `cargo test --locked -p orna-standard`), with the cargo limits from
 the repository rules. A check that could not run is unavailable, not a pass.
+
+### Moving a Rust shadow into the standard library
+
+Language features belong in `stdlib/std`, not in Rust. To move one module's
+shadowed functions into Orna bodies (use a module whose functions Orna can
+express; the bits primitives cannot move because Orna has no bitwise operator):
+
+1. In `workingdir/ornadb-std`, branch and replace the stub bodies (for example
+   `pub fn encode = __encode; fn __encode = encode`) with real Orna bodies.
+   Keep public signatures unchanged. Merge through a normal reviewed PR; never
+   force-push.
+2. In the ornadb worktree, follow the bump procedure steps 2 and 3 for the new
+   commit. A changed file needs no mirror edit; a new file needs the consts and
+   array entry described in step 3.
+3. Gate the Rust shadow before removing it. Key the decision on the module's
+   pinned digest or stub shape, following `captured_timezone_snapshot_matches`.
+   Then drop the op from `STANDARD_BINDING_MODULES` in
+   `crates/orna-evaluator-v1/src/lib.rs`, its dispatch arm, and its arity-name
+   table entry, for pins that carry real bodies. Keep the shadow for the old
+   stub digests so historical pins behave identically under ORNA-LIB-001.
+4. Update the tests that pin the old shape: the `stub_candidates == 30` and
+   `registered >= 4` asserts in `registry_covers_pinned_intrinsic_and_sys_host_stubs`,
+   the module's `standard_library_*` evaluator tests, and the declaration and
+   index asserts in `v1_profile.rs`. Check `scripts/fixture-manifest.sha256` only
+   if fixtures change.
+5. Add a golden test for each moved function that runs the new bytes with no
+   shadow, and a replay test (as in `standard_snapshot_replay.rs`) showing that the
+   old stub commit still behaves identically.
+6. Run `python3 scripts/check_standard_library_pin.py --check`, then
+   `cargo test --locked -p orna-standard` and `-p orna-evaluator-v1`, under the
+   repository cargo limits, then the fixture-manifest check.
 
 ## 1.0.0 requirement evidence report
 
