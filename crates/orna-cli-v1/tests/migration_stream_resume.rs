@@ -331,3 +331,58 @@ fn migration_of_dirty_source_without_stream_state_still_prepares_copy() {
     );
     assert!(destination.join("main.orna").exists());
 }
+
+/// A carried checkpoint's history chain is only provable from its migration bridge
+/// origin. Removing the bridge and leaving a chain that begins above version zero
+/// must refuse the destination open rather than resume from an unproven state.
+#[test]
+fn migration_carry_without_bridge_origin_refuses_open() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+
+    let output = run_copy(&source, &destination);
+
+    assert!(
+        output.status.success(),
+        "carriable stream state must migrate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    runtime().block_on(async {
+        let repository = Repository::discover(&destination).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("intact destination opens before forging");
+
+        let database = libsql::Builder::new_local(repository.runtime_paths().state_db())
+            .build()
+            .await
+            .unwrap();
+        let connection = database.connect().unwrap();
+        connection
+            .execute("DELETE FROM stream_checkpoint_migration_bridge", ())
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO stream_checkpoint_history
+                 SELECT key_id, version, committed_position, snapshot, generation_digest, transition
+                 FROM stream_checkpoint_migration_archive
+                 WHERE version = 2",
+                (),
+            )
+            .await
+            .unwrap();
+        drop(connection);
+        drop(database);
+
+        match RuntimeState::open(&repository, identity, digest).await {
+            Ok(_) => panic!("a bridge-less chain beginning at version 2 must not open"),
+            Err(error) => assert_eq!(error, RuntimeError::RecoveryInvalid),
+        }
+    });
+}
