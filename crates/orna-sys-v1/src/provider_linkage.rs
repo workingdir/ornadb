@@ -57,10 +57,18 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 5] = [
+const DECLARED_LINKS: [SystemProviderLink; 6] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
+        host: SystemProviderHost::Evaluator,
+    },
+    // `orna-evaluator-v1`: `Evaluator::call` lowers the query natively through
+    // `explain_bindings`; the plan pins its source through the catalogue the
+    // host installs. The `FunctionRef` and `Diagnostic` overloads stay
+    // unlinked: the evaluator rejects them.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.explain(Query)"),
         host: SystemProviderHost::Evaluator,
     },
     // `orna-application-v1`: `AsyncSourceMutationEffectHandler` forwards both
@@ -224,7 +232,8 @@ mod tests {
         for member in [
             SystemSurfaceMember::Callable("sys.rt.info"),
             SystemSurfaceMember::Callable("sys.snapshot(Str)"),
-            SystemSurfaceMember::Callable("sys.explain(Query)"),
+            SystemSurfaceMember::Callable("sys.explain(FunctionRef)"),
+            SystemSurfaceMember::Relation("sys.Plan"),
             SystemSurfaceMember::Callable("sys.cancel"),
             SystemSurfaceMember::Relation("sys.Run"),
             SystemSurfaceMember::Relation("sys.storage.objects"),
@@ -237,6 +246,7 @@ mod tests {
         }
         for member in [
             SystemSurfaceMember::Callable("sys.blob.annotate"),
+            SystemSurfaceMember::Callable("sys.explain(Query)"),
             SystemSurfaceMember::Callable("sys.blob.capture_file"),
             SystemSurfaceMember::Relation("sys.Storage"),
         ] {
