@@ -2,7 +2,8 @@
 //! Orna 1.1.0 grammar. Each test pins one audited reproducer.
 
 use orna_syntax_v1::{
-    ControlKind, Declaration, Expr, Statement, TableMember, parse_module, parse_repl,
+    ControlKind, Declaration, Expr, Statement, TableMember, TokenKind, lex, parse_expression,
+    parse_module, parse_repl,
 };
 
 fn function_body(source: &str) -> Expr {
@@ -460,4 +461,38 @@ fn assignment_inside_a_group_tuple_or_argument_is_e1301() {
         );
         assert_eq!(first_codes(source), (Some("E1301"), Some("E1301")));
     }
+}
+
+// A01-04 (grammar `date_literal`; lexical "Numeric and string token
+// boundaries"): only `digit4 "-" digit2 "-" digit2` with ASCII digits is
+// date-shaped, so arithmetic written without spaces is not an invalid date.
+#[test]
+fn spaceless_arithmetic_is_not_a_date_literal() {
+    for source in [
+        "1+10-20-30",
+        "[1,10-20-30]",
+        "f(1,10-20-30)",
+        "0+12-34-56",
+        "1e10-ab-cd",
+    ] {
+        let tokens = lex(source).unwrap_or_else(|errors| panic!("{source}: {errors:?}"));
+        assert!(
+            tokens.iter().all(|token| token.kind != TokenKind::Date),
+            "{source}: {tokens:?}"
+        );
+        let parsed = parse_expression(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+    }
+    let body = function_body("pub fn total(): Int {\n    let x = 1+10-20-30;\n    x\n}");
+    let (statements, _) = block_parts(&body);
+    assert!(
+        matches!(&statements[0], Statement::Let { value: Expr::Binary { op, .. }, .. } if op == "-"),
+        "{statements:?}"
+    );
+
+    let invalid = lex("2024-13-45").expect_err("a date-shaped literal is validated as a date");
+    assert_eq!(
+        invalid.iter().map(|error| error.code).collect::<Vec<_>>(),
+        ["ORNA-LEX-007"]
+    );
 }
