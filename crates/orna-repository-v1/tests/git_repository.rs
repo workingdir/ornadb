@@ -1,3 +1,8 @@
+// The compact fixture writer is test-only (`legacy-fixture-writer`). Without
+// it, the legacy compact reader tests below are compiled out and the parquet
+// helpers they share are unused.
+#![cfg_attr(not(feature = "legacy-fixture-writer"), allow(dead_code, unused_imports))]
+
 #[path = "../src/test_support.rs"]
 mod test_support;
 
@@ -8,18 +13,18 @@ use std::{
     process::Command,
 };
 
-use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
 use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
+#[cfg(feature = "legacy-fixture-writer")]
+use orna_repository_v1::CompactSegment;
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
-    CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
-    ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
-    MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
-    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
-    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
-    WorktreeState,
+    CompactSegmentRole, GitDeclaredObjectSetState, GitObjectKind, GitObjectState,
+    GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate, ManagedFileChange, ManagedPath,
+    MigrationAnnotationDefaults, MigrationContinuityRecord, MountError, MountView, NativeObjectId,
+    OrnaInternalRef, PublicationJournal, PublicationJournalEntry, PublicationJournalStage,
+    RemoteContinuity, Repository, RepositoryError, RequiredInternalRef, RuntimeGeneration,
+    StreamCheckpointIdentityPredecessor, WorktreeState,
 };
 
 use parquet::{
@@ -235,10 +240,12 @@ fn with_partial_clone(root: &Path) {
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 fn compact_segment(table: Uuid, ordinal: u64, bytes: Vec<u8>) -> CompactSegment {
     compact_segment_with_manifest_columns(table, ordinal, bytes, compact_columns())
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 fn compact_segment_with_manifest_columns(
     table: Uuid,
     ordinal: u64,
@@ -337,6 +344,7 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
     with_page_checksums(bytes)
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
     let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
     let path = ManagedPath::new(format!(
@@ -739,6 +747,7 @@ fn compact_ovb_parquet(
     with_page_checksums(bytes)
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 fn compact_segment_for_schema(
     table: Uuid,
     ordinal: u64,
@@ -775,6 +784,7 @@ fn compact_segment_for_schema(
     .unwrap()
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[allow(clippy::too_many_arguments)]
 fn compact_ovb_segment_for_schema(
     table: Uuid,
@@ -1051,6 +1061,8 @@ fn compact_skip(bytes: &[u8], cursor: &mut usize, kind: u8) {
     }
 }
 
+/// Builds a compact candidate with the test-only legacy fixture writer.
+#[cfg(feature = "legacy-fixture-writer")]
 fn compact_plan(
     repository: &Repository,
     table: Uuid,
@@ -1075,49 +1087,17 @@ fn compact_plan(
         .unwrap()
 }
 
-fn publish_compact_repository_boundary(
+/// Makes a fixture-writer candidate the committed `HEAD`, as a compact
+/// publication by an older build left it; this build cannot publish one.
+#[cfg(feature = "legacy-fixture-writer")]
+fn adopt_compact_fixture(
     repository: &Repository,
-    plan: orna_repository_v1::CompactPublicationPlan,
-) -> Result<IndexGeneration, orna_repository_v1::RepositoryError> {
-    repository
-        .publish_compact_repository_boundary(plan)
-        .map(|pending| pending.index().clone())
-}
-
-fn compact_receipt_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x5a; 32])
-}
-
-fn provision_compact_receipt_trust_root(repository: &Repository, key: &SigningKey) {
-    repository.runtime_paths().ensure_exists().unwrap();
-    fs::write(
-        repository
-            .runtime_paths()
-            .compact_runtime_receipt_public_key(),
-        key.verifying_key().to_bytes(),
-    )
-    .unwrap();
-}
-
-fn compact_runtime_receipt(
-    pending: &orna_repository_v1::CompactPublicationPending,
-    key: &SigningKey,
-) -> CompactRuntimeReceipt {
-    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
-        pending.runtime_intent_id(),
-        pending.cleanup_watermark(),
-        pending.commit(),
-        pending.journal_verifier(),
-    )
-    .unwrap();
-    CompactRuntimeReceipt::new(
-        pending.runtime_intent_id(),
-        pending.cleanup_watermark(),
-        pending.commit().clone(),
-        pending.journal_verifier(),
-        key.sign(&signing_bytes).to_bytes(),
-    )
-    .unwrap()
+    plan: &orna_repository_v1::CompactPublicationPlan,
+) {
+    git(
+        repository.worktree(),
+        &["reset", "--quiet", "--hard", plan.candidate_commit().as_str()],
+    );
 }
 
 /// Builds a real filtered clone when the installed Git supports file-protocol
@@ -1187,6 +1167,7 @@ struct FilteredCompactClone {
 /// Builds a compact snapshot in a real file-protocol filtered clone. Metadata
 /// and one segment are intentionally materialized before the promisor endpoint
 /// is disabled; the other segment and an unrelated blob must remain promised.
+#[cfg(feature = "legacy-fixture-writer")]
 fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     let fixture = TempDir::new().ok()?;
     let origin = fixture.path().join("origin.git");
@@ -1204,11 +1185,10 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     git(&seed, &["commit", "-m", "initial"]);
 
     let repository = Repository::discover(&seed).ok()?;
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repository, &signing_key);
     let materialized_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0610);
-    let materialized_pending = repository
-        .publish_compact_repository_boundary(compact_plan(
+    adopt_compact_fixture(
+        &repository,
+        &compact_plan(
             &repository,
             materialized_table,
             [70; 16],
@@ -1217,18 +1197,13 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
                 70,
                 b"materialized inventory segment".to_vec(),
             )],
-        ))
-        .ok()?;
-    repository
-        .finish_compact_with_receipt(&compact_runtime_receipt(
-            &materialized_pending,
-            &signing_key,
-        ))
-        .ok()?;
+        ),
+    );
 
     let promised_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0611);
-    let promised_pending = repository
-        .publish_compact_repository_boundary(compact_plan(
+    adopt_compact_fixture(
+        &repository,
+        &compact_plan(
             &repository,
             promised_table,
             [71; 16],
@@ -1237,11 +1212,8 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
                 71,
                 b"promised inventory segment".to_vec(),
             )],
-        ))
-        .ok()?;
-    repository
-        .finish_compact_with_receipt(&compact_runtime_receipt(&promised_pending, &signing_key))
-        .ok()?;
+        ),
+    );
 
     let head = repository.head().ok()??;
     let materialized_manifest = repository
@@ -3690,12 +3662,11 @@ fn empty_compact_manifest_is_a_valid_committed_snapshot() {
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_or_runtime_state() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
     let first_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0604);
     let first = compact_plan(
         &repo,
@@ -3707,9 +3678,7 @@ fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_
             b"first compact table".to_vec(),
         )],
     );
-    let first_pending = repo.publish_compact_repository_boundary(first).unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&first_pending, &signing_key))
-        .unwrap();
+    adopt_compact_fixture(&repo, &first);
 
     let second_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0605);
     let second = compact_plan(
@@ -3722,9 +3691,7 @@ fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_
             b"second compact table".to_vec(),
         )],
     );
-    let second_pending = repo.publish_compact_repository_boundary(second).unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&second_pending, &signing_key))
-        .unwrap();
+    adopt_compact_fixture(&repo, &second);
 
     fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
     git(root.path(), &["add", "ordinary.txt"]);
@@ -3798,6 +3765,7 @@ fn compact_manifest_inventory_ignores_policy_only_table_roots() {
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_hydration_plans_all_tables_without_fetching_promised_segments() {
     let fixture = filtered_compact_clone()
@@ -3893,6 +3861,7 @@ fn compact_manifest_inventory_hydration_plans_all_tables_without_fetching_promis
     assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_closure_without_mutation()
  {
@@ -4016,16 +3985,16 @@ fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_clo
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_hydration_rejects_later_invalid_table_without_partial_result_or_mutation()
  {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
     let first = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0613);
-    let pending = repo
-        .publish_compact_repository_boundary(compact_plan(
+    adopt_compact_fixture(
+        &repo,
+        &compact_plan(
             &repo,
             first,
             [73; 16],
@@ -4034,10 +4003,8 @@ fn compact_manifest_inventory_hydration_rejects_later_invalid_table_without_part
                 73,
                 b"first inventory table".to_vec(),
             )],
-        ))
-        .unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-        .unwrap();
+        ),
+    );
 
     let second = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0614);
     let plan = compact_plan(
@@ -4102,6 +4069,7 @@ fn compact_manifest_inventory_hydration_rejects_later_invalid_table_without_part
     assert_eq!(no_lazy_object_inventory(root.path()), objects_before);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() {
     for artifact in [
@@ -4113,8 +4081,6 @@ fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() 
     ] {
         let root = repository();
         let repo = Repository::discover(root.path()).unwrap();
-        let signing_key = compact_receipt_signing_key();
-        provision_compact_receipt_trust_root(&repo, &signing_key);
         let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0608);
         let plan = compact_plan(
             &repo,
@@ -4126,9 +4092,7 @@ fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() 
                 b"declared compact segment".to_vec(),
             )],
         );
-        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-            .unwrap();
+        adopt_compact_fixture(&repo, &plan);
         let head = repo.head().unwrap().unwrap();
         let orphan = repo
             .build_private_commit(
@@ -4149,13 +4113,12 @@ fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() 
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entries() {
     for entry in ["manifest", "shard", "segment"] {
         let root = repository();
         let repo = Repository::discover(root.path()).unwrap();
-        let signing_key = compact_receipt_signing_key();
-        provision_compact_receipt_trust_root(&repo, &signing_key);
         let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0607);
         let plan = compact_plan(
             &repo,
@@ -4163,9 +4126,7 @@ fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entri
             [63; 16],
             &[compact_segment(table, 63, b"symlink witness".to_vec())],
         );
-        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-            .unwrap();
+        adopt_compact_fixture(&repo, &plan);
         let head = repo.head().unwrap().unwrap();
         let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
         let path = match entry {
@@ -4228,6 +4189,7 @@ fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entri
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_inventory_rejects_missing_or_malformed_manifest_closure_without_mutation() {
     for missing_manifest in [true, false] {
@@ -4313,6 +4275,7 @@ fn compact_manifest_inventory_rejects_missing_or_malformed_manifest_closure_with
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_accepts_a_valid_date_parquet_fixture() {
     let root = repository();
@@ -4334,16 +4297,15 @@ fn compact_publication_accepts_a_valid_date_parquet_fixture() {
             "test: publish date compact segment",
         )
         .unwrap();
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
     let manifest = repo
-        .read_compact_manifest(pending.commit(), table)
+        .read_compact_manifest(plan.candidate_commit(), table)
         .unwrap()
         .unwrap();
     assert_eq!(manifest.schema(), schema_digest);
     assert_eq!(manifest.entries().len(), 1);
 
     let verified = repo
-        .read_verified_compact_segment(pending.commit(), table, &manifest.entries()[0])
+        .read_verified_compact_segment(plan.candidate_commit(), table, &manifest.entries()[0])
         .unwrap();
     let reader = SerializedFileReader::new(bytes::Bytes::from(verified)).unwrap();
     assert_eq!(reader.metadata().file_metadata().version(), 1);
@@ -4378,6 +4340,7 @@ fn compact_publication_accepts_a_valid_date_parquet_fixture() {
     assert_eq!(schema_digest, schema_fingerprint(&schema));
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
     let root = repository();
@@ -4389,7 +4352,7 @@ fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
         [42; 16],
         &[compact_segment(table, 42, b"manifest-backed".to_vec())],
     );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
+    adopt_compact_fixture(&repo, &plan);
     let head = repo.head().unwrap().unwrap();
     let before = git_state(&repo, root.path());
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
@@ -4412,6 +4375,7 @@ fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
     assert_eq!(git_state(&repo, root.path()), before);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
     let root = repository();
@@ -4427,7 +4391,7 @@ fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
             b"promised-manifest-segment".to_vec(),
         )],
     );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
+    adopt_compact_fixture(&repo, &plan);
     let head = repo.head().unwrap().unwrap();
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
     let object = manifest.entries()[0].git_object_id().to_owned();
@@ -4476,6 +4440,7 @@ fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_hydration_range_selects_only_overlapping_segments() {
     let root = repository();
@@ -4490,7 +4455,7 @@ fn compact_manifest_hydration_range_selects_only_overlapping_segments() {
             compact_segment(table, 46, b"range-selected".to_vec()),
         ],
     );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
+    adopt_compact_fixture(&repo, &plan);
     let head = repo.head().unwrap().unwrap();
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
     let lower = CanonicalValue::new(OvbRaw::Int(46.into()))
@@ -4579,6 +4544,7 @@ fn compact_manifest_hydration_range_selects_only_overlapping_segments() {
     assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_range_hydration_materializes_selected_promises_only() {
     let root = repository();
@@ -4593,7 +4559,7 @@ fn compact_manifest_range_hydration_materializes_selected_promises_only() {
             compact_segment(table, 46, b"range-selected-promised".to_vec()),
         ],
     );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
+    adopt_compact_fixture(&repo, &plan);
     let head = repo.head().unwrap().unwrap();
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
     let selected_key = CanonicalValue::new(OvbRaw::Int(46.into()))
@@ -4705,6 +4671,7 @@ fn compact_manifest_range_hydration_materializes_selected_promises_only() {
     assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_hydration_is_manifest_bound_and_preserves_git_state() {
     let root = repository();
@@ -4720,7 +4687,7 @@ fn compact_manifest_hydration_is_manifest_bound_and_preserves_git_state() {
             b"manifest-bound-hydration".to_vec(),
         )],
     );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
+    adopt_compact_fixture(&repo, &plan);
     let head = repo.head().unwrap().unwrap();
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
     let object = manifest.entries()[0].git_object_id().to_owned();
@@ -5551,16 +5518,6 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
     assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
-    ));
-    let receipt =
-        CompactRuntimeReceipt::new([87; 16], [88; 32], head.clone(), [89; 32], [0; 64]).unwrap();
-    assert!(matches!(
-        repo.finish_compact_with_receipt(&receipt),
-        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
-    ));
-    assert!(matches!(
         repo.clear_publication_journal(),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
@@ -6241,6 +6198,7 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_rejects_schema_identity_and_type_substitution() {
     let root = repository();
@@ -6289,6 +6247,7 @@ fn compact_publication_rejects_schema_identity_and_type_substitution() {
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
     let root = repository();
@@ -6368,6 +6327,7 @@ fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
     let root = repository();
@@ -6438,6 +6398,7 @@ fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_rejects_a_schema_owned_by_another_table() {
     let root = repository();
@@ -6471,6 +6432,7 @@ fn compact_publication_rejects_a_schema_owned_by_another_table() {
     ));
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_requires_complete_unique_known_stored_mappings() {
     let root = repository();
@@ -6543,6 +6505,7 @@ fn compact_publication_requires_complete_unique_known_stored_mappings() {
     }
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
     let root = repository();
@@ -6601,6 +6564,7 @@ fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
     ));
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves() {
     let root = repository();
@@ -6629,6 +6593,7 @@ fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves()
     assert_eq!(repo.head().unwrap(), Some(head));
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_identity() {
     let root = repository();
@@ -6699,6 +6664,7 @@ fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_iden
     ));
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_state() {
     let root = repository();
@@ -6713,9 +6679,7 @@ fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_stat
         .map(|ordinal| compact_segment(table, ordinal, format!("segment-{ordinal}\n").into_bytes()))
         .collect::<Vec<_>>();
     let plan = compact_plan(&repo, table, [41; 16], &segments);
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    let head = repo.head().unwrap().unwrap();
+    let head = plan.candidate_commit().clone();
     let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
     assert_eq!(manifest.entries().len(), 257);
     assert_eq!(manifest.next_generation(), 2);
@@ -6748,6 +6712,7 @@ fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_stat
     );
 }
 
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn compact_publication_rejects_a_noncanonical_reordered_candidate_manifest() {
     let root = repository();
@@ -6871,445 +6836,11 @@ fn hex_digest(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[test]
-fn compact_publication_refuses_missing_or_corrupt_referenced_objects_before_ref_advance() {
-    for corrupt in [false, true] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let segment = compact_segment(table, 1, b"compact object\n".to_vec());
-        let plan = compact_plan(
-            &repo,
-            table,
-            if corrupt { [43; 16] } else { [42; 16] },
-            &[segment],
-        );
-        let head = repo.head().unwrap().unwrap();
-        let object = plan.manifest().entries()[0].git_object_id();
-        let object_path = root
-            .path()
-            .join(".git/objects")
-            .join(&object[..2])
-            .join(&object[2..]);
-        assert!(object_path.is_file());
-        #[cfg(unix)]
-        fs::set_permissions(
-            &object_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .unwrap();
-        if corrupt {
-            fs::write(&object_path, b"corrupt").unwrap();
-        } else {
-            fs::remove_file(&object_path).unwrap();
-        }
-        assert!(matches!(
-            publish_compact_repository_boundary(&repo, plan),
-            Err(orna_repository_v1::RepositoryError::GitOperationFailed)
-        ));
-        assert_eq!(repo.head().unwrap(), Some(head));
-        assert_eq!(repo.read_publication_journal().unwrap(), None);
-    }
-}
-
-#[test]
-fn compact_manifest_journal_recovery_proves_candidate_before_reconciling() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-
-    let plan = compact_plan(
-        &repo,
-        table,
-        [44; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
-    ));
-    assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged ordinary"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("main.orna")).unwrap(),
-        "unstaged ordinary\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-    let persisted = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(persisted.compact_manifest().unwrap().object_count(), 1);
-    assert_eq!(persisted.compact_manifest().unwrap().generation(), 1);
-}
-
-#[test]
-fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(
-        root.path().join("ordinary.txt"),
-        "staged ordinary\nunstaged ordinary\n",
-    )
-    .unwrap();
-    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
-    let unstaged_before = git(root.path(), &["diff", "--binary"]);
-
-    let plan = compact_plan(
-        &repo,
-        table,
-        [53; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    git(
-        root.path(),
-        &[
-            "update-ref",
-            "refs/heads/main",
-            candidate.as_str(),
-            head.as_str(),
-        ],
-    );
-
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        recovery,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref pending)
-            if pending.commit() == &candidate
-    ));
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-    assert!(
-        repo.read_compact_manifest(&candidate, table)
-            .unwrap()
-            .is_some()
-    );
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_post_ref_worktree_conflict_retains_journal_and_retries_reconciliation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
-    let unstaged_before = git(root.path(), &["diff", "--binary"]);
-
-    let segment = compact_segment(table, 1, b"compact object\n".to_vec());
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let segment_path = PathBuf::from(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ));
-    let plan = compact_plan(&repo, table, [54; 16], &[segment]);
-    let old_head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    git(
-        root.path(),
-        &[
-            "update-ref",
-            "refs/heads/main",
-            candidate.as_str(),
-            old_head.as_str(),
-        ],
-    );
-
-    let conflict = root.path().join(&segment_path);
-    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
-    fs::write(&conflict, b"concurrent worktree content\n").unwrap();
-    assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(RepositoryError::ManagedContentConflict)
-    ));
-    let retained = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(retained.stage(), PublicationJournalStage::IndexReconciled);
-    assert_eq!(repo.head().unwrap(), Some(candidate.clone()));
-    assert_eq!(
-        fs::read(&conflict).unwrap(),
-        b"concurrent worktree content\n"
-    );
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-
-    fs::remove_file(conflict).unwrap();
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        recovery,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(pending)
-            if pending.commit() == &candidate
-    ));
-    let completed = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(
-        completed.stage(),
-        PublicationJournalStage::WorktreeReconciled
-    );
-    let published_segment = Command::new("git")
-        .current_dir(root.path())
-        .args([
-            "show",
-            &format!("{}:{}", candidate.as_str(), segment_path.display()),
-        ])
-        .output()
-        .unwrap();
-    assert!(published_segment.status.success());
-    assert_eq!(
-        fs::read(root.path().join(&segment_path)).unwrap(),
-        published_segment.stdout
-    );
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-}
-
-#[test]
-fn compact_prepared_publication_stale_head_retains_journal_and_requires_reconciliation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let intent = [55; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    let index_at_preparation = repo.index_generation().unwrap();
-
-    repo.persist_compact_publication(&plan).unwrap();
-    let prepared = repo.read_publication_journal().unwrap().unwrap();
-    let watermark = prepared.compact_manifest().unwrap().cleanup_watermark();
-    assert_eq!(prepared.runtime_intent_id(), Some(intent));
-    assert_eq!(
-        prepared.stage(),
-        orna_repository_v1::PublicationJournalStage::Prepared
-    );
-
-    git(
-        root.path(),
-        &["commit", "--allow-empty", "-m", "human branch advance"],
-    );
-    let current = repo.head().unwrap().unwrap();
-    let index_after_human_commit = repo.index_generation().unwrap();
-    assert_ne!(current, *index_at_preparation.head().unwrap());
-    assert_eq!(index_after_human_commit.tree(), index_at_preparation.tree());
-
-    assert!(matches!(
-        repo.publish_compact_repository_boundary(plan),
-        Err(orna_repository_v1::RepositoryError::StaleHead)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(current.clone()));
-    assert_eq!(
-        repo.read_publication_journal().unwrap(),
-        Some(prepared.clone())
-    );
-
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    match recovery {
-        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
-            assert_eq!(value.candidate(), &candidate);
-            assert_eq!(value.current_head(), &current);
-            assert_eq!(value.runtime_intent_id(), intent);
-            assert_eq!(value.cleanup_watermark(), watermark);
-            assert_eq!(
-                value.stage(),
-                orna_repository_v1::PublicationJournalStage::Prepared
-            );
-        }
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
-            panic!("stale compact candidate must require explicit reconciliation")
-        }
-    }
-    assert_eq!(repo.head().unwrap(), Some(current));
-    assert_eq!(repo.read_publication_journal().unwrap(), Some(prepared));
-}
-
-#[test]
-fn compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [54; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-    let manifest = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!("{}:{}", candidate, manifest_path.as_path().display()),
-        ],
-    );
-    let unsupported = String::from_utf8(manifest)
-        .unwrap()
-        .replacen("compact-storage-v1", "unsupported-profile-v9", 1)
-        .into_bytes();
-    let malformed = repo
-        .build_private_commit(
-            &candidate,
-            &[orna_repository_v1::ManagedFileChange::new(
-                manifest_path,
-                Some(unsupported),
-            )],
-            "test: commit unsupported compact profile",
-        )
-        .unwrap();
-    repo.advance_current_ref(&candidate, &malformed).unwrap();
-
-    assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(malformed.commit().clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_post_ref_boundaries() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [48; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::PublicationPending)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(head.clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let manifest_path = format!("{}:.orna/storage/{table}/manifest.orna", candidate);
-    let manifest_object = git(root.path(), &["rev-parse", &manifest_path]);
-    let object_path = root
-        .path()
-        .join(".git/objects")
-        .join(&manifest_object[..2])
-        .join(&manifest_object[2..]);
-    #[cfg(unix)]
-    fs::set_permissions(
-        &object_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .unwrap();
-    fs::remove_file(&object_path).unwrap();
-
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(candidate.clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let stale_segment = compact_segment(table, 1, b"stale candidate\n".to_vec());
-
-    let winner = compact_plan(
-        &repo,
-        table,
-        [46; 16],
-        &[compact_segment(table, 2, b"winner\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(winner).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    repo.finish_compact_with_receipt(&receipt).unwrap();
-    assert_eq!(repo.read_publication_journal().unwrap(), None);
-
-    let rebuilt = repo
-        .rebuild_compact_publication_with_watermark(
-            table,
-            compact_schema_fingerprint(table),
-            [45; 16],
-            [45; 32],
-            &[stale_segment],
-            "orna: publish compact runtime data",
-        )
-        .unwrap();
-    let generation = rebuilt.manifest().next_generation();
-    publish_compact_repository_boundary(&repo, rebuilt).unwrap();
-    assert_eq!(generation, 3);
-    assert!(
-        repo.read_compact_manifest(&repo.head().unwrap().unwrap(), table)
-            .unwrap()
-            .unwrap()
-            .entries()
-            .iter()
-            .any(|entry| entry.generation() == 2)
-    );
-}
-
+#[cfg(feature = "legacy-fixture-writer")]
 #[test]
 fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
     let table = Uuid::new_v4();
     let plan = compact_plan(
         &repo,
@@ -7317,10 +6848,7 @@ fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() 
         [67; 16],
         &[compact_segment(table, 1, b"compact object\n".to_vec())],
     );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    repo.finish_compact_with_receipt(&receipt).unwrap();
-    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    adopt_compact_fixture(&repo, &plan);
 
     let published = repo.head().unwrap().unwrap();
     let manifest_path = format!(".orna/storage/{table}/manifest.orna");
@@ -7393,183 +6921,6 @@ fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() 
         fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
         "untracked ordinary\n"
     );
-}
-
-#[test]
-fn compact_publication_refuses_missing_manifest_or_shard_witness_before_ref_advance() {
-    for (ordinal, witness_path) in [(70, "manifest.orna"), (71, "shards/00000000.orna")] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let plan = compact_plan(
-            &repo,
-            table,
-            [ordinal as u8; 16],
-            &[compact_segment(
-                table,
-                ordinal,
-                b"compact object\n".to_vec(),
-            )],
-        );
-        let head = repo.head().unwrap().unwrap();
-        let object = git(
-            root.path(),
-            &[
-                "rev-parse",
-                &format!(
-                    "{}:.orna/storage/{table}/{witness_path}",
-                    plan.candidate_commit()
-                ),
-            ],
-        );
-        let object_path = root
-            .path()
-            .join(".git/objects")
-            .join(&object[..2])
-            .join(&object[2..]);
-        #[cfg(unix)]
-        fs::set_permissions(
-            &object_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .unwrap();
-        fs::remove_file(&object_path).unwrap();
-
-        let error = publish_compact_repository_boundary(&repo, plan).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                orna_repository_v1::RepositoryError::InvalidPublicationJournal
-                    | orna_repository_v1::RepositoryError::GitOperationFailed
-            ),
-            "unexpected missing-witness rejection: {error:?}"
-        );
-        assert_eq!(repo.head().unwrap(), Some(head));
-        assert_eq!(repo.read_publication_journal().unwrap(), None);
-    }
-}
-
-#[test]
-fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [49; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    assert_eq!(pending.runtime_intent_id(), intent);
-    assert_eq!(pending.cleanup_watermark(), [49; 32]);
-    let recovered = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    let recovered_again = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert_eq!(recovered, recovered_again);
-    assert!(matches!(
-        recovered,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value)
-            if value == &pending
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    assert_eq!(repo.head().unwrap(), Some(candidate));
-}
-
-#[test]
-fn compact_runtime_fence_rejects_signed_receipt_with_mismatched_frozen_proof() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [50; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let mismatched_watermark = [51; 32];
-    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
-        pending.runtime_intent_id(),
-        mismatched_watermark,
-        pending.commit(),
-        pending.journal_verifier(),
-    )
-    .unwrap();
-    let receipt = CompactRuntimeReceipt::new(
-        pending.runtime_intent_id(),
-        mismatched_watermark,
-        pending.commit().clone(),
-        pending.journal_verifier(),
-        signing_key.sign(&signing_bytes).to_bytes(),
-    )
-    .unwrap();
-
-    assert!(matches!(
-        repo.finish_compact_with_receipt(&receipt),
-        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
-    ));
-    assert!(matches!(
-        repo.recover_compact_publication_boundary().unwrap(),
-        Some(orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value))
-            if value == &pending
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    assert_eq!(repo.head().unwrap(), Some(pending.commit().clone()));
-}
-
-#[test]
-fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [51; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    fs::write(root.path().join("ordinary.txt"), "native writer\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    git(root.path(), &["commit", "-m", "native writer"]);
-    let result = repo.finish_compact_with_receipt(&receipt);
-    assert!(matches!(
-        result,
-        Err(orna_repository_v1::RepositoryError::StaleHead)
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    let reconciliation = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    match reconciliation {
-        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
-            assert_eq!(value.candidate(), pending.commit());
-            assert_ne!(value.current_head(), pending.commit());
-            assert_eq!(value.runtime_intent_id(), intent);
-            assert_eq!(value.cleanup_watermark(), [51; 32]);
-        }
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
-            panic!("ref drift must require explicit reconciliation")
-        }
-    }
 }
 
 #[test]
