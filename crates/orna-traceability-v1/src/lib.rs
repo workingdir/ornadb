@@ -980,7 +980,7 @@ fn validate_payload(payload: &NormativePayloadTrace) -> Result<()> {
     Ok(())
 }
 fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
-    let sys = load_sys_api(root)?;
+    let sys = load_sys_api()?;
     let live: Value = read_json(root, "profiles/live-messages.json")?;
     let session: Value = read_json(root, "profiles/session.schema.json")?;
     let mut ids = BTreeSet::new();
@@ -1010,10 +1010,7 @@ fn schema_profile_members(root: &Path) -> Result<Vec<InventoryEntry>> {
         .collect())
 }
 
-fn load_sys_api(root: &Path) -> Result<Value> {
-    if root.join("api/sys.json").is_file() {
-        return read_json(root, "api/sys.json");
-    }
+fn load_sys_api() -> Result<Value> {
     serde_json::from_str(&orna_sys_v1::system_api_json())
         .map_err(|error| err(format!("parse embedded sys API artifact: {error}")))
 }
@@ -1226,7 +1223,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).expect("create workspace without api folder");
-        let api = load_sys_api(&root).expect("use embedded generated sys API");
+        let api = load_sys_api().expect("use embedded generated sys API");
         fs::remove_dir_all(&root).expect("remove temporary workspace");
         assert_eq!(api["functions"].as_array().unwrap().len(), 82);
     }
