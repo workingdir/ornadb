@@ -221,6 +221,7 @@ mod tests {
 
     fn generation(source: u8, runtime: u8) -> PageGeneration { PageGeneration::new([source; 32], [runtime; 32]) }
 
+    /// ORNA-APP-018: unrelated typed results preserve unsent draft text, focus, and caret.
     #[test]
     fn unrelated_typed_results_preserve_unsent_draft_focus_and_caret() {
         let control = ControlId::new("query");
@@ -235,6 +236,7 @@ mod tests {
         assert_eq!(page.result("older-run"), Some(&PageValue::Integer(7)));
     }
 
+    /// ORNA-APP-017: scratch bindings cannot change page values or the pinned generation.
     #[test]
     fn scratch_bindings_cannot_change_page_values_or_pinned_generation() {
         let control = ControlId::new("query");
@@ -246,6 +248,7 @@ mod tests {
         assert_eq!(page.scratch_value("query"), None);
     }
 
+    /// ORNA-APP-020: a source or runtime upgrade is atomic and keeps local recovery state.
     #[test]
     fn source_and_runtime_upgrade_is_atomic_and_preserves_local_recovery() {
         let control = ControlId::new("query");
@@ -259,9 +262,16 @@ mod tests {
         assert!(!page.invalid_source());
         let stale = page.transition(PageEvent::ResultReceived { generation: generation(1, 1), request: "old-request".into(), value: PageValue::Integer(99) });
         assert_eq!(stale.result("old-request"), None);
+        for (request, pair) in [("mixed-source", generation(1, 3)), ("mixed-runtime", generation(2, 1))] {
+            let mixed = page.transition(PageEvent::ResultReceived { generation: pair, request: request.into(), value: PageValue::Integer(5) });
+            assert_eq!(mixed.result(request), None);
+        }
+        let current = page.transition(PageEvent::ResultReceived { generation: generation(2, 3), request: "current-request".into(), value: PageValue::Integer(8) });
+        assert_eq!(current.result("current-request"), Some(&PageValue::Integer(8)));
         assert!(stale.draft(&control).expect("local draft survives").text() == "unsent");
     }
 
+    /// ORNA-APP-019: expired sessions restore local state and never replay a mutation.
     #[test]
     fn expired_sessions_restore_locally_without_replaying_mutations() {
         let plan = classify_recovery(false, true, true);

@@ -9,8 +9,8 @@ use orna_syntax_v1::{
 use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
-    CancellationToken, Context, Environment, EvaluationError, Functions, Limits, PureFunction,
-    Scope, bind, error, pattern_names, validate_limits,
+    CallReuse, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
+    PureFunction, Scope, bind, error, pattern_names, validate_limits,
 };
 
 /// A bounded ephemeral module for one interactive Orna session.
@@ -319,6 +319,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation,
         };
         context.items(self.functions.len())?;
@@ -450,6 +451,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            reuse: CallReuse::default(),
             cancellation,
         };
         let mut scope = Scope::from_repl_environment(
