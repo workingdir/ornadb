@@ -166,6 +166,50 @@ Record the exact command, working directory, revision, exit status, and any
 unrun checks. Do not claim language, runtime, storage, or interoperability
 completion from a CLI smoke alone.
 
+## Standard library submodule bump
+
+The Orna standard library source is the `stdlib/std` git submodule, which
+tracks `workingdir/ornadb-std`. The superproject gitlink is the only source of
+truth for which commit ornadb builds against. The Rust mirror in
+`crates/orna-standard-sources/src/lib.rs` embeds those bytes with `include_str!`
+and must match the pinned blobs byte for byte. Snapshot identities and accepted
+digests are governed by `docs/decisions/0055-standard-executable-source-units.md`
+and the later snapshot ADRs (0058, 0059); they are not regenerated in place.
+
+Bump procedure:
+
+1. Make the stdlib change in `workingdir/ornadb-std` on a branch, open a PR,
+   and merge it to `main` only after its checks are green and it is reviewed.
+   The pinned commit MUST be reachable from `ornadb-std` `main`. Never
+   force-push or rewrite that history.
+2. In the ornadb worktree, fetch the new commit into the submodule with
+   `git -C stdlib/std fetch --depth 1 origin <sha>`, check it out with
+   `git -C stdlib/std checkout --detach <sha>`, then stage the gitlink with
+   `git add stdlib/std`. Do not change git configuration.
+3. Mirror the changed files in `crates/orna-standard-sources/src/lib.rs`. Every
+   tracked `.orna` file must have an `include_str!` entry, or an entry in
+   `UNMIRRORED_SOURCES` in `scripts/check_standard_library_pin.py` with a reason.
+4. If the changed bytes belong to a snapshot whose digest is pinned, do not edit
+   the `ACCEPTED_*` digests to match. Either the change is a new immutable
+   `orna.std/N` snapshot with new revision, catalogue, bundle, source, and unit
+   identities and new `ACCEPTED_*` constants (ADR 0055/0059 pattern), or the
+   change is reverted. Regenerate goldens only inside that new snapshot.
+5. Run the drift check and the pin-checker tests from the worktree root:
+
+```text
+python3 -m unittest scripts.test_standard_library_pin
+python3 scripts/check_standard_library_pin.py --check
+```
+
+The check fails when the gitlink is not on `ornadb-std` `main`, the submodule
+is dirty or at a different commit, or a mirrored module differs from the pinned
+blob. CI runs the same two commands in the `fixture-and-editor-artifacts` job of
+`.github/workflows/source-audits.yml`, after a recursive submodule checkout.
+
+Then run the package-scoped Rust checks that cover the snapshot you changed
+(for example `cargo test --locked -p orna-standard`), with the cargo limits from
+the repository rules. A check that could not run is unavailable, not a pass.
+
 ## 1.0.0 requirement evidence report
 
 From the repository root, generate the machine-readable report against the
