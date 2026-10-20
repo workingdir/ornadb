@@ -22,6 +22,12 @@ mod cli_status;
 mod cli_serve;
 mod media_range;
 mod repl;
+#[cfg(test)]
+#[path = "../tests/support/format3.rs"]
+mod format3;
+#[cfg(test)]
+#[path = "../tests/support/media_commit.rs"]
+mod media_commit;
 
 use cli_args::{
     Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,

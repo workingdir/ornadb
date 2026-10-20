@@ -752,7 +752,7 @@ impl NativeGraphContext {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
             let root_node = read_node(&root)?;
             validate_ordered_root_node(&root_node, &domain, expected_count)?;
-            find_ordered_entry_with(&mut read_node, root_node, &domain, None, None, key)?
+            find_ordered_entry_with(&mut read_node, root_node, &domain, key)?
         };
         let Some(entry) = entry else {
             return Ok(None);
@@ -855,8 +855,6 @@ impl NativeGraphContext {
                 &mut read_node,
                 relation_node,
                 &relations_domain,
-                None,
-                None,
                 &relation_key,
             )?
         }
@@ -2845,15 +2843,8 @@ impl NativeGraphContext {
         let key = crate::row_store::TypedKey::Bytes(version.relation_id().to_vec());
         let relation = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            find_ordered_entry_with(
-                &mut read_node,
-                relation_node.clone(),
-                &domain,
-                None,
-                None,
-                &key,
-            )?
-            .ok_or(GraphError::ContextMismatch)?
+            find_ordered_entry_with(&mut read_node, relation_node.clone(), &domain, &key)?
+                .ok_or(GraphError::ContextMismatch)?
         };
         let (schema_oid, old_primary, secondary, old_count) =
             decode_relation_value(&relation.value, self.algorithm)?;
@@ -3043,7 +3034,7 @@ impl NativeGraphContext {
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
         validate_ordered_root_node(&node, &domain, candidate.row_count)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-        let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
+        let entry = find_ordered_entry_with(&mut read_node, node, &domain, key)?;
         entry
             .map(|entry| {
                 decode_candidate_blob_metadata(
@@ -6463,7 +6454,7 @@ impl PinnedNativeGraphReader {
     ) -> Result<Option<OrderedLeafEntry>, GraphError> {
         let node = self.read_native_node(root)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid);
-        find_ordered_entry_with(&mut read_node, node, expected_domain, None, None, key)
+        find_ordered_entry_with(&mut read_node, node, expected_domain, key)
     }
 
     fn read_native_node(&mut self, oid: &NativeObjectId) -> Result<NodeData, GraphError> {
@@ -6760,115 +6751,122 @@ fn find_ordered_entry_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
     expected_domain: &[u8],
-    expected_height: Option<u8>,
-    lower_exclusive: Option<&crate::row_store::TypedKey>,
     key: &crate::row_store::TypedKey,
 ) -> Result<Option<OrderedLeafEntry>, GraphError> {
-    match node {
-        NodeData::OrderedLeaf { domain, entries } => {
-            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
-                return Err(GraphError::InvalidDomain);
-            }
-            let mut decoded: Vec<(crate::row_store::TypedKey, &OrderedLeafEntry)> =
-                Vec::with_capacity(entries.len());
-            for entry in &entries {
-                let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                if decoded.last().is_some_and(|(last, _)| last >= &entry_key) {
-                    return Err(GraphError::NonCanonicalData);
+    // ORP-1 child ranges are nonoverlapping and exhaustive in fence order
+    // (store-format-3 section 2), so the first child whose inclusive maximum
+    // fence is at or above the key is the only child that can hold it. A
+    // point lookup therefore reads exactly one node per level, and a miss
+    // returns after that single path instead of probing later siblings.
+    //
+    // Every node on the path is checked against what its parent's entry
+    // claims for it: domain, height, exact row count, an inclusive maximum
+    // equal to the fence, and a minimum above the previous fence. Those checks
+    // use only the node itself, so they add no reads. A malformed range on
+    // the path is rejected; overlap between children off the path is left to
+    // full admission and to range reads, which read those children anyway.
+    let mut node = node;
+    // The root's height is whatever it records, and it has no lower bound.
+    let mut expected_height: Option<u8> = None;
+    let mut lower_exclusive: Option<crate::row_store::TypedKey> = None;
+    // The parent's claim for `node`: its exact row count and inclusive
+    // maximum key. The root has no parent entry and so no claim.
+    let mut claim: Option<(u64, crate::row_store::TypedKey)> = None;
+    loop {
+        match node {
+            NodeData::OrderedLeaf { domain, entries } => {
+                if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                    return Err(GraphError::InvalidDomain);
                 }
-                decoded.push((entry_key, entry));
+                let mut decoded: Vec<(crate::row_store::TypedKey, &OrderedLeafEntry)> =
+                    Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map_err(|_| GraphError::NonCanonicalData)?;
+                    if decoded.last().is_some_and(|(last, _)| last >= &entry_key) {
+                        return Err(GraphError::NonCanonicalData);
+                    }
+                    decoded.push((entry_key, entry));
+                }
+                let breaks_claim = claim.as_ref().is_some_and(|(row_count, fence)| {
+                    entries.len() as u64 != *row_count
+                        || decoded.last().is_none_or(|(maximum, _)| maximum != fence)
+                });
+                let breaks_lower = lower_exclusive.as_ref().is_some_and(|lower| {
+                    decoded.first().is_some_and(|(minimum, _)| minimum <= lower)
+                });
+                if breaks_claim || breaks_lower {
+                    return Err(GraphError::InvalidCount(entries.len()));
+                }
+                return Ok(decoded
+                    .binary_search_by(|(candidate, _)| candidate.cmp(key))
+                    .ok()
+                    .map(|index| decoded[index].1.clone()));
             }
-            if lower_exclusive
-                .is_some_and(|lower| decoded.first().is_some_and(|(minimum, _)| minimum <= lower))
-            {
-                return Err(GraphError::NonCanonicalData);
-            }
-            Ok(decoded
-                .binary_search_by(|(candidate, _)| candidate.cmp(key))
-                .ok()
-                .map(|index| decoded[index].1.clone()))
-        }
-        NodeData::OrderedBranch {
-            domain,
-            height,
-            entries,
-        } => {
-            if domain != expected_domain
-                || height == 0
-                || expected_height.is_some_and(|expected| expected != height)
-                || entries.is_empty()
-            {
-                return Err(GraphError::InvalidDomain);
-            }
-            // The caller proved this node's minimum sorts above the lower
-            // exclusive bound when it descended here, so a point lookup does
-            // not recompute whole-branch bounds: it validates each child it
-            // probes and stops at the first child that answers. Recomputing
-            // them would read the first and last descendant of every level,
-            // which is what made a lookup on a deep index cost the whole
-            // index rather than the path to the key.
-            let mut previous_fence = None;
-            for entry in &entries {
-                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                if previous_fence
-                    .as_ref()
-                    .is_some_and(|previous| previous >= &fence)
+            NodeData::OrderedBranch {
+                domain,
+                height,
+                entries,
+            } => {
+                if domain != expected_domain
+                    || height == 0
+                    || expected_height.is_some_and(|expected| expected != height)
+                    || entries.is_empty()
                 {
-                    return Err(GraphError::NonCanonicalData);
+                    return Err(GraphError::InvalidDomain);
                 }
-                // A fence is the child's own inclusive maximum key, so a child
-                // whose fence sorts below the search key holds no key at or
-                // above it and is left unread: a point lookup reads the path to
-                // the key plus the pages it probes, not the whole index. The
-                // probe is not cut short, so a miss in the child that covers
-                // the key continues into later children while their fences
-                // still reach it, and every child the probe descends into is
-                // validated before it is used. ORP-1 fixes the child ranges as
-                // nonoverlapping, so a fence that lies about its child is a
-                // malformed node, and probing the children the key reaches is
-                // what detects it.
-                if key <= &fence {
-                    // A fence is only a pruning hint after its child proves
-                    // it: validate the child this search descends into, and
-                    // reject a range that overlaps the previous child.
-                    let child = read_node(&entry.child)?;
-                    let child_bounds = ordered_node_bounds_with(
-                        read_node,
-                        child.clone(),
-                        expected_domain,
-                        Some(height - 1),
-                    )?;
-                    if child_bounds.0 != entry.row_count
-                        || child_bounds.2 != fence
-                        || previous_fence
-                            .as_ref()
-                            .is_some_and(|previous| child_bounds.1 <= *previous)
-                    {
-                        return Err(GraphError::InvalidCount(
-                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                        ));
+                let total_count = entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.row_count)
+                        .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                        .ok_or(GraphError::InvalidCount(usize::MAX))
+                })?;
+                let mut fences: Vec<crate::row_store::TypedKey> = Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    let fence =
+                        crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                            .map_err(|_| GraphError::NonCanonicalData)?;
+                    if fences.last().is_some_and(|previous| previous >= &fence) {
+                        return Err(GraphError::NonCanonicalData);
                     }
-                    if let Some(found) = find_ordered_entry_with(
-                        read_node,
-                        child,
-                        expected_domain,
-                        Some(height - 1),
-                        previous_fence.as_ref(),
-                        key,
-                    )? {
-                        return Ok(Some(found));
-                    }
+                    fences.push(fence);
                 }
-                previous_fence = Some(fence);
+                // This branch's maximum is its last child's fence and its
+                // minimum is no greater than its first child's fence, so both
+                // halves of the parent's claim are checked without reading
+                // any child other than the one the key selects.
+                let breaks_claim = claim.as_ref().is_some_and(|(row_count, maximum)| {
+                    total_count != *row_count || fences.last() != Some(maximum)
+                });
+                let breaks_lower = lower_exclusive
+                    .as_ref()
+                    .is_some_and(|lower| fences.first().is_some_and(|first| first <= lower));
+                if breaks_claim || breaks_lower {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(total_count).unwrap_or(usize::MAX),
+                    ));
+                }
+                let index = fences.partition_point(|fence| fence < key);
+                let Some(entry) = entries.get(index) else {
+                    // The key sorts above this node's maximum: no row holds it.
+                    return Ok(None);
+                };
+                // The first child inherits this node's own lower bound; any
+                // later child must sort above its predecessor's fence.
+                if let Some(index) = index.checked_sub(1) {
+                    lower_exclusive = Some(fences[index].clone());
+                }
+                let child = read_node(&entry.child)?;
+                expected_height = Some(height - 1);
+                claim = Some((entry.row_count, fences.swap_remove(index)));
+                node = child;
             }
-            Ok(None)
+            other => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: other.kind(),
+                });
+            }
         }
-        other => Err(GraphError::WrongNodeKind {
-            expected: NodeKind::OrderedLeaf,
-            actual: other.kind(),
-        }),
     }
 }
 
