@@ -379,10 +379,9 @@ impl MountSignalHandler {
                             .expect("live FUSE session is retained")
                             .umount_and_join();
                         return match fallback {
-                            Ok(()) => {
-                                eprintln!("{error}; FUSE fallback cleanup succeeded");
-                                Ok(())
-                            }
+                            // The graceful unmount failed. Report that failure even though the
+                            // lazy detach cleaned up, so a busy mount never exits as success.
+                            Ok(()) => Err(error),
                             Err(fallback_error) => Err(format!(
                                 "{error}; FUSE session cleanup also failed: {fallback_error}"
                             )),
