@@ -11331,16 +11331,15 @@ fn collect_overflow_oids(
     Ok(())
 }
 
+/// `MediaAnnotation::new` admits only the canonical wire pair, so its success
+/// is the whole MIME-1 check.
 fn validate_canonical_mime1_annotation(
     media_type: &str,
     suffix: Option<&str>,
 ) -> Result<(), GraphError> {
-    let annotation =
-        MediaAnnotation::new(media_type, suffix).map_err(|_| GraphError::InvalidBlobAnnotation)?;
-    if annotation.media_type() != media_type || annotation.suffix() != suffix {
-        return Err(GraphError::InvalidBlobAnnotation);
-    }
-    Ok(())
+    MediaAnnotation::new(media_type, suffix)
+        .map(drop)
+        .map_err(|_| GraphError::InvalidBlobAnnotation)
 }
 
 /// Binds the annotation of a candidate row to the annotation its pin was
