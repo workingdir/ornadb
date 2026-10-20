@@ -3823,42 +3823,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         let objects_output = self.git_output(&["rev-parse", "--git-path", "objects"])?;
         let objects_dir = resolve_git_path(self.repository.worktree(), &objects_output)?;
-        let pack_dir = objects_dir.join("pack");
-        let alternates = objects_dir.join("info").join("alternates");
-        match fs::symlink_metadata(&alternates) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() || metadata.len() != 0 {
-                    return Err(GraphError::ObjectDurabilityUnavailable);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
-        }
-        let mut needs_pack_sync = false;
-        for oid in objects {
-            scope.check_cancelled()?;
-            let hex = oid.to_hex();
-            let loose = objects_dir.join(&hex[..2]).join(&hex[2..]);
-            match fs::symlink_metadata(&loose) {
-                Ok(metadata) => {
-                    if !metadata.file_type().is_file() {
-                        return Err(GraphError::DurabilityFailed);
-                    }
-                    File::open(&loose)
-                        .and_then(|file| file.sync_all())
-                        .map_err(|_| GraphError::DurabilityFailed)?;
-                    sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    needs_pack_sync = true;
-                }
-                Err(_) => return Err(GraphError::DurabilityFailed),
-            }
-        }
-        if needs_pack_sync {
-            sync_all_pack_files(&pack_dir)?;
-        }
-        sync_directory(&objects_dir)
+        sync_object_files(&objects_dir, objects, || scope.check_cancelled())
     }
 }
 
@@ -4787,6 +4752,67 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GraphError> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| GraphError::DurabilityFailed)
+}
+
+/// Persists the named objects before a ref may name them: each loose object
+/// file and its shard directory, the whole pack set when an object is not
+/// loose, then the object directory. A non-empty `objects/info/alternates` is
+/// refused rather than half-synced, because those objects may live in
+/// another repository. `before_each` runs ahead of every object.
+pub(crate) fn sync_object_files<'a>(
+    objects_dir: &Path,
+    objects: impl IntoIterator<Item = &'a NativeOid>,
+    mut before_each: impl FnMut() -> Result<(), GraphError>,
+) -> Result<(), GraphError> {
+    let pack_dir = objects_dir.join("pack");
+    let alternates = objects_dir.join("info").join("alternates");
+    match fs::symlink_metadata(&alternates) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.len() != 0 {
+                return Err(GraphError::ObjectDurabilityUnavailable);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
+    }
+    let mut needs_pack_sync = false;
+    for oid in objects {
+        before_each()?;
+        let hex = oid.to_hex();
+        let loose = objects_dir.join(&hex[..2]).join(&hex[2..]);
+        match fs::symlink_metadata(&loose) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::DurabilityFailed);
+                }
+                File::open(&loose)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| GraphError::DurabilityFailed)?;
+                sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                needs_pack_sync = true;
+            }
+            Err(_) => return Err(GraphError::DurabilityFailed),
+        }
+    }
+    if needs_pack_sync {
+        sync_all_pack_files(&pack_dir)?;
+    }
+    sync_directory(objects_dir)
+}
+
+/// Persists `reference` after a ref transaction wrote it: the loose ref
+/// file, each directory from it up to the common Git directory, and
+/// `packed-refs`.
+pub(crate) fn sync_git_ref_durably(
+    repository: &crate::Repository,
+    reference: &str,
+) -> Result<(), GraphError> {
+    PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    }
+    .sync_ref_file(reference)
 }
 
 pub(crate) fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
