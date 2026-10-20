@@ -20,6 +20,8 @@ use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
 
+use crate::explain_bindings::ExplainCatalogue;
+
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
 /// Evaluator-facing registration of built-in sys host providers.
@@ -37,6 +39,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
+    explain_catalogue: Option<Arc<dyn ExplainCatalogue>>,
 }
 
 #[derive(Debug)]
@@ -55,6 +58,11 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
+            && match (&self.explain_catalogue, &other.explain_catalogue) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -74,6 +82,7 @@ impl SysHostBindingRegistry {
             capture_candidates: Arc::default(),
             http: None,
             system_random: false,
+            explain_catalogue: None,
         }
     }
 
@@ -88,6 +97,13 @@ impl SysHostBindingRegistry {
     #[must_use]
     pub fn with_clock_provider(mut self, provider: ClockProvider) -> Self {
         self.clock = Some(provider);
+        self
+    }
+
+    /// Installs the host catalogue that pins `sys.explain(Query)` sources.
+    #[must_use]
+    pub fn with_explain_catalogue(mut self, catalogue: Arc<dyn ExplainCatalogue>) -> Self {
+        self.explain_catalogue = Some(catalogue);
         self
     }
 
@@ -862,6 +878,10 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
+    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
+        self.explain_catalogue.as_deref()
+    }
+
     fn handle(
         &mut self,
         _callee: &Expr,
