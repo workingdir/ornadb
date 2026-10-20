@@ -32,6 +32,7 @@ fn browser_boundary_transports_canonical_typed_values_without_server_authority()
 
     assert_eq!(client_value.value(), &result);
 }
+/// ORNA-APP-021: an independent HTTP renderer and a second app both use the public profile entry.
 #[test]
 fn independent_http_renderer_and_second_app_use_the_public_profile_entry() {
     let response = execute_browser_profile(HTTP_SOURCE, "response")
@@ -45,6 +46,7 @@ fn independent_http_renderer_and_second_app_use_the_public_profile_entry() {
     assert_eq!(second_app.raw(), &OvbRaw::Text("A second ordinary source-hosted app".to_owned()));
 }
 
+/// ORNA-APP-016: browser host JavaScript is byte marshalling only, with no git or table authority.
 #[test]
 fn browser_host_javascript_is_byte_marshalling_only() {
     assert!(HOST_BINDINGS.contains("WebAssembly.Memory"));
