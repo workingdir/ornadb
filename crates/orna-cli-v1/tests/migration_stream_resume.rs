@@ -1,14 +1,15 @@
-//! Gate F: a legacy migration must not silently drop a source stream's
-//! consumer checkpoint. Checkpoint carry-over is not implemented, so a source
-//! holding durable stream state must fail closed and leave its checkpoint intact.
+//! Gate F: a legacy migration must carry a source stream's consumer checkpoints
+//! into the destination, so delivery resumes exactly where the source committed.
+//! Stream state that cannot be carried must fail closed and leave the source intact.
 
 use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeIdentity, RuntimeState,
-    StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem, StreamMutationBatch,
-    WriterLease,
+    CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
+    RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
+    StreamMutationBatch, WriterLease, import_stream_carry, read_stream_carry,
+    repository_runtime_identity, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -74,11 +75,19 @@ fn dirty_legacy_source(root: &Path) {
     );
 }
 
-fn identity() -> RuntimeIdentity {
-    RuntimeIdentity {
-        database_id: [41; 16],
-        repository_id: [42; 16],
+/// The legacy source has no migration continuity yet, so its runtime identity is
+/// derived from the database id in its own `.orna/database.orna` sidecar, the
+/// same derivation the destination uses from its recorded identity.
+fn source_runtime_identity(root: &Path) -> (RuntimeIdentity, [u8; 32]) {
+    let sidecar = fs::read_to_string(root.join(".orna/database.orna")).unwrap();
+    let uuid = sidecar.split('"').nth(1).expect("quoted database id");
+    let hex: String = uuid.chars().filter(|character| *character != '-').collect();
+    assert_eq!(hex.len(), 32, "database id is a 128-bit uuid");
+    let mut database_id = [0_u8; 16];
+    for (index, byte) in database_id.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap();
     }
+    runtime_identity_for_database_id(database_id)
 }
 
 fn checkpoint_key() -> CheckpointKey {
@@ -120,10 +129,12 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 /// Gives the legacy source a durable persistent consumer that has committed two of three items.
-fn give_source_a_persistent_consumer(root: &Path) -> StreamCheckpoint {
+/// When `pause` is set, the source also holds a paused stream, which is non-carriable state.
+fn give_source_a_persistent_consumer(root: &Path, pause: bool) -> StreamCheckpoint {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let state = RuntimeState::open(&repository, identity(), [43; 32])
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("open source runtime");
         let writer: WriterLease = state.acquire_lease([44; 16]).await.unwrap();
@@ -143,6 +154,12 @@ fn give_source_a_persistent_consumer(root: &Path) -> StreamCheckpoint {
                 .expect("consumer delivery commits");
             assert_eq!(handler.seen, vec![expected.to_vec()]);
         }
+        if pause {
+            state
+                .pause_stream(writer, key.clone())
+                .await
+                .expect("pausing the stream writes non-carriable stream_control state");
+        }
         state.stream_checkpoint(&key).await.unwrap()
     })
 }
@@ -150,7 +167,8 @@ fn give_source_a_persistent_consumer(root: &Path) -> StreamCheckpoint {
 fn checkpoint_after_reopen(root: &Path) -> StreamCheckpoint {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let state = RuntimeState::open(&repository, identity(), [43; 32])
+        let (identity, digest) = source_runtime_identity(root);
+        let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("reopen source runtime");
         state.stream_checkpoint(&checkpoint_key()).await.unwrap()
@@ -174,13 +192,63 @@ fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
         .unwrap()
 }
 
+/// Delivers the remaining items from the destination's carried checkpoint.
+fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
+    runtime().block_on(async {
+        let repository = Repository::discover(root).unwrap();
+        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let state = RuntimeState::open(&repository, identity, digest)
+            .await
+            .expect("open destination runtime");
+        let writer = state.acquire_lease([45; 16]).await.unwrap();
+        let key = checkpoint_key();
+        let mut source = ListStreamSource::new(
+            key.clone(),
+            vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+        );
+        let mut handler = CommitEach {
+            seen: Vec::new(),
+            next_digest: state.capture().await.unwrap().generation_digest(),
+        };
+        state
+            .run_stream_once(writer, &key, &mut source, &mut handler)
+            .await
+            .expect("resumed delivery commits");
+        handler.seen
+    })
+}
+
 #[test]
-fn migration_refuses_source_with_persistent_stream_state_and_keeps_checkpoint() {
+fn migration_carries_persistent_stream_checkpoint_and_resumes_delivery() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
     dirty_legacy_source(&source);
-    let before = give_source_a_persistent_consumer(&source);
+    let before = give_source_a_persistent_consumer(&source, false);
+    assert_eq!(before.version, 2);
+    let destination = parent.path().join("migrated");
+
+    let output = run_copy(&source, &destination);
+
+    assert!(
+        output.status.success(),
+        "carriable stream state must migrate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("carried_checkpoints=1"));
+    let source_after = checkpoint_after_reopen(&source);
+    assert_eq!(source_after.version, before.version);
+    assert_eq!(source_after.committed, before.committed);
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
+}
+
+#[test]
+fn migration_refuses_non_carriable_stream_state_and_keeps_checkpoint() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    let before = give_source_a_persistent_consumer(&source, true);
     assert_eq!(before.version, 2);
     let destination = parent.path().join("migrated");
 
@@ -188,7 +256,7 @@ fn migration_refuses_source_with_persistent_stream_state_and_keeps_checkpoint() 
 
     assert!(
         !output.status.success(),
-        "migration must not drop persistent stream state: {}",
+        "migration must not drop non-carriable stream state: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("E2100"));
@@ -199,6 +267,47 @@ fn migration_refuses_source_with_persistent_stream_state_and_keeps_checkpoint() 
     let after = checkpoint_after_reopen(&source);
     assert_eq!(after.version, before.version);
     assert_eq!(after.committed, before.committed);
+}
+
+#[test]
+fn stream_carry_import_without_recorded_continuity_writes_nothing() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let clean_source = parent.path().join("clean");
+    fs::create_dir(&clean_source).unwrap();
+    dirty_legacy_source(&clean_source);
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&clean_source, &destination);
+    assert!(
+        output.status.success(),
+        "clean source must prepare a destination: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        assert_eq!(carry.checkpoint_count(), 1);
+
+        let destination_repository = Repository::discover(&destination).unwrap();
+        let refused = import_stream_carry(&destination_repository, &carry, None).await;
+        assert_eq!(refused, Err(RuntimeError::StreamIdentityMismatch));
+
+        let (identity, digest) = repository_runtime_identity(&destination_repository).unwrap();
+        let state = RuntimeState::open(&destination_repository, identity, digest)
+            .await
+            .expect("open destination runtime");
+        let absent = match state.stream_checkpoint(&checkpoint_key()).await {
+            Ok(checkpoint) => checkpoint.version == 0,
+            Err(_) => true,
+        };
+        assert!(absent, "a refused import must not write a checkpoint");
+    });
 }
 
 #[test]
