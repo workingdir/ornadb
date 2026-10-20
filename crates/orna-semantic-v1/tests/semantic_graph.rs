@@ -18162,9 +18162,11 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         .find(|module| module.namespace.display() == "while")
         .unwrap();
     let poll = &module.symbols["poll"];
+    // The trailing `while` is the block tail and a loop completes with
+    // `Unit` (ORNA-CFLOW-001), not the `null` value.
     assert!(matches!(
         &poll.ty,
-        Type::Function { result, .. } if result.as_ref() == &Type::Null
+        Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
     assert!(poll.effects.effects.contains("database write"));
     assert!(poll.effects.may_fail);
