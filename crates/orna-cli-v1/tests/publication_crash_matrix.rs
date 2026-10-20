@@ -342,6 +342,40 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
 
+/// Coordinated GC: `git gc --prune=now` may discard only objects that no ref names. Objects named by the
+/// protected `refs/orna/pins/*` refs survive; an unreferenced object is removed. This is coordinated GC
+/// only and does not claim that an uncoordinated prune is safe (ORNA-GIT-010).
+#[tokio::test]
+async fn coordinated_gc_prune_keeps_pinned_objects_and_removes_unreferenced_ones() {
+    let (directory, _source, _repository, _state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    let pins = git_output(root, &["for-each-ref", "--format=%(objectname)", "refs/orna/pins"], None);
+    let pinned = String::from_utf8_lossy(&pins)
+        .lines()
+        .next()
+        .expect("seeded project leaves a protected pin")
+        .to_owned();
+    let probe = git_output(root, &["hash-object", "-w", "--stdin"], Some(b"orna gc prune probe"));
+    let unreferenced = String::from_utf8(probe).unwrap().trim().to_owned();
+    assert!(object_exists(root, &pinned), "pinned object missing before gc");
+    assert!(object_exists(root, &unreferenced), "probe object missing before gc");
+
+    git(root, &["gc", "--prune=now", "--quiet"]);
+
+    assert!(object_exists(root, &pinned), "gc pruned an object named by a protected pin");
+    assert!(!object_exists(root, &unreferenced), "gc kept an unreferenced object");
+}
+
+fn object_exists(root: &Path, object: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-e", object])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success()
+}
+
 fn head(repository: &Repository) -> String {
     repository.head().unwrap().unwrap().as_str().to_owned()
 }

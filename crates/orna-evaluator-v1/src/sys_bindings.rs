@@ -1114,7 +1114,7 @@ impl<'a> BlobAnnotationProvider<'a> {
             source.format(),
             ValueFormat::Ovb2 | ValueFormat::Rov3 | ValueFormat::Sov3
         ) {
-            return Err(redacted_error("ORNA-EVAL-VALUE"));
+            return Err(redacted_error("sys.codec.unsupported_value_profile"));
         }
         Ok(Self {
             offer: ProviderOffer {
@@ -1572,7 +1572,7 @@ mod tests {
             BlobAnnotationProvider::linked(role, &legacy)
                 .err()
                 .map(|error| error.code().to_owned()),
-            Some("ORNA-EVAL-VALUE".to_owned()),
+            Some("sys.codec.unsupported_value_profile".to_owned()),
             "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
         );
     }
