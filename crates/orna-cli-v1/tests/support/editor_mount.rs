@@ -200,13 +200,3 @@ pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
         _repository_directory: repository_directory,
     }
 }
-
-/// True when the durable admitted row's stored canonical value contains `needle`.
-pub fn durable_row_contains(rows: &[orna_repository_v1::AdmittedRow], needle: &str) -> bool {
-    rows.iter().any(|row| match row.value() {
-        orna_repository_v1::RowValue::Inline { encoded, .. } => encoded
-            .windows(needle.len())
-            .any(|window| window == needle.as_bytes()),
-        _ => false,
-    })
-}

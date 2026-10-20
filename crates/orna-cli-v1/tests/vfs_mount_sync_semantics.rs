@@ -7,6 +7,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    path::PathBuf,
 };
 
 #[allow(dead_code)]
@@ -18,9 +19,10 @@ mod media_commit;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{EditorMount, durable_row_contains, require_fuse_or_skip, start_editor_mount};
+use editor_mount::{EditorMount, require_fuse_or_skip, start_editor_mount};
 
 const EIO: i32 = 5;
+const EBUSY: i32 = 16;
 
 fn row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -61,6 +63,34 @@ fn assert_eio(result: std::io::Result<()>, context: &str) {
     let error = result.expect_err(context);
     assert_eq!(error.raw_os_error(), Some(EIO), "{context}: {error}");
 }
+
+fn mount_root(fixture: &EditorMount) -> PathBuf {
+    fixture._mount_parent.path().join("library")
+}
+
+/// Draft guard value the mount publishes on its root: `1` while any draft is
+/// unresolved, `0` when none is.
+fn draft_guard(fixture: &EditorMount) -> u8 {
+    let root = mount_root(fixture);
+    let mut value = [0_u8; 1];
+    let length = rustix::fs::getxattr(root.as_path(), "user.orna.unresolved-drafts", &mut value)
+        .expect("read the mount draft guard");
+    assert_eq!(length, 1, "the draft guard is one byte");
+    value[0]
+}
+
+/// Sets the mount root's unmount-quiesce attribute, as `orna-cli-v1` does
+/// before unmount.
+fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
+    let root = mount_root(fixture);
+    rustix::fs::setxattr(
+        root.as_path(),
+        "user.orna.unmount-quiesce",
+        value,
+        rustix::fs::XattrFlags::empty(),
+    )
+}
+
 
 /// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
 /// returns EIO, stays visible to its own handle, and is never admitted.
@@ -113,7 +143,9 @@ async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {
 }
 
 /// ORNA-VFS-008: repeated fsync/fdatasync/flush of one accepted candidate
-/// return the recorded outcome and never create a second acceptance.
+/// return the recorded outcome and never create a second acceptance. A handle
+/// opened after the first acceptance must still sync afterwards: a second
+/// acceptance would advance the baseline and make its write stale.
 #[tokio::test]
 async fn repeated_sync_and_flush_do_not_accept_the_candidate_twice() {
     if !require_fuse_or_skip() {
@@ -125,6 +157,7 @@ async fn repeated_sync_and_flush_do_not_accept_the_candidate_twice() {
     file.sync_all().expect("first fsync accepts the candidate");
     let after_first = fresh_view(&fixture);
     assert!(after_first.contains("Repeated once"));
+    let mut later = open_rw(&fixture);
 
     file.sync_all()
         .expect("repeated fsync returns the recorded outcome");
@@ -141,10 +174,17 @@ async fn repeated_sync_and_flush_do_not_accept_the_candidate_twice() {
         after_first,
         "repeated sync and flush must not admit the same candidate again",
     );
+
+    replace_draft(&mut later, &row("Later after repeats"));
+    later
+        .sync_all()
+        .expect("a handle opened after the first acceptance still syncs");
+    assert!(fresh_view(&fixture).contains("Later after repeats"));
 }
 
 /// ORNA-VFS-008: a dup shares one handle; syncing through either descriptor
-/// acknowledges the same single candidate.
+/// acknowledges the same single candidate. A handle opened after that single
+/// acceptance must still sync, so a second acceptance would be detectable.
 #[tokio::test]
 async fn dup_descriptors_share_one_draft_and_one_acceptance() {
     if !require_fuse_or_skip() {
@@ -157,14 +197,21 @@ async fn dup_descriptors_share_one_draft_and_one_acceptance() {
     dup.sync_all()
         .expect("sync through the dup acknowledges the shared draft");
     assert!(fresh_view(&fixture).contains("Dup shared"));
+    let mut later = open_rw(&fixture);
     file.sync_all()
         .expect("sync through the original is idempotent");
     drop(dup);
     assert!(fresh_view(&fixture).contains("Dup shared"));
+    replace_draft(&mut later, &row("Dup later"));
+    later
+        .sync_all()
+        .expect("a handle opened after the single acceptance still syncs");
+    assert!(fresh_view(&fixture).contains("Dup later"));
 }
 
 /// ORNA-VFS-007/008: a close flush of an unsynced draft is not acceptance; the
-/// close succeeds, and after unmount only acknowledged bytes are durable.
+/// close succeeds, a new open sees only accepted state, and the close leaves no
+/// draft guard set.
 #[tokio::test]
 async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
     if !require_fuse_or_skip() {
@@ -182,19 +229,10 @@ async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
         "a new open after close sees only accepted state",
     );
     assert!(!fresh_view(&fixture).contains("Never synced"));
-
-    let EditorMount {
-        _mounted,
-        repository,
-        relation_id,
-        ..
-    } = fixture;
-    drop(_mounted);
-    let rows = format3::committed_store_rows(&repository, relation_id);
-    assert!(durable_row_contains(&rows, "Original"));
-    assert!(
-        !durable_row_contains(&rows, "Never synced"),
-        "unmount must not retain or accept an unsynced draft as durable",
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "closing an unsynced draft must not leave the draft guard set",
     );
 }
 
@@ -343,7 +381,7 @@ async fn temporary_sync_is_not_acceptance_and_rename_applies_it() {
 }
 
 /// ORNA-VFS-009: a synced temporary that is abandoned instead of renamed never
-/// reaches the row.
+/// reaches the row, and unlinking it clears the draft guard.
 #[tokio::test]
 async fn abandoned_synced_temporary_never_reaches_the_row() {
     if !require_fuse_or_skip() {
@@ -361,7 +399,173 @@ async fn abandoned_synced_temporary_never_reaches_the_row() {
         .expect("write temporary");
     scratch.sync_all().expect("fsync(temp) succeeds");
     drop(scratch);
+    assert_eq!(
+        draft_guard(&fixture),
+        b'1',
+        "a synced scratch that is not yet renamed holds the draft guard",
+    );
     std::fs::remove_file(&temporary).expect("unlink abandoned temporary");
+    assert!(!temporary.exists(), "unlink removes the abandoned temporary");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "unlinking the abandoned temporary clears the draft guard",
+    );
     assert!(fresh_view(&fixture).contains("Original"));
     assert!(!fresh_view(&fixture).contains("Abandoned temp"));
+}
+
+/// ORNA-VFS-009: unlinking a clean scratch that is still open removes it from
+/// the namespace; a later write through the open handle must not recreate draft
+/// state for the missing inode, so the guard stays clear and unmount proceeds.
+#[tokio::test]
+async fn open_unlink_then_write_leaves_no_ghost_draft() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let temporary = fixture.row_directory.join(".data.orna.open-unlink-tmp");
+    let mut scratch = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("create temporary sibling");
+    std::fs::remove_file(&temporary).expect("unlink of a clean open scratch succeeds");
+    assert!(!temporary.exists());
+    // The handle outlived its name. The write and fsync outcomes are not the
+    // subject here; the draft guard and unmount quiesce are.
+    let _ = scratch.write_all(row("Ghost").as_bytes());
+    let _ = scratch.sync_all();
+    drop(scratch);
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "a write through an unlinked handle must not leave draft state",
+    );
+    set_quiesce(&fixture, b"1").expect("unmount quiesce is not blocked by a ghost draft");
+    set_quiesce(&fixture, b"0").expect("cancel unmount quiesce");
+}
+
+/// ORNA-VFS-009: a temporary whose rename onto data.orna is rejected keeps the
+/// old row and the scratch; the scratch cannot be unlinked away, and the guard
+/// stays set until a corrected rename is accepted.
+#[tokio::test]
+async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let temporary = fixture.row_directory.join(".data.orna.rejected-tmp");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("create temporary sibling");
+    scratch
+        .write_all(invalid_row("Rejected rename").as_bytes())
+        .expect("write invalid temporary");
+    scratch
+        .sync_all()
+        .expect("fsync(temp) preserves the bytes and is not acceptance");
+    drop(scratch);
+
+    assert_eio(
+        std::fs::rename(&temporary, &fixture.data_path),
+        "rename of an invalid temporary must fail with EIO",
+    );
+    assert!(temporary.exists(), "a failed rename keeps the scratch");
+    assert!(
+        fresh_view(&fixture).contains("Original"),
+        "a failed rename leaves the old row",
+    );
+    assert_eq!(
+        draft_guard(&fixture),
+        b'1',
+        "the rejected scratch holds the draft guard",
+    );
+    let unlink = std::fs::remove_file(&temporary)
+        .expect_err("unlink must not discard a rejected scratch");
+    assert_eq!(unlink.raw_os_error(), Some(EBUSY), "{unlink}");
+    assert!(temporary.exists());
+    assert_eq!(draft_guard(&fixture), b'1');
+
+    let mut corrected = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)
+        .expect("reopen the rejected scratch");
+    replace_draft(&mut corrected, &row("Rejected corrected"));
+    corrected
+        .sync_all()
+        .expect("fsync(temp) of the corrected bytes");
+    drop(corrected);
+    std::fs::rename(&temporary, &fixture.data_path).expect("corrected rename is accepted");
+    assert!(fresh_view(&fixture).contains("Rejected corrected"));
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "an accepted rename resolves the rejected scratch",
+    );
+}
+
+/// ORNA-VFS-008: a clean handle opened before another writer's accepted save
+/// submitted nothing; its fsync and fdatasync succeed and leave no draft state.
+#[tokio::test]
+async fn stale_clean_handle_sync_succeeds_without_draft_state() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let stale = open_rw(&fixture);
+    let mut writer = open_rw(&fixture);
+    replace_draft(&mut writer, &row("Peer accepted"));
+    writer.sync_all().expect("peer fsync accepts its candidate");
+    stale
+        .sync_all()
+        .expect("fsync of a clean stale handle is not a failure");
+    stale
+        .sync_data()
+        .expect("fdatasync of a clean stale handle is not a failure");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "a clean stale handle holds no draft state",
+    );
+    drop(stale);
+    drop(writer);
+    assert_eq!(draft_guard(&fixture), b'0');
+    assert!(fresh_view(&fixture).contains("Peer accepted"));
+}
+
+/// ORNA-VFS-008: a same-length ftruncate on an open handle is pending draft
+/// state until fsync; the accepted fsync clears the guard while the handle is
+/// still open.
+#[tokio::test]
+async fn same_length_truncate_clears_guard_on_accepted_fsync_while_open() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Truncate same"));
+    file.sync_all().expect("first fsync accepts the candidate");
+    let accepted_len = fresh_view(&fixture).len() as u64;
+    file.set_len(accepted_len)
+        .expect("same-length ftruncate on the open handle");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'1',
+        "a truncate on an open handle is pending draft state",
+    );
+    file.sync_all()
+        .expect("fsync of the same-length candidate is acknowledged");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "the accepted fsync clears the guard while the handle stays open",
+    );
+    drop(file);
+    assert_eq!(draft_guard(&fixture), b'0');
+    assert!(fresh_view(&fixture).contains("Truncate same"));
 }
