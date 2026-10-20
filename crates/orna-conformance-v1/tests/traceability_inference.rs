@@ -1,6 +1,9 @@
 //! Focused successful and failing inference evidence on checked-in sources.
 
 use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
+use orna_conformance_v1::AdmittedReplSession;
+use orna_evaluator_v1::Limits;
+use orna_foundation_v1::Value;
 
 const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.orna");
 const INFER_UNDERCONSTRAINED: &str =
@@ -63,12 +66,18 @@ fn inferred_export_does_not_fall_back_to_dynamic_any() {
     ));
 }
 
-// Specified: ORNA-INFER-003. Exists: the same real source fixture.
-// Passed: its unannotated function parameter and return are accepted.
+// Specified: ORNA-INFER-003, ORNA-INFER-004. Exists: the same real source fixture, whose public
+// function `increment` omits every parameter and return annotation. Passed: inference
+// yields no diagnostic and the exported `increment` has the inferred type Int -> Int.
 #[test]
 fn inferable_function_signature_needs_no_annotations() {
     let result = analyze(INFER_SUCCESS);
     assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(matches!(
+        increment_type(&result),
+        Type::Function { parameters, result, .. }
+            if parameters == &[Type::Int] && **result == Type::Int
+    ));
 }
 
 // Specified: ORNA-INFER-007. Exists: a fixture with an underconstrained
@@ -101,4 +110,27 @@ fn contextual_numeric_inference_preserves_decimal_and_float_types() {
             Some(Type::Function { result, .. }) if **result == expected
         ));
     }
+}
+
+// Specified: ORNA-INFER-010. Exists: the same function written with and without a
+// redundant parameter and return annotation, run through the admitted REPL path.
+// Passed: both sessions produce the same successful result.
+#[test]
+fn redundant_annotation_does_not_change_successful_behavior() {
+    let call = "increment(41)";
+    let mut inferred = AdmittedReplSession::new(Limits::default());
+    assert_eq!(inferred.submit("fn increment(value) = value + 1;").unwrap(), None);
+    let inferred_result = inferred.submit(call).unwrap();
+
+    let mut annotated = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        annotated
+            .submit("fn increment(value: Int): Int = value + 1;")
+            .unwrap(),
+        None
+    );
+    let annotated_result = annotated.submit(call).unwrap();
+
+    assert_eq!(inferred_result, Some(Value::int(42.into())));
+    assert_eq!(inferred_result, annotated_result);
 }
