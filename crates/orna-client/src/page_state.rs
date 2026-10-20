@@ -262,6 +262,12 @@ mod tests {
         assert!(!page.invalid_source());
         let stale = page.transition(PageEvent::ResultReceived { generation: generation(1, 1), request: "old-request".into(), value: PageValue::Integer(99) });
         assert_eq!(stale.result("old-request"), None);
+        for (request, pair) in [("mixed-source", generation(1, 3)), ("mixed-runtime", generation(2, 1))] {
+            let mixed = page.transition(PageEvent::ResultReceived { generation: pair, request: request.into(), value: PageValue::Integer(5) });
+            assert_eq!(mixed.result(request), None);
+        }
+        let current = page.transition(PageEvent::ResultReceived { generation: generation(2, 3), request: "current-request".into(), value: PageValue::Integer(8) });
+        assert_eq!(current.result("current-request"), Some(&PageValue::Integer(8)));
         assert!(stale.draft(&control).expect("local draft survives").text() == "unsent");
     }
 
