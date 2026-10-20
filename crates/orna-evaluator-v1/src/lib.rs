@@ -3639,6 +3639,9 @@ struct MaterializationRecord {
     rows: usize,
     bytes: Option<usize>,
     valid: bool,
+    /// Pinned `sys.MaterializationRef`, captured with the decision. `None` when
+    /// no OVB-2 value context pins the activation.
+    reference: Option<CanonicalValue>,
     /// Activation instant captured when the decision was made. `None` when no
     /// effect handler resolved `now` at that point.
     created: Option<Value>,
@@ -6924,6 +6927,7 @@ impl Context<'_, '_> {
             return Ok(());
         }
         let created = self.activation_now(&materialization_clock_callee())?;
+        let reference = self.materialization_reference(&object, &snapshot)?;
         self.admit_materialization(MaterializationRecord {
             object,
             snapshot,
@@ -6931,6 +6935,7 @@ impl Context<'_, '_> {
             rows: values.len(),
             bytes,
             valid,
+            reference,
             created,
         })
     }
@@ -6939,6 +6944,34 @@ impl Context<'_, '_> {
         self.materializations
             .iter()
             .any(|record| record.object == *object && record.snapshot == *snapshot)
+    }
+
+    /// Pins the decision's `sys.MaterializationRef` to this activation's OVB-2
+    /// value context. Without that context there is no database or snapshot
+    /// pin, so no reference is fabricated and the row omits `reference`.
+    fn materialization_reference(
+        &mut self,
+        object: &[u8; 32],
+        snapshot: &[u8; 32],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(handler) = self.ovb2_effects() else {
+            return Ok(None);
+        };
+        let Some(context) = handler.value_context() else {
+            return Ok(None);
+        };
+        let reference = orna_foundation_v1::materialization_reference(
+            context.database_uuid(),
+            context.pin().clone(),
+            *object,
+            *snapshot,
+        )
+        .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        reference
+            .into_row_ref()
+            .to_canonical()
+            .map(Some)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
 
     /// Appends a decision unless its key is already logged. The log holds one
@@ -14551,15 +14584,10 @@ fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
 }
 
 fn materialization_row(record: &MaterializationRecord) -> Value {
-    let reference = sha256_parts(
-        "orna.materialization.reference.v1",
-        &[&record.object[..], &record.snapshot[..]],
-    );
     let count = |value: Option<usize>| {
         Value::Option(value.map(|count| Box::new(Value::Int(BigInt::from(count)))))
     };
     let mut fields = BTreeMap::from([
-        ("reference".to_owned(), Value::Blob(reference.to_vec())),
         ("object".to_owned(), Value::Blob(record.object.to_vec())),
         ("snapshot".to_owned(), Value::Blob(record.snapshot.to_vec())),
         ("digest".to_owned(), Value::Blob(record.digest.to_vec())),
@@ -14567,6 +14595,9 @@ fn materialization_row(record: &MaterializationRecord) -> Value {
         ("bytes".to_owned(), count(record.bytes)),
         ("valid".to_owned(), Value::Bool(record.valid)),
     ]);
+    if let Some(reference) = &record.reference {
+        fields.insert("reference".to_owned(), Value::Reference(reference.clone()));
+    }
     if let Some(created) = &record.created {
         fields.insert("created".to_owned(), created.clone());
     }
