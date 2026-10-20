@@ -148,7 +148,8 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     const SOURCE: &str = r####"
         mod nested {
             trait Declared {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.trait_declared","purpose":"trait fixture","signature":"fn sys.trait_declared(): Int"}"###)]
+                /// trait fixture
+                #[ornasys(name = "sys.trait_declared", effect = "read", signature = "fn sys.trait_declared(): Int")]
                 fn declared(&self);
             }
 
@@ -157,12 +158,14 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
                 fn bound(&self);
             }
             impl Implemented for Binding {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.impl_method","purpose":"impl fixture","signature":"fn sys.impl_method(): Int"}"###)]
+                /// impl fixture
+                #[ornasys(name = "sys.impl_method", effect = "read", signature = "fn sys.impl_method(): Int")]
                 fn bound(&self) {}
             }
 
             impl Binding {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.inherent_method","purpose":"inherent fixture","signature":"fn sys.inherent_method(): Int"}"###)]
+                /// inherent fixture
+                #[ornasys(name = "sys.inherent_method", effect = "read", signature = "fn sys.inherent_method(): Int")]
                 fn inherent(&self) {}
             }
         }
@@ -188,11 +191,13 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     );
 
     let unsupported = r####"
-        #[ornasys(function = r###"{"effect":"read","name":"sys.free","purpose":"not a method","signature":"fn sys.free(): Int"}"###)]
+        /// not a method
+        #[ornasys(name = "sys.free", effect = "read", signature = "fn sys.free(): Int")]
         fn free() {}
 
         trait HasConst {
-            #[ornasys(function = r###"{"effect":"read","name":"sys.const","purpose":"not a method","signature":"fn sys.const(): Int"}"###)]
+            /// not a method
+            #[ornasys(name = "sys.const", effect = "read", signature = "fn sys.const(): Int")]
             const VALUE: u8;
         }
     "####;
@@ -204,19 +209,142 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     assert!(collector.errors.iter().any(|error| error.contains("associated const")));
 }
 
+fn collect_doc_fixture(
+    name: &str,
+    effect: &str,
+    doc: &str,
+    extra_args: &str,
+) -> build_support::Collector {
+    let source = format!(
+        "struct Binding;\nimpl Binding {{\n{doc}\n#[ornasys(name = \"{name}\", effect = \"{effect}\", signature = \"fn {name}(): Int\"{extra_args})]\nfn fixture(&self) {{}}\n}}\n"
+    );
+    let mut collector = build_support::Collector::default();
+    collector.collect_source("doc fixture", &source);
+    collector
+}
+
+fn assert_doc_rejected(doc: &str, expected: &str) {
+    let collector = collect_doc_fixture("sys.fixture", "read", doc, "");
+    assert!(collector.functions.is_empty(), "{expected}");
+    assert!(
+        collector.errors.iter().any(|error| error.contains(expected)),
+        "{:?}",
+        collector.errors
+    );
+}
+
+#[test]
+fn doc_metadata_requires_a_purpose_paragraph() {
+    assert_doc_rejected("", "must begin with a purpose paragraph");
+    assert_doc_rejected(
+        "/// # Contract\n/// The body.",
+        "must begin with a purpose paragraph",
+    );
+}
+
+#[test]
+fn doc_metadata_requires_line_form_doc_comments() {
+    assert_doc_rejected("#[doc(hidden)]", "doc comments must use `///` line form");
+}
+
+#[test]
+fn doc_metadata_rejects_multiline_block_doc_comments() {
+    assert_doc_rejected(
+        "/** Purpose.\n * Second line. */",
+        "doc comments must use `///` line form",
+    );
+    let collector = collect_doc_fixture("sys.fixture", "read", "/** Purpose. */", "");
+    assert!(collector.errors.is_empty(), "{:?}", collector.errors);
+    assert_eq!(collector.functions[0].metadata["purpose"], "Purpose.");
+}
+
+#[test]
+fn doc_metadata_requires_string_literal_values() {
+    assert_doc_rejected(
+        "#[doc = concat!(\"Purpose.\")]",
+        "doc comment must be a string literal",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_malformed_heading_lines() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// #Contract\n/// The body.",
+        "doc section headings must be a single `# Heading` line",
+    );
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract\n/// The body continues in the heading paragraph.",
+        "doc section headings must be a single `# Heading` line",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_unknown_sections() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Notes\n///\n/// Body.",
+        "unknown #[ornasys] doc section `# Notes`",
+    );
+}
+
+#[test]
+fn doc_metadata_requires_a_body_paragraph_after_each_section() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract",
+        "doc section `# Contract` must be followed by one body paragraph",
+    );
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract\n///\n/// # Since\n/// 1.1.0",
+        "doc section `# Contract` must be followed by one body paragraph",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_duplicate_sections() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Since\n///\n/// 1.1.0\n///\n/// # Since\n///\n/// 1.1.1",
+        "duplicate doc section `# Since`",
+    );
+}
+
+#[test]
+fn doc_metadata_collects_documentation_paragraphs_and_contexts() {
+    let collector = collect_doc_fixture(
+        "sys.admin.fixture",
+        "admin",
+        "/// Fixture purpose\n/// continues here.\n///\n/// First documentation paragraph.\n///\n/// # Contract\n///\n/// The contract body.\n///\n/// Second documentation paragraph.\n///\n/// # Since\n///\n/// 1.1.0",
+        ", contexts = \"format-1, format-3\"",
+    );
+    assert!(collector.errors.is_empty(), "{:?}", collector.errors);
+    let metadata = &collector.functions[0].metadata;
+    assert_eq!(metadata["purpose"], "Fixture purpose continues here.");
+    assert_eq!(metadata["contract"], "The contract body.");
+    assert_eq!(metadata["since"], "1.1.0");
+    assert_eq!(
+        metadata["documentation"],
+        "First documentation paragraph.\n\nSecond documentation paragraph."
+    );
+    assert_eq!(metadata["contexts"], serde_json::json!(["format-1", "format-3"]));
+}
+
 #[test]
 fn collector_registers_versioned_roles_and_rejects_incompatible_overloads() {
     const SOURCE: &str = r####"
         struct Binding;
         impl Binding {
+            /// fixture
             #[ornasys(
-                function = r###"{"effect":"read","name":"sys.fixture.first","purpose":"fixture","signature":"fn sys.fixture.first(value: Int): Int"}"###,
+                name = "sys.fixture.first",
+                effect = "read",
+                signature = "fn sys.fixture.first(value: Int): Int",
                 role = "langitem.fixture.invoke@1.0"
             )]
             fn first(&self) {}
 
+            /// fixture
             #[ornasys(
-                function = r###"{"effect":"read","name":"sys.fixture.second","purpose":"fixture","signature":"fn sys.fixture.second(value: Str): Str"}"###,
+                name = "sys.fixture.second",
+                effect = "read",
+                signature = "fn sys.fixture.second(value: Str): Str",
                 role = "langitem.fixture.invoke@1.0"
             )]
             fn second(&self) {}
