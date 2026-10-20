@@ -1105,112 +1105,22 @@ impl NativeGraphContext {
             .into_iter()
             .map(|(key, value)| crate::row_store::RowEntry::new(key, value))
             .collect();
-        let leaf_pages = crate::row_store::partition_pages(&entries, 0)
-            .map_err(|_| GraphError::NonCanonicalData)?;
-
         let mut written = BTreeSet::new();
         // Envelope object ids only. A data blob carries the same value bytes
         // whenever a page is rebuilt with unchanged stored values, so counting
         // it as churn would report media as an index object.
         let mut written_nodes = BTreeSet::new();
         let mut new_payload = BTreeSet::new();
-        let mut level: Vec<BranchCandidate> = Vec::new();
-        if leaf_pages.is_empty() {
-            // The empty table is one empty leaf, not zero pages.
-            let node = NodeData::OrderedLeaf {
-                domain: domain.clone(),
-                entries: Vec::new(),
-            };
-            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+        let primary_root = Self::build_canonical_ordered_map(&domain, &entries, &mut |node| {
+            if matches!(node, NodeData::OrderedLeaf { .. }) {
+                for dependency in node.dependencies()? {
+                    new_payload.insert(dependency.oid);
+                }
+            }
+            let oid = self.write_capture_node(node, &mut written, scope.max_objects)?;
             written_nodes.insert(oid.clone());
-            level.push(BranchCandidate {
-                max_key: Vec::new(),
-                oid,
-                row_count: 0,
-            });
-        }
-        for page in &leaf_pages {
-            let mut page_entries = Vec::with_capacity(page.entries().len());
-            for entry in page.entries() {
-                page_entries.push(OrderedLeafEntry {
-                    key: entry
-                        .key()
-                        .canonical_bytes()
-                        .map_err(|_| GraphError::NonCanonicalData)?,
-                    value: entry
-                        .value()
-                        .canonical_page_bytes()
-                        .map_err(|_| GraphError::NonCanonicalData)?,
-                });
-            }
-            let node = NodeData::OrderedLeaf {
-                domain: domain.clone(),
-                entries: page_entries,
-            };
-            for dependency in node.dependencies()? {
-                new_payload.insert(dependency.oid);
-            }
-            let NodeData::OrderedLeaf { entries, .. } = &node else {
-                unreachable!("constructed ordered leaf")
-            };
-            // The fence is the canonical encoding of the page's inclusive
-            // maximum key. `entry.key` is already that encoding, so it is kept
-            // as bytes: decoding it to a typed key and re-encoding it would be
-            // the same bytes, and the branch encoder and every fence comparison
-            // consume the canonical spelling rather than a typed key (ORP-1).
-            let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
-            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-            written_nodes.insert(oid.clone());
-            level.push(BranchCandidate {
-                max_key,
-                oid,
-                row_count: entries.len() as u64,
-            });
-        }
-
-        let mut height = 1u8;
-        while level.len() > 1 {
-            if height > MAX_GRAPH_HEIGHT {
-                return Err(GraphError::HeightExceeded(height));
-            }
-            let groups = partition_branch_candidates(&domain, height, &level)?;
-            if groups.len() >= level.len() {
-                return Err(GraphError::FanoutExceeded(level.len()));
-            }
-            let mut next = Vec::with_capacity(groups.len());
-            for group in groups {
-                let node = NodeData::OrderedBranch {
-                    domain: domain.clone(),
-                    height,
-                    entries: group
-                        .iter()
-                        .map(|candidate| OrderedBranchEntry {
-                            inclusive_max_key: candidate.max_key.clone(),
-                            child: candidate.oid.clone(),
-                            row_count: candidate.row_count,
-                        })
-                        .collect(),
-                };
-                let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-                written_nodes.insert(oid.clone());
-                next.push(BranchCandidate {
-                    max_key: group
-                        .last()
-                        .ok_or(GraphError::InvalidCount(0))?
-                        .max_key
-                        .clone(),
-                    oid,
-                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
-                });
-            }
-            level = next;
-            height += 1;
-        }
-        let primary_root = level
-            .first()
-            .ok_or(GraphError::InvalidCount(0))?
-            .oid
-            .clone();
+            Ok(oid)
+        })?;
         self.sync_object_closure(&written, scope)?;
 
         let index_objects_created: Vec<NativeOid> = written_nodes
@@ -1365,6 +1275,117 @@ impl NativeGraphContext {
             row_count: maintenance.row_count(),
             store_root,
         })
+    }
+
+    /// Builds one canonical ORP-1 ordered map over `entries`, which must be in
+    /// strictly ascending logical key order (store-format-3 §3). Leaf pages
+    /// are cut by the boundary anchor and the 64 KiB, 256-entry and 256-ref
+    /// bounds; each branch level repeats the rule over its children's
+    /// inclusive maximum keys until one root remains; an empty map is one
+    /// empty leaf. Every node is written through `write_node`, leaves first,
+    /// and the root is returned. This is the one ORP-1 builder: row
+    /// maintenance and relation admission both build through it.
+    pub(crate) fn build_canonical_ordered_map(
+        domain: &[u8],
+        entries: &[crate::row_store::RowEntry],
+        write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
+    ) -> Result<NativeOid, GraphError> {
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].key() >= pair[1].key())
+        {
+            return Err(GraphError::NonCanonicalData);
+        }
+        let leaf_pages = crate::row_store::partition_pages(entries, 0)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let mut level: Vec<BranchCandidate> = Vec::new();
+        if leaf_pages.is_empty() {
+            // The empty table is one empty leaf, not zero pages.
+            let oid = write_node(&NodeData::OrderedLeaf {
+                domain: domain.to_vec(),
+                entries: Vec::new(),
+            })?;
+            level.push(BranchCandidate {
+                max_key: Vec::new(),
+                oid,
+                row_count: 0,
+            });
+        }
+        for page in &leaf_pages {
+            let mut page_entries = Vec::with_capacity(page.entries().len());
+            for entry in page.entries() {
+                page_entries.push(OrderedLeafEntry {
+                    key: entry
+                        .key()
+                        .canonical_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                    value: entry
+                        .value()
+                        .canonical_page_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                });
+            }
+            // The fence is the canonical encoding of the page's inclusive
+            // maximum key. `entry.key` is already that encoding, so it is kept
+            // as bytes: decoding it to a typed key and re-encoding it would be
+            // the same bytes, and the branch encoder and every fence comparison
+            // consume the canonical spelling rather than a typed key (ORP-1).
+            let max_key = page_entries
+                .last()
+                .map_or(Vec::new(), |entry| entry.key.clone());
+            let row_count = page_entries.len() as u64;
+            let oid = write_node(&NodeData::OrderedLeaf {
+                domain: domain.to_vec(),
+                entries: page_entries,
+            })?;
+            level.push(BranchCandidate {
+                max_key,
+                oid,
+                row_count,
+            });
+        }
+
+        let mut height = 1u8;
+        while level.len() > 1 {
+            if height > MAX_GRAPH_HEIGHT {
+                return Err(GraphError::HeightExceeded(height));
+            }
+            let groups = partition_branch_candidates(domain, height, &level)?;
+            if groups.len() >= level.len() {
+                return Err(GraphError::FanoutExceeded(level.len()));
+            }
+            let mut next = Vec::with_capacity(groups.len());
+            for group in groups {
+                let oid = write_node(&NodeData::OrderedBranch {
+                    domain: domain.to_vec(),
+                    height,
+                    entries: group
+                        .iter()
+                        .map(|candidate| OrderedBranchEntry {
+                            inclusive_max_key: candidate.max_key.clone(),
+                            child: candidate.oid.clone(),
+                            row_count: candidate.row_count,
+                        })
+                        .collect(),
+                })?;
+                next.push(BranchCandidate {
+                    max_key: group
+                        .last()
+                        .ok_or(GraphError::InvalidCount(0))?
+                        .max_key
+                        .clone(),
+                    oid,
+                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
+                });
+            }
+            level = next;
+            height += 1;
+        }
+        Ok(level
+            .first()
+            .ok_or(GraphError::InvalidCount(0))?
+            .oid
+            .clone())
     }
 
 
