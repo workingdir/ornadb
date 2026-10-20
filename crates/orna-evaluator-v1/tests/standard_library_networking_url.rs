@@ -19,12 +19,16 @@ fn networking_url_modules_are_optional_and_host_effects_are_separated() {
         with_std.submit(include_str!("fixtures/stdlib-use-url-bc963.orna")),
         Ok(None)
     );
+    // std.url.parse deliberately fails with canonical ORNA-EVAL-UNSUPPORTED
+    // (stdlib/std/url.orna); the admitted REPL boundary presents every
+    // deliberate std failure as ORNA-EVAL-ERROR and redacts the canonical code
+    // (ORNA-FAILURE-009), as in the sibling std tests.
     assert_eq!(
         with_std
             .submit(include_str!("fixtures/stdlib-call-net-url-bc963.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-EVAL-ERROR"
     );
     for network_call in [
         include_str!("fixtures/stdlib-call-net-http-bc963.orna"),
