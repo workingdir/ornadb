@@ -1,11 +1,16 @@
 //! Carries durable stream consumer checkpoints across a format-3 migration.
 //!
-//! The carry copies `stream_checkpoint` and `stream_checkpoint_history` rows
-//! verbatim. The stream key text is built from the consumer's natural identity
-//! and is unchanged by the migration, so the rows keep their meaning. Every
-//! carried row must be covered by a migration continuity predecessor that the
-//! destination repository has already recorded, and the import verifies that
-//! before the destination runtime is opened or any row is written.
+//! The carry copies each `stream_checkpoint` row verbatim and records its
+//! version and position as a migration bridge origin. The destination
+//! validator starts that consumer's checkpoint chain from the origin, so no
+//! history row is needed to prove the carried state. The source's
+//! `stream_checkpoint_history` rows are archived verbatim in
+//! `stream_checkpoint_migration_archive` and are not validated. The stream key
+//! text is built from the consumer's natural identity and is unchanged by the
+//! migration. Every carried row must be covered by a migration continuity
+//! predecessor that the destination repository has already recorded, and the
+//! import verifies that before the destination runtime is opened or any row is
+//! written.
 //!
 //! Live or per-attempt stream state (leases, claims, failures, receipts,
 //! controls, pause state, reset audit, bootstrap pins) is not carried. A source
@@ -44,7 +49,8 @@ const NON_CARRIABLE_TABLES: &[&str] = &[
 ];
 
 const INSERT_CHECKPOINT: &str = "INSERT INTO stream_checkpoint (key_id, consumer_principal, consumer_root, consumer_function, consumer_binding, source_format, source, partition_format, partition, position_format, version, committed_position, next_fence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
-const INSERT_HISTORY: &str = "INSERT INTO stream_checkpoint_history (key_id, version, committed_position, snapshot, generation_digest, transition) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_BRIDGE: &str = "INSERT INTO stream_checkpoint_migration_bridge (key_id, origin_version, origin_position, source_generation, source_generation_digest) VALUES (?1, ?2, ?3, ?4, ?5)";
+const INSERT_ARCHIVE: &str = "INSERT INTO stream_checkpoint_migration_archive (key_id, version, committed_position, snapshot, generation_digest, transition) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CheckpointRow {
@@ -73,10 +79,20 @@ struct HistoryRow {
     transition: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BridgeRow {
+    key_id: String,
+    origin_version: i64,
+    origin_position: Option<String>,
+    source_generation: i64,
+    source_generation_digest: Vec<u8>,
+}
+
 /// Exact stream checkpoint state read from a source repository for carry.
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct StreamCarry {
     checkpoints: Vec<CheckpointRow>,
+    bridges: Vec<BridgeRow>,
     history: Vec<HistoryRow>,
 }
 
@@ -106,7 +122,10 @@ impl StreamCarry {
             let legacy = legacy_consumer_identity(row)?;
             let format3 = format3_consumer_identity(row)?;
             let source = row.source.as_bytes().to_vec();
-            let partition = row.partition.as_ref().map(|value| value.as_bytes().to_vec());
+            let partition = row
+                .partition
+                .as_ref()
+                .map(|value| value.as_bytes().to_vec());
             if !seen.insert((legacy, source.clone(), partition.clone())) {
                 continue;
             }
@@ -175,7 +194,9 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     let connection = database
         .connect()
         .map_err(|_| StreamCarryError::Runtime(RuntimeError::StorageUnavailable))?;
-    let tables = table_names(&connection).await.map_err(StreamCarryError::Runtime)?;
+    let tables = table_names(&connection)
+        .await
+        .map_err(StreamCarryError::Runtime)?;
 
     let mut refused = Vec::new();
     for table in NON_CARRIABLE_TABLES {
@@ -206,8 +227,26 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
     } else {
         Vec::new()
     };
+    let bridges = if checkpoints.is_empty() {
+        Vec::new()
+    } else {
+        let (source_generation, source_generation_digest) = read_source_generation(&connection)
+            .await
+            .map_err(StreamCarryError::Runtime)?;
+        checkpoints
+            .iter()
+            .map(|row| BridgeRow {
+                key_id: row.key_id.clone(),
+                origin_version: row.version,
+                origin_position: row.committed_position.clone(),
+                source_generation,
+                source_generation_digest: source_generation_digest.clone(),
+            })
+            .collect()
+    };
     Ok(StreamCarry {
         checkpoints,
+        bridges,
         history,
     })
 }
@@ -267,10 +306,25 @@ pub async fn import_stream_carry(
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
+    for row in &carry.bridges {
+        transaction
+            .execute(
+                INSERT_BRIDGE,
+                params![
+                    row.key_id.as_str(),
+                    row.origin_version,
+                    row.origin_position.as_deref(),
+                    row.source_generation,
+                    row.source_generation_digest.as_slice()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
     for row in &carry.history {
         transaction
             .execute(
-                INSERT_HISTORY,
+                INSERT_ARCHIVE,
                 params![
                     row.key_id.as_str(),
                     row.version,
@@ -288,6 +342,27 @@ pub async fn import_stream_carry(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(())
+}
+
+async fn read_source_generation(connection: &Connection) -> Result<(i64, Vec<u8>), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT generation, generation_digest FROM runtime_meta WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    let generation: i64 = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if generation < 0 || digest.len() != 32 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok((generation, digest))
 }
 
 async fn table_names(connection: &Connection) -> Result<HashSet<String>, RuntimeError> {
