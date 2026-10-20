@@ -503,7 +503,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     return Err(Diagnostic::target_with_detail(
                         "E2000",
                         "Unmount was refused",
-                        "unresolved workspace drafts remain; write and fsync each affected file again before unmounting",
+                        "unresolved workspace drafts remain, including unsynced dirty drafts; write and fsync each affected file again before unmounting",
                         "the FUSE mount and its repository view remain attached",
                     ));
                 }
@@ -514,7 +514,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                         return Err(Diagnostic::target_with_detail(
                             "E2000",
                             "Unmount was refused",
-                            "unresolved workspace drafts remain; write and fsync each affected file again before unmounting",
+                            "unresolved workspace drafts remain, including unsynced dirty drafts; write and fsync each affected file again before unmounting",
                             "the FUSE mount and its repository view remain attached",
                         ));
                     }

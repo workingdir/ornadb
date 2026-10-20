@@ -3,11 +3,13 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
-    process::Command,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Output},
 };
 
-use orna_runtime_v1::RuntimeState;
+use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
+use tempfile::TempDir;
 
 #[allow(dead_code)]
 #[path = "support/format3.rs"]
@@ -21,7 +23,8 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EditorMount, mountinfo_contains, repository_with_music_row, require_fuse_or_skip,
-    run_orna_unmount, spawn_editor_mount, spawn_mount_process, start_editor_mount, write_and_sync,
+    run_orna_unmount, spawn_editor_mount, spawn_mount_process, start_editor_mount,
+    start_editor_mount_with_source, write_and_sync,
 };
 
 #[tokio::test]
@@ -436,4 +439,223 @@ async fn stale_persisted_temporary_scratch_is_skipped_at_mount_start() {
         "an unresolved temporary scratch must not be restored",
     );
     run_orna_unmount(target_directory.path(), &mountpoint);
+}
+
+async fn current_runtime_row(
+    repository: &orna_repository_v1::Repository,
+    relation_id: [u8; 16],
+    table: &str,
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    let (identity, digest) = format3::cli_runtime_identity(repository);
+    let state = RuntimeState::open(repository, identity, digest).await.unwrap();
+    let table_identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id)).unwrap();
+    let snapshot = state
+        .begin_admitted_table_activation(std::slice::from_ref(&table_identity))
+        .await
+        .unwrap();
+    snapshot
+        .query_exact(table_identity.table(), key)
+        .unwrap()
+        .map(<[u8]>::to_vec)
+}
+
+fn editor_script(directory: &TempDir, document: &str) -> PathBuf {
+    let path = directory.path().join("editor.sh");
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\ncat > \"$1\" <<'ORNADB_TEST'\n{document}ORNADB_TEST\n"),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+
+fn run_row_edit(repository_directory: &TempDir, editor: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(repository_directory.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("EDITOR", editor)
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "edit",
+            "--row",
+            "Music/london/data.orna",
+        ])
+        .output()
+        .expect("production orna edit --row entrypoint runs")
+}
+
+/// ORNA-VFS-014: unsupported namespace and shared-mapping operations fail through FUSE.
+#[tokio::test]
+async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+
+    let hard_link = fixture.row_directory.join("hard-link");
+    assert_eq!(
+        std::fs::hard_link(&fixture.data_path, &hard_link)
+            .expect_err("hard links are unsupported")
+            .raw_os_error(),
+        Some(libc::EOPNOTSUPP),
+    );
+
+    let symbolic_link = fixture.row_directory.join("symbolic-link");
+    assert_eq!(
+        std::os::unix::fs::symlink("data.orna", &symbolic_link)
+            .expect_err("symbolic links are unsupported")
+            .raw_os_error(),
+        Some(libc::EOPNOTSUPP),
+    );
+
+    let fifo = fixture.row_directory.join("fifo");
+    let fifo_output = Command::new("mknod")
+        .env("LC_ALL", "C")
+        .arg(&fifo)
+        .arg("p")
+        .output()
+        .expect("mknod is available on Linux");
+    assert!(
+        !fifo_output.status.success(),
+        "the FUSE adapter rejects node creation"
+    );
+    let fifo_error = String::from_utf8_lossy(&fifo_output.stderr);
+    assert!(
+        fifo_error.contains("Operation not supported"),
+        "FIFO mknod should reach the unsupported FUSE operation, got: {fifo_error}"
+    );
+
+    let device_node = fixture.row_directory.join("device-node");
+    let device_output = Command::new("mknod")
+        .env("LC_ALL", "C")
+        .arg(&device_node)
+        .args(["c", "0", "0"])
+        .output()
+        .expect("mknod is available on Linux");
+    assert!(!device_output.status.success(), "device nodes are unsupported");
+    let device_error = String::from_utf8_lossy(&device_output.stderr);
+    assert!(
+        device_error.contains("Operation not supported")
+            || device_error.contains("Operation not permitted"),
+        "unexpected device-node mknod error: {device_error}"
+    );
+
+    let mmap_output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"import mmap, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    mmap.mmap(fd, 1, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
+except OSError as error:
+    print(error.errno)
+else:
+    print(0)"#,
+        )
+        .arg(&fixture.data_path)
+        .output()
+        .expect("python3 is available on Linux");
+    assert!(
+        mmap_output.status.success(),
+        "mmap probe failed: {}",
+        String::from_utf8_lossy(&mmap_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&mmap_output.stdout).trim(),
+        libc::ENODEV.to_string(),
+        "writable shared mmap is unsupported"
+    );
+}
+
+/// ORNA-VFS-020/022: writes remain speculative; admission validates the source-backed candidate and stale handles cannot overwrite a later CLI commit.
+#[tokio::test]
+async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let source = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    assert every(row => row.title != \"Forbidden\");\n}\n";
+    let fixture = start_editor_mount_with_source(
+        source,
+        "{ title: \"Original\", artist: \"Kieran\", }\n",
+        false,
+    )
+    .await;
+    let original = current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london")
+        .await
+        .expect("initial committed row exists");
+
+    let mut open_draft = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fixture.data_path)
+        .unwrap();
+    open_draft.set_len(0).unwrap();
+    open_draft
+        .write_all(b"{ title: \"Forbidden\", artist: \"Kieran\", }\n")
+        .unwrap();
+    assert_eq!(
+        current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london").await,
+        Some(original.clone()),
+        "speculative FUSE writes must not evaluate or commit a source candidate",
+    );
+    assert_eq!(
+        open_draft.sync_all().unwrap_err().raw_os_error(),
+        Some(libc::EINVAL),
+        "the production shared-workspace source validator rejects the complete candidate",
+    );
+    assert_eq!(
+        current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london").await,
+        Some(original.clone()),
+        "rejected candidate leaves the admitted source row unchanged",
+    );
+
+    open_draft.set_len(0).unwrap();
+    open_draft
+        .write_all(b"{ title: \"Stale draft\", artist: \"Kieran\", }\n")
+        .unwrap();
+    let editor_directory = TempDir::new().unwrap();
+    let external_editor = editor_script(
+        &editor_directory,
+        "{ title: \"External commit\", artist: \"Kieran\", }\n",
+    );
+    let external = run_row_edit(&fixture._repository_directory, &external_editor);
+    assert!(
+        external.status.success(),
+        "non-VFS orna edit --row failed: {}; initial row={:?}",
+        String::from_utf8_lossy(&external.stderr),
+        orna_value_v1::decode_canonical_storage_value(&original),
+    );
+    let externally_committed = current_runtime_row(
+        &fixture.repository,
+        fixture.relation_id,
+        "Music",
+        b"london",
+    )
+    .await
+    .expect("the non-VFS writer committed the row");
+    assert!(
+        String::from_utf8_lossy(&externally_committed).contains("External commit"),
+        "the non-VFS writer's row is current",
+    );
+
+    assert_eq!(
+        open_draft.sync_all().unwrap_err().raw_os_error(),
+        Some(libc::EAGAIN),
+        "an open draft pinned to the earlier generation must reject its stale save",
+    );
+    open_draft.seek(SeekFrom::Start(0)).unwrap();
+    let mut pinned_draft = String::new();
+    open_draft.read_to_string(&mut pinned_draft).unwrap();
+    assert!(pinned_draft.contains("Stale draft"), "the open handle remains pinned to its draft");
+    assert_eq!(
+        current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london").await,
+        Some(externally_committed),
+        "stale VFS save must preserve the newer non-VFS database row",
+    );
 }
