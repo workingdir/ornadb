@@ -319,6 +319,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation,
         };
         context.items(self.functions.len())?;
@@ -450,6 +451,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation,
         };
         let mut scope = Scope::from_repl_environment(
