@@ -2,7 +2,7 @@
 //! `orna run exercise` exit 0 and the exercise's committed row is durable; a REPL effect
 //! (`insert`) exits 0; a REPL capture exits 0; and the first run's committed effect is
 //! still readable from the durable runtime state afterwards. Each step must exit 0 with
-//! no error code. A repeated run and a run after a REPL effect also exit 0.
+//! no error code. A repeated run and a run after a REPL effect also exit 0 (ornadb-5il1.95).
 //!
 //! Not asserted here (inherited on origin/main, orna-1.1.0-gap), each dropped step names
 //! its bead:
@@ -105,7 +105,7 @@ async fn run_then_repl_effect_and_capture_exit_zero_and_first_run_commit_persist
     );
 
     // Only the REPL effect's exit code is asserted. Its commit visibility is inherited
-    // (ornadb-5il1.79). A run after this effect is covered by run_after_repl_effect_exits_zero.
+    // (ornadb-5il1.79).
     let repl_effect = run_repl(
         root,
         r#"main.music.insert({ id: "paris", title: "New title", artist: "REPL" })"#,
