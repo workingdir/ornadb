@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Write};
 
 use orna_client::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
 use orna_conformance_v1::AdmittedReplSession;
+use orna_evaluator_v1::{ReplDetail, ReplError};
 use orna_foundation_v1::{CanonicalValue, canonical_uuid_text};
 use orna_value_v1::Raw;
 
@@ -13,7 +14,7 @@ const MAX_INSPECT_TEXT: usize = 256;
 const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
 
 type ReplSubmissionHandler<'a> =
-    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String> + 'a;
+    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure> + 'a;
 
 
 #[derive(Clone, Copy)]
@@ -240,21 +241,120 @@ fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
     }
 }
 
-fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
-    let (title, help) = repl_error_documentation(code);
-    write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
-    writer.write_all(b"[")?;
-    write_styled(
-        writer,
-        AnsiColor::Red,
-        code.as_bytes(),
-        color_enabled,
-    )?;
-    writer.write_all(b"]: ")?;
-    writer.write_all(title.as_bytes())?;
-    writer.write_all(b"\nhelp: ")?;
-    writer.write_all(help.as_bytes())?;
+/// A failed submission: the stable code, plus the evaluator's located detail
+/// (message, source span, notes and remedies) when the evaluator has one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReplFailure {
+    pub(crate) code: String,
+    pub(crate) detail: Option<ReplDetail>,
+}
+
+impl ReplFailure {
+    pub(crate) fn code(code: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            detail: None,
+        }
+    }
+}
+
+impl From<String> for ReplFailure {
+    fn from(code: String) -> Self {
+        Self { code, detail: None }
+    }
+}
+
+impl From<ReplError> for ReplFailure {
+    fn from(error: ReplError) -> Self {
+        Self {
+            code: error.code().to_owned(),
+            detail: error.detail().cloned(),
+        }
+    }
+}
+
+/// Locates a span as `line N, column M`, then the source line with carets
+/// under the span. Returns `None` when the span is not on character
+/// boundaries of `source`.
+fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
+    let start = span.start;
+    if start > source.len() || !source.is_char_boundary(start) {
+        return None;
+    }
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |index| start + index);
+    let line_number = source[..start].matches('\n').count() + 1;
+    let column = source[line_start..start].chars().count() + 1;
+    let end = span.end.clamp(start, line_end);
+    let width = source
+        .get(start..end)
+        .map_or(1, |text| text.chars().count().max(1));
+    let gutter = line_number.to_string();
+    let pad = " ".repeat(gutter.len());
+    Some(format!(
+        "  --> line {line_number}, column {column}\n{pad} |\n{gutter} | {}\n{pad} | {}{}",
+        &source[line_start..line_end],
+        " ".repeat(column - 1),
+        "^".repeat(width),
+    ))
+}
+
+/// Renders a failed submission for the person who typed it. The message
+/// leads, followed by the location, notes and remedies. A failure without
+/// located detail uses the fixed text for its code.
+pub(crate) fn render_repl_failure(failure: &ReplFailure, source: &str) -> String {
+    let Some(detail) = &failure.detail else {
+        let (title, help) = repl_error_documentation(&failure.code);
+        return format!("error[{}]: {title}\nhelp: {help}", failure.code);
+    };
+    let mut text = format!("error[{}]: {}", detail.code, detail.message);
+    if let Some(span) = &detail.span
+        && let Some(location) = render_span(source, span)
+    {
+        text.push('\n');
+        text.push_str(&location);
+    }
+    for note in &detail.notes {
+        let _ = write!(text, "\nnote: {note}");
+    }
+    if detail.help.is_empty() {
+        let (_, help) = repl_error_documentation(&failure.code);
+        let _ = write!(text, "\nhelp: {help}");
+    }
+    for help in &detail.help {
+        let _ = write!(text, "\nhelp: {help}");
+    }
+    text
+}
+
+/// Writes rendered error text with the header line in red and the rest plain.
+pub(crate) fn write_rendered_error<W: Write>(
+    writer: &mut W,
+    text: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let (header, rest) = text.split_once('\n').unwrap_or((text, ""));
+    write_styled(writer, AnsiColor::Red, header.as_bytes(), color_enabled)?;
+    if !rest.is_empty() {
+        writer.write_all(b"\n")?;
+        writer.write_all(rest.as_bytes())?;
+    }
     writer.write_all(b"\n")
+}
+
+fn write_repl_failure<W: Write>(
+    writer: &mut W,
+    failure: &ReplFailure,
+    source: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    write_rendered_error(writer, &render_repl_failure(failure, source), color_enabled)
+}
+
+fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+    write_repl_failure(writer, &ReplFailure::code(code), "", color_enabled)
 }
 
 fn write_repl_value<W: Write>(
@@ -355,7 +455,7 @@ pub fn run_with_snapshot_loader_and_color_and_submitter<
     R: BufRead,
     W: Write,
     L: SnapshotSessionLoader + ?Sized,
-    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String>,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure>,
 >(
     reader: &mut R,
     writer: &mut W,
@@ -495,12 +595,12 @@ fn run_loop<
                 } else {
                     let result = match submitter.as_deref_mut() {
                         Some(submit) => submit(session, &source),
-                        None => session.submit(&source).map_err(|error| error.code().to_owned()),
+                        None => session.submit(&source).map_err(ReplFailure::from),
                     };
                     match result {
                         Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
                         Ok(None) => {}
-                        Err(code) => write_repl_error(writer, &code, color_enabled)?,
+                        Err(failure) => write_repl_failure(writer, &failure, &source, color_enabled)?,
                     }
                 }
             }
@@ -1239,8 +1339,9 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n"));
-        assert!(output.ends_with("> 2 : Int\n> "));
+        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: "), "{output}");
+        assert!(output.contains("\nhelp: "), "{output}");
+        assert!(output.ends_with("> 2 : Int\n> "), "{output}");
     }
 
     #[test]
@@ -1249,10 +1350,11 @@ mod tests {
         let mut output = Vec::new();
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "> error[ORNA-S021-TYPE]: expression has the wrong type\nhelp: change the expression or its declared type so the value and requirement agree\n> {\"code\": \"ORNA-S021-TYPE\", \"message\": \"<redacted>\", \"redacted\": true, \"severity\": \"error\"} : Map\n> 42 : Int\n> null : Null\n> "
-        );
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.starts_with("> error[ORNA-S021-TYPE]: "), "{output}");
+        assert!(!output.contains("private"), "{output}");
+        assert!(output.contains("\"redacted\": true"), "{output}");
+        assert!(output.ends_with("> 42 : Int\n> null : Null\n> "), "{output}");
     }
 
     #[test]
