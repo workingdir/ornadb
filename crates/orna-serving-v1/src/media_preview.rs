@@ -15,7 +15,7 @@ pub enum PreviewError { UnsupportedMediaType, InputTooLarge, ContentUnavailable,
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecodedImage { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
 pub fn decode_image_preview(blob: &Blob) -> Result<DecodedImage, PreviewError> {
-    let format = match blob.media_type().split(';').next().unwrap_or("").trim() {
+    let format = match blob.annotation().essence() {
         "image/png" => ImageFormat::Png, "image/jpeg" => ImageFormat::Jpeg,
         "image/gif" => ImageFormat::Gif, "image/webp" => ImageFormat::WebP,
         _ => return Err(PreviewError::UnsupportedMediaType),
