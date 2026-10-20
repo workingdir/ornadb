@@ -211,6 +211,8 @@ pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
     );
 }
 
+const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+
 /// Creates a repository whose `Music` table has one committed row named `key`.
 pub async fn repository_with_music_row(
     key: &str,
@@ -218,7 +220,17 @@ pub async fn repository_with_music_row(
     initial: &str,
     foreign_owner: bool,
 ) -> (TempDir, Repository, [u8; 16]) {
-    let source = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+    repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial, foreign_owner).await
+}
+
+/// Like `repository_with_music_row`, with a caller-supplied table `source`.
+pub async fn repository_with_source_row(
+    source: &str,
+    key: &str,
+    ordinal: u8,
+    initial: &str,
+    foreign_owner: bool,
+) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
             source,
@@ -259,9 +271,21 @@ pub async fn repository_with_music_row(
 }
 
 pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
-    let initial = "{ title: \"Original\", artist: \"Kieran\", }\n";
+    start_editor_mount_with_source(
+        "pub table Music(id: Str) { title: Str, artist: Str, }\n",
+        "{ title: \"Original\", artist: \"Kieran\", }\n",
+        foreign_owner,
+    )
+    .await
+}
+
+pub async fn start_editor_mount_with_source(
+    source: &str,
+    initial: &str,
+    foreign_owner: bool,
+) -> EditorMount {
     let (repository_directory, repository, relation_id) =
-        repository_with_music_row("london", 0x90, initial, foreign_owner).await;
+        repository_with_source_row(source, "london", 0x90, initial, foreign_owner).await;
 
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
@@ -276,5 +300,61 @@ pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
         data_path,
         _mount_parent: mount_parent,
         _repository_directory: repository_directory,
+    }
+}
+
+pub const EIO: i32 = 5;
+pub const ENOSPC: i32 = 28;
+pub const EDQUOT: i32 = 122;
+
+/// Opens the mounted `data.orna` read-write without truncating it.
+pub fn open_rw(fixture: &EditorMount) -> File {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fixture.data_path)
+        .expect("open data.orna read-write")
+}
+
+/// Reads the accepted row through a new open, never through an editor handle.
+pub fn fresh_view(fixture: &EditorMount) -> String {
+    std::fs::read_to_string(&fixture.data_path).expect("read accepted state through a new open")
+}
+
+/// Asserts that `result` failed with one of `expected` errno values.
+pub fn assert_errno(result: std::io::Result<()>, expected: &[i32], context: &str) {
+    let error = result.expect_err(context);
+    let code = error.raw_os_error();
+    assert!(
+        code.is_some_and(|code| expected.contains(&code)),
+        "{context}: expected one of {expected:?}, got {error}",
+    );
+}
+
+/// Draft guard value the mount publishes on its root: `1` while any draft is
+/// unresolved, `0` when none is.
+pub fn draft_guard(fixture: &EditorMount) -> u8 {
+    let root = fixture._mount_parent.path().join("library");
+    let mut value = [0_u8; 1];
+    let length = rustix::fs::getxattr(root.as_path(), "user.orna.unresolved-drafts", &mut value)
+        .expect("read the mount draft guard");
+    assert_eq!(length, 1, "the draft guard is one byte");
+    value[0]
+}
+
+/// Waits up to five seconds for the draft guard to reach `expected`. The FUSE
+/// release handler can run after close(2) returns, so a guard read right after
+/// a drop polls instead of reading once.
+pub async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = draft_guard(fixture);
+        if value == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{context}: guard is {value}, expected {expected} after 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

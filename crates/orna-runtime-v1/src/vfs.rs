@@ -1286,9 +1286,6 @@ impl<S> EditDraft<S> {
         let end = start
             .checked_add(bytes.len())
             .ok_or(EditDraftError::OffsetOverflow)?;
-        if end > self.max_file_bytes {
-            return Err(EditDraftError::FileTooLarge);
-        }
 
         let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
@@ -1296,7 +1293,7 @@ impl<S> EditDraft<S> {
             .candidate
             .as_ref()
             .map_or(state.baseline.bytes.len(), Vec::len);
-        if current_len.max(end) > self.max_file_bytes {
+        if end > current_len && end > self.max_file_bytes {
             return Err(EditDraftError::FileTooLarge);
         }
         let next_revision = state
@@ -1316,15 +1313,15 @@ impl<S> EditDraft<S> {
     /// Changes the candidate length. Extending creates zero-filled holes.
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
         let length = usize::try_from(length).map_err(|_| EditDraftError::OffsetOverflow)?;
-        if length > self.max_file_bytes {
-            return Err(EditDraftError::FileTooLarge);
-        }
         let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
         let current_len = state
             .candidate
             .as_ref()
             .map_or(state.baseline.bytes.len(), Vec::len);
+        if length > current_len && length > self.max_file_bytes {
+            return Err(EditDraftError::FileTooLarge);
+        }
         if current_len == length {
             return Ok(());
         }

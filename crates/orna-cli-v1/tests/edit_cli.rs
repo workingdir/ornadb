@@ -6,7 +6,7 @@ use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{GitHashAlgorithm, NativeOid, Repository, TypedKey};
 use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::decode_rov3_blob_metadata;
+use orna_value_v1::{BlobMetadata, NativeOid as ValueNativeOid, Raw, ROV3_BLOB_TAG, decode_canonical_storage_value};
 use sha2::Digest;
 use tempfile::TempDir;
 
@@ -47,6 +47,39 @@ async fn current_row(
     let table_identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id)).unwrap();
     let snapshot = state.begin_admitted_table_activation(std::slice::from_ref(&table_identity)).await.unwrap();
     snapshot.query_exact(table_identity.table(), key).unwrap().map(<[u8]>::to_vec)
+}
+fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
+    let raw = decode_canonical_storage_value(encoded).unwrap();
+    let blob = match raw {
+        blob @ Raw::Tag(ROV3_BLOB_TAG, _) => blob,
+        Raw::Array(mut fields) if fields.len() == 1 => fields.remove(0),
+        other => panic!("stored Blob row has no single ROV-3 field: {other:?}"),
+    };
+    let Raw::Tag(ROV3_BLOB_TAG, payload) = blob else {
+        panic!("stored Blob field is not ROV-3: {blob:?}");
+    };
+    let Raw::Array(fields) = *payload else {
+        panic!("stored ROV-3 metadata is not an array");
+    };
+    let [Raw::Int(length), Raw::Bytes(sha256), Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
+        panic!("stored ROV-3 metadata has the wrong shape: {fields:?}");
+    };
+    let suffix = match suffix {
+        Raw::Null => None,
+        Raw::Text(suffix) => Some(suffix.as_str()),
+        other => panic!("stored ROV-3 suffix has the wrong shape: {other:?}"),
+    };
+    BlobMetadata::from_stored_reference(
+        length.to_string().parse().unwrap(),
+        sha256.as_slice().try_into().unwrap(),
+        media_type,
+        suffix,
+        Some(match descriptor.as_slice() {
+            bytes if bytes.len() == 20 => ValueNativeOid::Sha1(bytes.try_into().unwrap()),
+            bytes if bytes.len() == 32 => ValueNativeOid::Sha256(bytes.try_into().unwrap()),
+            _ => panic!("stored Blob descriptor has an unsupported OID width"),
+        }),
+    )
 }
 
 
@@ -105,7 +138,13 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
 async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snapshot() {
     const ORIGINAL_PIXEL: &[u8] = include_bytes!("fixtures/media/pixel.png");
 
-    let (repository_directory, repository, relation_id) = format3::empty_format3_repository();
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            include_str!("fixtures/media/empty-media-main.orna"),
+            "media",
+            "media/image.orna",
+            "{ }\n",
+        );
     let source = TempDir::new().unwrap();
     let original_path = Path::new(MEDIA_FIXTURES).join("pixel.png");
     let replacement_path = Path::new(MEDIA_FIXTURES).join("pixel2.png");
@@ -123,13 +162,25 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         .with_repository_capture_capability(capability);
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let capture = format!("sys.blob.capture_file({root}, \"pixel.png\", 65536)");
-    media_commit::commit_capture(
-        &repository, &state, writer, &mut bindings, &capture, "image", 0xb0, true, relation_id,
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "media",
+        &[media_commit::SourceCaptureRow {
+            key: "image",
+            blob_fields: &[("content", &capture)],
+            source_row: None,
+            ordinal: 0xb0,
+            insert_only: true,
+        }],
     ).await;
-
     let before_value = current_row(&repository, relation_id, "media", b"image").await
         .expect("published image row exists");
-    let before_metadata = decode_rov3_blob_metadata(&before_value).unwrap();
+    let before_metadata = stored_blob_metadata(&before_value);
     assert_eq!(before_metadata.length(), ORIGINAL_PIXEL.len() as u64);
     assert_eq!(before_metadata.sha256(), <[u8; 32]>::from(sha2::Sha256::digest(ORIGINAL_PIXEL)));
 
@@ -151,12 +202,51 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
 
     let scripts = TempDir::new().unwrap();
     let replacement = editor(&scripts, "replace-blob", &format!("cp '{}' \"$1\"", replacement_path.display()));
-    let accepted = edit(&repository_directory, &replacement, &["edit", "media/image/content.png"]);
+    let accepted = edit(&repository_directory, &replacement, &["edit", "--row", "media/image/content.png"]);
     assert!(accepted.status.success(), "edit stderr: {}", String::from_utf8_lossy(&accepted.stderr));
 
     let after_value = current_row(&repository, relation_id, "media", b"image").await
         .expect("replacement image row exists");
     assert_ne!(after_value, before_value, "replacement updates the accepted Blob row");
-    let old_bytes = pinned_graph.read_blob_range(&pinned_reference, 0..before_metadata.length(), &pinned_scope).unwrap();
-    assert_eq!(old_bytes.bytes(), ORIGINAL_PIXEL, "the pinned old snapshot still reads its original Blob");
+
+    let replacement_bytes = fs::read(&replacement_path).unwrap();
+    let after_metadata = stored_blob_metadata(&after_value);
+    assert_eq!(after_metadata.length(), replacement_bytes.len() as u64);
+    assert_eq!(
+        after_metadata.sha256(),
+        <[u8; 32]>::from(sha2::Sha256::digest(&replacement_bytes)),
+        "grouped edit updates the Blob descriptor metadata",
+    );
+    let committed_context = repository.open_format_context().unwrap();
+    let committed_rows = committed_context.load_row_map(relation_id).unwrap();
+    let committed_graph = committed_context.open_native_graph(&committed_rows).unwrap();
+    let committed_scope = committed_graph.open_read_scope().unwrap();
+    let committed_row = committed_graph
+        .lookup_row(&TypedKey::Text("image".to_owned()), &committed_scope)
+        .unwrap()
+        .expect("the committed snapshot retains the original image row");
+    let committed_blob = committed_graph
+        .read_stored_blob_value(&committed_row, &descriptor, &committed_scope)
+        .unwrap();
+    let committed_reference = committed_blob.reference().clone();
+    let committed_bytes = committed_graph
+        .read_blob_range(
+            &committed_reference,
+            0..before_metadata.length(),
+            &committed_scope,
+        )
+        .unwrap();
+    assert_eq!(
+        committed_bytes.bytes(),
+        ORIGINAL_PIXEL,
+        "filesystem row save does not publish over the committed snapshot",
+    );
+    let old_bytes = pinned_graph
+        .read_blob_range(&pinned_reference, 0..before_metadata.length(), &pinned_scope)
+        .unwrap();
+    assert_eq!(
+        old_bytes.bytes(),
+        ORIGINAL_PIXEL,
+        "the pinned old snapshot still reads its original Blob",
+    );
 }
