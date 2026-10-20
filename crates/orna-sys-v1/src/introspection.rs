@@ -1309,6 +1309,10 @@ impl Plan {
     pub const fn actual_available(&self) -> bool {
         self.actual_available
     }
+
+    pub fn warnings(&self) -> &[Diagnostic] {
+        &self.warnings
+    }
 }
 
 /// Planner failures. These are diagnostics for the planner's own callers; the
