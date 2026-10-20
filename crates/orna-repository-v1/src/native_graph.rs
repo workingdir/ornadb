@@ -2505,6 +2505,7 @@ impl NativeGraphContext {
             }
             total = next_total;
             reservation.commit(count as u64);
+            crate::publication_crash_barrier("capture-read");
         }
         if let Some(chunk) = chunker.finish() {
             index.push_chunk_bytes(chunk)?;
@@ -2550,6 +2551,7 @@ impl NativeGraphContext {
         let reference = self.admit_blob(descriptor)?;
         let objects = self.verify_full_blob(&reference, scope)?;
         self.sync_object_closure(&objects, scope)?;
+        crate::publication_crash_barrier("pack-install");
 
         Ok(CapturedBlobCandidate {
             context: self.identity,
@@ -3074,6 +3076,7 @@ impl NativeGraphContext {
         // If syncing the promoted ref fails, leave it rooted. Returning no pin
         // is safe; deleting a possibly durable root could expose objects to GC.
         self.sync_git_ref(&protected_ref)?;
+        crate::publication_crash_barrier("pin");
         ProtectedContentPin::issue_after_durable_ref(
             self.repository_id,
             self.database_id,
