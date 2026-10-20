@@ -22486,6 +22486,35 @@ fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
     );
 }
 
+/// ORNA-WIRE-005: a host keepalive Ping is an unmasked RFC 6455 control frame
+/// with the same 125-byte payload bound as every other control frame.
+#[test]
+fn websocket_output_encoder_emits_bounded_host_pings() {
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(Vec::new()),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 0])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![1, 2]),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 2, 1, 2])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![7; 126]),
+            TransportLimits::default()
+        ),
+        Err(orna_live_v1::WebSocketEncodeError::Limit)
+    );
+}
+
 fn attached_transport_for_close() -> (LiveTransport, WebSocketState) {
     let mut host = host();
     let mut issuer = Issuer(1, None);
