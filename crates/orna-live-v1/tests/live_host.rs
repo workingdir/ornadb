@@ -11472,9 +11472,29 @@ fn dispatches_request_status_and_rejects_unsupported_client_operations() {
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(status))),
         Ok(FrameOutcome::Accepted)
     );
+    // 30-protocol.md, Limits, connection errors and reconnection: "A
+    // well-formed request with a stale handle, wrong fingerprint, invalid
+    // program or forbidden effect receives a correlated diagnostic without
+    // closing unrelated watches." An operation the application does not
+    // support is rejected the same way, with the portable `wire.unsupported`
+    // code, rather than as a transport error.
     assert_eq!(
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(subscribe()))),
-        Err(Error::UnsupportedOperation)
+        Ok(FrameOutcome::Accepted)
+    );
+    let mut application = UnitApplication::default();
+    let rejection =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(subscribe()), &mut application))
+            .unwrap()
+            .response
+            .expect("the rejection is retained as a correlated diagnostic");
+    assert_eq!(rejection.request, Some([3; 16]));
+    assert!(matches!(rejection.message, Message::Diagnostic { .. }));
+    let encoded = rejection.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.unsupported".len())
+            .any(|window| window == b"wire.unsupported")
     );
 }
 
