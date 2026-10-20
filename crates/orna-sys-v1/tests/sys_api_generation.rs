@@ -209,6 +209,123 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     assert!(collector.errors.iter().any(|error| error.contains("associated const")));
 }
 
+fn collect_doc_fixture(
+    name: &str,
+    effect: &str,
+    doc: &str,
+    extra_args: &str,
+) -> build_support::Collector {
+    let source = format!(
+        "struct Binding;\nimpl Binding {{\n{doc}\n#[ornasys(name = \"{name}\", effect = \"{effect}\", signature = \"fn {name}(): Int\"{extra_args})]\nfn fixture(&self) {{}}\n}}\n"
+    );
+    let mut collector = build_support::Collector::default();
+    collector.collect_source("doc fixture", &source);
+    collector
+}
+
+fn assert_doc_rejected(doc: &str, expected: &str) {
+    let collector = collect_doc_fixture("sys.fixture", "read", doc, "");
+    assert!(collector.functions.is_empty(), "{expected}");
+    assert!(
+        collector.errors.iter().any(|error| error.contains(expected)),
+        "{:?}",
+        collector.errors
+    );
+}
+
+#[test]
+fn doc_metadata_requires_a_purpose_paragraph() {
+    assert_doc_rejected("", "must begin with a purpose paragraph");
+    assert_doc_rejected(
+        "/// # Contract\n/// The body.",
+        "must begin with a purpose paragraph",
+    );
+}
+
+#[test]
+fn doc_metadata_requires_line_form_doc_comments() {
+    assert_doc_rejected("#[doc(hidden)]", "doc comments must use `///` line form");
+}
+
+#[test]
+fn doc_metadata_rejects_multiline_block_doc_comments() {
+    assert_doc_rejected(
+        "/** Purpose.\n * Second line. */",
+        "doc comments must use `///` line form",
+    );
+    let collector = collect_doc_fixture("sys.fixture", "read", "/** Purpose. */", "");
+    assert!(collector.errors.is_empty(), "{:?}", collector.errors);
+    assert_eq!(collector.functions[0].metadata["purpose"], "Purpose.");
+}
+
+#[test]
+fn doc_metadata_requires_string_literal_values() {
+    assert_doc_rejected(
+        "#[doc = concat!(\"Purpose.\")]",
+        "doc comment must be a string literal",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_malformed_heading_lines() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// #Contract\n/// The body.",
+        "doc section headings must be a single `# Heading` line",
+    );
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract\n/// The body continues in the heading paragraph.",
+        "doc section headings must be a single `# Heading` line",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_unknown_sections() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Notes\n///\n/// Body.",
+        "unknown #[ornasys] doc section `# Notes`",
+    );
+}
+
+#[test]
+fn doc_metadata_requires_a_body_paragraph_after_each_section() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract",
+        "doc section `# Contract` must be followed by one body paragraph",
+    );
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Contract\n///\n/// # Since\n/// 1.1.0",
+        "doc section `# Contract` must be followed by one body paragraph",
+    );
+}
+
+#[test]
+fn doc_metadata_rejects_duplicate_sections() {
+    assert_doc_rejected(
+        "/// Purpose.\n///\n/// # Since\n///\n/// 1.1.0\n///\n/// # Since\n///\n/// 1.1.1",
+        "duplicate doc section `# Since`",
+    );
+}
+
+#[test]
+fn doc_metadata_collects_documentation_paragraphs_and_contexts() {
+    let collector = collect_doc_fixture(
+        "sys.admin.fixture",
+        "admin",
+        "/// Fixture purpose\n/// continues here.\n///\n/// First documentation paragraph.\n///\n/// # Contract\n///\n/// The contract body.\n///\n/// Second documentation paragraph.\n///\n/// # Since\n///\n/// 1.1.0",
+        ", contexts = \"format-1, format-3\"",
+    );
+    assert!(collector.errors.is_empty(), "{:?}", collector.errors);
+    let metadata = &collector.functions[0].metadata;
+    assert_eq!(metadata["purpose"], "Fixture purpose continues here.");
+    assert_eq!(metadata["contract"], "The contract body.");
+    assert_eq!(metadata["since"], "1.1.0");
+    assert_eq!(
+        metadata["documentation"],
+        "First documentation paragraph.\n\nSecond documentation paragraph."
+    );
+    assert_eq!(metadata["contexts"], serde_json::json!(["format-1", "format-3"]));
+}
+
 #[test]
 fn collector_registers_versioned_roles_and_rejects_incompatible_overloads() {
     const SOURCE: &str = r####"

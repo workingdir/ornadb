@@ -853,7 +853,11 @@ fn parse_doc_metadata(attrs: &[syn::Attribute]) -> Result<Map<String, Value>, St
         else {
             return Err("doc comment must be a string literal".to_owned());
         };
-        lines.push(text.value());
+        let text = text.value();
+        if text.contains('\n') {
+            return Err("doc comments must use `///` line form".to_owned());
+        }
+        lines.push(text);
     }
     let mut paragraphs: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
