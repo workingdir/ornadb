@@ -24,8 +24,8 @@
   ],
   "properties": {
     "title": { "const": "Orna portable sys API" },
-    "language_version": { "type": "string", "minLength": 1 },
-    "sys_version": { "type": "string", "minLength": 1 },
+    "language_version": { "type": "string", "minLength": 1, "const": "1.1.0" },
+    "sys_version": { "type": "string", "minLength": 1, "const": "1.1" },
     "status": { "const": "Final 1.1.0 specification contract; engine execution not claimed" },
     "removed_names": {
       "type": "object",
