@@ -1749,7 +1749,6 @@ impl Parser {
                 continue;
             }
             let next = tokens.get(i + 1);
-            let next2 = tokens.get(i + 2);
             let diagnostic = if braces == 0
                 && matches!(token.kind, TokenKind::Keyword(Keyword::Impl))
                 && (i == 0
@@ -1760,14 +1759,6 @@ impl Parser {
                 Some((
                     "ORNA091-E-IMPL-FOR",
                     "move the implementation inside its nominal target and omit `for Type`",
-                ))
-            } else if matches!(token.kind, TokenKind::Punct("<"))
-                && matches!(next.map(|t| &t.kind), Some(TokenKind::Identifier { .. }))
-                && matches!(next2.map(|t| &t.kind), Some(TokenKind::Punct(":")))
-            {
-                Some((
-                    "ORNA091-E-BOUND-COLON",
-                    "protocol bounds use `<T impl Protocol>`",
                 ))
             } else if matches!(token.kind, TokenKind::Punct("||"))
                 && matches!(
@@ -1795,15 +1786,6 @@ impl Parser {
             }
         }
         for i in 0..tokens.len().saturating_sub(1) {
-            if matches!(tokens[i].kind, TokenKind::Keyword(Keyword::Assert))
-                && matches!(tokens[i + 1].kind, TokenKind::Punct(";"))
-            {
-                self.errors.push(Diagnostic::error(
-                    "ORNA-A091-011",
-                    "assertion requires a proposition before `;`",
-                    tokens[i + 1].span.clone(),
-                ));
-            }
             if matches!(tokens[i].kind, TokenKind::Punct("|"))
                 && matches!(
                     tokens.get(i + 1).map(|x| &x.kind),
@@ -1818,63 +1800,6 @@ impl Parser {
                     "E1204",
                     "anonymous function must be parenthesized as a pipeline stage",
                     tokens[i + 1].span.clone(),
-                ));
-            }
-        }
-        for i in 0..tokens.len().saturating_sub(2) {
-            if matches!(tokens[i].kind, TokenKind::Punct("("))
-                && matches!(tokens[i + 1].kind, TokenKind::Identifier { .. })
-                && matches!(tokens[i + 2].kind, TokenKind::Punct("="))
-            {
-                let parameter_list =
-                    i >= 2 && matches!(tokens[i - 2].kind, TokenKind::Keyword(Keyword::Fn));
-                if !parameter_list {
-                    self.errors.push(Diagnostic::error(
-                        "E1301",
-                        "assignment is a statement, not an expression",
-                        tokens[i + 2].span.clone(),
-                    ));
-                }
-            }
-        }
-        for i in 0..tokens.len().saturating_sub(1) {
-            if !matches!(tokens[i].kind, TokenKind::Keyword(Keyword::Assert)) {
-                continue;
-            }
-            let mut nesting = 0usize;
-            let mut terminated = false;
-            let mut legacy_else = false;
-            for token in &tokens[i + 1..] {
-                if matches!(token.kind, TokenKind::Punct("(" | "[" | "{")) {
-                    nesting += 1
-                }
-                if matches!(token.kind, TokenKind::Punct(")" | "]" | "}")) {
-                    if nesting == 0 {
-                        break;
-                    }
-                    nesting -= 1
-                }
-                if nesting == 0 && matches!(token.kind, TokenKind::Punct(";")) {
-                    terminated = true;
-                    break;
-                }
-                if nesting == 0 && matches!(token.kind, TokenKind::Keyword(Keyword::Else)) {
-                    legacy_else = true
-                }
-            }
-            if !terminated || legacy_else {
-                self.errors.push(Diagnostic::error(
-                    if legacy_else {
-                        "ORNA-A091-006"
-                    } else {
-                        "ORNA-A091-005"
-                    },
-                    if legacy_else {
-                        "assert has no assertion-specific `else` arm"
-                    } else {
-                        "assertion clause must end with `;`"
-                    },
-                    tokens[i].span.clone(),
                 ));
             }
         }
@@ -2598,9 +2523,12 @@ impl Parser {
                 }
             }
             ItemKind::Assert => {
-                let value = self.parse_assertion_expression();
-                self.require_semicolon("assertion statements require `;`");
-                Declaration::Assertion { value }
+                let keyword = self.previous().span.clone();
+                let (value, _) =
+                    self.parse_assertion_clause(keyword, true, "assertion statements require `;`");
+                Declaration::Assertion {
+                    value: value.unwrap_or_else(|| self.error_expr()),
+                }
             }
             ItemKind::Let => {
                 let pattern = self.parse_pattern();
@@ -3160,14 +3088,16 @@ impl Parser {
             span: start.join(self.previous().span.clone()),
         }
     }
-    #[allow(dead_code)]
-    fn consume_statement(&mut self) {
+    /// Skips the rest of a malformed statement through its `;`. When a
+    /// closing delimiter or the end of input comes first it reports the
+    /// missing terminator and returns false.
+    fn consume_statement(&mut self) -> bool {
         let start = self.at;
         let mut depth = 0;
         while !self.eof() {
             if self.is_punct(";") && depth == 0 {
                 self.bump();
-                return;
+                return true;
             }
             if self.is_punct("{") || self.is_punct("(") || self.is_punct("[") {
                 depth += 1
@@ -3188,7 +3118,8 @@ impl Parser {
             "ORNA-PARSE-002",
             "expected `;` before end of statement",
             span,
-        ))
+        ));
+        false
     }
     fn parse_block(&mut self) -> Expr {
         let start = self.current().span.clone();
@@ -3252,23 +3183,19 @@ impl Parser {
                 Some(Keyword::Assert) => {
                     let statement_start = self.current().span.clone();
                     self.bump();
-                    if self.is_punct(";") {
-                        self.error_here("ORNA-PARSE-001", "assert requires an expression")
-                    } else {
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
+                    let (value, terminated) = self.parse_assertion_clause(
+                        statement_start.clone(),
+                        false,
+                        "assertion statements require `;`",
+                    );
+                    if let Some(value) = value {
                         let end = value.span();
                         statements.push(Statement::Assert {
                             value,
                             span: statement_start.join(end),
                         });
                     }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-002", "assertion statements require `;`");
+                    if !terminated {
                         break;
                     }
                 }
@@ -3474,16 +3401,17 @@ impl Parser {
             if self.keyword() == Some(Keyword::Assert) {
                 let start = self.current().span.clone();
                 self.bump();
-                let value = self.parse_assertion_expression();
-                if self.is_punct(";") {
-                    self.bump()
-                } else {
-                    self.error_here("ORNA-PARSE-002", "expected `;` after table assertion")
-                };
-                members.push(TableMember::Assertion {
-                    value,
-                    span: start.join(self.previous().span.clone()),
-                });
+                let (value, _) = self.parse_assertion_clause(
+                    start.clone(),
+                    true,
+                    "expected `;` after table assertion",
+                );
+                if let Some(value) = value {
+                    members.push(TableMember::Assertion {
+                        value,
+                        span: start.join(self.previous().span.clone()),
+                    });
+                }
                 continue;
             }
             if self.keyword() == Some(Keyword::Impl) {
@@ -3686,16 +3614,17 @@ impl Parser {
             let start = self.current().span.clone();
             if self.keyword() == Some(Keyword::Assert) {
                 self.bump();
-                let value = self.parse_assertion_expression();
-                if self.is_punct(";") {
-                    self.bump()
-                } else {
-                    self.error_here("ORNA-PARSE-002", "expected `;` after type assertion")
+                let (value, _) = self.parse_assertion_clause(
+                    start.clone(),
+                    true,
+                    "expected `;` after type assertion",
+                );
+                if let Some(value) = value {
+                    members.push(TypeMember::Assertion {
+                        value,
+                        span: start.join(self.previous().span.clone()),
+                    });
                 }
-                members.push(TypeMember::Assertion {
-                    value,
-                    span: start.join(self.previous().span.clone()),
-                });
             } else if self.keyword() == Some(Keyword::Impl) {
                 self.bump();
                 let implementation = self.parse_implementation(start.clone());
@@ -3807,7 +3736,16 @@ impl Parser {
             let start = self.current().span.clone();
             let name = self.require_name_text();
             let mut bounds = Vec::new();
-            if self.keyword() == Some(Keyword::Impl) {
+            // ORNA-GENERIC-006: the removed `<T: Protocol>` spelling is
+            // reported here and its bounds are read as if `impl` were used.
+            let legacy_colon = self.is_punct(":");
+            if legacy_colon {
+                self.error_here(
+                    "ORNA091-E-BOUND-COLON",
+                    "protocol bounds use `<T impl Protocol>`",
+                );
+            }
+            if legacy_colon || self.keyword() == Some(Keyword::Impl) {
                 self.bump();
                 while let Some(bound) = self.parse_type_expr() {
                     bounds.push(bound);
@@ -4465,6 +4403,7 @@ impl Parser {
                     });
                 }
                 let inner = self.expr()?;
+                self.reject_assignment_expression();
                 if self.is_punct(",") {
                     let mut elements = vec![inner];
                     while self.is_punct(",") {
@@ -4473,7 +4412,8 @@ impl Parser {
                             break;
                         }
                         if let Some(value) = self.expr() {
-                            elements.push(value)
+                            elements.push(value);
+                            self.reject_assignment_expression();
                         } else {
                             break;
                         }
@@ -4585,6 +4525,7 @@ impl Parser {
                 elements: Vec::new(),
                 span: start.clone(),
             });
+            self.reject_assignment_expression();
             let span = start.join(value.span());
             arguments.push(Argument { name, value, span });
             if self.is_punct(",") {
@@ -5029,6 +4970,68 @@ impl Parser {
         TypeExpr::Tuple {
             elements: Vec::new(),
             span: self.current().span.clone(),
+        }
+    }
+    /// Parses `assertion_expression ";"` after the `assert` keyword at
+    /// `keyword`, reporting each removed assertion form where this
+    /// production fails: an empty proposition (ORNA-A091-011), an
+    /// assertion-specific `else` arm (ORNA-A091-006) and a missing `;`
+    /// (ORNA-A091-005, then the owner's `missing_semicolon` diagnostic).
+    /// `subjectless` admits a leading comparison operator. Returns the
+    /// proposition, `None` when it is empty, and whether the clause reached
+    /// its terminating `;`.
+    fn parse_assertion_clause(
+        &mut self,
+        keyword: SourceSpan,
+        subjectless: bool,
+        missing_semicolon: &str,
+    ) -> (Option<Expr>, bool) {
+        if self.is_punct(";") {
+            self.error_here(
+                "ORNA-A091-011",
+                "assertion requires a proposition before `;`",
+            );
+            self.bump();
+            return (None, true);
+        }
+        let value = if subjectless {
+            self.parse_assertion_expression()
+        } else {
+            self.expr().unwrap_or_else(|| self.error_expr())
+        };
+        let terminated = if self.keyword() == Some(Keyword::Else) {
+            self.errors.push(Diagnostic::error(
+                "ORNA-A091-006",
+                "assert has no assertion-specific `else` arm",
+                keyword,
+            ));
+            self.consume_statement()
+        } else if self.is_punct(";") {
+            self.bump();
+            true
+        } else {
+            // More input can still supply the terminator at the end of input.
+            if self.eof() {
+                self.incomplete_errors += 1;
+            }
+            self.errors.push(Diagnostic::error(
+                "ORNA-A091-005",
+                "assertion clause must end with `;`",
+                keyword,
+            ));
+            self.error_here("ORNA-PARSE-002", missing_semicolon);
+            false
+        };
+        (Some(value), terminated)
+    }
+    /// ORNA-CFLOW-006: assignment is a statement, so `=` after a grouped
+    /// expression, tuple element or call argument is reported as E1301 and
+    /// its right-hand side is skipped.
+    fn reject_assignment_expression(&mut self) {
+        if self.is_punct("=") {
+            self.error_here("E1301", "assignment is a statement, not an expression");
+            self.bump();
+            let _ = self.expr();
         }
     }
     fn parse_assertion_expression(&mut self) -> Expr {

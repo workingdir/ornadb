@@ -1,7 +1,9 @@
 //! Parser regressions for bead ornadb-5il1.118, the A01 syntax audit of the
 //! Orna 1.1.0 grammar. Each test pins one audited reproducer.
 
-use orna_syntax_v1::{ControlKind, Declaration, Expr, Statement, TableMember, parse_module};
+use orna_syntax_v1::{
+    ControlKind, Declaration, Expr, Statement, TableMember, parse_module, parse_repl,
+};
 
 fn function_body(source: &str) -> Expr {
     let parsed = parse_module(source);
@@ -326,4 +328,136 @@ fn table_subjectless_predicates_keep_their_comparison_operator() {
         ] if equal == "true" && greater == "0" && member == "allowed"),
         "{predicates:?}"
     );
+}
+
+fn first_codes(source: &str) -> (Option<&'static str>, Option<&'static str>) {
+    (
+        parse_module(source).diagnostics.first().map(|d| d.code),
+        parse_repl(source).diagnostics.first().map(|d| d.code),
+    )
+}
+
+// A01-03 (grammar `case_arm`): `x if x < limit:` is a guard, not the removed
+// `<T: Protocol>` bound, so the module entry accepts it like the REPL does.
+#[test]
+fn case_guard_comparison_before_the_arm_colon_parses_in_a_module() {
+    let source =
+        r#"pub fn band(n: Int, limit: Int): Str = case n { x if x < limit: "low", _: "high" };"#;
+    function_body(source);
+    assert_eq!(first_codes(source), (None, None));
+}
+
+// A01-03 (lexical structure, "Contextual names and construction"): `assert`
+// is a variant, label, field and member name outside assertion statements,
+// and an assertion may take an `if` expression with its own `else`.
+#[test]
+fn assert_is_a_contextual_name_outside_assertion_statements() {
+    let enumeration = parse_module("pub enum Op { assert, deny }");
+    assert!(enumeration.is_ok(), "{:?}", enumeration.diagnostics);
+    let source = "pub fn label(audit: Audit, ok: Bool): Bool {\n    f(assert: true);\n    let r = { assert: 1 };\n    g(audit.assert);\n    audit.assert;\n    assert if ok { true } else { false };\n    true\n}";
+    let (statements, _) = block_parts(&function_body(source));
+    assert_eq!(statements.len(), 5, "{statements:?}");
+    assert!(
+        matches!(
+            &statements[4],
+            Statement::Assert {
+                value: Expr::Control { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        statements[4]
+    );
+    assert_eq!(first_codes(source), (None, None));
+}
+
+// A01-03 (grammar `function_parameter`): a default on the first parameter of
+// a generic function is not an assignment expression.
+#[test]
+fn generic_function_with_a_leading_default_parameter_parses_in_a_module() {
+    let source = "fn f<T>(limit = 10, x: T) = x;";
+    function_body(source);
+    assert_eq!(first_codes(source), (None, None));
+}
+
+// A01-03: the removed assertion spellings are reported by every assertion
+// production rather than by a token scan of the whole module.
+#[test]
+fn removed_assertion_forms_are_reported_by_each_assertion_production() {
+    for (source, code) in [
+        ("assert;", "ORNA-A091-011"),
+        ("assert ok else Bad;", "ORNA-A091-006"),
+        ("assert ok", "ORNA-A091-005"),
+        ("pub fn f() { assert; }", "ORNA-A091-011"),
+        (
+            "pub fn f(ok: Bool) { assert ok else Bad; }",
+            "ORNA-A091-006",
+        ),
+        ("pub fn f(ok: Bool) { assert ok }", "ORNA-A091-005"),
+        ("pub table T(id: Int) { assert; }", "ORNA-A091-011"),
+        (
+            "pub table T(id: Int) { assert > 0 else Bad; }",
+            "ORNA-A091-006",
+        ),
+        ("pub table T(id: Int) { assert > 0 }", "ORNA-A091-005"),
+        ("pub type Port = Int { assert; }", "ORNA-A091-011"),
+        (
+            "pub type Port = Int { assert > 0 else Bad; }",
+            "ORNA-A091-006",
+        ),
+        ("pub type Port = Int { assert > 0 }", "ORNA-A091-005"),
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed.diagnostics.first().map(|d| d.code),
+            Some(code),
+            "{source}: {:?}",
+            parsed.diagnostics
+        );
+    }
+}
+
+// A01-03 (ORNA-GENERIC-006): the colon bound is reported by the generic
+// parameter list of every declaration form and read as `impl`, so it does not
+// cascade into further diagnostics.
+#[test]
+fn colon_bounds_are_reported_by_the_generic_parameter_list() {
+    for source in [
+        "pub fn largest<T: Order>(values: [T]): T? = values | last();",
+        "pub type Holder<T: Display> { value: T, }",
+        "pub enum Choice<T: Display> { one { value: T } }",
+    ] {
+        let parsed = parse_module(source);
+        assert_eq!(
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>(),
+            ["ORNA091-E-BOUND-COLON"],
+            "{source}"
+        );
+    }
+}
+
+// A01-03 (ORNA-CFLOW-006): `=` inside a group, tuple or argument is the
+// assignment-expression diagnostic in both entry points.
+#[test]
+fn assignment_inside_a_group_tuple_or_argument_is_e1301() {
+    for source in [
+        "fn f(x: Int) = (x = 1);",
+        "fn f(x: Int) = (x, x = 1);",
+        "fn f(x: Int) = g(x = 1);",
+    ] {
+        assert_eq!(
+            parse_module(source)
+                .diagnostics
+                .iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>(),
+            ["E1301"],
+            "{source}"
+        );
+        assert_eq!(first_codes(source), (Some("E1301"), Some("E1301")));
+    }
 }
