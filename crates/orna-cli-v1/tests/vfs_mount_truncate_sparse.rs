@@ -1,9 +1,10 @@
 #![cfg(target_os = "linux")]
 
 //! Gate E: zero truncation, ftruncate shrink/extend, sparse holes, quota
-//! exhaustion and close-error ignorance on the writable mount (VFS-007/008,
-//! EDIT-1, profiles/vfs-1 errno table: EINVAL for syntax, ENOSPC/EDQUOT for
-//! capacity/quota).
+//! exhaustion and a close after a quota rejection (VFS-007/008, EDIT-1,
+//! profiles/vfs-1 errno table: EINVAL for syntax, ENOSPC/EDQUOT for
+//! capacity/quota). Close-error ignorance is only asserted inside the quota
+//! write test; a dedicated close-after-truncate test is not yet written.
 
 use std::{
     fs::OpenOptions,
