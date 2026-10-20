@@ -38,6 +38,7 @@ mod native_graph;
 pub mod offline_copy;
 pub mod publication_describe;
 mod publication_transaction;
+pub mod relation_admission;
 mod row_store;
 #[cfg(test)]
 pub(crate) mod test_support;
