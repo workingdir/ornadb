@@ -1445,6 +1445,8 @@ fn song_revisions_limited_to(
     graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
 }
 
+/// ORNA-MEDIA-001: Blob length and content identity are reported without a payload read.
+/// ORNA-APP-013: Blob summaries are metadata-only.
 /// QUERY: `orna query RELATION` answers the Blob metadata of committed media
 /// rows through the real CLI over the real graph, and the read seam it reports
 /// charges zero media payload bytes for the whole listing.
