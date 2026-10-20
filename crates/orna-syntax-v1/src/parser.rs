@@ -3316,13 +3316,7 @@ impl Parser {
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
                 ) => {
-                    // Parse the complete expression spine before deciding
-                    // whether this control form is a statement or the block
-                    // tail. This preserves postfix/infix continuations and
-                    // lets a final unsemicolonated control expression produce
-                    // its value; a following block item is an unambiguous
-                    // statement boundary under ORNA-PARSE-002.
-                    let value = self.expr().unwrap_or_else(|| self.error_expr());
+                    let value = self.parse_control_block_item();
                     let span = value.span();
                     if self.is_punct(";") {
                         if matches!(&value, Expr::Control { .. }) {
@@ -3411,6 +3405,49 @@ impl Parser {
         } else {
             self.error_expr()
         }
+    }
+    /// Parses a block item that begins with `if`, `case`, `for`, `while` or
+    /// `loop`. Under ORNA-PARSE-002 the braced control expression is a whole
+    /// item when another block item follows, so a following `(`, `[`, `-`,
+    /// `+`, `!`, `..` or `{` begins the next item. Only `.`, `?` or a
+    /// binary-only operator, none of which can begin a block item, continues
+    /// it as the left operand of a larger expression.
+    fn parse_control_block_item(&mut self) -> Expr {
+        let value = self.recurse(|parser| {
+            let control = parser.parse_control_expression();
+            Some(if parser.continues_control_expression() {
+                parser.pratt_from(control, 0, NominalBraceMode::Ordinary)
+            } else {
+                control
+            })
+        });
+        match value {
+            Some(value) if self.within_depth(expr_depth(&value)) => value,
+            _ => self.error_expr(),
+        }
+    }
+    fn continues_control_expression(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Punct(
+                "." | "?"
+                    | "||"
+                    | "&&"
+                    | "=="
+                    | "!="
+                    | "<"
+                    | "<="
+                    | ">"
+                    | ">="
+                    | "??"
+                    | "|"
+                    | "|?"
+                    | "*"
+                    | "/"
+                    | "%"
+                    | "^"
+            ) | TokenKind::Keyword(Keyword::In)
+        )
     }
     fn skip_limited_block(&mut self) {
         if !self.is_punct("{") {
@@ -4099,7 +4136,12 @@ impl Parser {
     }
 
     fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
-        let mut lhs = self.prefix(mode)?;
+        let lhs = self.prefix(mode)?;
+        Some(self.pratt_from(lhs, min, mode))
+    }
+
+    /// Applies postfix and infix operators to an already parsed left operand.
+    fn pratt_from(&mut self, mut lhs: Expr, min: u8, mode: NominalBraceMode) -> Expr {
         loop {
             let nominal_braces = match mode {
                 NominalBraceMode::Ordinary => true,
@@ -4132,7 +4174,7 @@ impl Parser {
                     self.error_here("ORNA-PARSE-001", "expected `]` after index")
                 }
                 if !self.within_depth(expr_depth(&lhs).max(expr_depth(&index)) + 1) {
-                    return Some(lhs);
+                    return lhs;
                 }
                 lhs = Expr::Index {
                     base: Box::new(lhs),
@@ -4150,7 +4192,7 @@ impl Parser {
                             .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
                     ),
                 ) {
-                    return Some(lhs);
+                    return lhs;
                 }
                 lhs = Expr::Call {
                     span: SourceSpan::new(start, self.previous().span.end),
@@ -4166,7 +4208,7 @@ impl Parser {
                 if self.contextual() {
                     self.bump();
                     if !self.within_depth(expr_depth(&lhs) + 1) {
-                        return Some(lhs);
+                        return lhs;
                     }
                     lhs = Expr::Field {
                         base: Box::new(lhs),
@@ -4238,7 +4280,7 @@ impl Parser {
                 };
                 if !self.within_depth(expr_depth(&lhs).max(rhs.as_ref().map_or(0, expr_depth)) + 1)
                 {
-                    return Some(lhs);
+                    return lhs;
                 }
                 let start = lhs.span().start;
                 let end = rhs
@@ -4277,7 +4319,7 @@ impl Parser {
                 ));
             }
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
-                return Some(lhs);
+                return lhs;
             }
             let span = lhs.span().join(rhs.span());
             lhs = Expr::Binary {
@@ -4287,7 +4329,7 @@ impl Parser {
                 span,
             }
         }
-        Some(lhs)
+        lhs
     }
     fn prefix(&mut self, mode: NominalBraceMode) -> Option<Expr> {
         let t = self.current().clone();
