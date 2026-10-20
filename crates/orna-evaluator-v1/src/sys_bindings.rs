@@ -1,9 +1,6 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
@@ -1017,13 +1014,11 @@ impl SysHostBindingRegistry {
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let annotation = capture_annotation(path);
-        let blob = Blob::from_bytes_with_annotation(
-            source.into_captured_bytes(),
-            annotation.media_type(),
-            annotation.suffix(),
-        )
-        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        // Capture is one of the old constructors: it supplies the
+        // octet-stream/null annotation whatever the file is called, and an
+        // importer declares the media type afterwards with `sys.blob.annotate`
+        // (ORNA-MIME-001).
+        let blob = Blob::from_bytes(source.into_captured_bytes());
         let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
             .map(Some)
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
@@ -1032,8 +1027,8 @@ impl SysHostBindingRegistry {
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
             .push(CapturedBlobForRow {
                 candidate,
-                media_type: annotation.media_type().to_owned(),
-                suffix: annotation.suffix().map(str::to_owned),
+                media_type: blob.media_type().to_owned(),
+                suffix: blob.suffix().map(str::to_owned),
             });
         Ok(value)
     }
@@ -1313,21 +1308,6 @@ fn capture_file_failure(
     }
 }
 
-/// The annotation a captured file takes from its name (ORNA-MIME-006).
-///
-/// Capture has no declaration and runs no detection, so only a uniquely
-/// mapped MIME-1 suffix selects a media type. An ambiguous suffix such as
-/// `mp4` (audio/mp4 and video/mp4), an unknown one, or none keeps the
-/// octet-stream/null fallback; importers declare anything else with
-/// `sys.blob.annotate`.
-fn capture_annotation(path: &str) -> orna_value_v1::MediaAnnotation {
-    Path::new(path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .and_then(|suffix| orna_value_v1::MimeRegistry::mime1().annotation_for_suffix(suffix))
-        .unwrap_or_default()
-}
-
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
 }
@@ -1413,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_file_selects_only_mime1_annotations() {
+    fn capture_file_declares_only_its_generated_failures() {
         let operation = system_host_operation_registry()
             .operation("sys.blob.capture_file")
             .expect("capture_file is present in the generated host ABI");
@@ -1431,40 +1411,6 @@ mod tests {
                 "sys.blob.capture.source_changed",
             ]
         );
-        let annotation = |media_type: &str, suffix: Option<&str>| {
-            orna_value_v1::MediaAnnotation::new(media_type, suffix)
-                .expect("canonical MIME-1 annotation")
-        };
-        assert_eq!(
-            capture_annotation("records/data.json"),
-            annotation("application/json", None)
-        );
-        assert_eq!(
-            capture_annotation("records/photo.jpeg"),
-            annotation("image/jpeg", Some("jpeg"))
-        );
-        assert_eq!(
-            capture_annotation("records/PHOTO.JPG"),
-            annotation("image/jpeg", None)
-        );
-        assert_eq!(
-            capture_annotation("records/clip.m4v"),
-            annotation("video/mp4", Some("m4v"))
-        );
-        // MIME-1 lists `mp4` for both audio/mp4 and video/mp4, so it is not a
-        // uniquely mapped suffix and keeps the octet-stream/null fallback.
-        for path in [
-            "records/clip.mp4",
-            "records/unknown.custom",
-            "records/README",
-            "records/.profile",
-        ] {
-            assert_eq!(
-                capture_annotation(path),
-                orna_value_v1::MediaAnnotation::default(),
-                "{path}"
-            );
-        }
     }
 
     #[test]
