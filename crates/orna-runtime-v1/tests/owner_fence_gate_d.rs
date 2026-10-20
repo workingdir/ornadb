@@ -32,7 +32,8 @@ const LEASE_CHILD_TEST: &str = "owner_fence_child_holds_writer_lease";
 const RUNNING_CHILD_TEST: &str = "owner_fence_child_leaves_running_request";
 const SIGKILL: i32 = 9;
 
-/// The CLI owner ID for this worktree: `invocation_owner_id` is the repository ID.
+/// The CLI writer owner for a repository is its repository ID (`invocation_owner_id`).
+/// `identity()` uses this value as `repository_id`; `writer_owner_shared.rs` pins the CLI derivation.
 const SHARED_OWNER: [u8; 16] = [2; 16];
 /// A second, distinct writer that must never take a live owner's lease.
 const OTHER_OWNER: [u8; 16] = [0xd2; 16];
@@ -96,7 +97,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 fn identity() -> RuntimeIdentity {
     RuntimeIdentity {
         database_id: [1; 16],
-        repository_id: [2; 16],
+        repository_id: SHARED_OWNER,
     }
 }
 
