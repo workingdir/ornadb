@@ -870,6 +870,8 @@ struct DraftState {
     unresolved_handles: HashMap<u64, u64>,
     retained_scratch: HashSet<u64>,
     rejected_documents: HashSet<u64>,
+    /// Scratch files whose rename was refused; kept until a rename of them is accepted.
+    rejected_scratch: HashSet<u64>,
     quiescing: bool,
 }
 
@@ -879,6 +881,7 @@ impl DraftState {
             || !self.unresolved_handles.is_empty()
             || !self.retained_scratch.is_empty()
             || !self.rejected_documents.is_empty()
+            || !self.rejected_scratch.is_empty()
     }
 }
 
@@ -1476,6 +1479,7 @@ impl Filesystem for WorkspaceFilesystem {
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
+            draft_state.rejected_scratch.insert(source_inode);
             reply.error(Errno::EIO);
             return;
         }
@@ -1513,6 +1517,7 @@ impl Filesystem for WorkspaceFilesystem {
             .unresolved_handles
             .retain(|_, dirty_inode| *dirty_inode != source_inode);
         draft_state.retained_scratch.remove(&source_inode);
+        draft_state.rejected_scratch.remove(&source_inode);
         draft_state.rejected_documents.remove(&destination_inode);
         draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
@@ -1565,6 +1570,12 @@ impl Filesystem for WorkspaceFilesystem {
             .values()
             .any(|open| *open == inode)
         {
+            reply.error(Errno::EBUSY);
+            return;
+        }
+        if draft_state.rejected_scratch.contains(&inode) {
+            // A rejected replacement is the only copy of its draft until a rename of
+            // it is accepted; removing its name must not discard it.
             reply.error(Errno::EBUSY);
             return;
         }
@@ -1712,7 +1723,16 @@ impl Filesystem for WorkspaceFilesystem {
         let is_scratch = matches!(&open_file, Some(OpenFile::Temporary(_, _, _, _)));
         let had_unresolved_handle = draft_state.unresolved_handles.contains_key(&handle.0);
         let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
-        if !data.is_empty() {
+        // A scratch unlinked or renamed away while this handle stayed open is no
+        // longer in the namespace; writing through it is not draft state.
+        let is_tracked = !is_scratch
+            || self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .nodes
+                .contains_key(&inode.0);
+        if !data.is_empty() && is_tracked {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
@@ -1811,14 +1831,16 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.ok();
             }
             Err(DocumentCommitError::NoCandidate) => {
-                // Nothing was submitted, so there is nothing to accept or reject;
-                // POSIX requires fsync of an unmodified handle to succeed.
+                // The handle submitted nothing, so there is nothing to accept or
+                // reject and it cannot block unmount. POSIX requires fsync of an
+                // unmodified handle to succeed.
+                draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            Err(error) => {
-                // An unmodified handle submits no candidate, so there is nothing
-                // rejected to keep unresolved; only a failed submission blocks unmount.
-                if is_document && matches!(error, DocumentCommitError::Failed(_)) {
+            Err(DocumentCommitError::Failed(_)) => {
+                // A submission that did not commit (rejected, stale or failed I/O)
+                // stays unresolved until a later sync of the same file is accepted.
+                if is_document {
                     draft_state.rejected_documents.insert(inode.0);
                 }
                 reply.error(Errno::EIO);
@@ -1909,9 +1931,20 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EBADF);
                     return;
                 };
-                draft_state.unresolved_handles.insert(handle.0, inode.0);
-                if is_scratch {
-                    draft_state.retained_scratch.insert(inode.0);
+                // A scratch unlinked or renamed away while this handle stayed open is
+                // no longer in the namespace; truncating it is not draft state.
+                let is_tracked = !is_scratch
+                    || self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .nodes
+                        .contains_key(&inode.0);
+                if is_tracked {
+                    draft_state.unresolved_handles.insert(handle.0, inode.0);
+                    if is_scratch {
+                        draft_state.retained_scratch.insert(inode.0);
+                    }
                 }
                 let (result, candidate_bytes) = match open_file {
                     OpenFile::Document(save, draft) => {
