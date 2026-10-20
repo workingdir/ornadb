@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - Remounted writable workspace views capture one runtime activation and project
