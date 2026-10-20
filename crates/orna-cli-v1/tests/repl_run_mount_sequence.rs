@@ -1,11 +1,16 @@
-//! Regression for the walkthrough ordering: `orna run` succeeds, a REPL effect is
-//! accepted, `orna run` still succeeds on the same project, and a REPL capture runs.
-//! Each step must exit 0 with no error code, and the first run's committed effect
-//! must remain readable from the durable runtime state.
+//! Regression for the walkthrough ordering as far as it is fixed: `orna run seed` and
+//! `orna run exercise` exit 0 and the exercise's committed row is durable; a REPL effect
+//! (`insert`) exits 0; a REPL capture exits 0; and the first run's committed effect is
+//! still readable from the durable runtime state afterwards. Each step must exit 0 with
+//! no error code.
 //!
-//! Inherited gaps (origin/main reproduces both; ornadb-5il1.79, orna-1.1.0-gap): a run
-//! after a REPL effect exits 1 with E2200, and a writable-mount step does not expose
-//! run-committed rows. Those steps are not asserted here until the gap is fixed.
+//! Not asserted here (inherited on origin/main, orna-1.1.0-gap), each dropped step names
+//! its bead:
+//! - a second `orna run` after a REPL effect exits 1 with E2200: ornadb-5il1.95.
+//! - the writable-mount step does not expose run-committed rows: ornadb-5il1.96.
+//! - the REPL effect's commit is not visible to `committed_table_rows`, and a REPL update
+//!   on a run-committed row fails ORNA-EVAL-TABLE-MISSING-ROW: ornadb-5il1.79. The REPL
+//!   step therefore checks only its exit code.
 
 use std::{
     io::Write,
@@ -88,7 +93,7 @@ async fn committed_music_text(directory: &Path) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn run_repl_run_repl_capture_steps_succeed_and_first_run_commit_persists() {
+async fn run_then_repl_effect_and_capture_exit_zero_and_first_run_commit_persists() {
     let (directory, _repository, _) = format3::format3_repository_for_table(SOURCE, "music");
     let root = directory.path();
 
@@ -100,8 +105,8 @@ async fn run_repl_run_repl_capture_steps_succeed_and_first_run_commit_persists()
         "first run must commit its effect: {after_run:?}"
     );
 
-    // Only the REPL effect's exit code is asserted here. Commit visibility of a REPL effect is an
-    // inherited gap (ornadb-5il1.79, orna-1.1.0-gap).
+    // Only the REPL effect's exit code is asserted. Its commit visibility is inherited
+    // (ornadb-5il1.79); a run after this effect is inherited (ornadb-5il1.95).
     let repl_effect = run_repl(
         root,
         r#"main.music.insert({ id: "paris", title: "New title", artist: "REPL" })"#,
