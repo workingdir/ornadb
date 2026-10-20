@@ -3799,6 +3799,9 @@ struct Scope {
     nominal_conversions: BTreeMap<String, Vec<Type>>,
     /// Effects/failure summaries of each conversion body.
     nominal_conversion_effects: BTreeMap<String, Vec<(Type, EffectSummary)>>,
+    /// Function bodies being inferred, innermost last. Each frame checks or
+    /// joins the `return` statements that it owns.
+    return_frames: RefCell<Vec<ReturnFrame>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -3945,6 +3948,7 @@ fn resolve_imports_with_dependencies(
         protocol_implementations: BTreeMap::new(),
         nominal_conversions: BTreeMap::new(),
         nominal_conversion_effects: BTreeMap::new(),
+        return_frames: RefCell::new(Vec::new()),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -5518,11 +5522,8 @@ fn validate_nested_implementation_function(
         });
     if let Some(expected) = effective_result {
         let before = diagnostics.len();
-        let FunctionBodyInference {
-            inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
-        if !direct_return && diagnostics.len() == before {
+        let inferred = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
+        if diagnostics.len() == before {
             require_same(&expected, &inferred.ty, diagnostics);
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
@@ -6714,117 +6715,237 @@ fn annotation_type_name_is_declared(
         })
 }
 
-struct FunctionBodyInference {
-    inferred: Inferred,
-    direct_return: bool,
+/// One function body whose `return` statements are being typed. Ownership is
+/// lexical: a `return` inside a nested anonymous function exits that
+/// function, not the enclosing declaration (ORNA-CFLOW-008).
+#[derive(Clone)]
+struct ReturnFrame {
+    /// Addresses of the `return` statements that this body owns.
+    owned: Vec<usize>,
+    /// The declared result type, when the signature has one.
+    expected: Option<Type>,
+    /// Return-path types of an unannotated function, in source order.
+    returned: Vec<Type>,
 }
 
+/// Infers a declared function body (ORNA-FN-009). With a declared result,
+/// each owned `return` value is checked where it occurs and the body's own
+/// tail type is returned (`Bottom` when every path returns). Without one,
+/// the result joins the tail with every reachable return path.
 fn infer_function_body(
     body: &Expr,
     expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> FunctionBodyInference {
-    let Expr::Block { statements, .. } = body else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
+) -> Inferred {
+    let mut owned = Vec::new();
+    collect_owned_returns(body, &mut owned);
+    if owned.is_empty() {
+        return match expected {
+            Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+            None => infer(body, scope, local, diagnostics),
         };
+    }
+    scope.return_frames.borrow_mut().push(ReturnFrame {
+        owned,
+        expected: expected.cloned(),
+        returned: Vec::new(),
+    });
+    let inferred = match expected {
+        Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+        None => infer(body, scope, local, diagnostics),
     };
-    let Some(return_index) = statements
-        .iter()
-        .position(|statement| matches!(statement, Statement::Return { .. }))
-    else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
-        };
-    };
+    let frame = scope
+        .return_frames
+        .borrow_mut()
+        .pop()
+        .expect("function return frames are pushed and popped in pairs");
+    if expected.is_some() {
+        return inferred;
+    }
+    Inferred {
+        ty: join_return_paths(inferred.ty, frame.returned, diagnostics),
+        effects: inferred.effects,
+    }
+}
 
-    let mut locals = local.clone();
-    let mut effects = EffectSummary::default();
-    for statement in &statements[..return_index] {
-        match statement {
-            Statement::Let {
-                pattern,
-                annotation,
-                value,
-                ..
-            } => {
-                let inferred = if let Some(annotation) = annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                    let expected = resolved_type_of(annotation, scope);
-                    let inferred = infer_contextual(value, &expected, scope, &locals, diagnostics);
-                    require_same(&expected, &inferred.ty, diagnostics);
-                    inferred
-                } else {
-                    infer(value, scope, &locals, diagnostics)
-                };
-                effects.join(&inferred.effects);
-                bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
-            }
-            Statement::Assert { value, .. } => {
-                let inferred = infer(value, scope, &locals, diagnostics);
-                effects.join(&inferred.effects);
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-            }
-            Statement::Expression { value, .. } | Statement::Control { value, .. } => {
-                effects.join(&infer(value, scope, &locals, diagnostics).effects);
-            }
-            Statement::Assignment {
-                target,
-                operator,
-                value,
-                ..
-            } => effects.join(&infer_assignment(
-                target,
-                operator,
-                value,
-                scope,
-                &mut locals,
-                diagnostics,
-            )),
-            Statement::Break { value, .. } => {
-                if let Some(value) = value {
-                    effects.join(&infer(value, scope, &locals, diagnostics).effects);
+/// Records the `return` statements whose nearest enclosing function is the
+/// body being walked. Anonymous-function bodies own their own returns.
+fn collect_owned_returns(expression: &Expr, owned: &mut Vec<usize>) {
+    match expression {
+        Expr::Name { .. }
+        | Expr::Literal { .. }
+        | Expr::ReplBinding { .. }
+        | Expr::Lambda { .. } => {}
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    collect_owned_returns(value, owned);
                 }
             }
-            Statement::Continue { .. } => {}
-            Statement::Return { .. } => unreachable!("return is outside the function-body prefix"),
+        }
+        Expr::Unary { rhs: inner, .. }
+        | Expr::Group { inner, .. }
+        | Expr::Field { base: inner, .. } => collect_owned_returns(inner, owned),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Index {
+            base: lhs,
+            index: rhs,
+            ..
+        } => {
+            collect_owned_returns(lhs, owned);
+            collect_owned_returns(rhs, owned);
+        }
+        Expr::Range { lower, upper, .. } => {
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_owned_returns(bound, owned);
+            }
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            collect_owned_returns(callee, owned);
+            for argument in arguments {
+                collect_owned_returns(&argument.value, owned);
+            }
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                collect_owned_returns(element, owned);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_owned_returns(&field.value, owned);
+            }
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                match statement {
+                    Statement::Return { value, .. } => {
+                        owned.push(std::ptr::from_ref(statement).addr());
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Break { value, .. } => {
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Let { value, .. }
+                    | Statement::Assert { value, .. }
+                    | Statement::Assignment { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. } => collect_owned_returns(value, owned),
+                    Statement::Continue { .. } => {}
+                }
+            }
+            if let Some(tail) = tail {
+                collect_owned_returns(tail, owned);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            for part in [condition, body, alternate].into_iter().flatten() {
+                collect_owned_returns(part, owned);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_owned_returns(guard, owned);
+                }
+                collect_owned_returns(&arm.body, owned);
+            }
         }
     }
+}
 
-    let Statement::Return { value, .. } = &statements[return_index] else {
-        unreachable!("function-body return index must identify a return statement");
-    };
-    let returned = match (value, expected) {
-        (Some(value), Some(expected)) => {
-            infer_contextual(value, expected, scope, &locals, diagnostics)
+/// Types one `return` statement against the function body that owns it. A
+/// bare `return;` completes with `Unit` (ORNA-CFLOW-001). A statement owned by
+/// no frame, such as one inside an anonymous function, is only inferred.
+fn infer_return_statement(
+    statement: &Statement,
+    value: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let address = std::ptr::from_ref(statement).addr();
+    let (owner, expected) = {
+        let frames = scope.return_frames.borrow();
+        match frames
+            .iter()
+            .rposition(|frame| frame.owned.contains(&address))
+        {
+            Some(index) => (Some(index), frames[index].expected.clone()),
+            None => (None, None),
         }
-        (Some(value), None) => infer(value, scope, &locals, diagnostics),
+    };
+    let returned = match (value, &expected) {
+        (Some(value), Some(expected)) => {
+            infer_contextual(value, expected, scope, local, diagnostics)
+        }
+        (Some(value), None) => infer(value, scope, local, diagnostics),
         (None, _) => Inferred {
-            ty: Type::Null,
+            ty: Type::Unit,
             effects: EffectSummary::default(),
         },
     };
-    if let Some(expected) = expected {
-        require_same(expected, &returned.ty, diagnostics);
+    match (owner, &expected) {
+        (Some(_), Some(expected)) => require_same(expected, &returned.ty, diagnostics),
+        (Some(index), None) => scope.return_frames.borrow_mut()[index]
+            .returned
+            .push(returned.ty.clone()),
+        (None, _) => {}
     }
-    effects.join(&returned.effects);
-    FunctionBodyInference {
-        inferred: Inferred {
-            ty: returned.ty,
-            effects,
-        },
-        direct_return: true,
+    returned
+}
+
+/// Joins an unannotated function's tail with its return paths (ORNA-FN-009).
+/// `Bottom` contributes nothing and `null` joins an ordinary value as its
+/// optional; any other disagreement has no single static result type.
+fn join_return_paths(tail: Type, returned: Vec<Type>, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    let mut joined = tail;
+    for path in returned {
+        joined = match (joined, path) {
+            (Type::Error, _) | (_, Type::Error) => Type::Error,
+            (Type::Bottom, path) => path,
+            (joined, Type::Bottom) => joined,
+            (joined, path) if joined == path => joined,
+            (Type::Null, Type::Optional(inner)) | (Type::Optional(inner), Type::Null) => {
+                Type::Optional(inner)
+            }
+            (Type::Optional(inner), path) if types_match(&inner, &path) => Type::Optional(inner),
+            (joined, Type::Optional(inner)) if types_match(&inner, &joined) => {
+                Type::Optional(inner)
+            }
+            (Type::Null, path) if path != Type::Unit => Type::Optional(Box::new(path)),
+            (joined, Type::Null) if joined != Type::Unit => Type::Optional(Box::new(joined)),
+            (joined, path) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!(
+                        "return paths have incompatible static types: {} and {}",
+                        diagnostic_type_name(&joined),
+                        diagnostic_type_name(&path),
+                    ),
+                ));
+                Type::Error
+            }
+        };
     }
+    joined
 }
 
 fn check_function(
@@ -6897,22 +7018,15 @@ fn check_function(
         .as_ref()
         .map(|result| resolved_type_of(result, &function_scope))
     {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
+        let mut inferred =
+            infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        if !direct_return {
-            require_same(&expected, &inferred.ty, diagnostics);
-        }
+        require_same(&expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return: _,
-        } = infer_function_body(body, None, &function_scope, &local, diagnostics);
+        let mut inferred = infer_function_body(body, None, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
@@ -9585,13 +9699,13 @@ fn infer_node(
                     }
                     Statement::Continue { .. } => {}
                     Statement::Return { value, .. } => {
-                        let returned = value
-                            .as_ref()
-                            .map(|value| infer(value, scope, &locals, diagnostics))
-                            .unwrap_or(Inferred {
-                                ty: Type::Null,
-                                effects: EffectSummary::default(),
-                            });
+                        let returned = infer_return_statement(
+                            statement,
+                            value.as_ref(),
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
                         effects.join(&returned.effects);
                         final_control = Some(Inferred {
                             ty: Type::Bottom,
