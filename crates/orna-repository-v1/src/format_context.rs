@@ -4272,19 +4272,19 @@ mod graph_bridge_tests {
                 .expect("a miss is an absent row"),
             None
         );
-        assert_eq!(scope.objects_read_for_test() - before_miss, path_objects);
+        let miss_objects = scope.objects_read_for_test() - before_miss;
+        assert_eq!(miss_objects, path_objects);
 
         let before_malformed = scope.objects_read_for_test();
         assert!(matches!(
             graph.lookup_row(&TypedKey::UInt(50), &scope),
             Err(crate::native_graph::GraphError::InvalidCount(_))
         ));
-        assert_eq!(
-            scope.objects_read_for_test() - before_malformed,
-            path_objects
-        );
+        let malformed_objects = scope.objects_read_for_test() - before_malformed;
+        assert_eq!(malformed_objects, path_objects);
         println!(
-            "git-backed ORP point lookup object reads: {path_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
+            "git-backed ORP point lookup object reads: miss={miss_objects} \
+             malformed={malformed_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
     }
 
