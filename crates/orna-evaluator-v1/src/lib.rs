@@ -86,9 +86,9 @@ const DEFAULT_ITEMS: usize = 2_048;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
 /// Native stack headroom kept before evaluation requests a fresh stack segment.
-const EVALUATOR_STACK_RED_ZONE: usize = 1024 * 1024;
+const EVALUATOR_STACK_RED_ZONE: usize = 128 * 1024;
 /// Size of each fresh stack segment used by deep expression evaluation.
-const EVALUATOR_STACK_SEGMENT: usize = 1024 * 1024;
+const EVALUATOR_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
 fn unicode_16_white_space(value: char) -> bool {
     matches!(
