@@ -16,20 +16,43 @@ use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
     Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    analyze_with_catalogue,
+    analyze_with_catalogue, unresolved_member, unresolved_name,
 };
-use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
+use orna_syntax_v1::{
+    Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, UseTail, Visibility, lex,
+    parse_module, parse_repl,
+};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    module_function_alias_key, parse_admitted_repl,
+    module_function_alias_key,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
 
 /// Redacted failure from the admitted REPL boundary.
+///
+/// [`Self::diagnostic`] never contains submitted source. [`Self::detail`]
+/// carries parser or semantic specifics for the local operator and may quote
+/// the submitted input, so it must not cross a protocol boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplError {
     diagnostic: Box<FoundationDiagnostic>,
+    detail: Option<Box<ReplDetail>>,
+}
+
+/// Explanation of a rejected REPL input, located in its source text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplDetail {
+    /// Parser or semantic code, for example `ORNA-PARSE-001`.
+    pub code: String,
+    /// What the user did wrong, naming the offending identifier when known.
+    pub message: String,
+    /// Byte range of the offending text in the submitted source, when located.
+    pub span: Option<std::ops::Range<usize>>,
+    /// Supporting facts about the failure.
+    pub notes: Vec<String>,
+    /// Concrete remedies the user can apply.
+    pub help: Vec<String>,
 }
 
 impl ReplError {
@@ -55,6 +78,7 @@ impl ReplError {
         .redacted();
         Self {
             diagnostic: Box::new(diagnostic),
+            detail: None,
         }
     }
 
@@ -69,6 +93,12 @@ impl ReplError {
     /// boundary; this value never contains the submitted source.
     pub fn diagnostic(&self) -> &FoundationDiagnostic {
         self.diagnostic.as_ref()
+    }
+
+    /// Returns the located explanation of a parse or static-name failure, when
+    /// one is available. Runtime and host failures carry none.
+    pub fn detail(&self) -> Option<&ReplDetail> {
+        self.detail.as_deref()
     }
 
     fn status_value(&self) -> CanonicalValue {
@@ -359,7 +389,7 @@ impl AdmittedReplSession {
             Ok(input) => input,
             Err(error) => return Err(self.publish_failure(error)),
         };
-        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+        let admission = match self.stage_input(&input, source) {
             Ok(admission) => admission,
             Err(error) => return Err(self.publish_failure(error)),
         };
@@ -396,7 +426,7 @@ impl AdmittedReplSession {
             Ok(input) => input,
             Err(error) => return Err(self.publish_failure(error)),
         };
-        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+        let admission = match self.stage_input(&input, source) {
             Ok(admission) => admission,
             Err(error) => return Err(self.publish_failure(error)),
         };
@@ -429,7 +459,7 @@ impl AdmittedReplSession {
     /// committed activation.
     pub fn stage_activation(&self, source: &str) -> Result<StagedReplActivation, ReplError> {
         let input = self.parse(source)?;
-        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        let admission = self.stage_input(&input, source)?;
         if admission.effects.effects.is_empty() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
@@ -474,7 +504,8 @@ impl AdmittedReplSession {
     ) -> Result<Option<CanonicalValue>, ReplError> {
         cancellation.check().map_err(ReplError::runtime)?;
         let mut candidate = self.clone();
-        let admission = candidate.semantic.stage(input).map_err(semantic_error)?;
+        // This admitted-input path has no source text, so diagnostics carry no spans.
+        let admission = candidate.stage_input(input, "")?;
         if !admission.effects.effects.is_empty() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
@@ -502,7 +533,7 @@ impl AdmittedReplSession {
         if !matches!(input, ReplInput::Expression(_)) {
             return Err(ReplError::fixed("ORNA-EVAL-UNSUPPORTED"));
         }
-        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        let admission = self.stage_input(&input, source)?;
         if !admission.effects.effects.is_empty() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
@@ -514,7 +545,20 @@ impl AdmittedReplSession {
     }
 
     fn parse(&self, source: &str) -> Result<ReplInput, ReplError> {
-        parse_admitted_repl(source, self.limits).map_err(ReplError::runtime)
+        self.limits
+            .check_source(source)
+            .map_err(ReplError::runtime)?;
+        let parsed = parse_repl(source);
+        if parsed.is_ok() {
+            return Ok(parsed.value);
+        }
+        Err(parse_error(&parsed.diagnostics))
+    }
+
+    fn stage_input(&self, input: &ReplInput, source: &str) -> Result<ReplAdmission, ReplError> {
+        self.semantic
+            .stage(input)
+            .map_err(|diagnostics| stage_error(&self.semantic, diagnostics, source))
     }
 
     fn publish_failure(&mut self, error: ReplError) -> ReplError {
@@ -842,9 +886,105 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
     )
 }
 
+fn parse_error(diagnostics: &[SyntaxDiagnostic]) -> ReplError {
+    let mut error = ReplError::redacted("ORNA-EVAL-PARSE");
+    if let Some(diagnostic) = diagnostics.first() {
+        error.detail = Some(Box::new(ReplDetail {
+            code: diagnostic.code.to_owned(),
+            message: diagnostic.message.clone(),
+            span: Some(diagnostic.span.start..diagnostic.span.end),
+            notes: diagnostic.notes.clone(),
+            help: diagnostic.help.clone(),
+        }));
+    }
+    error
+}
+
+fn stage_error(
+    context: &ReplContext,
+    diagnostics: Vec<orna_foundation_v1::Diagnostic>,
+    source: &str,
+) -> ReplError {
+    let Some(first) = diagnostics.first() else {
+        return ReplError::fixed("ORNA-REPL-SEMANTIC");
+    };
+    let code = first.code();
+    let detail = match (unresolved_name(first), unresolved_member(first)) {
+        (Some(name), _) => unresolved_detail(context, code, name, source),
+        (None, Some((module, member))) => unresolved_member_detail(code, module, member, source),
+        (None, None) => ReplDetail {
+            code: code.to_owned(),
+            message: first.message().to_owned(),
+            span: None,
+            notes: first
+                .notes()
+                .iter()
+                .map(|note| note.as_str().to_owned())
+                .collect(),
+            help: Vec::new(),
+        },
+    };
+    let mut error = ReplError::redacted(code);
+    error.detail = Some(Box::new(detail));
+    error
+}
+
+fn unresolved_detail(context: &ReplContext, code: &str, name: &str, source: &str) -> ReplDetail {
+    let hints = context.name_hints(name);
+    let mut help: Vec<String> = hints
+        .similar
+        .iter()
+        .map(|candidate| format!("did you mean `{candidate}`?"))
+        .collect();
+    help.extend(
+        hints
+            .modules
+            .iter()
+            .map(|module| format!("add `use {module}.{name}` to bring `{name}` into scope")),
+    );
+    help.push(format!(
+        "declare `{name}` before using it, for example `let {name} = <value>`"
+    ));
+    ReplDetail {
+        code: code.to_owned(),
+        message: format!("name `{name}` cannot be resolved"),
+        span: locate_identifier(source, name, false),
+        notes: vec![format!(
+            "`{name}` is not declared in this session and is not imported"
+        )],
+        help,
+    }
+}
+
+fn unresolved_member_detail(code: &str, module: &str, member: &str, source: &str) -> ReplDetail {
+    ReplDetail {
+        code: code.to_owned(),
+        message: format!("`{member}` is not a member of module `{module}`"),
+        span: locate_identifier(source, member, true),
+        notes: Vec::new(),
+        help: vec![
+            format!("check the spelling of `{member}` against the exports of `{module}`"),
+            format!("if `{member}` is private in `{module}`, mark it `pub` to use it here"),
+        ],
+    }
+}
+
+/// Locates the first identifier `name` in `source` as a byte span. With
+/// `qualified`, only an occurrence directly after `.` (a member access) counts.
+fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::ops::Range<usize>> {
+    lex(source).ok()?.into_iter().find_map(|token| match &token.kind {
+        TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
+            let start = token.span.start;
+            (!qualified || source[..start].trim_end().ends_with('.')).then(|| start..token.span.end)
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_admitted_repl;
     use orna_project_v1::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
     use orna_repository_v1::Repository;
     use orna_semantic_v1::StandardDependencyProfile;

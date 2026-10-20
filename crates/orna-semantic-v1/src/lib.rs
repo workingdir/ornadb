@@ -40,7 +40,7 @@ pub use semantic_payload::{
     analyze_semantic_payloads,
 };
 
-pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
+pub use repl::{NameHints, ReplAdmission, ReplCommitError, ReplContext};
 
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
@@ -48,6 +48,29 @@ pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
 pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
 pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";
+/// Note prefix carrying the identifier of an `ORNA-S012-UNRESOLVED` diagnostic.
+pub const UNRESOLVED_NAME_NOTE: &str = "unresolved name: ";
+
+/// Returns the unresolved identifier recorded on an unresolved-name diagnostic.
+pub fn unresolved_name(diagnostic: &Diagnostic) -> Option<&str> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_NAME_NOTE))
+}
+
+/// Note prefix carrying `module.member` for an unresolved module member.
+pub const UNRESOLVED_MEMBER_NOTE: &str = "unresolved member: ";
+
+/// Returns the `(module, member)` pair recorded on an unresolved module member diagnostic.
+pub fn unresolved_member(diagnostic: &Diagnostic) -> Option<(&str, &str)> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_MEMBER_NOTE))
+        .and_then(|path| path.rsplit_once('.'))
+}
+
 pub const DIAG_DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
@@ -8388,7 +8411,7 @@ fn infer_node(
                         effects: EffectSummary::default(),
                     },
                     None => {
-                        diagnostics.push(diag(
+                        let mut diagnostic = diag(
                             if matches!(text.as_str(), "Ok" | "Err") {
                                 DIAG_LEGACY_RESULT
                             } else {
@@ -8399,7 +8422,14 @@ fn infer_node(
                             } else {
                                 "name cannot be resolved"
                             },
-                        ));
+                        );
+                        if !matches!(text.as_str(), "Ok" | "Err") {
+                            diagnostic = diagnostic.with_note(
+                                SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
+                                    .expect("identifier text is safe"),
+                            );
+                        }
+                        diagnostics.push(diagnostic);
                         Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -16545,7 +16575,16 @@ fn resolve_qualified_module_member(
             effects: symbol.effects.clone(),
         },
         None => {
-            diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
+            diagnostics.push(
+                diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
+                    SafeText::new(format!(
+                        "{UNRESOLVED_MEMBER_NOTE}{}.{}",
+                        namespace.display(),
+                        path[path.len() - 1]
+                    ))
+                    .expect("identifier text is safe"),
+                ),
+            );
             Inferred {
                 ty: Type::Error,
                 effects: EffectSummary::default(),
