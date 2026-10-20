@@ -42,11 +42,12 @@ fn session() -> AdmittedReplSession {
 #[test]
 fn stats_population_spread_of_one_value_is_zero_and_empty_input_is_null() {
     let mut session = session();
+    assert_eq!(session.submit("let empty: [Int] = [];"), Ok(None));
     for (source, expected) in [
         ("stats.variance([5])", optional_int(0)),
         ("stats.standard_deviation([7])", optional_int(0)),
-        ("stats.variance([])", optional_none()),
-        ("stats.standard_deviation([])", optional_none()),
+        ("stats.variance(empty)", optional_none()),
+        ("stats.standard_deviation(empty)", optional_none()),
     ] {
         assert_eq!(session.submit(source), Ok(Some(expected)), "{source}");
     }
