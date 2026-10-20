@@ -184,3 +184,164 @@ fn effectful_function_calls_are_not_collapsed() {
     assert_eq!(stats.stores, 0);
     assert_eq!(effects.calls.len(), 2);
 }
+
+/// Counts the clock and identity intrinsics that reach the effect boundary.
+/// Each read returns a fresh integer, so a reused result would be observable.
+#[derive(Default)]
+struct IntrinsicEffects {
+    reads: i64,
+}
+
+impl EffectHandler for IntrinsicEffects {
+    fn handle(
+        &mut self,
+        callee: &Expr,
+        _arguments: &[Value],
+    ) -> Result<Option<Value>, EvaluationError> {
+        let Expr::Name { text, .. } = callee else {
+            return Ok(None);
+        };
+        if text != "now" && text != "uuid7" {
+            return Ok(None);
+        }
+        self.reads += 1;
+        Ok(Some(Value::int(self.reads.into())))
+    }
+}
+
+/// ORNA-CALL-002: `now()` is an external read, so a pure-looking call that
+/// performs it must not be stored and reused by an equal second call.
+#[test]
+fn now_boundary_prevents_reuse_of_the_enclosing_call() {
+    let functions = functions_from_source(
+        "fn pick(x: Int) = x + now();\nfn entry() = pick(1) + pick(1);",
+    );
+    let mut effects = IntrinsicEffects::default();
+
+    let (value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    // Two reads, 1 + 1 and 1 + 2: a reused second call would yield 4.
+    assert_eq!(value, Value::int(5.into()));
+    assert_eq!(effects.reads, 2);
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
+
+/// ORNA-CALL-002: `uuid7()` is an external identity source with the same
+/// boundary as `now()`.
+#[test]
+fn uuid7_boundary_prevents_reuse_of_the_enclosing_call() {
+    let functions = functions_from_source(
+        "fn pick(x: Int) = x + uuid7();\nfn entry() = pick(1) + pick(1);",
+    );
+    let mut effects = IntrinsicEffects::default();
+
+    let (value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    assert_eq!(value, Value::int(5.into()));
+    assert_eq!(effects.reads, 2);
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
+
+/// ORNA-CALL-002: a call whose body forks a concurrent child (`race`) crosses
+/// the fork boundary; the guard must stop the parent from reusing its result.
+#[test]
+fn race_fork_does_not_collapse_later_equal_calls() {
+    let functions = functions_from_source(
+        "fn pick(x: Int) = std.concurrent.race([() => x, () => x + 1]);\nfn entry() = [pick(1), pick(1)];",
+    );
+    let mut effects = NoteEffects::default();
+
+    let (_value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
+
+/// ORNA-CALL-002: `parallel` is a fork boundary like `race`.
+#[test]
+fn parallel_fork_does_not_collapse_later_equal_calls() {
+    let functions = functions_from_source(
+        "fn pick(x: Int) = std.concurrent.parallel([() => x, () => x + 1]);\nfn entry() = [pick(1), pick(1)];",
+    );
+    let mut effects = NoteEffects::default();
+
+    let (_value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
+
+/// ORNA-CALL-002: `timeout` runs its body as a fork child under a deadline and
+/// is a fork boundary like `race`.
+#[test]
+fn timeout_fork_does_not_collapse_later_equal_calls() {
+    let functions = functions_from_source(
+        "fn pick(x: Int) = std.concurrent.timeout(() => x, 1.s);\nfn entry() = [pick(1), pick(1)];",
+    );
+    let mut effects = NoteEffects::default();
+
+    let (_value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
+
+/// Closure arguments are never admitted to the memo: a closure carries live
+/// evaluation state, so equal-looking calls with closures must both run.
+#[test]
+fn closure_arguments_are_not_reused() {
+    let functions = functions_from_source(
+        "fn apply(f) = f(1);\nfn entry() = apply(y => y + 1) + apply(y => y + 1);",
+    );
+    let mut effects = NoteEffects::default();
+
+    let (value, stats) = invoke_named_with_effects_and_reuse_report(
+        "entry",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap();
+
+    assert_eq!(value, Value::int(4.into()));
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.stores, 0);
+}
