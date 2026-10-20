@@ -1,5 +1,5 @@
 {
-  "max_uncited": 521,
+  "max_uncited": 515,
   "cited_ids": [
     "ORNA-ADMIN-002",
     "ORNA-APP-013",
@@ -63,8 +63,12 @@
     "ORNA-CONSUMER-005",
     "ORNA-CONSUMER-008",
     "ORNA-CONVERT-001",
+    "ORNA-CONVERT-002",
     "ORNA-CONVERT-003",
+    "ORNA-CONVERT-005",
     "ORNA-CONVERT-006",
+    "ORNA-CONVERT-007",
+    "ORNA-CONVERT-009",
     "ORNA-CP-002",
     "ORNA-CP-003",
     "ORNA-CP-004",
@@ -151,6 +155,8 @@
     "ORNA-HIST-002",
     "ORNA-HIST-004",
     "ORNA-HOT-001",
+    "ORNA-IMPL-002",
+    "ORNA-IMPL-004",
     "ORNA-IMPL-005",
     "ORNA-IMPORT-001",
     "ORNA-IMPORT-002",
