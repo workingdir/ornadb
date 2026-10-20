@@ -1444,6 +1444,7 @@ pub fn planner_metadata(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation: None,
     };
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -1576,6 +1577,7 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
         effects,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation,
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
@@ -1683,6 +1685,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         effects: Some(effects),
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation,
     };
     context.items(functions.len())?;
@@ -1820,6 +1823,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation: None,
     };
     let result = (|| {
@@ -1861,6 +1865,7 @@ pub fn evaluate_function(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation: None,
     };
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
@@ -1908,6 +1913,7 @@ pub fn invoke_named_with_nominals(
         effects: None,
         namespace: function_namespace(name),
         transfer: None,
+        materializations: Vec::new(),
         cancellation: None,
     };
     context.items(functions.len())?;
@@ -1953,6 +1959,7 @@ pub fn invoke_named_with_effects_and_budget(
         effects: Some(effects),
         namespace: function_namespace(name),
         transfer: None,
+        materializations: Vec::new(),
         cancellation: None,
     };
     let result = (|| {
@@ -2032,6 +2039,7 @@ pub fn invoke_named_with_context_effects(
             effects: Some(&mut profiled_effects),
             namespace: function_namespace(name),
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         };
         let result = (|| {
@@ -3606,6 +3614,17 @@ impl Scope {
     }
 }
 
+/// One relation buffering decision made during this activation. Entries are
+/// append-only so `sys.Materialization` pages can use an index cursor.
+struct MaterializationRecord {
+    object: [u8; 32],
+    read_scope: u64,
+    digest: [u8; 32],
+    rows: usize,
+    bytes: Option<usize>,
+    valid: bool,
+}
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -3618,6 +3637,7 @@ struct Context<'functions, 'effects> {
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
     transfer: Option<Transfer>,
+    materializations: Vec<MaterializationRecord>,
     cancellation: Option<&'functions CancellationToken>,
 }
 
@@ -3699,6 +3719,7 @@ fn invoke_task_callback(
             .map(|handler| handler as &mut dyn EffectHandler),
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
         cancellation: Some(&cancellation),
     };
     context.invoke_callable(&callback, Vec::new(), depth)
@@ -6165,6 +6186,7 @@ impl Context<'_, '_> {
             context.items(values.len())?;
             Ok(true)
         })?;
+        self.record_materialization(plan, &values);
         Ok(values)
     }
 
@@ -6536,6 +6558,7 @@ impl Context<'_, '_> {
             context.items(values.len())?;
             Ok(true)
         })?;
+        self.record_materialization(&prefix, &values);
         let sorted = self.collection("sort_by", vec![Value::List(values), key.clone()], depth)?;
         let Value::List(sorted) = sorted else {
             unreachable!("sort_by returns a list")
@@ -6675,6 +6698,9 @@ impl Context<'_, '_> {
         page_limit: usize,
         depth: usize,
     ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
+        if source == SYS_MATERIALIZATION_SOURCE {
+            return self.materialization_page(after, page_limit);
+        }
         enum SourcePage {
             Canonical(RelationPage),
             Contextual(ContextValueRelationPage),
@@ -6762,6 +6788,132 @@ impl Context<'_, '_> {
         Ok((rows, next))
     }
 
+    /// Buffers a materialization decision for `sys.Materialization`. Only the
+    /// canonical digest, count, and byte size are retained; rows are not copied.
+    fn record_materialization(&mut self, plan: &RelationPlan, values: &[Value]) {
+        if plan.source == SYS_MATERIALIZATION_SOURCE {
+            return;
+        }
+        let read_scope = plan.source_identity.0.to_be_bytes();
+        let object = sha256_parts(
+            "orna.materialization.object.v1",
+            &[plan.source.as_bytes(), &read_scope[..]],
+        );
+        let mut digest = Sha256::new();
+        digest.update(b"orna.materialization.digest.v1\0");
+        let mut bytes = 0usize;
+        let mut valid = true;
+        for value in values {
+            let encoded = value
+                .clone()
+                .canonical()
+                .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")));
+            match encoded {
+                Ok(encoded) => {
+                    digest.update((encoded.len() as u64).to_be_bytes());
+                    digest.update(&encoded);
+                    bytes = bytes.saturating_add(encoded.len());
+                }
+                Err(_) => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        self.materializations.push(MaterializationRecord {
+            object,
+            read_scope: plan.source_identity.0,
+            digest: digest.finalize().into(),
+            rows: values.len(),
+            bytes: valid.then_some(bytes),
+            valid,
+        });
+    }
+
+    /// Serves one page of the activation's materialization log. The cursor is
+    /// the 8-byte big-endian index of the next entry.
+    fn materialization_page(
+        &mut self,
+        after: Option<&[u8]>,
+        page_limit: usize,
+    ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
+        let start = match after {
+            None => 0,
+            Some(cursor) => {
+                let bytes: [u8; 8] = cursor.try_into().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| error("ORNA-EVAL-VALUE"))?
+            }
+        };
+        let total = self.materializations.len();
+        if start > total {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let end = start.saturating_add(page_limit).min(total);
+        if end == start {
+            return Ok((Vec::new(), None));
+        }
+        if end - start > self.limits.max_collection_items {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let callee = Expr::Name {
+            text: "now".to_owned(),
+            span: orna_syntax_v1::SyntaxSpan::new(0, 0),
+        };
+        let created = self
+            .activation_now(&callee)?
+            .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
+        let mut rows = Vec::with_capacity(end - start);
+        for ordinal in start..end {
+            self.step()?;
+            rows.push(materialization_row(
+                &self.materializations[ordinal],
+                ordinal,
+                &created,
+            ));
+        }
+        let next = (end < total).then(|| (end as u64).to_be_bytes().to_vec());
+        Ok((rows, next))
+    }
+
+    /// Reads the activation clock through the effect boundary. `None` means no
+    /// handler resolved `now`; the evaluator never supplies a clock itself.
+    fn activation_now(&mut self, callee: &Expr) -> Result<Option<Value>, EvaluationError> {
+        if self.effects.is_none() {
+            return Ok(None);
+        }
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        if self.has_ovb2_effects() {
+            let result = self
+                .ovb2_effects()
+                .expect("checked OVB-2 effect handler")
+                .handle_with_budget(callee, &[], &mut budget);
+            let debited = remaining - budget.remaining();
+            self.steps = self
+                .steps
+                .checked_add(debited)
+                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+            return match result? {
+                Some(value) => self.ovb2_effect_value(&value).map(Some),
+                None => Ok(None),
+            };
+        }
+        let result = self
+            .effects
+            .as_deref_mut()
+            .expect("checked effect handler")
+            .handle_with_budget(callee, &[], &mut budget);
+        let debited = remaining - budget.remaining();
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        match result? {
+            Some(value) => self.effect_value(&value).map(Some),
+            None => Ok(None),
+        }
+    }
+
     fn validate_relation_plan_sources(
         &mut self,
         plan: &RelationPlan,
@@ -6770,6 +6922,8 @@ impl Context<'_, '_> {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
         } else if plan.source_values.is_some() {
+            Ok(())
+        } else if plan.source == SYS_MATERIALIZATION_SOURCE {
             Ok(())
         } else {
             self.effects
@@ -7127,35 +7281,8 @@ impl Context<'_, '_> {
             if input.is_some() || !arguments.is_empty() {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
-            let remaining = self.limits.max_steps.saturating_sub(self.steps);
-            let mut budget = StepBudget::new(remaining);
-            if self.has_ovb2_effects() {
-                let result = self
-                    .ovb2_effects()
-                    .expect("checked OVB-2 effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.ovb2_effect_value(&value);
-                }
-            } else {
-                let result = self
-                    .effects
-                    .as_deref_mut()
-                    .expect("checked effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.effect_value(&value);
-                }
+            if let Some(value) = self.activation_now(callee)? {
+                return Ok(value);
             }
         }
         // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
@@ -14268,8 +14395,46 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
     match function_name(expression)?.as_str() {
         "sys.Storage" => Some("sys.Storage"),
         "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
+        "sys.Materialization" => Some("sys.Materialization"),
         _ => None,
     }
+}
+
+const SYS_MATERIALIZATION_SOURCE: &str = "sys.Materialization";
+
+fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(domain.as_bytes());
+    hash.update([0]);
+    for part in parts {
+        hash.update(part);
+    }
+    hash.finalize().into()
+}
+
+fn materialization_row(record: &MaterializationRecord, ordinal: usize, created: &Value) -> Value {
+    let ordinal = (ordinal as u64).to_be_bytes();
+    let reference = sha256_parts(
+        "orna.materialization.reference.v1",
+        &[&record.object[..], &ordinal[..]],
+    );
+    let snapshot = sha256_parts(
+        "orna.materialization.snapshot.v1",
+        &[&record.read_scope.to_be_bytes()[..]],
+    );
+    let count = |value: Option<usize>| {
+        Value::Option(value.map(|count| Box::new(Value::Int(BigInt::from(count)))))
+    };
+    Value::Record(BTreeMap::from([
+        ("reference".to_owned(), Value::Blob(reference.to_vec())),
+        ("object".to_owned(), Value::Blob(record.object.to_vec())),
+        ("snapshot".to_owned(), Value::Blob(snapshot.to_vec())),
+        ("digest".to_owned(), Value::Blob(record.digest.to_vec())),
+        ("rows".to_owned(), count(Some(record.rows))),
+        ("bytes".to_owned(), count(record.bytes)),
+        ("created".to_owned(), created.clone()),
+        ("valid".to_owned(), Value::Bool(record.valid)),
+    ]))
 }
 
 fn function_namespace(name: &str) -> Option<String> {
@@ -14849,6 +15014,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         }
     }
@@ -16323,6 +16489,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16396,6 +16563,7 @@ mod tests {
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16545,6 +16713,7 @@ mod tests {
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation,
         };
         let mut scope = Scope(
@@ -16689,6 +16858,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         };
         let mut scope = Scope(
@@ -16723,6 +16893,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: None,
         };
         let plan = RelationPlan::new("Note".into());
@@ -17188,6 +17359,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -17220,6 +17392,7 @@ mod tests {
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -17251,6 +17424,7 @@ mod tests {
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             cancellation: Some(&cancellation),
         };
         let mut callbacks = 0;
