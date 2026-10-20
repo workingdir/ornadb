@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - Remounted writable workspace views capture one runtime activation and project
   current row values only when table identity, exact key, and ordered stored
   field layout match. Rekeys without row-lineage metadata stay pinned; Blob
