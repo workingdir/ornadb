@@ -385,7 +385,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
         )
     })?;
 
-    serve_listener(listener.listener(), state).map_err(|_| {
+    serve_listener(listener.listener(), &Arc::new(state)).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "the serving listener stopped",
@@ -463,11 +463,10 @@ fn new_serve_state(
     })
 }
 
-fn serve_listener(listener: &TcpListener, state: ServeState) -> io::Result<()> {
-    let state = Arc::new(state);
+fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
     for accepted in listener.incoming() {
         let stream = accepted?;
-        let connection_state = Arc::clone(&state);
+        let connection_state = Arc::clone(state);
         std::thread::Builder::new()
             .name("orna-serve-connection".into())
             .spawn(move || {
@@ -666,13 +665,16 @@ impl WebSocketWorker<'_> {
 
     /// Serves frames until the peer closes, the transport retires this
     /// attachment, or the peer stays silent past the keepalive bound.
+    /// Silence is measured from the peer's last bytes or the end of the last
+    /// step served for it, whichever is later: time spent evaluating its own
+    /// requests, while nothing is read from it, is not silence.
     fn serve_frames(&self, initial: Vec<u8>) -> io::Result<()> {
         let keepalive = self.state.options.keepalive;
         let mut socket = WebSocketState::new(self.attachment);
         let mut stream = self.stream;
         let mut chunk = [0; WEBSOCKET_READ_CHUNK_BYTES];
         let mut input = initial;
-        let mut last_inbound = Instant::now();
+        let mut last_activity = Instant::now();
         let mut pinged = false;
         loop {
             if !input.is_empty() {
@@ -680,11 +682,12 @@ impl WebSocketWorker<'_> {
                 if !self.serve_input(&mut socket, &bytes)? {
                     return Ok(());
                 }
+                last_activity = Instant::now();
             }
             if self.cancelled.load(Ordering::Acquire) {
                 return Ok(());
             }
-            let silent = last_inbound.elapsed();
+            let silent = last_activity.elapsed();
             if silent >= keepalive.idle_timeout {
                 return Ok(());
             }
@@ -704,7 +707,7 @@ impl WebSocketWorker<'_> {
                 Ok(0) => return Ok(()),
                 Ok(read) => {
                     input.extend_from_slice(&chunk[..read]);
-                    last_inbound = Instant::now();
+                    last_activity = Instant::now();
                     pinged = false;
                 }
                 Err(error)
@@ -2837,6 +2840,45 @@ mod tests {
         assert_eq!(delete_session_once_released(address, &session), 204);
     }
 
+    /// ORNA-WIRE-005, A13-live-serving-01: the keepalive judges the peer, not
+    /// the host. An evaluation that outlasts the idle bound (here, waiting on
+    /// the application lock) delivers its result and leaves the socket
+    /// attached for the next request.
+    #[test]
+    fn evaluation_time_is_not_counted_as_peer_silence() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=busy"],
+        );
+        let keepalive = WebSocketKeepalive {
+            ping_after: StdDuration::from_millis(100),
+            idle_timeout: StdDuration::from_millis(300),
+            write_timeout: StdDuration::from_secs(5),
+        };
+        let (address, state) = start_shared_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                keepalive,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+
+        let busy = state.application.lock().expect("live application");
+        let waiting = std::thread::spawn(move || {
+            let result = eval_over_socket(&mut socket, &session, [51; 16]);
+            (socket, session, result)
+        });
+        std::thread::sleep(keepalive.idle_timeout * 3);
+        drop(busy);
+        let (mut socket, session, result) = waiting.join().expect("Eval client");
+        assert_serve_entry_result(&result);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [52; 16]));
+    }
+
     const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
     const TEST_IDENTITY: RuntimeIdentity = RuntimeIdentity {
         database_id: [31; 16],
@@ -2850,19 +2892,32 @@ mod tests {
         identity: RuntimeIdentity,
         options: ServeOptions,
     ) -> SocketAddr {
+        start_shared_live_server(root, identity, options).0
+    }
+
+    /// [`start_live_server`], also returning the state the listener shares
+    /// with its connection threads.
+    fn start_shared_live_server(
+        root: &Path,
+        identity: RuntimeIdentity,
+        options: ServeOptions,
+    ) -> (SocketAddr, Arc<ServeState>) {
         let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
         let address = listener.status().address;
-        let state = new_serve_state(
-            root.to_path_buf(),
-            identity,
-            address,
-            orna_semantic_v1::Catalogue::authoritative_core(),
-            None,
-            options,
-        )
-        .expect("serve host");
-        std::thread::spawn(move || serve_listener(listener.listener(), state));
-        address
+        let state = Arc::new(
+            new_serve_state(
+                root.to_path_buf(),
+                identity,
+                address,
+                orna_semantic_v1::Catalogue::authoritative_core(),
+                None,
+                options,
+            )
+            .expect("serve host"),
+        );
+        let shared = Arc::clone(&state);
+        std::thread::spawn(move || serve_listener(listener.listener(), &shared));
+        (address, state)
     }
 
     struct Reply {
@@ -3118,9 +3173,17 @@ mod tests {
             *sent = fingerprint;
         }
         send_frame(stream, 2, &envelope.encode(limits).expect("canonical Eval"));
-        let (opcode, payload) = read_frame(stream).expect("Eval result before the client timeout");
-        assert_eq!(opcode, 2, "the Eval result is one binary message");
-        Envelope::decode(&payload, limits).expect("canonical Eval result")
+        loop {
+            let (opcode, payload) =
+                read_frame(stream).expect("Eval result before the client timeout");
+            // A conforming client answers keepalive pings while it waits.
+            if opcode == 9 {
+                send_frame(stream, 10, &payload);
+                continue;
+            }
+            assert_eq!(opcode, 2, "the Eval result is one binary message");
+            return Envelope::decode(&payload, limits).expect("canonical Eval result");
+        }
     }
 
     fn assert_serve_entry_result(response: &Envelope) {
