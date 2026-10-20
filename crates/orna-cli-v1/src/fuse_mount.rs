@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -36,6 +38,338 @@ use orna_runtime_v1::{
 use orna_syntax_v1::{Expr, parse_row};
 use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
+const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
+const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
+const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
+
+#[derive(Clone, Debug)]
+struct TemporaryScratchIdentity {
+    logical_path: String,
+    relation_id: [u8; 16],
+    key: Vec<u8>,
+    name: String,
+    blob_field_name: Option<String>,
+}
+
+struct PersistedTemporaryScratch {
+    identity: TemporaryScratchIdentity,
+    baseline: Option<Vec<u8>>,
+    bytes: Vec<u8>,
+}
+
+struct VfsScratchStore {
+    directory: PathBuf,
+}
+
+impl VfsScratchStore {
+    fn open(runtime_root: &Path) -> Result<Self, String> {
+        let directory = runtime_root.join(VFS_SCRATCH_DIRECTORY);
+        let created = match fs::create_dir(&directory) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                return Err(format!(
+                    "temporary scratch directory could not be created: {error}"
+                ));
+            }
+        };
+        if created {
+            Self::sync_directory(runtime_root)?;
+        } else {
+            let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+                format!("temporary scratch directory could not be inspected: {error}")
+            })?;
+            if !metadata.file_type().is_dir() {
+                return Err("temporary scratch directory is not a real directory".into());
+            }
+        }
+        Self::sync_directory(&directory)?;
+        Ok(Self { directory })
+    }
+
+    fn persist(
+        &self,
+        identity: &TemporaryScratchIdentity,
+        baseline: Option<&[u8]>,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        Self::validate_identity(identity)?;
+        let mut staged = tempfile::Builder::new()
+            .prefix(VFS_SCRATCH_TEMP_PREFIX)
+            .tempfile_in(&self.directory)
+            .map_err(|error| format!("temporary scratch record could not be staged: {error}"))?;
+        staged
+            .write_all(VFS_SCRATCH_RECORD_MAGIC)
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+        Self::write_identity(staged.as_file_mut(), identity)?;
+        Self::write_optional(staged.as_file_mut(), baseline)?;
+        Self::write_bytes(staged.as_file_mut(), bytes)?;
+        staged.as_file().sync_all().map_err(|error| {
+            format!("temporary scratch record could not be synchronized: {error}")
+        })?;
+        staged
+            .persist(self.record_path(identity))
+            .map_err(|error| {
+                format!(
+                    "temporary scratch record could not be published: {}",
+                    error.error
+                )
+            })?;
+        Self::sync_directory(&self.directory)
+    }
+
+    fn load(&self) -> Result<Vec<PersistedTemporaryScratch>, String> {
+        let mut records = Vec::new();
+        let mut removed_staging = false;
+        for entry in fs::read_dir(&self.directory)
+            .map_err(|error| format!("temporary scratch records could not be listed: {error}"))?
+        {
+            let entry = entry.map_err(|error| {
+                format!("temporary scratch record could not be inspected: {error}")
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!("temporary scratch record type could not be read: {error}")
+            })?;
+            if !file_type.is_file() {
+                return Err("temporary scratch store contains a non-file entry".into());
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "temporary scratch record name is not UTF-8".to_owned())?;
+            if name.starts_with(VFS_SCRATCH_TEMP_PREFIX) {
+                fs::remove_file(entry.path()).map_err(|error| {
+                    format!("stale temporary scratch staging file could not be removed: {error}")
+                })?;
+                removed_staging = true;
+                continue;
+            }
+            if !name.ends_with(".scratch") {
+                return Err("temporary scratch store contains an unknown file".into());
+            }
+            let record = Self::read_record(&entry.path())?;
+            Self::validate_identity(&record.identity)?;
+            if Self::record_name(&record.identity) != name {
+                return Err("temporary scratch record identity does not match its filename".into());
+            }
+            records.push(record);
+        }
+        if removed_staging {
+            Self::sync_directory(&self.directory)?;
+        }
+        records.sort_by(|left, right| {
+            left.identity
+                .logical_path
+                .cmp(&right.identity.logical_path)
+                .then_with(|| left.identity.name.cmp(&right.identity.name))
+        });
+        Ok(records)
+    }
+
+    fn remove(&self, identity: &TemporaryScratchIdentity) -> Result<(), String> {
+        Self::validate_identity(identity)?;
+        match fs::remove_file(self.record_path(identity)) {
+            Ok(()) => Self::sync_directory(&self.directory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "temporary scratch record could not be removed: {error}"
+            )),
+        }
+    }
+
+    fn record_path(&self, identity: &TemporaryScratchIdentity) -> PathBuf {
+        self.directory.join(Self::record_name(identity))
+    }
+
+    fn record_name(identity: &TemporaryScratchIdentity) -> String {
+        let mut digest = Sha256::new();
+        Self::update_digest(&mut digest, identity.logical_path.as_bytes());
+        digest.update(identity.relation_id);
+        Self::update_digest(&mut digest, &identity.key);
+        Self::update_digest(&mut digest, identity.name.as_bytes());
+        match &identity.blob_field_name {
+            Some(name) => {
+                digest.update([1]);
+                Self::update_digest(&mut digest, name.as_bytes());
+            }
+            None => digest.update([0]),
+        }
+        let mut name = String::with_capacity(64 + ".scratch".len());
+        for byte in digest.finalize() {
+            let _ = write!(name, "{byte:02x}");
+        }
+        name.push_str(".scratch");
+        name
+    }
+
+    fn update_digest(digest: &mut Sha256, bytes: &[u8]) {
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+
+    fn validate_identity(identity: &TemporaryScratchIdentity) -> Result<(), String> {
+        if identity.logical_path.is_empty()
+            || Path::new(&identity.logical_path).is_absolute()
+            || identity.logical_path.contains('\0')
+            || identity
+                .logical_path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+        {
+            return Err("temporary scratch row path is invalid".into());
+        }
+        if identity.name.is_empty()
+            || identity.name == "."
+            || identity.name == ".."
+            || identity.name.contains('/')
+            || identity.name.contains('\0')
+        {
+            return Err("temporary scratch name is invalid".into());
+        }
+        if identity
+            .blob_field_name
+            .as_deref()
+            .is_some_and(|name| name.is_empty() || name.contains('\0'))
+        {
+            return Err("temporary scratch Blob field identity is invalid".into());
+        }
+        Ok(())
+    }
+
+    fn write_identity(file: &mut File, identity: &TemporaryScratchIdentity) -> Result<(), String> {
+        Self::write_bytes(file, identity.logical_path.as_bytes())?;
+        file.write_all(&identity.relation_id)
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+        Self::write_bytes(file, &identity.key)?;
+        Self::write_bytes(file, identity.name.as_bytes())?;
+        Self::write_optional(file, identity.blob_field_name.as_deref().map(str::as_bytes))
+    }
+
+    fn write_optional(file: &mut File, value: Option<&[u8]>) -> Result<(), String> {
+        match value {
+            Some(bytes) => {
+                file.write_all(&[1]).map_err(|error| {
+                    format!("temporary scratch record could not be written: {error}")
+                })?;
+                Self::write_bytes(file, bytes)
+            }
+            None => file
+                .write_all(&[0])
+                .map_err(|error| format!("temporary scratch record could not be written: {error}")),
+        }
+    }
+
+    fn write_bytes(file: &mut File, bytes: &[u8]) -> Result<(), String> {
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| "temporary scratch record field is too large".to_owned())?;
+        file.write_all(&length.to_le_bytes())
+            .and_then(|()| file.write_all(bytes))
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))
+    }
+
+    fn read_record(path: &Path) -> Result<PersistedTemporaryScratch, String> {
+        let mut file = File::open(path)
+            .map_err(|error| format!("temporary scratch record could not be opened: {error}"))?;
+        let mut magic = [0; 8];
+        file.read_exact(&mut magic)
+            .map_err(|error| format!("temporary scratch record header is incomplete: {error}"))?;
+        if &magic != VFS_SCRATCH_RECORD_MAGIC {
+            return Err("temporary scratch record has an unsupported format".into());
+        }
+        let identity = Self::read_identity(&mut file)?;
+        let baseline = Self::read_optional(&mut file)?;
+        let bytes = Self::read_bytes(&mut file)?;
+        let mut trailing = [0];
+        if file
+            .read(&mut trailing)
+            .map_err(|error| format!("temporary scratch record could not be checked: {error}"))?
+            != 0
+        {
+            return Err("temporary scratch record contains trailing data".into());
+        }
+        Ok(PersistedTemporaryScratch {
+            identity,
+            baseline,
+            bytes,
+        })
+    }
+
+    fn read_identity(file: &mut File) -> Result<TemporaryScratchIdentity, String> {
+        let logical_path = Self::read_string(file)?;
+        let mut relation_id = [0; 16];
+        file.read_exact(&mut relation_id)
+            .map_err(|error| format!("temporary scratch record identity is incomplete: {error}"))?;
+        let key = Self::read_bytes(file)?;
+        let name = Self::read_string(file)?;
+        let blob_field_name = Self::read_optional(file)?
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|error| {
+                format!("temporary scratch Blob field identity is invalid: {error}")
+            })?;
+        Ok(TemporaryScratchIdentity {
+            logical_path,
+            relation_id,
+            key,
+            name,
+            blob_field_name,
+        })
+    }
+
+    fn read_string(file: &mut File) -> Result<String, String> {
+        String::from_utf8(Self::read_bytes(file)?)
+            .map_err(|error| format!("temporary scratch record string is invalid: {error}"))
+    }
+
+    fn read_optional(file: &mut File) -> Result<Option<Vec<u8>>, String> {
+        let mut present = [0];
+        file.read_exact(&mut present)
+            .map_err(|error| format!("temporary scratch record field is incomplete: {error}"))?;
+        match present[0] {
+            0 => Ok(None),
+            1 => Self::read_bytes(file).map(Some),
+            _ => Err("temporary scratch record has an invalid field marker".into()),
+        }
+    }
+
+    fn read_bytes(file: &mut File) -> Result<Vec<u8>, String> {
+        let mut encoded_length = [0; 8];
+        file.read_exact(&mut encoded_length).map_err(|error| {
+            format!("temporary scratch record field length is incomplete: {error}")
+        })?;
+        let length = u64::from_le_bytes(encoded_length);
+        if length
+            > file
+                .metadata()
+                .map_err(|error| {
+                    format!("temporary scratch record size could not be read: {error}")
+                })?
+                .len()
+        {
+            return Err("temporary scratch record field exceeds its file size".into());
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            "temporary scratch record field is too large for this platform".to_owned()
+        })?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length).map_err(|error| {
+            format!("temporary scratch record field could not be allocated: {error}")
+        })?;
+        bytes.resize(length, 0);
+        file.read_exact(&mut bytes)
+            .map_err(|error| format!("temporary scratch record field is incomplete: {error}"))?;
+        Ok(bytes)
+    }
+
+    fn sync_directory(path: &Path) -> Result<(), String> {
+        File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!("temporary scratch directory could not be synchronized: {error}")
+            })
+    }
+}
+
 struct MountWriter {
     runtime: tokio::runtime::Runtime,
     state: RuntimeState,
@@ -44,6 +378,7 @@ struct MountWriter {
     runtime_commit: GitCommitRef,
     mount_snapshot: OnceLock<RuntimeTableActivationSnapshot>,
     cache: Arc<VfsRepositoryCache>,
+    scratch_store: VfsScratchStore,
     owner_id: [u8; 16],
     row_baselines: Option<MountRowBaselines>,
 }
@@ -72,6 +407,7 @@ impl MountWriter {
         let project = ProjectLoader::default()
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
+        let scratch_store = VfsScratchStore::open(repository.runtime_paths().root())?;
         Ok(Arc::new(Self {
             runtime,
             state,
@@ -80,6 +416,7 @@ impl MountWriter {
             runtime_commit,
             mount_snapshot: OnceLock::new(),
             cache: Arc::new(VfsRepositoryCache::new()),
+            scratch_store,
             owner_id,
             row_baselines,
         }))
@@ -570,6 +907,39 @@ impl RowSaveContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row);
     }
+    fn temporary_target(
+        &self,
+        blob_field: Option<&BlobField>,
+    ) -> Result<Arc<ManagedFile<RowMapSnapshot>>, String> {
+        if blob_field.is_none() {
+            return Ok(Arc::clone(&self.target));
+        }
+        let image = Arc::new(VfsFileSnapshot::new(
+            SnapshotPin::capture(Arc::clone(&self.source.rows)),
+            Arc::<[u8]>::from([]),
+        ));
+        self.writer
+            .runtime
+            .block_on(self.writer.cache.managed_file(image))
+            .map_err(|error| {
+                format!("mounted replacement scratch target could not be admitted: {error:?}")
+            })
+    }
+
+    fn fsync_temporary(
+        &self,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        identity: &TemporaryScratchIdentity,
+        baseline: Option<&[u8]>,
+    ) -> Result<(), String> {
+        let store = &self.writer.scratch_store;
+        self.writer
+            .runtime
+            .block_on(scratch.fsync_scratch_with(|_, bytes| async move {
+                store.persist(identity, baseline, bytes.as_ref())
+            }))
+            .map(|_| ())
+    }
 
     fn commit_document(
         self: &Arc<Self>,
@@ -704,12 +1074,6 @@ impl RowSaveContext {
             ))),
         }
     }
-    fn fsync_temporary(&self, scratch: &TemporarySave<RowMapSnapshot>) -> Result<(), String> {
-        self.writer
-            .runtime
-            .block_on(scratch.fsync_scratch_with(|_, _| async { Ok::<(), String>(()) }))
-            .map(|_| ())
-    }
 
     fn commit_temporary(
         self: &Arc<Self>,
@@ -833,67 +1197,133 @@ pub(super) fn edit_path(
     row_baselines: Option<MountRowBaselines>,
 ) -> Result<(), EditError> {
     let writer = MountWriter::open(repository, commit, row_baselines)?;
-    let filesystem = WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
+    let filesystem =
+        WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
     let relative = Path::new(path);
     if relative.is_absolute() {
         return Err("edit path must be relative to the projected row tree".into());
     }
     let mut inode = ROOT_INODE;
     {
-        let mut builder = filesystem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut builder = filesystem
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for component in relative.components() {
             let std::path::Component::Normal(name) = component else {
                 return Err("edit path contains an unsupported component".into());
             };
-            inode = builder.lookup_child(inode, name)?.ok_or_else(|| format!("edit path does not exist: {path}"))?;
+            inode = builder
+                .lookup_child(inode, name)?
+                .ok_or_else(|| format!("edit path does not exist: {path}"))?;
         }
     }
     let (save, initial_bytes, blob_edit) = {
-        let mut builder = filesystem.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let node = builder.nodes.get(&inode).ok_or_else(|| "edit target disappeared".to_owned())?;
+        let mut builder = filesystem
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let node = builder
+            .nodes
+            .get(&inode)
+            .ok_or_else(|| "edit target disappeared".to_owned())?;
         match &node.kind {
             NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
             NodeKind::Blob { graph, reference } => {
                 let parent = node.parent;
                 let graph = Arc::clone(graph);
                 let reference = reference.clone();
-                let document = builder.lookup_child(parent, OsStr::new("data.orna"))?
+                let document = builder
+                    .lookup_child(parent, OsStr::new("data.orna"))?
                     .ok_or_else(|| "Blob row has no data.orna document".to_owned())?;
-                let save = match &builder.nodes.get(&document).ok_or_else(|| "Blob row document disappeared".to_owned())?.kind {
+                let save = match &builder
+                    .nodes
+                    .get(&document)
+                    .ok_or_else(|| "Blob row document disappeared".to_owned())?
+                    .kind
+                {
                     NodeKind::Document { save, .. } => Arc::clone(save),
                     _ => return Err("Blob row document is not editable".into()),
                 };
-                let file_name = relative.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-                let field = save.blob_fields.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter().find(|field| field.file_name == file_name)
-                    .cloned().ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
-                let scope = graph.open_read_scope().map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
-                let length = usize::try_from(reference.content_identity().length()).map_err(|_| "Blob length is not addressable".to_owned())?;
-                let initial = graph.read_blob_range(&reference, 0..length as u64, &scope)
-                    .map_err(|error| format!("Blob content could not be read: {error:?}"))?.bytes().to_vec();
-                let expected = save.expected_baseline_row.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-                let image = Arc::new(VfsFileSnapshot::new(SnapshotPin::capture(Arc::clone(&save.source.rows)), Arc::<[u8]>::from([])));
-                let target = writer.runtime.block_on(writer.cache.managed_file(image))
+                let file_name = relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default();
+                let field = save
+                    .blob_fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .find(|field| field.file_name == file_name)
+                    .cloned()
+                    .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
+                let scope = graph
+                    .open_read_scope()
+                    .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
+                let length = usize::try_from(reference.content_identity().length())
+                    .map_err(|_| "Blob length is not addressable".to_owned())?;
+                let initial = graph
+                    .read_blob_range(&reference, 0..length as u64, &scope)
+                    .map_err(|error| format!("Blob content could not be read: {error:?}"))?
+                    .bytes()
+                    .to_vec();
+                let expected = save
+                    .expected_baseline_row
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let image = Arc::new(VfsFileSnapshot::new(
+                    SnapshotPin::capture(Arc::clone(&save.source.rows)),
+                    Arc::<[u8]>::from([]),
+                ));
+                let target = writer
+                    .runtime
+                    .block_on(writer.cache.managed_file(image))
                     .map_err(|error| format!("Blob edit target could not be opened: {error:?}"))?;
-                let scratch = Arc::new(writer.runtime.block_on(target.begin_temporary_replacement(usize::MAX)));
+                let scratch = Arc::new(
+                    writer
+                        .runtime
+                        .block_on(target.begin_temporary_replacement(usize::MAX)),
+                );
                 (save, initial, Some((target, scratch, field, expected)))
             }
-            _ => return Err(if grouped_row {
+            _ => {
+                return Err(if grouped_row {
                 "edit --row requires a projected row document or Blob path".into()
             } else {
                 "edit target is not a managed row document or Blob".into()
-            }),
+                });
+            }
         }
     };
     let draft = if blob_edit.is_none() {
-        Some(Arc::new(writer.runtime.block_on(save.target.open_draft(64 * 1024 * 1024))))
-    } else { None };
-    let draft_path = std::env::temp_dir().join(format!("orna-edit-{}-{}.draft", std::process::id(), super::cli_request_nonce()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&draft_path)
+        Some(Arc::new(
+            writer
+                .runtime
+                .block_on(save.target.open_draft(64 * 1024 * 1024)),
+        ))
+    } else {
+        None
+    };
+    let draft_path = std::env::temp_dir().join(format!(
+        "orna-edit-{}-{}.draft",
+        std::process::id(),
+        super::cli_request_nonce()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&draft_path)
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
-    file.write_all(&initial_bytes).and_then(|()| file.sync_all())
-        .map_err(|error| format!("explicit edit draft could not be initialized: {error}; retained at {}", draft_path.display()))?;
+    file.write_all(&initial_bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "explicit edit draft could not be initialized: {error}; retained at {}",
+                draft_path.display()
+            )
+        })?;
     drop(file);
     let Some(editor) = std::env::var_os("EDITOR") else {
         return Err(format!(
@@ -902,8 +1332,15 @@ pub(super) fn edit_path(
         )
         .into());
     };
-    let status = std::process::Command::new(editor).arg(&draft_path).status()
-        .map_err(|error| format!("editor could not be started: {error}; draft retained at {}", draft_path.display()))?;
+    let status = std::process::Command::new(editor)
+        .arg(&draft_path)
+        .status()
+        .map_err(|error| {
+            format!(
+                "editor could not be started: {error}; draft retained at {}",
+                draft_path.display()
+            )
+        })?;
     if !status.success() {
         return Err(format!(
             "editor exited unsuccessfully; draft retained at {}",
@@ -911,20 +1348,38 @@ pub(super) fn edit_path(
         )
         .into());
     }
-    let candidate = std::fs::read(&draft_path)
-        .map_err(|error| format!("edited candidate could not be read: {error}; draft retained at {}", draft_path.display()))?;
-    let admission = if let Some((target, scratch, field, expected)) = blob_edit {
-        writer.runtime.block_on(async {
-            scratch.truncate(0).await.map_err(|error| format!("Blob candidate exceeds draft limits: {error:?}"))?;
-            scratch.write_at(0, &candidate).await.map_err(|error| format!("Blob candidate exceeds draft limits: {error:?}"))
+    let candidate = std::fs::read(&draft_path).map_err(|error| {
+        format!(
+            "edited candidate could not be read: {error}; draft retained at {}",
+            draft_path.display()
+        )
+    })?;
+    let admission =
+        if let Some((target, scratch, field, expected)) = blob_edit {
+            writer
+                .runtime
+                .block_on(async {
+                    scratch.truncate(0).await.map_err(|error| {
+                        format!("Blob candidate exceeds draft limits: {error:?}")
+                    })?;
+                    scratch
+                        .write_at(0, &candidate)
+                        .await
+                        .map_err(|error| format!("Blob candidate exceeds draft limits: {error:?}"))
         })
         .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
         save.commit_blob_temporary(&target, &scratch, &field, expected)
     } else {
         let draft = draft.expect("document route creates an editor draft before launch");
-        writer.runtime.block_on(async {
-            draft.truncate(0).await.map_err(|error| format!("edited candidate exceeds draft limits: {error:?}"))?;
-            draft.write_at(0, &candidate).await.map_err(|error| format!("edited candidate exceeds draft limits: {error:?}"))
+            writer
+                .runtime
+                .block_on(async {
+                    draft.truncate(0).await.map_err(|error| {
+                        format!("edited candidate exceeds draft limits: {error:?}")
+                    })?;
+                    draft.write_at(0, &candidate).await.map_err(|error| {
+                        format!("edited candidate exceeds draft limits: {error:?}")
+                    })
         })
         .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
         save.commit_document(&draft)
@@ -950,7 +1405,6 @@ pub(super) enum UnmountPreparationError {
     Disconnected,
     Operation(String),
 }
-
 
 pub(super) fn begin_unmount(mountpoint: &Path) -> Result<(), UnmountPreparationError> {
     rustix::fs::setxattr(
@@ -983,11 +1437,7 @@ pub(super) fn cancel_unmount(mountpoint: &Path) -> Result<(), String> {
 }
 pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
     let mut value = [0_u8; 1];
-    let length = rustix::fs::getxattr(
-        mountpoint,
-        "user.orna.unresolved-drafts",
-        &mut value,
-    )
+    let length = rustix::fs::getxattr(mountpoint, "user.orna.unresolved-drafts", &mut value)
     .map_err(|error| format!("could not read Orna mount draft state: {error}"))?;
     if length != 1 {
         return Err("Orna mount returned an invalid draft-state length".to_owned());
@@ -1091,7 +1541,7 @@ impl WorkspaceFilesystem {
             .collect::<Vec<_>>();
         let loader = ProjectLoader::default();
         let mut builder = FsBuilder::new();
-        builder.writer = writer;
+        builder.writer.clone_from(&writer);
         builder.table_object_ids = Arc::new(
             tables
                 .iter()
@@ -1167,14 +1617,136 @@ impl WorkspaceFilesystem {
                 runtime_field_layout,
             )?;
         }
+        let mut retained_scratch = HashSet::new();
+        if let Some(writer) = &writer {
+            for record in writer.scratch_store.load()? {
+                let logical_path = record.identity.logical_path.clone();
+                match Self::restore_temporary_scratch(&mut builder, writer, record) {
+                    Ok(inode) => {
+                        retained_scratch.insert(inode);
+                    }
+                    Err(error) => eprintln!(
+                        "skipped unresolved persisted temporary scratch {logical_path}: {error}"
+                    ),
+                }
+            }
+        }
 
         Ok(Self {
             state: Mutex::new(builder),
             open_files: Mutex::new(HashMap::new()),
-            draft_state: Mutex::new(DraftState::default()),
+            draft_state: Mutex::new(DraftState {
+                retained_scratch,
+                ..DraftState::default()
+            }),
             next_handle: AtomicU64::new(1),
         })
     }
+    fn restore_temporary_scratch(
+        builder: &mut FsBuilder,
+        writer: &Arc<MountWriter>,
+        record: PersistedTemporaryScratch,
+    ) -> Result<u64, String> {
+        let table_inode = builder
+            .nodes
+            .iter()
+            .find_map(|(inode, node)| match &node.kind {
+                NodeKind::Table(table)
+                    if *table.source.binding.relation_id() == record.identity.relation_id =>
+                {
+                    Some(*inode)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| "persisted temporary scratch target table is unavailable".to_owned())?;
+        let mut path_components = record.identity.logical_path.split('/').skip(1).peekable();
+        let mut parent_inode = table_inode;
+        while let Some(component) = path_components.next() {
+            let component = if path_components.peek().is_none() {
+                component.strip_suffix(".orna").ok_or_else(|| {
+                    "persisted temporary scratch target path is invalid".to_owned()
+                })?
+            } else {
+                component
+            };
+            parent_inode = builder
+                .lookup_child(parent_inode, OsStr::new(component))?
+                .ok_or_else(|| {
+                    "persisted temporary scratch target row is unavailable".to_owned()
+                })?;
+        }
+        if !matches!(
+            builder.nodes.get(&parent_inode).map(|node| &node.kind),
+            Some(NodeKind::Row(_))
+        ) {
+            return Err("persisted temporary scratch target row is unavailable".into());
+        }
+        let document_inode = builder
+            .lookup_child(parent_inode, OsStr::new("data.orna"))?
+            .ok_or_else(|| {
+                "persisted temporary scratch target document is unavailable".to_owned()
+            })?;
+        let save = match builder.nodes.get(&document_inode).map(|node| &node.kind) {
+            Some(NodeKind::Document { save, .. }) => Arc::clone(save),
+            _ => return Err("persisted temporary scratch target document is unavailable".into()),
+        };
+        if *save.source.binding.relation_id() != record.identity.relation_id
+            || runtime_table_key_bytes(&save.key)? != record.identity.key
+        {
+            return Err("persisted temporary scratch target identity has changed".into());
+        }
+        let parent = builder
+            .nodes
+            .get(&document_inode)
+            .ok_or_else(|| "persisted temporary scratch row node is unavailable".to_owned())?
+            .parent;
+        let blob_field = match record.identity.blob_field_name.as_deref() {
+            Some(name) => Some(
+                save.blob_fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .find(|field| field.name.as_str() == name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "persisted temporary scratch Blob field is unavailable".to_owned()
+                    })?,
+            ),
+            None => None,
+        };
+        let target = save.temporary_target(blob_field.as_ref())?;
+        let scratch = Arc::new(
+            writer
+                .runtime
+                .block_on(target.begin_temporary_replacement(usize::MAX)),
+        );
+        writer
+            .runtime
+            .block_on(scratch.write_at(0, &record.bytes))
+            .map_err(|error| {
+                format!("persisted temporary scratch bytes could not be restored: {error:?}")
+            })?;
+        let PersistedTemporaryScratch {
+            identity,
+            baseline,
+            bytes,
+        } = record;
+        let name = identity.name.clone();
+        builder.add_file(
+            parent,
+            &name,
+            NodeKind::Temporary {
+                bytes,
+                save,
+                target,
+                scratch,
+                blob_field,
+                baseline,
+                identity: Arc::new(identity),
+            },
+        )
+    }
+
     fn update_writable_bytes(&self, inode: u64, bytes: &[u8]) -> bool {
         let mut state = self
             .state
@@ -1212,7 +1784,11 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::ENODATA);
             return;
         }
-        let value = if self.has_unresolved_drafts() { b"1" } else { b"0" };
+        let value = if self.has_unresolved_drafts() {
+            b"1"
+        } else {
+            b"0"
+        };
         if size == 0 {
             reply.size(1);
         } else if size >= 1 {
@@ -1504,7 +2080,7 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let blob_field = if is_replacement_scratch_name(name) {
+            let blob_field = if is_editor_temporary_name(name) {
                 None
             } else {
                 save.blob_fields
@@ -1514,7 +2090,7 @@ impl Filesystem for WorkspaceFilesystem {
                     .find(|field| is_replacement_scratch_for(name, &field.file_name))
                     .cloned()
             };
-            if !is_replacement_scratch_name(name) && blob_field.is_none() {
+            if !is_editor_temporary_name(name) && blob_field.is_none() {
                 reply.error(Errno::EROFS);
                 return;
             }
@@ -1523,24 +2099,20 @@ impl Filesystem for WorkspaceFilesystem {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let target = if blob_field.is_some() {
-                let image = Arc::new(VfsFileSnapshot::new(
-                    SnapshotPin::capture(Arc::clone(&save.source.rows)),
-                    Arc::<[u8]>::from([]),
-                ));
-                match save
-                    .writer
-                    .runtime
-                    .block_on(save.writer.cache.managed_file(image))
-                {
-                    Ok(target) => target,
-                    Err(_) => {
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                }
-            } else {
-                Arc::clone(&save.target)
+            let Ok(key) = runtime_table_key_bytes(&save.key) else {
+                reply.error(Errno::EIO);
+                return;
+            };
+            let identity = Arc::new(TemporaryScratchIdentity {
+                logical_path: save.logical_path.clone(),
+                relation_id: *save.source.binding.relation_id(),
+                key,
+                name: name.to_owned(),
+                blob_field_name: blob_field.as_ref().map(|field| field.name.clone()),
+            });
+            let Ok(target) = save.temporary_target(blob_field.as_ref()) else {
+                reply.error(Errno::EIO);
+                return;
             };
             let scratch = Arc::new(
                 save.writer
@@ -1557,6 +2129,7 @@ impl Filesystem for WorkspaceFilesystem {
                     scratch: Arc::clone(&scratch),
                     blob_field: blob_field.clone(),
                     baseline,
+                    identity: Arc::clone(&identity),
                 },
             ) {
                 Ok(inode) => inode,
@@ -1609,7 +2182,16 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EBUSY);
             return;
         }
-        let (source_inode, destination_inode, save, target, scratch, blob_field, baseline) = {
+        let (
+            source_inode,
+            destination_inode,
+            save,
+            target,
+            scratch,
+            blob_field,
+            baseline,
+            identity,
+        ) = {
             let mut state = self
                 .state
                 .lock()
@@ -1621,27 +2203,27 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let (save, target, scratch, blob_field, baseline) =
-                match state.nodes.get(&source_inode).map(|node| &node.kind) {
-                    Some(NodeKind::Temporary {
-                        save,
-                        target,
-                        scratch,
-                        blob_field,
-                        baseline,
-                        ..
-                    }) => (
-                        Arc::clone(save),
-                        Arc::clone(target),
-                        Arc::clone(scratch),
-                        blob_field.clone(),
-                        baseline.clone(),
-                    ),
-                    _ => {
-                        reply.error(Errno::EROFS);
-                        return;
-                    }
-                };
+            let Some(NodeKind::Temporary {
+                save,
+                target,
+                scratch,
+                blob_field,
+                baseline,
+                identity,
+                ..
+            }) = state.nodes.get(&source_inode).map(|node| &node.kind)
+            else {
+                reply.error(Errno::EROFS);
+                return;
+            };
+            let (save, target, scratch, blob_field, baseline, identity) = (
+                Arc::clone(save),
+                Arc::clone(target),
+                Arc::clone(scratch),
+                blob_field.clone(),
+                baseline.clone(),
+                Arc::clone(identity),
+            );
             let expected_name = blob_field
                 .as_ref()
                 .map_or("data.orna", |field| field.file_name.as_str());
@@ -1686,6 +2268,7 @@ impl Filesystem for WorkspaceFilesystem {
                 scratch,
                 blob_field,
                 baseline,
+                identity,
             )
         };
         let committed = match &blob_field {
@@ -1720,6 +2303,11 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EIO);
                 return;
             }
+        }
+        if let Err(error) = save.writer.scratch_store.remove(&identity) {
+            eprintln!("mounted replacement scratch cleanup failed: {error}");
+            reply.error(Errno::EIO);
+            return;
         }
         let removed = state
             .nodes
@@ -1794,6 +2382,20 @@ impl Filesystem for WorkspaceFilesystem {
             // A rejected replacement is the only copy of its draft until a rename of
             // it is accepted; removing its name must not discard it.
             reply.error(Errno::EBUSY);
+            return;
+        }
+        let (save, identity) = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Temporary { save, identity, .. }) => {
+                (Arc::clone(save), Arc::clone(identity))
+            }
+            _ => {
+                reply.error(Errno::EROFS);
+                return;
+            }
+        };
+        if let Err(error) = save.writer.scratch_store.remove(&identity) {
+            eprintln!("mounted temporary scratch removal failed: {error}");
+            reply.error(Errno::EIO);
             return;
         }
         if state
@@ -2032,17 +2634,34 @@ impl Filesystem for WorkspaceFilesystem {
                 }
                 result
             }
-            Some(OpenFile::Temporary(save, _, scratch, _)) => save
-                .fsync_temporary(&scratch)
-                .map_err(DocumentCommitError::Failed),
+            Some(OpenFile::Temporary(save, _, scratch, _)) => {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match state.nodes.get(&inode.0).map(|node| &node.kind) {
+                    Some(NodeKind::Temporary {
+                        identity, baseline, ..
+                    }) => save
+                        .fsync_temporary(&scratch, identity, baseline.as_deref())
+                        .map_err(DocumentCommitError::Failed),
+                    // Rename already accepted and removed this scratch node.
+                    None => Ok(()),
+                    _ => Err(DocumentCommitError::Failed(
+                        "open scratch node is unavailable".to_owned(),
+                    )),
+                }
+            }
             None => Err(DocumentCommitError::Failed(
                 "file handle is not open".to_owned(),
             )),
         };
         match result {
             Ok(()) => {
+                // A successful fsync makes this handle's bytes durable; nothing is
+                // unresolved for it, so unlink must not wait on its RELEASE.
+                draft_state.unresolved_handles.remove(&handle.0);
                 if is_document {
-                    draft_state.unresolved_handles.remove(&handle.0);
                     draft_state.rejected_documents.remove(&inode.0);
                 }
                 reply.ok();
@@ -3006,6 +3625,7 @@ enum NodeKind {
         scratch: Arc<TemporarySave<RowMapSnapshot>>,
         blob_field: Option<BlobField>,
         baseline: Option<Vec<u8>>,
+        identity: Arc<TemporaryScratchIdentity>,
     },
     Blob {
         graph: Arc<NativeGraphContext>,
@@ -3440,6 +4060,13 @@ fn is_replacement_scratch_name(name: &str) -> bool {
     is_replacement_scratch_for(name, "data.orna")
 }
 
+fn is_editor_temporary_name(name: &str) -> bool {
+    is_replacement_scratch_name(name)
+        || name.strip_prefix("tmp").is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix('.')
@@ -3482,8 +4109,9 @@ mod tests {
 
     use super::{
         Expr, FsBuilder, NodeKind, ROOT_INODE, RowProjectionSource, StoredFieldShape,
-        is_replacement_scratch_name, key_directory, parse_row, runtime_row_baseline_from_rows,
-        runtime_table_key_bytes, select_runtime_row_fields, source_without_fields,
+        is_editor_temporary_name, is_replacement_scratch_for, is_replacement_scratch_name,
+        key_directory, parse_row, runtime_row_baseline_from_rows, runtime_table_key_bytes,
+        select_runtime_row_fields, source_without_fields,
     };
     use orna_repository_v1::TypedKey;
     use orna_runtime_v1::{
@@ -3671,6 +4299,25 @@ mod tests {
         assert!(!is_replacement_scratch_name("unrelated"));
         assert!(!is_replacement_scratch_name("backup"));
         assert!(!is_replacement_scratch_name(".data.orna."));
+        assert!(is_editor_temporary_name("tmpldofdR"));
+        assert!(is_editor_temporary_name("tmpBX4D0m"));
+        assert!(!is_editor_temporary_name("tmp"));
+        assert!(!is_editor_temporary_name("tmpabcde"));
+        assert!(!is_editor_temporary_name("unrelated"));
+    }
+
+    #[test]
+    fn blob_replacement_scratch_names_stay_bound_to_their_target() {
+        assert!(is_replacement_scratch_for(
+            ".content.mp3.tmp",
+            "content.mp3"
+        ));
+        assert!(is_replacement_scratch_for(
+            ".content.mp3.12345",
+            "content.mp3"
+        ));
+        assert!(!is_replacement_scratch_for("unrelated", "content.mp3"));
+        assert!(!is_replacement_scratch_for(".content.mp3.", "content.mp3"));
     }
 
     #[test]
