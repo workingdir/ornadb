@@ -1478,6 +1478,7 @@ mod tests {
         )
     }
 
+    /// ORNA-SERVE-002: `orna serve` MUST NOT automatically invoke root `main()` or unrelated stream programs.
     #[test]
     fn serving_loads_the_local_main_module_without_evaluating_it() {
         let directory = tempfile::tempdir().expect("temporary clone");
@@ -1712,6 +1713,7 @@ mod tests {
         );
     }
 
+    /// ORNA-SERVE-003: A different clone running `orna serve` serves that clone's HEAD and CWD; CWD MUST remain local to that clone.
     #[test]
     fn clone_route_reports_head_and_cwd_from_the_selected_clone() {
         let left = tempfile::tempdir().expect("left clone");
@@ -1813,6 +1815,8 @@ mod tests {
         assert!(server.join().expect("route detection thread"));
     }
 
+    /// ORNA-TRUST-002: `orna serve` binds to loopback by default. Remote deployment SHOULD use normal SSH, Tailscale, or a trusted authenticated reverse proxy/TLS boundary.
+    /// ORNA-SERVE-004: The default listener MUST bind only to loopback unless the operator explicitly selects another address.
     #[test]
     fn default_loopback_listener_serves_the_clone_route() {
         let directory = tempfile::tempdir().expect("temporary clone");
