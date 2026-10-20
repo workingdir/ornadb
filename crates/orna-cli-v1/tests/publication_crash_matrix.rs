@@ -1,7 +1,6 @@
 //! Process-kill recovery checks for the real `orna publish` executable.
 use std::{
     fs::File,
-    io::{self, Read},
     path::Path,
     process::{Child, Command, Output},
     thread,
@@ -32,7 +31,6 @@ const CAPTURE_SOURCE: &str = "ORNA_TEST_CAPTURE_SOURCE";
 const CAPTURE_RELATION: &str = "ORNA_TEST_CAPTURE_RELATION";
 const CAPTURE_SCHEMA_ROOT: &str = "ORNA_TEST_CAPTURE_SCHEMA_ROOT";
 const CAPTURE_STORE_ROOT: &str = "ORNA_TEST_CAPTURE_STORE_ROOT";
-const CAPTURE_AT: &str = "ORNA_TEST_CAPTURE_CRASH_AT";
 
 async fn commit_capture(
     repository: &Repository,
@@ -62,7 +60,6 @@ async fn commit_capture(
         expression, &Default::default(), Limits::default(), bindings,
     ).unwrap();
     let blob_binding = bindings.accept_captured_blob_for_row(&value).unwrap();
-    capture_crash_barrier("pin");
     let admitted = admit_source_row_with_owner_fields(
         &project,
         logical_path,
@@ -107,7 +104,6 @@ async fn commit_capture(
         TerminalOutcome::new(vec![25]).unwrap(), &NoFault,
     ).await.unwrap();
     assert_eq!(commit.request.state, RequestState::Completed);
-    capture_crash_barrier("row-commit");
     drop(source_bindings);
 }
 
@@ -133,32 +129,6 @@ fn launch(directory: &Path, boundary: &str, marker: &Path) -> Child {
     command.spawn().expect("publication child starts")
 }
 
-fn capture_crash_barrier(boundary: &str) {
-    let Ok(selected) = std::env::var(CAPTURE_AT) else { return; };
-    if selected != boundary { return; }
-    let marker = std::env::var(CRASH_MARKER).expect("capture crash marker path");
-    std::fs::write(marker, boundary).expect("write capture crash marker");
-    loop { thread::sleep(Duration::from_millis(10)); }
-}
-
-struct MidstreamCrashRead<R> {
-    inner: R,
-    reads: usize,
-}
-
-impl<R: Read> Read for MidstreamCrashRead<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = self.inner.read(buffer)?;
-        if count > 0 {
-            self.reads += 1;
-            if self.reads == 2 {
-                capture_crash_barrier("capture");
-            }
-        }
-        Ok(count)
-    }
-}
-
 fn launch_capture_child(
     repository_root: &Path,
     source: &Path,
@@ -173,7 +143,7 @@ fn launch_capture_child(
         .current_dir(repository_root)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env(CAPTURE_AT, boundary)
+        .env(CRASH_AT, boundary)
         .env(CAPTURE_ROOT, repository_root)
         .env(CAPTURE_SOURCE, source)
         .env(CAPTURE_RELATION, hex(&relation_id))
@@ -189,7 +159,7 @@ fn launch_capture_child(
 
 #[tokio::test]
 async fn capture_crash_child() {
-    let Ok(boundary) = std::env::var(CAPTURE_AT) else { return; };
+    let Ok(boundary) = std::env::var(CRASH_AT) else { return; };
     let repository_root = std::env::var(CAPTURE_ROOT).expect("repository root");
     let source_path = std::env::var(CAPTURE_SOURCE).expect("capture source path");
     let relation = std::env::var(CAPTURE_RELATION).expect("capture relation id");
@@ -200,19 +170,10 @@ async fn capture_crash_child() {
     let repository = Repository::discover(&repository_root).unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     match boundary.as_str() {
-        "capture" => {
-            let reader = MidstreamCrashRead {
-                inner: File::open(&source_path).unwrap(),
-                reads: 0,
-            };
-            let _candidate = capability.capture_blob_candidate(reader, 1 << 20).unwrap();
-        }
-        "pack-install" => {
-            let candidate = capability
+        "capture-read" | "pack-install" => {
+            let _candidate = capability
                 .capture_blob_candidate(File::open(&source_path).unwrap(), 1 << 20)
                 .unwrap();
-            capture_crash_barrier("pack-install");
-            drop(candidate);
         }
         "pin" | "row-commit" => {
             let base = repository.head().unwrap().unwrap();
@@ -643,7 +604,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
 
 #[tokio::test]
 async fn capture_and_row_commit_recover_after_process_kill() {
-    for boundary in ["capture", "pack-install", "pin", "row-commit"] {
+    for boundary in ["capture-read", "pack-install", "pin", "row-commit"] {
         let source = TempDir::new().unwrap();
         std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel.png"), source.path().join("pixel.png")).unwrap();
         let payload = vec![0x6d; 128 * 1024];
