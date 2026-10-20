@@ -26895,7 +26895,7 @@ mod tests {
             ),
             (
                 "pub fn metadata() = sys.meta(1);",
-                "portable system callable `sys.meta<T>`",
+                "portable system callable `sys.meta`",
             ),
             (
                 "pub fn plan() = sys.Storage | sys.explain();",
