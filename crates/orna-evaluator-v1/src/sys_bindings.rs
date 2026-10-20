@@ -1017,11 +1017,11 @@ impl SysHostBindingRegistry {
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let (media_type, suffix) = mime1_for_path(path);
+        let annotation = capture_annotation(path);
         let blob = Blob::from_bytes_with_annotation(
             source.into_captured_bytes(),
-            media_type,
-            suffix.as_deref(),
+            annotation.media_type(),
+            annotation.suffix(),
         )
         .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
@@ -1032,8 +1032,8 @@ impl SysHostBindingRegistry {
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
             .push(CapturedBlobForRow {
                 candidate,
-                media_type: media_type.to_owned(),
-                suffix,
+                media_type: annotation.media_type().to_owned(),
+                suffix: annotation.suffix().map(str::to_owned),
             });
         Ok(value)
     }
@@ -1313,35 +1313,19 @@ fn capture_file_failure(
     }
 }
 
-fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
-    let extension = Path::new(path)
+/// The annotation a captured file takes from its name (ORNA-MIME-006).
+///
+/// Capture has no declaration and runs no detection, so only a uniquely
+/// mapped MIME-1 suffix selects a media type. An ambiguous suffix such as
+/// `mp4` (audio/mp4 and video/mp4), an unknown one, or none keeps the
+/// octet-stream/null fallback; importers declare anything else with
+/// `sys.blob.annotate`.
+fn capture_annotation(path: &str) -> orna_value_v1::MediaAnnotation {
+    Path::new(path)
         .extension()
         .and_then(std::ffi::OsStr::to_str)
+        .and_then(|suffix| orna_value_v1::MimeRegistry::mime1().annotation_for_suffix(suffix))
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "json" => ("application/json", None),
-        "pdf" => ("application/pdf", None),
-        "wasm" => ("application/wasm", None),
-        "zip" => ("application/zip", None),
-        "gz" | "tgz" => ("application/gzip", (extension != "gz").then_some(extension)),
-        "flac" => ("audio/flac", None),
-        "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
-        "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
-        "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
-        "wav" => ("audio/wav", None),
-        "gif" => ("image/gif", None),
-        "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
-        "png" => ("image/png", None),
-        "svg" => ("image/svg+xml", None),
-        "webp" => ("image/webp", None),
-        "css" => ("text/css", None),
-        "mjs" | "js" => ("text/javascript", (extension != "js").then_some(extension)),
-        "text" | "txt" => ("text/plain", (extension != "txt").then_some(extension)),
-        "m4v" | "mp4" => ("video/mp4", (extension != "mp4").then_some(extension)),
-        "webm" => ("video/webm", None),
-        _ => ("application/octet-stream", None),
-    }
 }
 
 fn redacted_error(code: &'static str) -> EvaluationError {
@@ -1447,18 +1431,40 @@ mod tests {
                 "sys.blob.capture.source_changed",
             ]
         );
+        let annotation = |media_type: &str, suffix: Option<&str>| {
+            orna_value_v1::MediaAnnotation::new(media_type, suffix)
+                .expect("canonical MIME-1 annotation")
+        };
         assert_eq!(
-            mime1_for_path("records/data.json"),
-            ("application/json", None)
+            capture_annotation("records/data.json"),
+            annotation("application/json", None)
         );
         assert_eq!(
-            mime1_for_path("records/photo.jpeg"),
-            ("image/jpeg", Some("jpeg".to_owned()))
+            capture_annotation("records/photo.jpeg"),
+            annotation("image/jpeg", Some("jpeg"))
         );
         assert_eq!(
-            mime1_for_path("records/unknown.custom"),
-            ("application/octet-stream", None)
+            capture_annotation("records/PHOTO.JPG"),
+            annotation("image/jpeg", None)
         );
+        assert_eq!(
+            capture_annotation("records/clip.m4v"),
+            annotation("video/mp4", Some("m4v"))
+        );
+        // MIME-1 lists `mp4` for both audio/mp4 and video/mp4, so it is not a
+        // uniquely mapped suffix and keeps the octet-stream/null fallback.
+        for path in [
+            "records/clip.mp4",
+            "records/unknown.custom",
+            "records/README",
+            "records/.profile",
+        ] {
+            assert_eq!(
+                capture_annotation(path),
+                orna_value_v1::MediaAnnotation::default(),
+                "{path}"
+            );
+        }
     }
 
     #[test]
