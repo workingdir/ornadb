@@ -83,6 +83,13 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- Format-3 table schemas encode defaulted fields and keys as stored or key
+  fields, computed fields as non-stored role-2 selectors with an expression
+  digest, table-typed fields as stored references, and enum, nominal record,
+  refined, transparent-alias and `Money` field types with their closed
+  definitions. The identity manifest issues stable IDs for nominal types, enum
+  variants and their fields, and explicit type renames carry those IDs.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
