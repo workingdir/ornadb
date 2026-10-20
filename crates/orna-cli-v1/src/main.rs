@@ -3220,13 +3220,13 @@ mod tests {
         );
         assert_eq!(
             parse_cli(&["serve".into()]).unwrap().command,
-            Command::Serve { port: 8080 }
+            Command::Serve { port: 8080, allow_push: false }
         );
         assert_eq!(
             parse_cli(&["serve".into(), "--port".into(), "0".into()])
                 .unwrap()
                 .command,
-            Command::Serve { port: 0 }
+            Command::Serve { port: 0, allow_push: false }
         );
     }
 
