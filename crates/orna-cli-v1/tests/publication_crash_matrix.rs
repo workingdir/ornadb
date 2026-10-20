@@ -373,6 +373,9 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
             .await
             .unwrap()
             .expect("seeded project leaves a writer lease for the abandoned owner");
+        // The publish child must be the live worktree owner that gets killed; the test
+        // handle must not hold the owner lock while the child runs (ORNA-TURSO-005).
+        drop(state);
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
@@ -391,8 +394,9 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
         assert!(pre_journal == matches!(boundary, "ref-cas" | "index" | "ref-index"), "unexpected journal state at {boundary}");
-        drop(state);
 
+        // Coordinated repack between the SIGKILL and recovery (no-prune; see recovery test).
+        git(root, &["gc", "--no-prune", "--quiet"]);
         let resumed = cli(root, &["publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
@@ -406,15 +410,15 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         // ORNA-PUB-018: pending pins stay protected through publication/recovery.
         let post_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(post_pins, seeded_pins, "accepted pending pin not retained through recovery at {boundary}");
+        let second = cli(root, &["publish"]);
+        assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
+        assert_eq!(head(&repository), once, "publication repeated after {boundary}");
+        assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
         let (identity, digest) = cli_runtime_identity(&repository);
         let reopened = RuntimeState::open(&repository, identity, digest)
             .await
             .unwrap_or_else(|error| panic!("runtime reopen after {boundary}: {error:?}"));
         assert_eq!(reopened.pending_count().await.unwrap(), 0, "pending range remains after {boundary}");
-        let second = cli(root, &["publish"]);
-        assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
-        assert_eq!(head(&repository), once, "publication repeated after {boundary}");
-        assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
         // Fence last: takeover_lease may leave takeover_recovery_pending set.
         let fresh = [0x5a; 16];
         let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
@@ -431,6 +435,32 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
             second.status.code().unwrap()
         );
     }
+}
+
+/// ORNA-TURSO-005: a publish that is not the worktree's owner must coordinate with that owner or fail. It
+/// must not freeze, recover, or complete a publication through a second writable handle.
+#[tokio::test]
+async fn secondary_publish_fails_while_live_owner_holds_worktree() {
+    let (directory, _source, repository, state, base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    assert!(state.holds_runtime_owner_lock(), "test owner must hold the worktree runtime owner lock");
+    let pending_before = state.pending_count().await.unwrap();
+    assert!(pending_before > 0, "fixture must leave pending runtime changes");
+    let output = cli(root, &["publish"]);
+    assert!(
+        !output.status.success(),
+        "secondary publish wrote while a live owner held the worktree: {}",
+            String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(head(&repository), base.as_str(), "secondary publish moved the ref");
+    assert!(repository.read_publication_journal().unwrap().is_none(), "secondary publish wrote a journal");
+    assert_eq!(
+        state.pending_count().await.unwrap(),
+        pending_before,
+        "secondary publish consumed the live owner's pending range"
+    );
+    assert!(state.holds_runtime_owner_lock());
 }
 
 /// ORNA-PUB-007: recovery after ref advancement completes index/worktree reconciliation and Turso cleanup.
@@ -458,6 +488,8 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
 
     let crash = TempDir::new().unwrap();
     let marker = crash.path().join(MARKER_FILE);
+    // The publish child must be the live owner; release this handle first (ORNA-TURSO-005).
+    drop(state);
     let mut child = launch(root, "ref-cas", crash.path());
     let deadline = Instant::now() + Duration::from_secs(30);
     while !marker.exists() && Instant::now() < deadline {
@@ -476,9 +508,13 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     )
     .unwrap();
 
-    let (identity, _) = cli_runtime_identity(&repository);
+    let (identity, digest) = cli_runtime_identity(&repository);
+    let repository_id = identity.repository_id;
     let source_format_context = format_context;
-    let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+    let capture_state = RuntimeState::open(&repository, identity, digest)
+        .await
+        .expect("secondary handle opens while the child owns the worktree");
+    let writer = capture_state.acquire_lease(repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
     filesystem.allow_root(source.path()).unwrap();
@@ -491,7 +527,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     commit_capture(
         &repository,
         &source_commit,
-        &state,
+        &capture_state,
         writer,
         &mut bindings,
         &expression,
@@ -510,7 +546,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     assert!(!status.success(), "child unexpectedly returned at ref-cas");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ref-cas");
     std::fs::remove_file(&marker).unwrap();
-    drop(state);
+    drop(capture_state);
 
     let (identity, digest) = cli_runtime_identity(&repository);
     let recovered = RuntimeState::open(&repository, identity, digest)
@@ -523,6 +559,9 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     assert!(repository.read_publication_journal().unwrap().is_some());
     assert_ne!(head(&repository), base.as_str(), "ref-cas crash did not advance HEAD");
     assert!(recovered.pending_count().await.unwrap() > 0);
+    // Coordinated repack after the owner died; --no-prune keeps unreachable candidate
+    // objects. Uncoordinated `prune --expire now` is out of scope (ORNA-GIT-010).
+    git(root, &["gc", "--no-prune", "--quiet"]);
     let recovered_index = RuntimePublicationCoordinator::recover(&repository, &recovered)
         .await
         .expect("recover the candidate after process death");

@@ -2456,7 +2456,7 @@ fn run_repl_input(
                     .state
                     .as_ref()
                     .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id(transactions.identity)),
+                    .acquire_fenced_writer_lease(transactions.session_id),
             )
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         transactions.lease = Some(lease);
