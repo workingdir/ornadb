@@ -4,9 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use syn::{
-    Expr, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
+    Expr, ExprLit, ForeignItem, ImplItem, ItemFn, Lit, TraitItem,
     visit::{self, Visit},
 };
 
@@ -630,7 +630,7 @@ impl Collector {
             return;
         }
         if let Some(attribute) = annotations.first() {
-            match parse_function_attributes(attribute) {
+            match parse_function_attributes(attribute, attrs) {
                 Ok((metadata, role, type_graph, schema)) => {
                     self.load_registry_json(type_graph, "type_graph");
                     self.load_registry_json(schema, "schema");
@@ -758,13 +758,19 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
 
 fn parse_function_attributes(
     attribute: &syn::Attribute,
+    attrs: &[syn::Attribute],
 ) -> Result<(Value, Option<String>, Option<String>, Option<String>), String> {
-    let mut function_json = None;
+    let mut fields = Map::new();
     let mut role = None;
     let mut type_graph = None;
     let mut schema = None;
     attribute
         .parse_nested_meta(|meta| {
+            let key = meta
+                .path
+                .get_ident()
+                .map(ToString::to_string)
+                .ok_or_else(|| meta.error("#[ornasys] metadata keys must be identifiers"))?;
             let value = meta.value()?;
             let expression: Expr = value.parse()?;
             let Expr::Lit(expression) = expression else {
@@ -773,36 +779,146 @@ fn parse_function_attributes(
             let Lit::Str(value) = expression.lit else {
                 return Err(meta.error("#[ornasys] metadata must be a string literal"));
             };
-            if meta.path.is_ident("function") {
-                if function_json.replace(value.value()).is_some() {
-                    return Err(meta.error("only one function metadata value is allowed"));
+            let value = value.value();
+            match key.as_str() {
+                "name" | "effect" | "signature" => {
+                    if fields.insert(key.clone(), Value::String(value)).is_some() {
+                        return Err(meta.error(format!("only one `{key}` value is allowed")));
+                    }
                 }
-            } else if meta.path.is_ident("role") {
-                if role.replace(value.value()).is_some() {
-                    return Err(meta.error("only one semantic role may be declared"));
+                "contexts" => {
+                    let contexts = value
+                        .split(',')
+                        .map(|context| Value::String(context.trim().to_owned()))
+                        .collect();
+                    if fields.insert(key.clone(), Value::Array(contexts)).is_some() {
+                        return Err(meta.error("only one `contexts` value is allowed"));
+                    }
                 }
-            } else if meta.path.is_ident("type_graph") {
-                if type_graph.replace(value.value()).is_some() {
-                    return Err(meta.error("only one type_graph source may be declared"));
+                "role" => {
+                    if role.replace(value).is_some() {
+                        return Err(meta.error("only one semantic role may be declared"));
+                    }
                 }
-            } else if meta.path.is_ident("schema") {
-                if schema.replace(value.value()).is_some() {
-                    return Err(meta.error("only one schema source may be declared"));
+                "type_graph" => {
+                    if type_graph.replace(value).is_some() {
+                        return Err(meta.error("only one type_graph source may be declared"));
+                    }
                 }
-            } else {
-                return Err(meta.error("expected function, role, type_graph, or schema metadata"));
+                "schema" => {
+                    if schema.replace(value).is_some() {
+                        return Err(meta.error("only one schema source may be declared"));
+                    }
+                }
+                _ => {
+                    return Err(meta.error(
+                        "expected name, effect, signature, contexts, role, type_graph, or schema metadata",
+                    ));
+                }
             }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    let source = function_json.ok_or_else(|| "missing function JSON metadata".to_owned())?;
-    let metadata: Value = serde_json::from_str(&source)
-        .map_err(|error| format!("invalid function JSON metadata: {error}"))?;
+    fields.extend(parse_doc_metadata(attrs)?);
+    let metadata = Value::Object(fields);
     validate_function_metadata(&metadata)?;
     if let Some(role) = &role {
         parse_role_version(role)?;
     }
     Ok((metadata, role, type_graph, schema))
+}
+
+/// Extracts portable API metadata from a method's `///` doc comment. The first
+/// paragraph is the purpose; `# Heading` sections (each followed by one body
+/// paragraph) map to fixed keys; any other later paragraphs form `documentation`.
+fn parse_doc_metadata(attrs: &[syn::Attribute]) -> Result<Map<String, Value>, String> {
+    let mut lines = Vec::new();
+    for attribute in attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("doc"))
+    {
+        let syn::Meta::NameValue(meta) = &attribute.meta else {
+            return Err("doc comments must use `///` line form".to_owned());
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(text),
+            ..
+        }) = &meta.value
+        else {
+            return Err("doc comment must be a string literal".to_owned());
+        };
+        let text = text.value();
+        if text.contains('\n') {
+            return Err("doc comments must use `///` line form".to_owned());
+        }
+        lines.push(text);
+    }
+    let mut paragraphs: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(line.to_owned());
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current);
+    }
+    let mut paragraphs = paragraphs.into_iter();
+    let purpose = match paragraphs.next() {
+        Some(lines) if !is_doc_heading(&lines) => lines.join(" "),
+        _ => {
+            return Err("#[ornasys] doc comment must begin with a purpose paragraph".to_owned());
+        }
+    };
+    let mut fields = Map::new();
+    fields.insert("purpose".to_owned(), Value::String(purpose));
+    let mut documentation = Vec::new();
+    while let Some(lines) = paragraphs.next() {
+        if !is_doc_heading(&lines) {
+            documentation.push(lines.join(" "));
+            continue;
+        }
+        let heading = match lines.as_slice() {
+            [heading] => heading.strip_prefix("# ").map(str::trim),
+            _ => None,
+        }
+        .ok_or_else(|| "doc section headings must be a single `# Heading` line".to_owned())?;
+        let key = match heading {
+            "Contract" => "contract",
+            "Preconditions" => "preconditions",
+            "Ownership" => "ownership",
+            "Snapshot rule" => "snapshot_rule",
+            "Since" => "since",
+            other => return Err(format!("unknown #[ornasys] doc section `# {other}`")),
+        };
+        let body = match paragraphs.next() {
+            Some(body) if !is_doc_heading(&body) => body.join(" "),
+            _ => {
+                return Err(format!(
+                    "doc section `# {heading}` must be followed by one body paragraph"
+                ));
+            }
+        };
+        if fields.insert(key.to_owned(), Value::String(body)).is_some() {
+            return Err(format!("duplicate doc section `# {heading}`"));
+        }
+    }
+    if !documentation.is_empty() {
+        fields.insert(
+            "documentation".to_owned(),
+            Value::String(documentation.join("\n\n")),
+        );
+    }
+    Ok(fields)
+}
+
+fn is_doc_heading(lines: &[String]) -> bool {
+    lines.first().is_some_and(|line| line.starts_with('#'))
 }
 
 pub fn parse_role_version(value: &str) -> Result<(&str, u16, u16), String> {
