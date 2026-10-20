@@ -27,6 +27,13 @@ CHECKER_VERSION = "1"
 INCLUDE_PATTERN = re.compile(r'include_str!\(\s*"\.\./\.\./\.\./stdlib/std/([^"]+)"\s*\)')
 GITLINK_PATTERN = re.compile(r"^160000 commit ([0-9a-f]{40})\t(.+)$")
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+SOURCE_CONST_PATTERN = re.compile(
+    r'const REFERENCE_STANDARD_(\w+)_SOURCE_V1:\s*&str\s*=\s*include_str!\(\s*"\.\./\.\./\.\./stdlib/std/([^"]+)"\s*\)\s*;'
+)
+PATH_CONST_PATTERN = re.compile(r'pub const REFERENCE_STANDARD_(\w+)_PATH_V1:\s*&str\s*=\s*"([^"]+)"\s*;')
+ARRAY_PAIR_PATTERN = re.compile(
+    r"\(\s*REFERENCE_STANDARD_(\w+)_PATH_V1\.into\(\)\s*,\s*REFERENCE_STANDARD_(\w+)_SOURCE_V1\.into\(\)\s*,?\s*\)"
+)
 # Tracked standard sources that intentionally have no Rust mirror entry. Each needs a reason.
 UNMIRRORED_SOURCES: dict[str, str] = {
     ".orna/database.orna": "pinned database root identity; repository metadata, not a standard unit",
@@ -73,6 +80,30 @@ def mirrored_paths(mirror_text: str) -> list[str]:
         duplicates = sorted({path for path in paths if paths.count(path) > 1})
         raise PinError(f"mirror includes the same source twice: {', '.join(duplicates)}")
     return paths
+
+
+def check_const_pairing(mirror_text: str) -> None:
+    """Require each mirrored source const to pair with the path const of the same stem.
+
+    The mirror declares `REFERENCE_STANDARD_<STEM>_PATH_V1 = "std/<rel>"` and
+    `REFERENCE_STANDARD_<STEM>_SOURCE_V1 = include_str!(".../std/<rel>")`, and the
+    reference array pairs them. A wrong path, a missing path const, or a swapped
+    array pair fails.
+    """
+    source_consts = dict(SOURCE_CONST_PATTERN.findall(mirror_text))
+    path_consts = dict(PATH_CONST_PATTERN.findall(mirror_text))
+    if not source_consts:
+        raise PinError("mirror declares no standard source consts")
+    for stem, relative in source_consts.items():
+        if stem not in path_consts:
+            raise PinError(f"source const {stem}_SOURCE_V1 has no path const {stem}_PATH_V1")
+        if path_consts[stem] != f"std/{relative}":
+            raise PinError(
+                f"{stem}_PATH_V1 is {path_consts[stem]!r} but {stem}_SOURCE_V1 includes {relative!r}"
+            )
+    for path_stem, source_stem in ARRAY_PAIR_PATTERN.findall(mirror_text):
+        if path_stem != source_stem:
+            raise PinError(f"array pairs {path_stem}_PATH_V1 with {source_stem}_SOURCE_V1")
 
 
 def ensure_upstream_main(submodule: Path) -> None:
@@ -156,7 +187,9 @@ def run_checks(superproject: Path, mirror_source: Path, submodule_path: str = SU
         raise PinError(f"gitlink is not a full commit identifier: {pin}")
     check_checkout_matches_pin(submodule, pin)
     check_reachable_from_main(submodule, pin)
-    mirrored = mirrored_paths(mirror_source.read_text(encoding="utf-8"))
+    mirror_text = mirror_source.read_text(encoding="utf-8")
+    mirrored = mirrored_paths(mirror_text)
+    check_const_pairing(mirror_text)
     check_mirror_bytes(submodule, pin, mirrored)
     check_every_source_accounted_for(submodule, pin, mirrored)
     return (

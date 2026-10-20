@@ -8,6 +8,7 @@ import unittest
 
 from scripts.check_standard_library_pin import (
     PinError,
+    check_const_pairing,
     check_mirror_bytes,
     check_reachable_from_main,
     gitlink_commit,
@@ -61,6 +62,50 @@ class MirrorParsingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(PinError, "twice: math.orna"):
             mirrored_paths(text)
+
+
+PAIRED_MIRROR = """
+pub const REFERENCE_STANDARD_MATH_PATH_V1: &str = "std/math.orna";
+const REFERENCE_STANDARD_MATH_SOURCE_V1: &str = include_str!("../../../stdlib/std/math.orna");
+pub const REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1: &str = "std/encoding/base64.orna";
+const REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1: &str =
+    include_str!("../../../stdlib/std/encoding/base64.orna");
+fn reference_standard_sources_v1() -> [(String, String); 2] {
+    [
+        (
+            REFERENCE_STANDARD_MATH_PATH_V1.into(),
+            REFERENCE_STANDARD_MATH_SOURCE_V1.into(),
+        ),
+        (
+            REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1.into(),
+            REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into(),
+        ),
+    ]
+}
+"""
+
+
+class ConstPairingTests(unittest.TestCase):
+    def test_accepts_matching_path_and_source_consts(self) -> None:
+        check_const_pairing(PAIRED_MIRROR)
+
+    def test_rejects_a_path_const_that_names_another_module(self) -> None:
+        text = PAIRED_MIRROR.replace('"std/math.orna"', '"std/bits.orna"')
+        with self.assertRaisesRegex(PinError, "MATH_PATH_V1 is 'std/bits.orna'"):
+            check_const_pairing(text)
+
+    def test_rejects_a_source_const_without_a_path_const(self) -> None:
+        text = PAIRED_MIRROR.replace("pub const REFERENCE_STANDARD_MATH_PATH_V1", "const UNUSED_PATH")
+        with self.assertRaisesRegex(PinError, "MATH_SOURCE_V1 has no path const"):
+            check_const_pairing(text)
+
+    def test_rejects_a_swapped_array_pair(self) -> None:
+        text = PAIRED_MIRROR.replace(
+            "REFERENCE_STANDARD_MATH_SOURCE_V1.into()",
+            "REFERENCE_STANDARD_ENCODING_BASE64_SOURCE_V1.into()",
+        )
+        with self.assertRaisesRegex(PinError, "array pairs MATH_PATH_V1 with ENCODING_BASE64_SOURCE_V1"):
+            check_const_pairing(text)
 
 
 class GitlinkTests(unittest.TestCase):
