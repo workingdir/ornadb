@@ -3,7 +3,6 @@ use std::{env, path::PathBuf, process::Command};
 
 const SOURCE: &str = include_str!("fixtures/browser-profile-renderer.orna");
 
-/// ORNA-APP-015: the Wasm build of the shared evaluator matches native canonical output.
 #[test]
 #[ignore = "requires the wasm32-unknown-unknown target and Node.js"]
 fn browser_profile_wasm_matches_native_canonical_output() {

@@ -17,7 +17,6 @@ fn encoded_blob(format: ImageFormat, mime: &str, width: u32, height: u32) -> Blo
         .expect("valid media annotation")
 }
 
-/// ORNA-MEDIA-005: explicitly requested raster formats decode with bounded output.
 #[test]
 fn explicitly_requested_raster_formats_decode_with_bounded_output() {
     for (format, mime) in [
@@ -48,6 +47,7 @@ fn explicit_png_preview_returns_bounded_rgba_pixels() {
     assert_eq!(blob.read(0, blob.length()).expect("raw bytes remain readable").len() as u64, blob.length());
 }
 
+/// ORNA-MEDIA-005: malformed and oversized inputs are rejected without panicking.
 #[test]
 fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     let malformed = [
@@ -93,7 +93,6 @@ fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     );
 }
 
-/// ORNA-MEDIA-003: decoding is side-effect-free; unsupported active content is not decoded.
 #[test]
 fn unsupported_active_content_is_not_read_or_decoded() {
     let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>throw 1</script></svg>";
@@ -108,7 +107,7 @@ fn unsupported_active_content_is_not_read_or_decoded() {
     assert_eq!(blob.read(0, svg.len() as u64).expect("raw SVG is preservable"), svg);
 }
 
-/// ORNA-MEDIA-003: decoding is bounded by the input limit before any full Blob read.
+/// ORNA-MEDIA-005: preview input over the limit is rejected with a typed error.
 #[test]
 fn preview_input_limit_rejects_before_attempting_full_blob_read() {
     let bytes = vec![0_u8; (MAX_PREVIEW_INPUT_BYTES + 1) as usize];
