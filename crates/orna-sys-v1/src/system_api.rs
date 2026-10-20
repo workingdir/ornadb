@@ -1405,8 +1405,8 @@ impl SystemApiFunctionBindings {
     /// 1.1.0
     #[ornasys(
         name = "sys.blob.media_type",
-        effect = "read",
         signature = "fn sys.blob.media_type(value: Blob): Str",
+        effect = "read",
         contexts = "format-3",
     )]
     pub fn sys_blob_media_type(&self) -> &'static SystemFunctionDescriptor {
@@ -1425,8 +1425,8 @@ impl SystemApiFunctionBindings {
     /// 1.1.0
     #[ornasys(
         name = "sys.blob.suffix",
-        effect = "read",
         signature = "fn sys.blob.suffix(value: Blob): Str?",
+        effect = "read",
         contexts = "format-3",
     )]
     pub fn sys_blob_suffix(&self) -> &'static SystemFunctionDescriptor {
@@ -1445,8 +1445,8 @@ impl SystemApiFunctionBindings {
     /// 1.1.0
     #[ornasys(
         name = "sys.blob.annotate",
-        effect = "read",
         signature = "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob",
+        effect = "read",
         contexts = "format-3",
         role = "langitem.sys.blob.annotate@1.0",
     )]
@@ -1466,8 +1466,8 @@ impl SystemApiFunctionBindings {
     /// 1.1.0
     #[ornasys(
         name = "sys.blob.same_content",
-        effect = "read",
         signature = "fn sys.blob.same_content(left: Blob, right: Blob): Bool",
+        effect = "read",
         contexts = "format-3",
     )]
     pub fn sys_blob_same_content(&self) -> &'static SystemFunctionDescriptor {
