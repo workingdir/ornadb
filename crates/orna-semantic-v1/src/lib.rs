@@ -26898,9 +26898,10 @@ mod tests {
                 "portable system callable `sys.meta`",
             ),
             (
-                "pub fn plan() = sys.Storage | sys.explain();",
-                "portable system callable `sys.explain(Query)`",
+                "pub fn plan(function: sys.FunctionRef) = sys.explain(function);",
+                "portable system callable `sys.explain(FunctionRef)`",
             ),
+            ("pub fn plans() = sys.Plan;", "portable system relation `sys.Plan`"),
             ("pub fn runs() = sys.Run;", "portable system relation `sys.Run`"),
             (
                 "pub fn objects() = sys.storage.objects;",
@@ -26936,7 +26937,8 @@ mod tests {
             pub fn pause(stream: sys.StreamRef): Bool = sys.admin.pause_stream(stream);
             pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
             pub fn storage() = sys.Storage;
-            pub fn maintenance() = sys.MaintenanceJob;",
+            pub fn maintenance() = sys.MaintenanceJob;
+            pub fn plan() = sys.Storage | sys.explain();",
         )]);
         assert!(
             analysis.is_ok(),
