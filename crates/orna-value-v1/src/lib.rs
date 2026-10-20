@@ -1552,16 +1552,10 @@ impl MimeRegistry {
     }
 
     pub fn normalize(self, media_type: &str) -> Result<String> {
-        if self.profile != mime1::PROFILE {
-            return Err(Error::InvalidContext);
-        }
         normalize_media_type(media_type)
     }
 
     pub fn annotation(self, media_type: &str, suffix: Option<&str>) -> Result<MediaAnnotation> {
-        if self.profile != mime1::PROFILE {
-            return Err(Error::InvalidContext);
-        }
         MediaAnnotation::with_mime1(media_type, suffix)
     }
 
@@ -1578,12 +1572,6 @@ impl MimeRegistry {
             None => None,
         };
         Ok(MediaAnnotation { media_type, suffix })
-    }
-
-    /// The preferred suffix of a canonical media type's essence; an essence
-    /// outside the registry uses `bin` (ORNA-MIME-003).
-    pub fn preferred_suffix(self, media_type: &str) -> &'static str {
-        mime1::preferred_suffix(mime1::essence(media_type))
     }
 
     /// The annotation a uniquely mapped file suffix selects (ORNA-MIME-006).
