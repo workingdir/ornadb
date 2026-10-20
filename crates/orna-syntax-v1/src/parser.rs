@@ -1546,17 +1546,9 @@ const MAX_AST_DEPTH: usize = 64;
 #[derive(Clone, Copy)]
 enum NominalBraceMode {
     Ordinary,
-    ControlRoot,
-    ControlNested,
-}
-
-impl NominalBraceMode {
-    fn nested(self) -> Self {
-        match self {
-            Self::Ordinary => Self::Ordinary,
-            Self::ControlRoot | Self::ControlNested => Self::ControlNested,
-        }
-    }
+    /// An `if`, `while`, `for` or `case` header outside any delimiters, where
+    /// an unparenthesised `{` always begins the control body.
+    Control,
 }
 
 #[derive(Clone)]
@@ -4039,7 +4031,24 @@ impl Parser {
         if self.is_punct("{") {
             self.error_here("ORNA-PARSE-001", "record conditions must be parenthesized");
         }
-        self.expr_with_nominal_braces(NominalBraceMode::ControlRoot)
+        self.expr_with_nominal_braces(NominalBraceMode::Control)
+    }
+
+    /// Parses the header of `if`, `while` or `for`, whose body is a block. A
+    /// record-shaped body after a qualified name is an unparenthesised
+    /// nominal constructor, which the lexical construction rule forbids in
+    /// a control header; report it and skip its fields so the real body
+    /// still parses.
+    fn block_control_header(&mut self) -> Option<Expr> {
+        let condition = self.control_condition();
+        if self.is_direct_record_body() && condition.as_ref().is_some_and(ends_with_nominal_path) {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "nominal constructors before a control body must be parenthesized",
+            );
+            self.parse_record();
+        }
+        condition
     }
 
     fn expr_with_nominal_braces(&mut self, mode: NominalBraceMode) -> Option<Expr> {
@@ -4150,12 +4159,7 @@ impl Parser {
     /// Applies postfix and infix operators to an already parsed left operand.
     fn pratt_from(&mut self, mut lhs: Expr, min: u8, mode: NominalBraceMode) -> Expr {
         loop {
-            let nominal_braces = match mode {
-                NominalBraceMode::Ordinary => true,
-                NominalBraceMode::ControlRoot => false,
-                NominalBraceMode::ControlNested => self.nominal_brace_is_expression_continuation(),
-            };
-            if nominal_braces
+            if matches!(mode, NominalBraceMode::Ordinary)
                 && self.is_punct("{")
                 && let Some(path) = nominal_path(&lhs)
             {
@@ -4276,12 +4280,12 @@ impl Parser {
                         span,
                     ));
                     if self.can_start_expression() {
-                        let _ = self.recurse(|parser| parser.pratt(prec + 1, mode.nested()));
+                        let _ = self.recurse(|parser| parser.pratt(prec + 1, mode));
                     }
                     break;
                 }
                 let rhs = if self.can_start_expression() {
-                    self.recurse(|parser| parser.pratt(prec + 1, mode.nested()))
+                    self.recurse(|parser| parser.pratt(prec + 1, mode))
                 } else {
                     None
                 };
@@ -4315,8 +4319,8 @@ impl Parser {
                 );
                 break;
             }
-            let rhs = self
-                .recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode.nested()));
+            let rhs =
+                self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode));
             let Some(rhs) = rhs else { break };
             if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
                 self.errors.push(Diagnostic::error(
@@ -4351,7 +4355,7 @@ impl Parser {
                     span: t.span,
                 });
             }
-            let upper = self.recurse(|parser| parser.pratt(7, mode.nested()))?;
+            let upper = self.recurse(|parser| parser.pratt(7, mode))?;
             let span = t.span.join(upper.span());
             return Some(Expr::Range {
                 lower: None,
@@ -4368,7 +4372,7 @@ impl Parser {
             // Unary operators bind below the complete postfix spine. This
             // keeps `-value.field`, `-value.call()`, and `-value[index]`
             // equivalent to applying the operator to the selected value.
-            let rhs = self.recurse(|parser| parser.pratt(10, mode.nested()))?;
+            let rhs = self.recurse(|parser| parser.pratt(10, mode))?;
             if !self.within_depth(expr_depth(&rhs) + 1) {
                 return None;
             }
@@ -4632,7 +4636,7 @@ impl Parser {
                     .map(Box::new)
             }
             Some(Keyword::If) => {
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self.parse_required_block("expected if block").map(Box::new);
                 if self.keyword() == Some(Keyword::Else) {
                     self.bump();
@@ -4646,7 +4650,7 @@ impl Parser {
                 }
             }
             Some(Keyword::While) => {
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self
                     .parse_required_block("expected while block")
                     .map(Box::new);
@@ -4659,7 +4663,7 @@ impl Parser {
                 } else {
                     self.bump()
                 }
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self
                     .parse_required_block("expected for block")
                     .map(Box::new);
@@ -4833,57 +4837,6 @@ impl Parser {
                 self.tokens.get(self.at + 2).map(|t| &t.kind),
                 Some(TokenKind::Punct(":"))
             )
-    }
-    fn nominal_brace_is_expression_continuation(&self) -> bool {
-        if !self.is_punct("{") {
-            return false;
-        }
-        let mut depth = 0usize;
-        for index in self.at..self.tokens.len() {
-            match self.tokens[index].kind {
-                TokenKind::Punct("{") => depth += 1,
-                TokenKind::Punct("}") if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(
-                            self.tokens.get(index + 1).map(|token| &token.kind),
-                            Some(TokenKind::Keyword(Keyword::In))
-                                | Some(TokenKind::Punct(
-                                    "{" | "("
-                                        | ")"
-                                        | "["
-                                        | "]"
-                                        | "."
-                                        | ","
-                                        | "?"
-                                        | "||"
-                                        | "&&"
-                                        | "=="
-                                        | "!="
-                                        | "<"
-                                        | "<="
-                                        | ">"
-                                        | ">="
-                                        | "in"
-                                        | "??"
-                                        | "|"
-                                        | "|?"
-                                        | ".."
-                                        | "..="
-                                        | "+"
-                                        | "-"
-                                        | "*"
-                                        | "/"
-                                        | "%"
-                                        | "^"
-                                ))
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
     }
     fn parse_list(&mut self) -> Vec<Expr> {
         let mut elements = Vec::new();
@@ -5375,6 +5328,18 @@ fn nominal_path(expr: &Expr) -> Option<Vec<NameSegment>> {
             Some(path)
         }
         _ => None,
+    }
+}
+
+/// True when the rightmost operand of an expression is a qualified name, the
+/// only operand that a following constructor brace could have extended.
+fn ends_with_nominal_path(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { rhs, .. } | Expr::Unary { rhs, .. } => ends_with_nominal_path(rhs),
+        Expr::Range {
+            upper: Some(upper), ..
+        } => ends_with_nominal_path(upper),
+        _ => nominal_path(expr).is_some(),
     }
 }
 
