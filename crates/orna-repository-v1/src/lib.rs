@@ -8184,20 +8184,17 @@ impl RuntimeOwnerLock {
         accepted_by_owner: &BTreeMap<[u8; 16], BTreeMap<[u8; 16], native_graph::NativeOid>>,
     ) -> Result<Option<usize>, RepositoryError> {
         let empty = BTreeMap::new();
-        let mut reclaimed = 0usize;
-        for owner in &self.departed_owners {
-            let accepted = accepted_by_owner.get(owner).unwrap_or(&empty);
-            let count =
-                match native_graph::reclaim_dead_owner_pin_refs(&self.repository, *owner, accepted)
-                {
-                    Ok(count) => count,
-                    Err(native_graph::GraphError::PublicationNotTerminal) => return Ok(None),
-                    Err(_) => return Err(RepositoryError::LocalStateUnavailable),
-                };
-            reclaimed = reclaimed
-                .checked_add(count)
-                .ok_or(RepositoryError::LocalStateUnavailable)?;
-        }
+        let departed = self
+            .departed_owners
+            .iter()
+            .map(|owner| (*owner, accepted_by_owner.get(owner).unwrap_or(&empty)))
+            .collect::<Vec<_>>();
+        let reclaimed =
+            match native_graph::reclaim_departed_owner_pin_refs(&self.repository, &departed) {
+                Ok(count) => count,
+                Err(native_graph::GraphError::PublicationNotTerminal) => return Ok(None),
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            };
         if !self.departed_owners.is_empty() {
             persist_runtime_owner_state(&self.owner_state_path, self.current_owner, &[])?;
         }
