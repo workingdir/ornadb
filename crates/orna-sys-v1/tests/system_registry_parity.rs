@@ -223,7 +223,7 @@ fn generated_artifact_determinism_matrix_matches_embedded_and_build_outputs() {
     let embedded_api_json = system_api_json();
     let artifact_matrix = [
         (
-            "api/sys.json",
+            "sys API json",
             regenerated.api_json.as_str(),
             embedded_api_json.as_str(),
             "api_sys.json",
