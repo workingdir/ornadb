@@ -6258,6 +6258,51 @@ fn publication_refuses_an_index_write_that_lands_before_the_ref_cas() {
     );
 }
 
+/// ORNA-PUB-005: every object the candidate adds must be durable before the
+/// ref names it. An object that cannot be flushed refuses publication before
+/// the CAS and leaves no journal behind.
+#[test]
+fn publication_flushes_candidate_objects_before_the_ref_names_them() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [19; 16]);
+    let blob = git(
+        root.path(),
+        &[
+            "rev-parse",
+            &format!("{}:generated/row.orna", candidate.commit().as_str()),
+        ],
+    );
+    let loose = root
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let aside = root.path().join(".git/orna-test-row-object");
+    fs::rename(&loose, &aside).unwrap();
+    // The object path no longer names a file that can be flushed.
+    fs::create_dir(&loose).unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(RepositoryError::Graph(
+            orna_repository_v1::GraphError::DurabilityFailed
+        ))
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+
+    fs::remove_dir(&loose).unwrap();
+    fs::rename(&aside, &loose).unwrap();
+    repo.publish_candidate(&index, &candidate, &mut journal)
+        .unwrap();
+    repo.mark_runtime_complete([19; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(candidate.commit()));
+}
+
 /// A Prepared journal is discarded once HEAD moves to a commit that lacks the
 /// candidate, and kept as a recovery conflict once HEAD descends from it.
 #[test]
