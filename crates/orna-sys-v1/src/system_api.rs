@@ -398,7 +398,6 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.explain<T>(query: Query<T>): sys.Plan",
         role = "langitem.sys.explain@1.0",
-        failures = "sys.explain.invalid_snapshot,sys.explain.invalid_object,sys.explain.invalid_expression,sys.explain.plan_limit,sys.explain.expression_limit,sys.explain.invalid_dependency,sys.explain.invalid_plan_tree",
     )]
     pub fn sys_explain_query(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Query)")

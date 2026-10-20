@@ -12,15 +12,7 @@ const GENERIC_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.unavailable",
     "sys.abi.provider_failed",
 ];
-const EXPLAIN_FAILURES: [&str; 7] = [
-    "sys.explain.invalid_snapshot",
-    "sys.explain.invalid_object",
-    "sys.explain.invalid_expression",
-    "sys.explain.plan_limit",
-    "sys.explain.expression_limit",
-    "sys.explain.invalid_dependency",
-    "sys.explain.invalid_plan_tree",
-];
+const PROVIDER_FAILURE: &str = "sys.abi.provider_failed";
 
 struct FixedResolver {
     response: Result<QueryPlanDescription, FailureCode>,
@@ -114,15 +106,8 @@ fn generated_abi_declares_explain_query_on_the_explain_role() {
     assert_eq!(operation.effects, EffectSet::one(SystemEffect::Read));
     for code in &operation.failures {
         assert!(
-            GENERIC_PROVIDER_FAILURES.contains(&code.as_str())
-                || EXPLAIN_FAILURES.contains(&code.as_str()),
-            "sys.explain(Query) declares only generic or explain failures, found {code:?}"
-        );
-    }
-    for code in EXPLAIN_FAILURES {
-        assert!(
-            operation.failures.iter().any(|declared| declared.as_str() == code),
-            "sys.explain(Query) must declare {code}"
+            GENERIC_PROVIDER_FAILURES.contains(&code.as_str()),
+            "sys.explain(Query) declares only generic failures, found {code:?}"
         );
     }
 
@@ -240,7 +225,7 @@ fn explain_offer_with_wider_effect_is_refused_at_bind() {
 #[test]
 fn resolver_failure_outside_the_abi_is_refused_as_undeclared() {
     let provider = explain_provider(Err(
-        FailureCode::new("sys.explain.unlisted_resolver_fault").unwrap()
+        FailureCode::new("sys.snapshot.not_found").unwrap()
     ));
     let registry = linked_registry(&provider);
     let error = registry
@@ -251,7 +236,7 @@ fn resolver_failure_outside_the_abi_is_refused_as_undeclared() {
             &[query_argument()],
             |_| Ok(()),
         )
-        .expect_err("sys.explain(Query) does not declare sys.explain.unlisted_resolver_fault");
+        .expect_err("sys.explain(Query) does not declare sys.snapshot.not_found");
     assert!(
         matches!(error, ProviderDiagnostic::UndeclaredFailure { .. }),
         "unexpected diagnostic: {error:?}"
@@ -282,7 +267,7 @@ fn resolver_failure_with_generic_provider_code_is_reported_as_failure() {
 }
 
 #[test]
-fn empty_snapshot_fails_planning_with_declared_invalid_snapshot() {
+fn empty_snapshot_fails_planning_with_provider_failure() {
     let mut query = scan_query();
     query.snapshot = SnapshotRef::descriptive("");
     let provider = explain_provider(Ok(query));
@@ -298,7 +283,7 @@ fn empty_snapshot_fails_planning_with_declared_invalid_snapshot() {
         .expect("a declared explain failure is a dispatch failure, not a diagnostic");
     match result {
         SystemDispatchResult::Failed(code) => {
-            assert_eq!(code.as_str(), "sys.explain.invalid_snapshot");
+            assert_eq!(code.as_str(), PROVIDER_FAILURE);
         }
         SystemDispatchResult::Returned(value) => {
             panic!("an empty snapshot must not yield a plan: {value:?}")
@@ -307,7 +292,7 @@ fn empty_snapshot_fails_planning_with_declared_invalid_snapshot() {
 }
 
 #[test]
-fn empty_source_fails_planning_with_declared_invalid_object() {
+fn empty_source_fails_planning_with_provider_failure() {
     let mut query = scan_query();
     query.source = ObjectRef::descriptive("");
     let provider = explain_provider(Ok(query));
@@ -323,7 +308,7 @@ fn empty_source_fails_planning_with_declared_invalid_object() {
         .expect("a declared explain failure is a dispatch failure, not a diagnostic");
     match result {
         SystemDispatchResult::Failed(code) => {
-            assert_eq!(code.as_str(), "sys.explain.invalid_object");
+            assert_eq!(code.as_str(), PROVIDER_FAILURE);
         }
         SystemDispatchResult::Returned(value) => {
             panic!("an empty source must not yield a plan: {value:?}")
@@ -355,7 +340,7 @@ fn direct_invoke_refuses_a_different_operation() {
     let provider = explain_provider(Ok(scan_query()));
     assert_eq!(
         invoke_refusal(&provider, "sys.explain(FunctionRef)", &[query_argument()]),
-        "sys.explain.invalid_object"
+        PROVIDER_FAILURE
     );
 }
 
@@ -364,7 +349,7 @@ fn direct_invoke_refuses_zero_arguments() {
     let provider = explain_provider(Ok(scan_query()));
     assert_eq!(
         invoke_refusal(&provider, OPERATION, &[]),
-        "sys.explain.invalid_object"
+        PROVIDER_FAILURE
     );
 }
 
@@ -373,7 +358,7 @@ fn direct_invoke_refuses_two_arguments() {
     let provider = explain_provider(Ok(scan_query()));
     assert_eq!(
         invoke_refusal(&provider, OPERATION, &[query_argument(), query_argument()]),
-        "sys.explain.invalid_object"
+        PROVIDER_FAILURE
     );
 }
 
@@ -383,6 +368,6 @@ fn direct_invoke_refuses_a_non_query_argument() {
     let not_a_query = TypedValue::public(TypeId::new("Int"), Vec::<u8>::new());
     assert_eq!(
         invoke_refusal(&provider, OPERATION, &[not_a_query]),
-        "sys.explain.invalid_object"
+        PROVIDER_FAILURE
     );
 }

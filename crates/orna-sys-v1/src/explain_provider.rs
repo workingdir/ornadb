@@ -8,7 +8,7 @@
 //! [`QueryPlanResolver`]. Planning and `sys.Plan` serialization are owned here.
 
 use crate::{
-    AbiVersion, EffectSet, ExplainError, FailureCode, OperationId, ProviderFailure, ProviderId,
+    AbiVersion, EffectSet, FailureCode, OperationId, ProviderFailure, ProviderId,
     ProviderOffer, QueryPlanDescription, SemanticRoleId, SystemEffect, SystemOperationProvider,
     TypeId, TypedValue, explain_query,
 };
@@ -62,13 +62,13 @@ impl<R: QueryPlanResolver> SystemOperationProvider for ExplainQueryProvider<R> {
         arguments: &[TypedValue],
     ) -> Result<TypedValue, ProviderFailure> {
         if operation.as_str() != EXPLAIN_QUERY_OPERATION {
-            return Err(failure(ExplainError::InvalidObject));
+            return Err(provider_failure());
         }
         let [query] = arguments else {
-            return Err(failure(ExplainError::InvalidObject));
+            return Err(provider_failure());
         };
         if !query.static_type().as_str().starts_with("Query<") {
-            return Err(failure(ExplainError::InvalidObject));
+            return Err(provider_failure());
         }
         let description = self
             .resolver
@@ -77,16 +77,17 @@ impl<R: QueryPlanResolver> SystemOperationProvider for ExplainQueryProvider<R> {
                 code,
                 payload: None,
             })?;
-        let explained = explain_query(&description).map_err(failure)?;
-        let bytes = serde_json::to_vec(explained.plan())
-            .map_err(|_| failure(ExplainError::InvalidPlanTree))?;
+        let explained = explain_query(&description).map_err(|_| provider_failure())?;
+        let bytes = serde_json::to_vec(explained.plan()).map_err(|_| provider_failure())?;
         Ok(TypedValue::public(TypeId::new(SYS_PLAN_TYPE), bytes))
     }
 }
 
-fn failure(error: ExplainError) -> ProviderFailure {
+/// The shared ABI failure code. It is the only non-resolver failure that the
+/// `sys.explain(Query)` vocabulary permits (see the ABI vocabulary test).
+fn provider_failure() -> ProviderFailure {
     ProviderFailure {
-        code: FailureCode::new(error.code()).expect("explain error codes are valid failure codes"),
+        code: FailureCode::new("sys.abi.provider_failed").expect("shared failure code is valid"),
         payload: None,
     }
 }
