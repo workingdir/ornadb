@@ -3815,6 +3815,10 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
+        // The drift commits below build on the fixture as the committed HEAD.
+        repository
+            .advance_current_ref(&head, plan.candidate())
+            .unwrap();
         let committed = plan.candidate_commit().clone();
         let source = CompactParquetKeySource::from_verified_manifest(
             &repository,
