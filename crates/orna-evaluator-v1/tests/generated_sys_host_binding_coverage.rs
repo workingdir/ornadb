@@ -202,7 +202,7 @@ fn every_generated_host_binding_has_a_fixture_and_native_value_proof() {
         BindingProof {
             operation: "sys.blob.capture_file",
             provider: "orna.sys.host.filesystem.v1",
-            fixture: include_str!("../../orna-cli-v1/tests/fixtures/media/import-song-authored.orna"),
+            fixture: include_str!("fixtures/sys-blob-capture-file-authored.orna"),
             call: "sys.blob.capture_file(",
             behavior_test: "cli_consumer_commits_captured_annotated_blob_with_its_request",
             behavior_source: CAPTURE_FILE_PROOFS,
