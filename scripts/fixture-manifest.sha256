@@ -5990,6 +5990,8 @@ c479d2f6a510fb2e817ddd2d9834b87a008c0f9f8e05dc9761946d020fa2ff76  crates/orna-tr
 1facde5fb2faae65d5ff121811d14c826647086a504dcbd0de3ccb1a3b0e1b2a  crates/orna-traceability-v1/tests/fixtures/reference/tests/snapshot-vectors.json
 b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095  crates/orna-traceability-v1/tests/fixtures/reference/tests/value-vectors.json
 7b393bb7b1a6290ae897cc62392b0751453ce93f7feb19fe2e1e352b78dba098  crates/orna-traceability-v1/tests/fixtures/traceability-evidence-closure-migrate.orna
+7b232d68b7e4a6a2e9c225339639165569896b7ee8e1b8bd06e3331af2f73120  crates/orna-value-v1/src/fixtures/reference/profiles/media-1.json
+985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d  crates/orna-value-v1/src/fixtures/reference/tests/final-vectors.json
 0a1246335ef757a7f18c8661bc9c39a49b5ccd0477704c77c6bae43c2a8c8094  crates/orna-value-v1/src/fixtures/reference/tests/float-vectors.json
 16b73a224efe971fa9b6190a860dac80611e987416872d1f6035c2994d247c12  crates/orna-value-v1/src/fixtures/reference/tests/numeric-vectors.json
 773216efb8a81c9b55597be0711cca35f9dd0c5df5880ec1e93ed991abf5a7c7  crates/orna-value-v1/src/fixtures/reference/tests/path-vectors.json
