@@ -384,7 +384,9 @@ fn head(repository: &Repository) -> String {
 async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary() {
     // The repository observer fires after each ref/index stage is durable;
     // ref-index remains the existing boundary after both stages complete.
-    for boundary in ["capture", "row", "candidate", "ref-cas", "index", "ref-index", "tail"] {
+    // index-install parks after the reconciled index is installed but before
+    // its IndexReconciled journal stage is durable (ORNA-PUB-007).
+    for boundary in ["capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
@@ -424,7 +426,7 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         let pre_journal = repository.read_publication_journal().unwrap().is_some();
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
-        assert!(pre_journal == matches!(boundary, "ref-cas" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
         drop(state);
 
         let resumed = cli(root, &["publish"]);
