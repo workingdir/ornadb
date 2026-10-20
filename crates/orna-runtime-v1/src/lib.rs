@@ -280,6 +280,22 @@ CREATE TABLE IF NOT EXISTS stream_checkpoint_history (
     transition INTEGER NOT NULL CHECK (transition IN (1, 2)),
     PRIMARY KEY (key_id, version)
 );
+CREATE TABLE IF NOT EXISTS stream_checkpoint_migration_bridge (
+    key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
+    origin_version INTEGER NOT NULL CHECK (origin_version >= 0),
+    origin_position TEXT CHECK (origin_position IS NULL OR length(origin_position) > 0),
+    source_generation INTEGER NOT NULL CHECK (source_generation >= 0),
+    source_generation_digest BLOB NOT NULL CHECK (length(source_generation_digest) = 32)
+);
+CREATE TABLE IF NOT EXISTS stream_checkpoint_migration_archive (
+    key_id TEXT NOT NULL CHECK (length(key_id) > 0),
+    version INTEGER NOT NULL CHECK (version > 0),
+    committed_position TEXT NOT NULL CHECK (length(committed_position) > 0),
+    snapshot BLOB NOT NULL CHECK (length(snapshot) > 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32),
+    transition INTEGER NOT NULL CHECK (transition IN (1, 2)),
+    PRIMARY KEY (key_id, version)
+);
 CREATE TABLE IF NOT EXISTS stream_checkpoint_bootstrap (
     key_id TEXT PRIMARY KEY CHECK (length(key_id) > 0),
     selected_commit TEXT NOT NULL CHECK (length(selected_commit) > 0)
@@ -13927,8 +13943,11 @@ impl RuntimeState {
                         return Err(RuntimeError::RecoveryInvalid);
                     }
                 }
+                let (origin_version, origin_position) =
+                    load_stream_checkpoint_migration_origin(&self.connection, &key_id).await?;
                 active_key = Some(key_id);
-                previous_version = 0;
+                previous_version = origin_version;
+                latest_position = origin_position;
                 checkpoint_version = joined_version;
                 checkpoint_position = joined_position;
             } else if joined_version != checkpoint_version || joined_position != checkpoint_position
@@ -13997,10 +14016,17 @@ impl RuntimeState {
         }
         drop(reset_only);
         for (key_id, version, position) in reset_only_checkpoints {
-            if validate_stream_checkpoint_reset_bridge(&self.connection, &key_id, 0, None, version)
-                .await?
-                != position
-            {
+            let (origin_version, origin_position) =
+                load_stream_checkpoint_migration_origin(&self.connection, &key_id).await?;
+            let reset_position = validate_stream_checkpoint_reset_bridge(
+                &self.connection,
+                &key_id,
+                origin_version,
+                origin_position.as_deref(),
+                version,
+            )
+            .await?;
+            if reset_position != position {
                 return Err(RuntimeError::RecoveryInvalid);
             }
         }
@@ -15414,6 +15440,42 @@ fn decode_bool(value: i64) -> Result<bool, RuntimeError> {
         1 => Ok(true),
         _ => Err(RuntimeError::RecoveryInvalid),
     }
+}
+
+async fn load_stream_checkpoint_migration_origin(
+    connection: &Connection,
+    key_id: &str,
+) -> Result<(u64, Option<String>), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT origin_version, origin_position
+             FROM stream_checkpoint_migration_bridge
+             WHERE key_id = ?1",
+            params![key_id],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok((0, None));
+    };
+    let version = decode_u64(
+        row.get::<i64>(0)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )?;
+    let position = row
+        .get::<Option<String>>(1)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    if let Some(position) = &position {
+        decode_position(position.clone())?;
+    }
+    if (version == 0) != position.is_none() {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok((version, position))
 }
 
 fn decode_u32(value: i64) -> Result<u32, RuntimeError> {
