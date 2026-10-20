@@ -148,7 +148,8 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     const SOURCE: &str = r####"
         mod nested {
             trait Declared {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.trait_declared","purpose":"trait fixture","signature":"fn sys.trait_declared(): Int"}"###)]
+                /// trait fixture
+                #[ornasys(name = "sys.trait_declared", effect = "read", signature = "fn sys.trait_declared(): Int")]
                 fn declared(&self);
             }
 
@@ -157,12 +158,14 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
                 fn bound(&self);
             }
             impl Implemented for Binding {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.impl_method","purpose":"impl fixture","signature":"fn sys.impl_method(): Int"}"###)]
+                /// impl fixture
+                #[ornasys(name = "sys.impl_method", effect = "read", signature = "fn sys.impl_method(): Int")]
                 fn bound(&self) {}
             }
 
             impl Binding {
-                #[ornasys(function = r###"{"effect":"read","name":"sys.inherent_method","purpose":"inherent fixture","signature":"fn sys.inherent_method(): Int"}"###)]
+                /// inherent fixture
+                #[ornasys(name = "sys.inherent_method", effect = "read", signature = "fn sys.inherent_method(): Int")]
                 fn inherent(&self) {}
             }
         }
@@ -188,11 +191,13 @@ fn collector_covers_trait_methods_and_nested_impls_and_rejects_silent_skips() {
     );
 
     let unsupported = r####"
-        #[ornasys(function = r###"{"effect":"read","name":"sys.free","purpose":"not a method","signature":"fn sys.free(): Int"}"###)]
+        /// not a method
+        #[ornasys(name = "sys.free", effect = "read", signature = "fn sys.free(): Int")]
         fn free() {}
 
         trait HasConst {
-            #[ornasys(function = r###"{"effect":"read","name":"sys.const","purpose":"not a method","signature":"fn sys.const(): Int"}"###)]
+            /// not a method
+            #[ornasys(name = "sys.const", effect = "read", signature = "fn sys.const(): Int")]
             const VALUE: u8;
         }
     "####;
@@ -209,14 +214,20 @@ fn collector_registers_versioned_roles_and_rejects_incompatible_overloads() {
     const SOURCE: &str = r####"
         struct Binding;
         impl Binding {
+            /// fixture
             #[ornasys(
-                function = r###"{"effect":"read","name":"sys.fixture.first","purpose":"fixture","signature":"fn sys.fixture.first(value: Int): Int"}"###,
+                name = "sys.fixture.first",
+                effect = "read",
+                signature = "fn sys.fixture.first(value: Int): Int",
                 role = "langitem.fixture.invoke@1.0"
             )]
             fn first(&self) {}
 
+            /// fixture
             #[ornasys(
-                function = r###"{"effect":"read","name":"sys.fixture.second","purpose":"fixture","signature":"fn sys.fixture.second(value: Str): Str"}"###,
+                name = "sys.fixture.second",
+                effect = "read",
+                signature = "fn sys.fixture.second(value: Str): Str",
                 role = "langitem.fixture.invoke@1.0"
             )]
             fn second(&self) {}
