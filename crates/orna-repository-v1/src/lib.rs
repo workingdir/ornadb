@@ -2924,11 +2924,79 @@ impl Repository {
         expected_ref: Option<&str>,
     ) -> Result<(), RepositoryError> {
         let reference = self.advance_target_ref(expected_head, expected_ref)?;
+        // ORNA-PUB-005: every object the candidate adds is durable before the
+        // ref names it, and the ref is durable before a journal stage or the
+        // runtime's tail consumption relies on it.
+        self.sync_candidate_objects(expected_head, candidate.commit())?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
         Ok(())
+    }
+
+    /// Flushes every object `candidate` adds over `base`: the commit, its root
+    /// tree, and each tree and blob on a changed path. `write-tree` and
+    /// `commit-tree` leave their loose objects unflushed under Git's default
+    /// `core.fsync`, so without this a crash after the ref names them could
+    /// lose or truncate them.
+    fn sync_candidate_objects(
+        &self,
+        base: &GitCommitRef,
+        candidate: &GitCommitRef,
+    ) -> Result<(), RepositoryError> {
+        let algorithm = match self.native_object_id_length()? {
+            40 => GitHashAlgorithm::Sha1,
+            64 => GitHashAlgorithm::Sha256,
+            _ => return Err(RepositoryError::UnsupportedObjectFormat),
+        };
+        let oid = |hex: &str| NativeOid::from_hex(algorithm, hex).map_err(RepositoryError::Graph);
+        let root_tree = format!("{}^{{tree}}", candidate.as_str());
+        let mut objects = BTreeSet::from([
+            oid(candidate.as_str())?,
+            oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
+        ]);
+        let changes = self.git_bytes_no_lazy_fetch([
+            "diff-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--no-renames",
+            base.as_str(),
+            candidate.as_str(),
+        ])?;
+        // Raw `-z` output alternates `:<old mode> <new mode> <old> <new> <status>`
+        // records with their paths.
+        let mut fields = changes
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        while let Some(record) = fields.next() {
+            fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let record =
+                std::str::from_utf8(record).map_err(|_| RepositoryError::GitOperationFailed)?;
+            let mut parts = record
+                .strip_prefix(':')
+                .ok_or(RepositoryError::GitOperationFailed)?
+                .split(' ');
+            let new_mode = parts.nth(1).ok_or(RepositoryError::GitOperationFailed)?;
+            let new_object = parts.nth(1).ok_or(RepositoryError::GitOperationFailed)?;
+            // A deletion names no object, and a gitlink names a commit in
+            // another repository.
+            if new_mode != "000000" && new_mode != "160000" {
+                objects.insert(oid(new_object)?);
+            }
+        }
+        let objects_dir = self.git_path("objects")?;
+        native_graph::sync_object_files(&objects_dir, &objects, || Ok(()))
+            .map_err(RepositoryError::Graph)
+    }
+
+    /// Persists the ref `HEAD` resolves through: its branch when attached,
+    /// otherwise `HEAD` itself.
+    fn sync_head_ref(&self) -> Result<(), RepositoryError> {
+        let reference = self.git(["rev-parse", "--symbolic-full-name", "HEAD"])?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)
     }
 
     /// Whether `HEAD` names `commit` or descends from it. A commit that is not
@@ -4367,6 +4435,11 @@ impl Repository {
                 GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
 
             if journal.stage() == PublicationJournalStage::Prepared {
+                // The publisher may have stopped between its CAS and the
+                // barriers after it, so the candidate and the ref must be
+                // durable before RefAdvanced is recorded (ORNA-PUB-005).
+                self.sync_candidate_objects(journal.old_head(), journal.new_head())?;
+                self.sync_head_ref()?;
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
             }
