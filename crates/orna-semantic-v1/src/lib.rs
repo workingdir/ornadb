@@ -2373,10 +2373,25 @@ pub fn analyze_with_providers(
     catalogue: &Catalogue,
     providers: SystemProviders,
 ) -> Analysis {
-    analyze_retaining_context(inputs, catalogue, false, providers).0
+    analyze_retaining_context_with_providers(inputs, catalogue, false, providers).0
 }
 
+/// Semantic payload derivation describes declarations rather than admitting
+/// a program for evaluation, so it checks the declared `sys` surface only.
 fn analyze_retaining_context(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    analyze_retaining_context_with_providers(
+        inputs,
+        catalogue,
+        retain_context,
+        SystemProviders::DeclaredSurface,
+    )
+}
+
+fn analyze_retaining_context_with_providers(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
     retain_context: bool,
