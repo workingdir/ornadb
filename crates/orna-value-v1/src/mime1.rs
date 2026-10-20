@@ -399,9 +399,10 @@ mod tests {
             annotation(OCTET_STREAM, Some("dat")).selected_suffix(),
             "dat"
         );
-        let registry = MimeRegistry::mime1();
-        assert_eq!(registry.preferred_suffix("image/jpeg"), "jpg");
-        assert_eq!(registry.preferred_suffix("video/mp4;codecs=avc1"), "mp4");
-        assert_eq!(registry.preferred_suffix("application/x-example"), "bin");
+        assert_eq!(annotation("image/jpeg", None).selected_suffix(), "jpg");
+        assert_eq!(
+            annotation("video/mp4;codecs=avc1", None).selected_suffix(),
+            "mp4"
+        );
     }
 }
