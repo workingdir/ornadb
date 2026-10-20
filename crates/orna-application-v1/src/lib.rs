@@ -3413,6 +3413,7 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
 mod tests {
     use super::*;
 
+    /// ORNA-KNOW-003: remote analysis is denied by default without disclosure.
     #[test]
     fn remote_analysis_is_denied_by_default_without_disclosure() {
         let denied = remote_analysis_request(RemoteAnalysisPolicy::default(), "snapshot:sha256:source-deps-resources-toolchain-abi", Vec::new());
@@ -3422,6 +3423,7 @@ mod tests {
         assert_eq!(denied.source_snapshot(), "snapshot:sha256:source-deps-resources-toolchain-abi");
     }
 
+    /// ORNA-KNOW-003: remote analysis requires explicit policy and records the disclosed boundary.
     #[test]
     fn remote_analysis_requires_explicit_policy_and_records_disclosed_boundary() {
         let allowed = remote_analysis_request(
