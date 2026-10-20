@@ -430,6 +430,8 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
     }
 }
 
+/// ORNA-PUB-007: recovery after ref advancement completes index/worktree reconciliation and Turso cleanup.
+/// ORNA-PUB-016: recovery retains distinct staged and unstaged changes across the crash boundary.
 #[tokio::test]
 async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
     let (directory, source, repository, state, source_commit, relation_id, format_context) =
