@@ -12,7 +12,9 @@ use std::{
 };
 
 use num_bigint::BigInt;
-use orna_repository_v1::{GitCommitRef, Repository, RepositoryError, Uuid};
+use orna_repository_v1::{
+    GitCommitRef, Repository, RepositoryError, Uuid, relation_admission::StoredObjectIdentity,
+};
 use orna_semantic_v1::{
     Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
     TableSchema, Type, declared_type,
@@ -24,8 +26,11 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 
-/// Repository-relative committed location of the object identity inventory.
-pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
+/// Repository-relative location of the legacy identity sidecar. Format 3
+/// commits keep the inventory in the store (see [`ObjectIdentityManifest::read_committed`]);
+/// the worktree copy remains the input of explicit rename tooling.
+pub const OBJECT_IDENTITY_MANIFEST_PATH: &str =
+    orna_repository_v1::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH;
 const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MANIFEST_VERSION: u64 = 1;
 
@@ -457,19 +462,78 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
-    /// Reads and validates the source identity inventory from one exact commit.
+    /// Reads and validates the committed identity inventory of one exact
+    /// commit.
+    ///
+    /// Format 3 keeps the inventory as a sealed system relation of
+    /// `.orna/store`, because tracked `.orna/` holds only `database.orna` and
+    /// `store` (ORNA-META-001) and stable IDs are committed metadata
+    /// (ORNA-OBJECT-002). The tracked sidecar is read only for a legacy
+    /// commit whose store has no inventory relation; when a commit has both,
+    /// the store is the authority.
     pub fn read_committed(
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
-        let bytes = repository
-            .read_committed_file(
-                commit,
-                OBJECT_IDENTITY_MANIFEST_PATH,
-                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
-            )
-            .map_err(|_| ObjectIdentityError::Io)?;
-        Self::decode(&bytes)
+        Self::read_committed_if_present(repository, commit)?.ok_or(ObjectIdentityError::Io)
+    }
+
+    /// Like [`Self::read_committed`], but `Ok(None)` when the commit carries
+    /// no identity inventory at all, as a commit made before any identity was
+    /// allocated does.
+    pub fn read_committed_if_present(
+        repository: &Repository,
+        commit: &GitCommitRef,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_committed_object_identities(commit)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored).map(Some);
+        }
+        repository
+            .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .map(|bytes| Self::decode(&bytes))
+            .transpose()
+    }
+
+    /// The inventory as store rows for the sealed identity relation.
+    pub fn to_stored(&self) -> Vec<StoredObjectIdentity> {
+        self.records
+            .iter()
+            .map(|record| {
+                StoredObjectIdentity::new(
+                    record.id,
+                    record.kind as u64,
+                    record.qualified_name.clone(),
+                    record.retired,
+                )
+            })
+            .collect()
+    }
+
+    /// Rebuilds the inventory from the store rows of the sealed identity
+    /// relation, in the same canonical record order reconciliation uses.
+    fn from_stored(stored: &[StoredObjectIdentity]) -> Result<Self, ObjectIdentityError> {
+        let mut records = stored
+            .iter()
+            .map(|identity| {
+                Ok(ObjectIdentity {
+                    kind: ObjectKind::from_raw(&Raw::Int(identity.kind().into()))
+                        .ok_or(ObjectIdentityError::InvalidEncoding)?,
+                    qualified_name: identity.qualified_name().to_owned(),
+                    id: *identity.id(),
+                    retired: identity.retired(),
+                })
+            })
+            .collect::<Result<Vec<_>, ObjectIdentityError>>()?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+        Ok(Self { records })
     }
     /// Reads the manifest from the current worktree without allocating IDs.
     pub fn read_worktree(repository: &Repository) -> Result<Option<Self>, ObjectIdentityError> {

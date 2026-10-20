@@ -507,6 +507,39 @@ impl Repository {
         Ok(Some(identities))
     }
 
+    /// The bytes of a legacy commit's tracked identity sidecar, or `None` when
+    /// the commit does not track one. Only commits written before the
+    /// inventory moved into the store carry it.
+    pub fn read_legacy_identity_sidecar(
+        &self,
+        commit: &GitCommitRef,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
+        let mut command = self.command();
+        command.args([
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            commit.as_str(),
+            "--",
+            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
+        ]);
+        let listed = self.run(command)?.stdout;
+        if !listed.split(|byte| *byte == 0).any(|entry| {
+            entry
+                .rsplit(|byte| *byte == b'\t')
+                .next()
+                .is_some_and(|path| path == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes())
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(self.read_committed_file(
+            commit,
+            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
+            max_bytes,
+        )?))
+    }
+
     /// SHA-256 of the ordinary index file, or of nothing when it is absent.
     fn index_file_digest(&self) -> Result<[u8; 32], RelationAdmissionError> {
         let index = self.git_path("index")?;
