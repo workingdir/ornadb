@@ -8849,6 +8849,122 @@ mod persisted_orp_tests {
         }
     }
 
+    /// Applies one maintenance pass to the fixture relation and publishes it
+    /// as the graph's pinned row map, so the next pass rewrites from it.
+    /// Returns the new primary root, its row count, every object the pass
+    /// wrote (sorted) and its created/reused index node counts.
+    fn maintain_and_repin(
+        graph: &mut NativeGraphContext,
+        mutations: &[RowIndexMutation],
+    ) -> (String, u64, Vec<String>, usize, usize) {
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let maintenance = graph
+            .maintain_row_index(mutations, &scope)
+            .expect("maintain fixture rows");
+        let version = graph.row_snapshot.version().clone();
+        let store_root = graph
+            .replace_relation_primary_root(
+                &graph.store_root,
+                &version,
+                maintenance.primary_root(),
+                maintenance.row_count(),
+                &scope,
+            )
+            .expect("publish maintained rows into the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("reload the maintained relation");
+        graph.store_root = store_root;
+        let mut objects = maintenance
+            .objects_written()
+            .iter()
+            .map(NativeOid::to_hex)
+            .collect::<Vec<_>>();
+        objects.sort();
+        (
+            maintenance.primary_root().to_hex(),
+            maintenance.row_count(),
+            objects,
+            maintenance.index_objects_created().len(),
+            maintenance.index_objects_reused().len(),
+        )
+    }
+
+    /// Pins the exact ORP-1 objects `maintain_row_index` writes for a
+    /// multi-page build, an edit of that build (delete, rekey, insert) and its
+    /// deletion down to the one empty leaf. Object ids are hashes of the page
+    /// and branch bytes, so a builder change that alters any page, fence,
+    /// count or partition boundary changes this transcript.
+    #[test]
+    fn maintain_row_index_writes_pinned_page_bytes() {
+        let (_directory, mut graph) = capture_test_context();
+        let empty = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
+        let flagged = RowValue::decode_canonical_fields(vec![0x81, 0xf5]).expect("one-field tuple");
+        let key = |index: usize| TypedKey::Text(format!("row-{index:04}"));
+        let seed = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: key(index),
+                value: empty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let edit = vec![
+            RowIndexMutation::Delete { key: key(0) },
+            RowIndexMutation::Delete { key: key(150) },
+            RowIndexMutation::Rekey {
+                from: key(299),
+                to: TypedKey::Text("row-0300-z".to_owned()),
+            },
+            RowIndexMutation::Insert {
+                key: TypedKey::Text("row-0150-b".to_owned()),
+                value: flagged,
+            },
+        ];
+        let mut remaining = (1..299)
+            .filter(|index| *index != 150)
+            .map(|index| RowIndexMutation::Delete { key: key(index) })
+            .collect::<Vec<_>>();
+        remaining.push(RowIndexMutation::Delete {
+            key: TypedKey::Text("row-0150-b".to_owned()),
+        });
+        remaining.push(RowIndexMutation::Delete {
+            key: TypedKey::Text("row-0300-z".to_owned()),
+        });
+
+        let mut transcript = String::new();
+        for mutations in [&seed, &edit, &remaining] {
+            let (root, rows, objects, created, reused) = maintain_and_repin(&mut graph, mutations);
+            let digest = Sha256::digest(objects.join("\n").as_bytes());
+            transcript.push_str(&format!(
+                "{root} {rows} {} {created} {reused} {}\n",
+                objects.len(),
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ));
+        }
+        assert_eq!(
+            transcript, PINNED_PAGE_TRANSCRIPT,
+            "ORP-1 page bytes changed"
+        );
+    }
+
+    /// Captured from `maintain_row_index` before its page builder became the
+    /// shared canonical ordered-map builder: root, row count, objects
+    /// written, index nodes created and reused, and SHA-256 of the sorted
+    /// written object ids, per pass.
+    const PINNED_PAGE_TRANSCRIPT: &str = "\
+2583d34d0259dc3c211beae75d643b1b8805ebda 300 17 8 0 e61e710d338c430e3e220cc650b462a70647b40c8f65b6de2d3cee41d9a6c054
+a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b907a12043fed3ab9727a7671bc2cf984bee2f
+688b927aafa299404d1a556273512bfaf6fc5df1 0 2 1 0 06a46d3af2a9e016cfeeed1c84fd3aa635ba63330b698da834af83821ae9bcc1
+";
+
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
         let (directory, mut graph) = capture_test_context();
