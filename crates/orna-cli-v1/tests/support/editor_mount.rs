@@ -278,3 +278,59 @@ pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
         _repository_directory: repository_directory,
     }
 }
+
+pub const EIO: i32 = 5;
+pub const ENOSPC: i32 = 28;
+pub const EDQUOT: i32 = 122;
+
+/// Opens the mounted `data.orna` read-write without truncating it.
+pub fn open_rw(fixture: &EditorMount) -> File {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fixture.data_path)
+        .expect("open data.orna read-write")
+}
+
+/// Reads the accepted row through a new open, never through an editor handle.
+pub fn fresh_view(fixture: &EditorMount) -> String {
+    std::fs::read_to_string(&fixture.data_path).expect("read accepted state through a new open")
+}
+
+/// Asserts that `result` failed with one of `expected` errno values.
+pub fn assert_errno(result: std::io::Result<()>, expected: &[i32], context: &str) {
+    let error = result.expect_err(context);
+    let code = error.raw_os_error();
+    assert!(
+        code.is_some_and(|code| expected.contains(&code)),
+        "{context}: expected one of {expected:?}, got {error}",
+    );
+}
+
+/// Draft guard value the mount publishes on its root: `1` while any draft is
+/// unresolved, `0` when none is.
+pub fn draft_guard(fixture: &EditorMount) -> u8 {
+    let root = fixture._mount_parent.path().join("library");
+    let mut value = [0_u8; 1];
+    let length = rustix::fs::getxattr(root.as_path(), "user.orna.unresolved-drafts", &mut value)
+        .expect("read the mount draft guard");
+    assert_eq!(length, 1, "the draft guard is one byte");
+    value[0]
+}
+
+/// Waits up to five seconds for the draft guard to reach `expected`. The FUSE
+/// release handler can run after close(2) returns, so a guard read right after
+/// a drop polls instead of reading once.
+pub async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = draft_guard(fixture);
+        if value == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{context}: guard is {value}, expected {expected} after 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
