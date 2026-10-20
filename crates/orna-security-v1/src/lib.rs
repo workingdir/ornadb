@@ -987,7 +987,6 @@ mod tests {
         assert!(!rendered.contains("app.example"));
     }
 
-    /// ORNA-SECRET-003: A `SecretRef` may be displayed and serialized by stable name; the resolved secret value may not.
     #[test]
     fn secret_reference_and_metadata_never_contain_secret_bytes() {
         let reference = SecretRef::new("messages.inbox").unwrap();

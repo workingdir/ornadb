@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use orna_value_v1::{
     decode_rov3, decode_rov3_in_context, encode_rov3, AvailabilityState, Blob, BlobResolver,
-    ContentIdentity, ContentReference, Error, Format3Context, Format3Quota, GitHash, NativeOid,
-    OwnerLifetime, Snapshot,
+    ContentIdentity, ContentReference, ContextValue, Error, Format3Context, Format3Quota, GitHash,
+    NativeOid, OwnerLifetime, Snapshot, ValueFormat,
 };
 
 struct FixedResolver(Vec<u8>);
@@ -62,7 +62,8 @@ fn authorized_blob(database: [u8; 16], resolver: Arc<FixedResolver>) -> (Format3
     (context, blob)
 }
 
-/// ORNA-FORMAT-003: A referenced database, type, table and key schema MUST agree. Decoding data from another snapshot does not implicitly import its schema or replace the current execution context.
+/// ORNA-FORMAT-003 (partial): covers only database pinning and read authority of a foreign snapshot.
+/// Type, table and key schema agreement is not exercised here; remainder tracked in gap bead ornadb-5il1.28.
 #[test]
 fn foreign_snapshot_neither_replaces_the_context_nor_authorizes_reads() {
     let resolver = Arc::new(FixedResolver(b"abc".to_vec()));
@@ -110,4 +111,16 @@ fn rov3_reference_tag_is_rejected_outside_its_recorded_context() {
     let decoded = decode_rov3_in_context(&encoded, &authorized).unwrap();
     assert_eq!(decoded.metadata().length(), 3);
     assert_eq!(blob.read(1, 2).unwrap(), b"bc");
+}
+
+/// ORNA-FORMAT-005 (partial): new annotated Blob values MUST NOT silently lose their annotation through the old OVB-1 interface.
+/// Covers only the reject half (OVB-1 refuses the annotated value); the OVB-2 preserve half is tracked in gap bead ornadb-5il1.29.
+#[test]
+fn annotated_blob_is_rejected_by_ovb1_instead_of_losing_its_annotation() {
+    let blob = Blob::from_bytes_with_annotation(b"image".to_vec(), "image/jpeg", Some("jpeg"))
+        .expect("valid MIME type and suffix");
+    assert_eq!(
+        ContextValue::from_blob(&blob, ValueFormat::Ovb1).err(),
+        Some(Error::InvalidProfile)
+    );
 }

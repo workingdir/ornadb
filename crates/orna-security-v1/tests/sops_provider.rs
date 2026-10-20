@@ -31,6 +31,7 @@ esac
 "##;
 
 /// ORNA-SECRET-001: Orna MUST NOT commit plaintext secret values by default.
+/// ORNA-SECRET-003: A `SecretRef` may be displayed and serialized by stable name; the resolved secret value may not.
 #[test]
 fn write_encrypts_before_persisting_and_removes_plaintext_temp() {
     let root = TempDir::new().unwrap();
