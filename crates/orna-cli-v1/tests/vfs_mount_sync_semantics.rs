@@ -2,7 +2,7 @@
 
 //! Gate E: acknowledged versus draft state on the writable mount for
 //! fsync/fdatasync, repeated flush, dup/fork, temporary sync and rename,
-//! writes after sync, and close-error ignorance (VFS-007/008/009, EDIT-1).
+//! writes after sync, and VFS-007/008/009 draft acknowledgement (EDIT-1).
 
 use std::{
     fs::{File, OpenOptions},
@@ -22,7 +22,7 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{EditorMount, require_fuse_or_skip, start_editor_mount};
 
-const EIO: i32 = 5;
+const EINVAL: i32 = 22;
 const EBUSY: i32 = 16;
 
 fn row(title: &str) -> String {
@@ -60,9 +60,9 @@ fn fresh_view(fixture: &EditorMount) -> String {
     std::fs::read_to_string(&fixture.data_path).expect("read accepted state through a new open")
 }
 
-fn assert_eio(result: std::io::Result<()>, context: &str) {
+fn assert_errno(result: std::io::Result<()>, expected: i32, context: &str) {
     let error = result.expect_err(context);
-    assert_eq!(error.raw_os_error(), Some(EIO), "{context}: {error}");
+    assert_eq!(error.raw_os_error(), Some(expected), "{context}: {error}");
 }
 
 fn mount_root(fixture: &EditorMount) -> PathBuf {
@@ -110,7 +110,7 @@ fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
 }
 
 /// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
-/// returns EIO, stays visible to its own handle, and is never admitted.
+/// returns EINVAL, stays visible to its own handle, and is never admitted.
 #[tokio::test]
 async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
     if !require_fuse_or_skip() {
@@ -124,7 +124,11 @@ async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
     assert!(fresh_view(&fixture).contains("Fsync accepted"));
 
     replace_draft(&mut file, &invalid_row("Bad fsync draft"));
-    assert_eio(file.sync_all(), "invalid draft fsync must fail with EIO");
+    assert_errno(
+        file.sync_all(),
+        EINVAL,
+        "invalid draft fsync must fail with EINVAL",
+    );
     assert!(
         read_own_draft(&mut file).contains("Bad fsync draft"),
         "the rejected draft stays visible to its own handle",
@@ -151,9 +155,10 @@ async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {
     assert!(fresh_view(&fixture).contains("Datasync accepted"));
 
     replace_draft(&mut file, &invalid_row("Bad datasync draft"));
-    assert_eio(
+    assert_errno(
         file.sync_data(),
-        "invalid draft fdatasync must fail with EIO",
+        EINVAL,
+        "invalid draft fdatasync must fail with EINVAL",
     );
     assert!(!fresh_view(&fixture).contains("Bad datasync draft"));
     assert!(fresh_view(&fixture).contains("Datasync accepted"));
@@ -254,8 +259,8 @@ async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
     .await;
 }
 
-/// ORNA-VFS-008 close-error ignorance: a rejected draft that is closed without
-/// a successful sync leaves the durable row unchanged.
+/// ORNA-VFS-008: a rejected draft that is closed without a successful sync
+/// leaves the durable row unchanged. This test does not observe close(2) errors.
 #[tokio::test]
 async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
     if !require_fuse_or_skip() {
@@ -264,7 +269,11 @@ async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
     let fixture = start_editor_mount(false).await;
     let mut file = open_rw(&fixture);
     replace_draft(&mut file, &invalid_row("Bad close draft"));
-    assert_eio(file.sync_all(), "invalid draft fsync must fail with EIO");
+    assert_errno(
+        file.sync_all(),
+        EINVAL,
+        "invalid draft fsync must fail with EINVAL",
+    );
     let before_close = fresh_view(&fixture);
     drop(file);
     assert_eq!(
@@ -494,9 +503,10 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
         .expect("fsync(temp) preserves the bytes and is not acceptance");
     drop(scratch);
 
-    assert_eio(
+    assert_errno(
         std::fs::rename(&temporary, &fixture.data_path),
-        "rename of an invalid temporary must fail with EIO",
+        EINVAL,
+        "rename of an invalid temporary must fail with EINVAL",
     );
     assert!(temporary.exists(), "a failed rename keeps the scratch");
     assert!(

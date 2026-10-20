@@ -30,14 +30,31 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
     vfs::{
-        EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
-        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates,
-        VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
+        EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        VfsDurableSave, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
+        VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
     },
 };
+use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax_v1::{Expr, parse_row};
 use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
+
+/// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
+/// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec
+/// bound. A write or truncate that grows a file past it is quota-rejected
+/// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
+const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
+
+/// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
+/// for the per-file quota, EIO for other draft failures.
+fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
+    match result {
+        Err(EditDraftError::FileTooLarge) => Errno::EDQUOT,
+        _ => Errno::EIO,
+    }
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -838,13 +855,50 @@ fn row_save_context(
 /// Why a document save did not commit. `NoCandidate` means the handle never
 /// submitted bytes, so there is nothing to accept or discard. `Stale` means the
 /// mounted baseline no longer matches the durable row and nothing was written.
-/// `Stale` and `Failed` both mean a save was attempted and did not commit, so
-/// the draft stays unresolved.
+/// `Rejected` means the submitted draft is malformed or fails semantic
+/// admission (profiles/vfs-1 EINVAL). `Stale`, `Rejected` and `Failed` all mean
+/// a save was attempted and did not commit, so the draft stays unresolved.
 #[derive(Debug)]
 enum DocumentCommitError {
     NoCandidate,
     Stale,
+    Rejected(String),
     Failed(String),
+}
+
+impl DocumentCommitError {
+    /// Errno for a save that did not commit (profiles/vfs-1 errno table):
+    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EIO for backing I/O.
+    fn errno(&self) -> Errno {
+        match self {
+            Self::Rejected(_) => Errno::EINVAL,
+            Self::Stale => Errno::EAGAIN,
+            Self::NoCandidate | Self::Failed(_) => Errno::EIO,
+        }
+    }
+}
+
+/// Classifies a failed durable save. Semantic admission and malformed-draft
+/// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
+/// backing I/O `Failed`.
+fn save_failure(
+    context: &str,
+    error: VfsSaveError<orna_runtime_v1::TableActivationError>,
+) -> DocumentCommitError {
+    match error {
+        VfsSaveError::Activation(orna_runtime_v1::TableActivationError::ValidationFailed(
+            diagnostic,
+        )) => DocumentCommitError::Rejected(format!("{context}: {diagnostic:?}")),
+        VfsSaveError::Activation(orna_runtime_v1::TableActivationError::Runtime(
+            orna_runtime_v1::RuntimeError::InvalidTableMutation,
+        )) => DocumentCommitError::Rejected(format!("{context}: malformed draft")),
+        VfsSaveError::Rejected { diagnostic, .. } => {
+            DocumentCommitError::Rejected(format!("{context}: {diagnostic:?}"))
+        }
+        VfsSaveError::Stale { .. } => DocumentCommitError::Stale,
+        VfsSaveError::NoCandidate => DocumentCommitError::NoCandidate,
+        error => DocumentCommitError::Failed(format!("{context}: {error:?}")),
+    }
 }
 
 impl From<String> for DocumentCommitError {
@@ -857,8 +911,10 @@ impl std::fmt::Display for DocumentCommitError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoCandidate => formatter.write_str("mounted row save failed: NoCandidate"),
-            Self::Stale => formatter.write_str("mounted save is stale against its captured baseline"),
-            Self::Failed(message) => formatter.write_str(message),
+            Self::Stale => {
+                formatter.write_str("mounted save is stale against its captured baseline")
+            }
+            Self::Rejected(message) | Self::Failed(message) => formatter.write_str(message),
         }
     }
 }
@@ -977,15 +1033,11 @@ impl RowSaveContext {
                 self.record_accepted_row(accepted_row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted row document was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(VfsSaveError::NoCandidate) => Err(DocumentCommitError::NoCandidate),
-            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(DocumentCommitError::Failed(format!(
-                "mounted row save failed: {error:?}"
-            ))),
+            Err(error) => Err(save_failure("mounted row save failed", error)),
         }
     }
 
@@ -1064,14 +1116,11 @@ impl RowSaveContext {
                 self.record_accepted_row(row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Failed(
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted Blob replacement was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(VfsSaveError::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(DocumentCommitError::Failed(format!(
-                "mounted Blob replacement failed: {error:?}"
-            ))),
+            Err(error) => Err(save_failure("mounted Blob replacement failed", error)),
         }
     }
 
@@ -1079,7 +1128,7 @@ impl RowSaveContext {
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
         expected_baseline_row: Option<Vec<u8>>,
-    ) -> Result<(), String> {
+    ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
@@ -1112,13 +1161,11 @@ impl RowSaveContext {
                 self.record_accepted_row(accepted_row);
                 Ok(())
             }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => {
-                Err("temporary mounted row document was rejected by semantic admission".into())
-            }
-            Ok(TemporaryRenameOutcome::Stale { .. }) => {
-                Err("temporary mounted row document is stale against its captured baseline".into())
-            }
-            Err(error) => Err(format!("temporary mounted row save failed: {error:?}")),
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
+                "temporary mounted row document was rejected by semantic admission".into(),
+            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(error) => Err(save_failure("temporary mounted row save failed", error)),
         }
     }
 }
@@ -1283,7 +1330,7 @@ pub(super) fn edit_path(
                 let scratch = Arc::new(
                     writer
                         .runtime
-                        .block_on(target.begin_temporary_replacement(usize::MAX)),
+                        .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                 );
                 (save, initial, Some((target, scratch, field, expected)))
             }
@@ -1300,7 +1347,7 @@ pub(super) fn edit_path(
         Some(Arc::new(
             writer
                 .runtime
-                .block_on(save.target.open_draft(64 * 1024 * 1024)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         ))
     } else {
         None
@@ -1718,7 +1765,7 @@ impl WorkspaceFilesystem {
         let scratch = Arc::new(
             writer
                 .runtime
-                .block_on(target.begin_temporary_replacement(usize::MAX)),
+                .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
         writer
             .runtime
@@ -1984,19 +2031,16 @@ impl Filesystem for WorkspaceFilesystem {
             }
         }
         if let Some(scratch) = scratch {
-            if let Some(size) = truncate_size
-                && save
-                    .writer
-                    .runtime
-                    .block_on(scratch.truncate(size))
-                    .is_err()
-            {
-                draft_state.unresolved_handles.remove(&handle);
-                if is_scratch && !had_retained_scratch {
-                    draft_state.retained_scratch.remove(&inode.0);
+            if let Some(size) = truncate_size {
+                let result = save.writer.runtime.block_on(scratch.truncate(size));
+                if result.is_err() {
+                    draft_state.unresolved_handles.remove(&handle);
+                    if is_scratch && !had_retained_scratch {
+                        draft_state.retained_scratch.remove(&inode.0);
+                    }
+                    reply.error(draft_errno(&result));
+                    return;
                 }
-                reply.error(Errno::EIO);
-                return;
             }
             self.open_files
                 .lock()
@@ -2014,14 +2058,15 @@ impl Filesystem for WorkspaceFilesystem {
         let draft = Arc::new(
             save.writer
                 .runtime
-                .block_on(save.target.open_draft(usize::MAX)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         );
-        if let Some(size) = truncate_size
-            && save.writer.runtime.block_on(draft.truncate(size)).is_err()
-        {
-            draft_state.unresolved_handles.remove(&handle);
-            reply.error(Errno::EIO);
-            return;
+        if let Some(size) = truncate_size {
+            let result = save.writer.runtime.block_on(draft.truncate(size));
+            if result.is_err() {
+                draft_state.unresolved_handles.remove(&handle);
+                reply.error(draft_errno(&result));
+                return;
+            }
         }
         self.open_files
             .lock()
@@ -2117,7 +2162,7 @@ impl Filesystem for WorkspaceFilesystem {
             let scratch = Arc::new(
                 save.writer
                     .runtime
-                    .block_on(target.begin_temporary_replacement(usize::MAX)),
+                    .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
             );
             let inode = match state.add_file(
                 parent.0,
@@ -2272,15 +2317,13 @@ impl Filesystem for WorkspaceFilesystem {
             )
         };
         let committed = match &blob_field {
-            Some(field) => save
-                .commit_blob_temporary(&target, &scratch, field, baseline)
-                .map_err(|error| error.to_string()),
+            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
             None => save.commit_temporary(&scratch, baseline),
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
             draft_state.rejected_scratch.insert(source_inode);
-            reply.error(Errno::EIO);
+            reply.error(error.errno());
             return;
         }
         let accepted_bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
@@ -2584,7 +2627,7 @@ impl Filesystem for WorkspaceFilesystem {
             if is_scratch && !had_retained_scratch {
                 draft_state.retained_scratch.remove(&inode.0);
             }
-            reply.error(Errno::EIO);
+            reply.error(draft_errno(&result));
         } else {
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
@@ -2673,13 +2716,17 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            Err(DocumentCommitError::Stale | DocumentCommitError::Failed(_)) => {
+            Err(
+                error @ (DocumentCommitError::Rejected(_)
+                | DocumentCommitError::Stale
+                | DocumentCommitError::Failed(_)),
+            ) => {
                 // A submission that did not commit (rejected, stale or failed I/O)
                 // stays unresolved until a later sync of the same file is accepted.
                 if is_document {
                     draft_state.rejected_documents.insert(inode.0);
                 }
-                reply.error(Errno::EIO);
+                reply.error(error.errno());
             }
         }
     }
@@ -2801,7 +2848,7 @@ impl Filesystem for WorkspaceFilesystem {
                     if is_scratch && !had_retained_scratch {
                         draft_state.retained_scratch.remove(&inode.0);
                     }
-                    reply.error(Errno::EIO);
+                    reply.error(draft_errno(&result));
                     return;
                 }
                 if let Some(bytes) = candidate_bytes {
@@ -2817,6 +2864,10 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(NodeKind::Document { .. })
                 ) {
                     reply.error(Errno::EROFS);
+                    return;
+                }
+                if size > DRAFT_FILE_BOUND_BYTES as u64 {
+                    reply.error(Errno::EDQUOT);
                     return;
                 }
                 draft_state.pending_truncates.insert(inode.0, size);
