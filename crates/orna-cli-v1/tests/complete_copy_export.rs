@@ -396,6 +396,7 @@ fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
 }
 
 #[test]
+/// ORNA-GIT-001: complete copies preserve the real snapshot gitlink and its dependency content.
 fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
     const DEPENDENCY_PATH: &str = "deps/reference project";
     const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
@@ -461,6 +462,16 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
         .unwrap()
         .trim()
         .to_owned();
+    let gitlink = git_output(
+        source,
+        &["--no-replace-objects", "ls-tree", &snapshot, "--", DEPENDENCY_PATH],
+        None,
+    );
+    assert!(
+        String::from_utf8_lossy(&gitlink)
+            .contains(&format!("160000 commit {dependency_commit}\t{DEPENDENCY_PATH}")),
+        "the committed snapshot stores the exact dependency commit as a native gitlink"
+    );
     git(
         source,
         &[
