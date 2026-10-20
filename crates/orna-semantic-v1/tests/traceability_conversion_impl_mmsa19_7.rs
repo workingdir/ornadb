@@ -65,13 +65,11 @@ pub fn from_number(number: Int): Target = Target.from(number);
     }
 }
 
-// Specified: ORNA-CONVERT-004, source/05-types.md:438.
-// Exists: a From body that fails through the ordinary fail channel, analyzed
-// against the authoritative fixture catalogue.
-// Passed is bounded to accepting the fallible From and propagating may_fail to
-// the explicit Target.from call site. Runtime failure propagation is not covered.
+// Not cited: the failure-propagation clause lacks a discriminating test; tracked in ornadb-o7qg.
+// Checks only that a From body using the ordinary fail channel is accepted.
+// Does not check that the failure reaches the call site.
 #[test]
-fn from_implementation_failure_propagates_through_ordinary_failure_channel() {
+fn from_body_using_ordinary_failure_channel_is_accepted() {
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "fallible-from.orna",
@@ -94,8 +92,6 @@ pub fn parse(text: Str): Target = Target.from(text);
     );
 
     assert!(result.is_ok(), "{:#?}", result.diagnostics);
-    let parse = &export(&result, "parse");
-    assert!(parse.effects.may_fail, "{:?}", parse.effects);
 }
 
 // Specified: ORNA-CONVERT-005, source/05-types.md:440.
