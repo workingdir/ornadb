@@ -43,6 +43,8 @@ mod relation;
 mod repl;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
+#[cfg(feature = "system-host-bindings")]
+mod explain_bindings;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
@@ -59,6 +61,8 @@ pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
+#[cfg(feature = "system-host-bindings")]
+pub use explain_bindings::ExplainCatalogue;
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
     ZonedLocalDateTime, resolve_time_zone,
@@ -827,6 +831,13 @@ pub trait EffectHandler {
         _cancellation: Option<&CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
+    }
+
+    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
+    /// without one report `sys.abi.unavailable` for explain calls.
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        None
     }
 
     /// Forks an activation-owned handler for one structured child task.
@@ -7018,6 +7029,28 @@ impl Context<'_, '_> {
         })
     }
 
+    #[cfg(feature = "system-host-bindings")]
+    fn call_sys_explain(
+        &mut self,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+        scope: &mut Scope,
+        depth: usize,
+    ) -> Result<Value, EvaluationError> {
+        if input.is_some() || arguments.len() != 1 {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        let query = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+        let Value::Relation(plan) = query else {
+            return Err(error("ORNA-EVAL-TYPE"));
+        };
+        let catalogue = self
+            .effects
+            .as_deref()
+            .and_then(|handler| handler.explain_catalogue());
+        explain_bindings::explain(&plan, catalogue)
+    }
+
     /// Dispatches one portable annotated-Blob call declared by the generated
     /// typed registry.
     ///
@@ -7365,6 +7398,14 @@ impl Context<'_, '_> {
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
         let source_function_name = function_name(callee);
+        // `sys.explain(Query)` is lowered by the host catalogue, never by a
+        // provider invoke. An unshadowed call therefore stays on this path.
+        #[cfg(feature = "system-host-bindings")]
+        if source_function_name.as_deref() == Some("sys.explain")
+            && !scope.0.contains_key("sys")
+        {
+            return self.call_sys_explain(arguments, input, scope, depth);
+        }
         // A portable Blob call is admitted only when the generated typed
         // registry declares the operation. The resolved name wins when a
         // declaration was reachable; an unresolved, unshadowed source-level
