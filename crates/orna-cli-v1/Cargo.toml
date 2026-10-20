@@ -9,6 +9,9 @@ license = "Apache-2.0"
 name = "orna-cli-v1"
 path = "src/main.rs"
 
+[features]
+crash-barriers = ["orna-repository-v1/crash-barriers", "orna-runtime-v1/crash-barriers"]
+
 [lints.rust]
 unsafe_code = "forbid"
 
@@ -42,6 +45,11 @@ serde_json = "1.0.151"
 getrandom = "0.3.4"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tempfile = "3.23.0"
+[[test]]
+name = "publication_crash_matrix"
+path = "tests/publication_crash_matrix.rs"
+required-features = ["crash-barriers"]
+
 [dev-dependencies]
 bytes = "1.11.1"
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
