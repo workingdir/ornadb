@@ -1,1 +1,1 @@
-sys.blob.capture_file(__MEDIA_ROOT__, "__PAYLOAD__", 65536)
+sys.blob.annotate(sys.blob.capture_file(__MEDIA_ROOT__, "__PAYLOAD__", 65536), "__MEDIA_TYPE__")

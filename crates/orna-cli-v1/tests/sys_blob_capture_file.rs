@@ -454,6 +454,64 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     );
 }
 
+/// ORNA-MIME-001 and `source/36-blob-values.md`: capture is one of the old
+/// constructors, so it supplies the octet-stream/null annotation whatever the
+/// file is called, and an importer declares the media type afterwards with
+/// `sys.blob.annotate`.
+#[tokio::test]
+async fn captured_files_keep_the_octet_stream_fallback_until_annotated() {
+    let (directory, repository, relation_id) = empty_format3_repository();
+    let root = directory.path();
+    let payload = include_bytes!("fixtures/media/tone.wav");
+    let names = ["tone.wav", "pixel.png", "clip.mp4", "notes"];
+    for name in names {
+        std::fs::write(root.join(name), payload).unwrap();
+    }
+    let state = RuntimeState::open(
+        &repository,
+        RuntimeIdentity {
+            database_id: [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1],
+            repository_id: [0x72; 16],
+        },
+        [0x73; 32],
+    )
+    .await
+    .unwrap();
+    let _writer = state.acquire_lease([0x74; 16]).await.unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(65_536, 16).unwrap();
+    filesystem.allow_root(root).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(repository.capture_capability(relation_id).unwrap());
+    let media_root = format!("{:?}", root.to_string_lossy().as_ref());
+    let mut evaluate = |source: &str| {
+        evaluate_expression_ovb2_with_effects(
+            source,
+            &Default::default(),
+            Limits::default(),
+            &mut bindings,
+        )
+        .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+        .blob()
+        .unwrap()
+    };
+
+    for name in names {
+        let blob = evaluate(&format!(
+            "sys.blob.capture_file({media_root}, {name:?}, 65536)"
+        ));
+        assert_eq!(blob.media_type(), "application/octet-stream", "{name}");
+        assert_eq!(blob.suffix(), None, "{name}");
+        assert_eq!(blob.read_to_end().unwrap(), payload);
+    }
+    let declared = evaluate(&format!(
+        "sys.blob.annotate(sys.blob.capture_file({media_root}, \"tone.wav\", 65536), \"audio/wav\")"
+    ));
+    assert_eq!(declared.media_type(), "audio/wav");
+    assert_eq!(declared.suffix(), None);
+    assert_eq!(declared.read_to_end().unwrap(), payload);
+}
+
 struct FixtureResolver {
     identity: ContentIdentity,
     payload: Arc<[u8]>,
