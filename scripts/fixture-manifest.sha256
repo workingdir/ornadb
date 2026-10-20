@@ -2002,7 +2002,7 @@ dc01e2552fe95b68f7cf5b2217b686a91949d8ffce5389ce50d6c836ec6a2ffc  crates/orna-ev
 c2a9855ab19b7a456d03d6d7edaddc45755618f79d6ba9b17990c02a7ba999c1  crates/orna-evaluator-v1/tests/fixtures/nominal_map_callback.orna
 f88be77220a6fc7d85ccfb632366c907fb41c84a27f823d0164d3ad7e2536b27  crates/orna-evaluator-v1/tests/fixtures/optional_some_null_case.orna
 a7988bc62fc57ef75772bcad4b54f8dc4ad24184641a5851a13726886f203bdc  crates/orna-evaluator-v1/tests/fixtures/ovc-callback-after-value-mqger.orna
-1ff1e6700f3cc097dee350dcc1d75324a7477d3381c8b57a5ef5782381997ec2  crates/orna-evaluator-v1/tests/fixtures/paired-rebind-depth-label-values.orna
+dc4a5563d61980d7a8f5316331e54b2ebd9734dd2f38c5fd1bdbd7c425ebd3e0  crates/orna-evaluator-v1/tests/fixtures/paired-rebind-depth-label-values.orna
 121de1adf22a80a8578a6661a7240adaae5117702d8222047547867555d3af9e  crates/orna-evaluator-v1/tests/fixtures/partition_callbacks.orna
 430876c9f7578f45781ce5e6d365f429eb17802d56c8a8c5c402bd2aef9f8a6d  crates/orna-evaluator-v1/tests/fixtures/partition_effect_callback.orna
 ea3c2188ac4c6481cb2a2c9225479c373f1ef832075491d0287c382f03d6bc30  crates/orna-evaluator-v1/tests/fixtures/pipelines.orna
@@ -2200,7 +2200,7 @@ cf063418df0664b7d66e025b0d7031da3798dcb4410b0b9e1620a0991d7fbf2a  crates/orna-ev
 2bf815f3cb9db0727fec2cf7bdb55a02f6bea5d25879295dd010e3cf755bdd97  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-insert-q730o.orna
 6f69dcd70b8b674326dcbbcdc8f6650c2daaf4bae9b29ebb534ac3c5635d0b2e  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-lookup-q730o.orna
 e1bd4a33308cb249b511e8fefafd79dcfdca97cbd8d33251438f1dc578b33a77  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-merge-q730o.orna
-0cabfda074cf51c09d7adf4f0d164cb0482d1fbccba7ca6f28e67046556e6ced  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-remove-absent-q730o.orna
+f6addadfb683b4f5b36efe39958aae3b28b181e9f2ad99a3f77a034d9be1b96b  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-map-remove-absent-q730o.orna
 08b5514208eb3398b47270803d33cbc84995f8b2e531ff4490135c9b7c1b2e00  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-deduplicate-q730o.orna
 f890093544236a8c910084c4f071d6764e8ce677149f046acf9e986b32740d80  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-empty-call-q730o.orna
 e12a72b75e4b9bb73994892298cbf0917e66407c85be9c8cee054c2892bc602a  crates/orna-evaluator-v1/tests/fixtures/stdlib-collection-builders-set-empty-q730o.orna
@@ -3173,6 +3173,7 @@ b5c1ece0068ebb4c83e53d0d3d84fdfa9e64a4b2495d1c211237332610a3ea10  crates/orna-ev
 1b1ae725394eef2c270d2cafd1f4a87ba5c0de2be451401fb655f7294865081e  crates/orna-evaluator-v1/tests/fixtures/sys-blob-annotate-invalid-suffix.orna
 9924115e2103ea2060a94e33505b92fce660d0370554fb1ead43b4c5d3e6bf24  crates/orna-evaluator-v1/tests/fixtures/sys-blob-annotate-mime1.orna
 415d743b189831cb7523ca5f21b9b82da5ba96bc4055858ac22f449dedc85e74  crates/orna-evaluator-v1/tests/fixtures/sys-blob-annotate-preferred-suffix.orna
+2d36d1ff97dc400f3c1ebf7e174f6c81d4a65476fccd3ace9950c4de5bb83258  crates/orna-evaluator-v1/tests/fixtures/sys-blob-capture-file-authored.orna
 cfde9258633e4e678d982dd9f5ec071cd9d689118e96c592f757267cfdf92df4  crates/orna-evaluator-v1/tests/fixtures/table_relation_audit_callbacks.orna
 4ccf9206dd5517f182d0e11e5c7c147db8bdd9de739bfe60f7ddf3b018ff888d  crates/orna-evaluator-v1/tests/fixtures/table_relation_nested_aggregate_compaction_3xa7q.orna
 4ccf9206dd5517f182d0e11e5c7c147db8bdd9de739bfe60f7ddf3b018ff888d  crates/orna-evaluator-v1/tests/fixtures/table_relation_nested_aggregate_refresh_restore_i6k3c.orna

@@ -25,6 +25,8 @@ pub struct Function {
     pub metadata: Value,
     /// Compiler-known semantic role, omitted from frozen `api/sys.json`.
     pub role: Option<String>,
+    /// Rust-only failure codes from `#[ornasys(failures = "...")]`; unioned into the provider ABI and omitted from frozen `api/sys.json`.
+    pub failures: Vec<String>,
 }
 
 #[derive(Default)]
@@ -242,7 +244,7 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
                 .as_str()
                 .ok_or_else(|| "validated operation name is missing".to_owned())?;
             let operation_namespace = name.find(['(', '<']).map_or(name, |end| &name[..end]);
-            let failures = declared_failures
+            let mut failures = declared_failures
                 .iter()
                 .filter_map(Value::as_str)
                 .filter(|code| {
@@ -259,6 +261,11 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
                             .is_some_and(|tail| tail.starts_with('.'))
                 })
                 .collect::<Vec<_>>();
+            for code in &function.failures {
+                if !failures.contains(&code.as_str()) {
+                    failures.push(code.as_str());
+                }
+            }
             let preconditions = function.metadata["preconditions"]
                 .as_str()
                 .map(|value| vec![value])
@@ -697,13 +704,14 @@ impl Collector {
         }
         if let Some(attribute) = annotations.first() {
             match parse_function_attributes(attribute, attrs) {
-                Ok((metadata, role, type_graph, schema)) => {
+                Ok((metadata, role, type_graph, schema, failures)) => {
                     self.load_registry_json(type_graph, "type_graph");
                     self.load_registry_json(schema, "schema");
                     self.functions.push(Function {
                         method: method.ident.to_string(),
                         metadata,
                         role,
+                        failures,
                     });
                 }
                 Err(error) => self.errors.push(format!("{}: {error}", method.ident)),
@@ -825,11 +833,12 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
 fn parse_function_attributes(
     attribute: &syn::Attribute,
     attrs: &[syn::Attribute],
-) -> Result<(Value, Option<String>, Option<String>, Option<String>), String> {
+) -> Result<(Value, Option<String>, Option<String>, Option<String>, Vec<String>), String> {
     let mut fields = Map::new();
     let mut role = None;
     let mut type_graph = None;
     let mut schema = None;
+    let mut failures = Vec::new();
     attribute
         .parse_nested_meta(|meta| {
             let key = meta
@@ -876,9 +885,15 @@ fn parse_function_attributes(
                         return Err(meta.error("only one schema source may be declared"));
                     }
                 }
+                "failures" => {
+                    if !failures.is_empty() {
+                        return Err(meta.error("only one `failures` value is allowed"));
+                    }
+                    failures = parse_failure_list(&value).map_err(|error| meta.error(error))?;
+                }
                 _ => {
                     return Err(meta.error(
-                        "expected name, effect, signature, contexts, role, type_graph, or schema metadata",
+                        "expected name, effect, signature, contexts, role, failures, type_graph, or schema metadata",
                     ));
                 }
             }
@@ -891,7 +906,23 @@ fn parse_function_attributes(
     if let Some(role) = &role {
         parse_role_version(role)?;
     }
-    Ok((metadata, role, type_graph, schema))
+    Ok((metadata, role, type_graph, schema, failures))
+}
+
+fn parse_failure_list(value: &str) -> Result<Vec<String>, String> {
+    value
+        .split(',')
+        .map(|code| {
+            let code = code.trim();
+            if is_qualified_sys_failure_code(code) {
+                Ok(code.to_owned())
+            } else {
+                Err(format!(
+                    "failures entry `{code}` must be a qualified lowercase `sys` failure code"
+                ))
+            }
+        })
+        .collect()
 }
 
 /// Extracts portable API metadata from a method's `///` doc comment. The first
@@ -1391,20 +1422,7 @@ fn validate_failure_code_array(value: &Value) -> Result<(), String> {
         .enumerate()
     {
         let code = code.as_str().expect("string validated");
-        let mut segments = code.split('.');
-        let valid = matches!(segments.next(), Some("sys"))
-            && segments.clone().count() >= 2
-            && segments.all(|segment| {
-                let mut characters = segment.chars();
-                characters
-                    .next()
-                    .is_some_and(|character| character.is_ascii_lowercase())
-                    && characters.all(|character| {
-                        character.is_ascii_lowercase()
-                            || character.is_ascii_digit()
-                            || character == '_'
-                    })
-            });
+        let valid = is_qualified_sys_failure_code(code);
         if !valid {
             return Err(format!(
                 "failure_codes[{index}] must be a qualified lowercase `sys` failure code"
@@ -1412,6 +1430,23 @@ fn validate_failure_code_array(value: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn is_qualified_sys_failure_code(code: &str) -> bool {
+    let mut segments = code.split('.');
+    matches!(segments.next(), Some("sys"))
+        && segments.clone().count() >= 2
+        && segments.all(|segment| {
+            let mut characters = segment.chars();
+            characters
+                .next()
+                .is_some_and(|character| character.is_ascii_lowercase())
+                && characters.all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || character == '_'
+                })
+        })
 }
 
 fn validate_named_rows(
