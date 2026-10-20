@@ -8,6 +8,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
+    time::Duration,
 };
 
 #[allow(dead_code)]
@@ -79,6 +80,23 @@ fn draft_guard(fixture: &EditorMount) -> u8 {
     value[0]
 }
 
+/// Waits up to five seconds for the draft guard to reach `expected`. The FUSE
+/// release handler can run after close(2) returns, so a guard read right after
+/// a drop polls instead of reading once.
+async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = draft_guard(fixture);
+        if value == expected {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("{context}: guard is {value}, expected {expected} after 5s");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Sets the mount root's unmount-quiesce attribute, as `orna-cli-v1` does
 /// before unmount.
 fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
@@ -90,7 +108,6 @@ fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
         rustix::fs::XattrFlags::empty(),
     )
 }
-
 
 /// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
 /// returns EIO, stays visible to its own handle, and is never admitted.
@@ -229,11 +246,12 @@ async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
         "a new open after close sees only accepted state",
     );
     assert!(!fresh_view(&fixture).contains("Never synced"));
-    assert_eq!(
-        draft_guard(&fixture),
+    await_draft_guard(
+        &fixture,
         b'0',
         "closing an unsynced draft must not leave the draft guard set",
-    );
+    )
+    .await;
 }
 
 /// ORNA-VFS-008 close-error ignorance: a rejected draft that is closed without
@@ -399,18 +417,23 @@ async fn abandoned_synced_temporary_never_reaches_the_row() {
         .expect("write temporary");
     scratch.sync_all().expect("fsync(temp) succeeds");
     drop(scratch);
-    assert_eq!(
-        draft_guard(&fixture),
+    await_draft_guard(
+        &fixture,
         b'1',
         "a synced scratch that is not yet renamed holds the draft guard",
-    );
+    )
+    .await;
     std::fs::remove_file(&temporary).expect("unlink abandoned temporary");
-    assert!(!temporary.exists(), "unlink removes the abandoned temporary");
-    assert_eq!(
-        draft_guard(&fixture),
+    assert!(
+        !temporary.exists(),
+        "unlink removes the abandoned temporary"
+    );
+    await_draft_guard(
+        &fixture,
         b'0',
         "unlinking the abandoned temporary clears the draft guard",
-    );
+    )
+    .await;
     assert!(fresh_view(&fixture).contains("Original"));
     assert!(!fresh_view(&fixture).contains("Abandoned temp"));
 }
@@ -438,11 +461,12 @@ async fn open_unlink_then_write_leaves_no_ghost_draft() {
     let _ = scratch.write_all(row("Ghost").as_bytes());
     let _ = scratch.sync_all();
     drop(scratch);
-    assert_eq!(
-        draft_guard(&fixture),
+    await_draft_guard(
+        &fixture,
         b'0',
         "a write through an unlinked handle must not leave draft state",
-    );
+    )
+    .await;
     set_quiesce(&fixture, b"1").expect("unmount quiesce is not blocked by a ghost draft");
     set_quiesce(&fixture, b"0").expect("cancel unmount quiesce");
 }
@@ -479,16 +503,12 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
         fresh_view(&fixture).contains("Original"),
         "a failed rename leaves the old row",
     );
-    assert_eq!(
-        draft_guard(&fixture),
-        b'1',
-        "the rejected scratch holds the draft guard",
-    );
-    let unlink = std::fs::remove_file(&temporary)
-        .expect_err("unlink must not discard a rejected scratch");
+    await_draft_guard(&fixture, b'1', "the rejected scratch holds the draft guard").await;
+    let unlink =
+        std::fs::remove_file(&temporary).expect_err("unlink must not discard a rejected scratch");
     assert_eq!(unlink.raw_os_error(), Some(EBUSY), "{unlink}");
     assert!(temporary.exists());
-    assert_eq!(draft_guard(&fixture), b'1');
+    await_draft_guard(&fixture, b'1', "a rejected unlink leaves the guard set").await;
 
     let mut corrected = OpenOptions::new()
         .read(true)
@@ -502,11 +522,12 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
     drop(corrected);
     std::fs::rename(&temporary, &fixture.data_path).expect("corrected rename is accepted");
     assert!(fresh_view(&fixture).contains("Rejected corrected"));
-    assert_eq!(
-        draft_guard(&fixture),
+    await_draft_guard(
+        &fixture,
         b'0',
         "an accepted rename resolves the rejected scratch",
-    );
+    )
+    .await;
 }
 
 /// ORNA-VFS-008: a clean handle opened before another writer's accepted save
@@ -534,7 +555,12 @@ async fn stale_clean_handle_sync_succeeds_without_draft_state() {
     );
     drop(stale);
     drop(writer);
-    assert_eq!(draft_guard(&fixture), b'0');
+    await_draft_guard(
+        &fixture,
+        b'0',
+        "dropping clean handles leaves no draft state",
+    )
+    .await;
     assert!(fresh_view(&fixture).contains("Peer accepted"));
 }
 
@@ -566,6 +592,6 @@ async fn same_length_truncate_clears_guard_on_accepted_fsync_while_open() {
         "the accepted fsync clears the guard while the handle stays open",
     );
     drop(file);
-    assert_eq!(draft_guard(&fixture), b'0');
+    await_draft_guard(&fixture, b'0', "closing the handle leaves no draft state").await;
     assert!(fresh_view(&fixture).contains("Truncate same"));
 }
