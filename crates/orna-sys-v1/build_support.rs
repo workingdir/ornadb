@@ -447,23 +447,30 @@ pub fn generate_system_api_document(
         "opaque_identifiers",
         "reference_aliases",
         "value_types",
+        "enums",
         "relations",
         "functions",
         "failure_codes",
     ] {
-        let count = object
-            .get(name)
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("system API registry inventory `{name}` must be an array"))?
-            .len();
+        let count = if name == "enums" {
+            object
+                .get(name)
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "system API registry inventory `enums` must be an object".to_owned()
+                })?
+                .len()
+        } else {
+            object
+                .get(name)
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("system API registry inventory `{name}` must be an array")
+                })?
+                .len()
+        };
         counts.insert(name.to_owned(), Value::from(count));
     }
-    let enum_count = object
-        .get("enums")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "system API registry inventory `enums` must be an object".to_owned())?
-        .len();
-    counts.insert("enums".to_owned(), Value::from(enum_count));
     object.insert("counts".to_owned(), Value::Object(counts));
 
     let mut members = std::mem::take(object);
