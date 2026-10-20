@@ -542,6 +542,15 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             };
             publish_error("local runtime could not be opened", detail)
         })?;
+    // ORNA-TURSO-005: only the worktree's owning runtime may freeze, recover, or
+    // complete a publication. A secondary handle coordinates by failing before
+    // any write, leaving the live owner's pending range and journal untouched.
+    if !state.holds_runtime_owner_lock() {
+        return Err(publish_error(
+            "another live runtime owns this worktree",
+            "stop the owning runtime or publish from it, then retry `orna publish`; nothing was changed",
+        ));
+    }
     // Reconcile an interrupted publication before reading or freezing the tail.
     runtime.block_on(recover_pending_publication(
         &repository,
