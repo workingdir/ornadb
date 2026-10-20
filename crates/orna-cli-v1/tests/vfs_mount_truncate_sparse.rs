@@ -1,10 +1,9 @@
 #![cfg(target_os = "linux")]
 
 //! Gate E: zero truncation, ftruncate shrink/extend, sparse holes, quota
-//! exhaustion and a close after a quota rejection (VFS-007/008, EDIT-1,
-//! profiles/vfs-1 errno table: EINVAL for syntax, ENOSPC/EDQUOT for
-//! capacity/quota). Close-error ignorance is only asserted inside the quota
-//! write test; a dedicated close-after-truncate test is not yet written.
+//! exhaustion, and path-based truncate refusal (VFS-007/008, EDIT-1,
+//! profiles/vfs-1 errno table: EINVAL for malformed candidates, ENOSPC/EDQUOT
+//! for capacity/quota).
 
 use std::{
     fs::OpenOptions,
@@ -22,14 +21,11 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EDQUOT, EIO, ENOSPC, EditorMount, assert_errno, await_draft_guard, draft_guard, fresh_view,
-    open_rw, require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, start_editor_mount,
+    EDQUOT, ENOSPC, EditorMount, assert_errno, await_draft_guard, draft_guard, fresh_view, open_rw,
+    require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, start_editor_mount,
 };
 
-/// profiles/vfs-1 errno table: EINVAL for malformed candidates. The mount
-/// currently rejects malformed drafts with EIO, the errno the existing
-/// `vfs_mount_sync_semantics` suite pins for type-invalid drafts; the two
-/// disagree (recorded as a gap bead), so malformed rejections accept both.
+/// profiles/vfs-1 errno table: EINVAL for malformed candidates.
 const EINVAL: i32 = 22;
 
 /// Compact-profile per-file bound (COMPACT_FILE_BOUND_BYTES); the mounted draft
@@ -115,8 +111,8 @@ async fn zero_length_row_candidate_is_rejected_at_fsync() {
 
     assert_errno(
         file.sync_all(),
-        &[EINVAL, EIO],
-        "an empty row candidate must fail fsync with EINVAL or EIO",
+        &[EINVAL],
+        "an empty row candidate must fail fsync with EINVAL",
     );
     assert!(read_own_draft(&mut file).is_empty());
     assert_eq!(
@@ -153,8 +149,8 @@ async fn shrink_truncate_is_rejected_whole_and_recovers_on_a_corrected_write() {
 
     assert_errno(
         file.sync_all(),
-        &[EINVAL, EIO],
-        "a truncated row must fail fsync with EINVAL or EIO",
+        &[EINVAL],
+        "a truncated row must fail fsync with EINVAL",
     );
     assert_eq!(
         fresh_view(&fixture),
@@ -193,8 +189,8 @@ async fn extend_truncate_zero_fills_candidate_and_zero_bytes_are_rejected() {
     );
     assert_errno(
         file.sync_all(),
-        &[EINVAL, EIO],
-        "an extended row with zero bytes must fail fsync with EINVAL or EIO",
+        &[EINVAL],
+        "an extended row with zero bytes must fail fsync with EINVAL",
     );
     assert_eq!(
         fresh_view(&fixture),
@@ -230,8 +226,8 @@ async fn sparse_hole_past_end_reads_as_zeros_and_is_rejected_whole() {
     assert_eq!(own[accepted.len() + 4], b'x');
     assert_errno(
         file.sync_all(),
-        &[EINVAL, EIO],
-        "a row with a sparse hole must fail fsync with EINVAL or EIO",
+        &[EINVAL],
+        "a row with a sparse hole must fail fsync with EINVAL",
     );
     assert_eq!(
         fresh_view(&fixture),
@@ -241,8 +237,8 @@ async fn sparse_hole_past_end_reads_as_zeros_and_is_rejected_whole() {
 }
 
 /// ORNA-VFS-008 quota: a write whose end passes the per-file bound fails with
-/// ENOSPC or EDQUOT, leaves the candidate as it was, and is never admitted. The
-/// close after that failure does not change the accepted row.
+/// ENOSPC or EDQUOT, leaves the candidate as it was, and is never admitted.
+/// Dropping the handle without a sync leaves the accepted row unchanged.
 #[tokio::test]
 async fn write_past_file_quota_fails_with_quota_errno_and_is_not_admitted() {
     if !require_fuse_or_skip() {
@@ -268,14 +264,14 @@ async fn write_past_file_quota_fails_with_quota_errno_and_is_not_admitted() {
     assert_eq!(
         fresh_view(&fixture),
         accepted,
-        "a quota failure ignored at close never changes the accepted row",
+        "an unsynced quota-rejected candidate never changes the accepted row",
     );
     await_draft_guard(&fixture, b'0', "a quota-rejected write holds no draft").await;
 }
 
 /// Gate E unmount/restart: a quota-rejected write was never acknowledged, so
-/// after unmount and remount only the accepted row is readable. The rejected
-/// bytes are not retained as a draft.
+/// after unmount and remount of the same repository only the accepted row is
+/// readable.
 #[tokio::test]
 async fn quota_rejected_write_is_not_retained_across_unmount_restart() {
     if !require_fuse_or_skip() {
@@ -332,4 +328,51 @@ async fn truncate_past_file_quota_fails_with_quota_errno() {
     file.sync_all()
         .expect("fsync of the unchanged candidate is not a rejection");
     assert_eq!(fresh_view(&fixture), accepted);
+}
+
+/// ORNA-VFS-008 quota: path-based truncate(2) past the per-file bound has no
+/// open handle, so it is refused with EDQUOT before any pending size is
+/// recorded. The accepted row is unchanged, and a later open starts from the
+/// accepted row rather than a pending oversize truncate.
+#[tokio::test]
+async fn path_truncate_past_file_quota_is_refused_and_records_no_pending_truncate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let accepted = fresh_view(&fixture);
+    // The crate forbids `unsafe`, and rustix 0.38 has no path-based truncate, so
+    // truncate(2) on the path (no open fd, hence the setattr route) is issued by
+    // python3 `os.truncate`, which reports the errno text on stderr.
+    let output = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import os, sys; os.truncate(sys.argv[1], 100 * 1024 * 1024)",
+        ])
+        .arg(&fixture.data_path)
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run python3 os.truncate on the mounted data.orna");
+    assert!(
+        !output.status.success(),
+        "path truncate past the per-file quota must fail",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Disk quota exceeded"),
+        "path truncate past the per-file quota must fail with EDQUOT, got: {stderr}",
+    );
+    assert_eq!(
+        fresh_view(&fixture),
+        accepted,
+        "a refused path truncate never changes the accepted row",
+    );
+    let mut file = open_rw(&fixture);
+    assert_eq!(
+        read_own_draft(&mut file),
+        accepted.as_bytes(),
+        "a later open starts from the accepted row, not a pending oversize truncate",
+    );
+    drop(file);
+    await_draft_guard(&fixture, b'0', "a refused path truncate leaves no draft").await;
 }
