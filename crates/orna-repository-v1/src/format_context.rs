@@ -3072,6 +3072,163 @@ mod graph_bridge_tests {
         total_count
     }
 
+    /// One node of a hand-built ORP-1 index before it is written: a leaf page
+    /// of `UInt` keys, or a branch whose entries carry the fence and row count
+    /// the parent claims for each child. A test builds the canonical shape,
+    /// tampers with one claim or page, and installs the result, so a lookup
+    /// meets one malformed node on its path.
+    enum OrpFixture {
+        Leaf(Vec<u64>),
+        Branch(Vec<OrpFixtureChild>),
+    }
+
+    /// A branch entry as its parent claims it.
+    struct OrpFixtureChild {
+        fence: u64,
+        row_count: u64,
+        node: OrpFixture,
+    }
+
+    impl OrpFixture {
+        /// The canonical index of `height` branch levels over leaf pages of
+        /// `page_width` keys, `fanout` children per branch, and keys 10, 20,
+        /// 30, ... in order. Every fence and count comes from the node it
+        /// names, exactly as [`install_nested_row_store`] builds them.
+        fn canonical(height: u8, fanout: usize, page_width: u64) -> Self {
+            fn build(height: u8, fanout: usize, page_width: u64, next_key: &mut u64) -> OrpFixture {
+                if height == 0 {
+                    return OrpFixture::Leaf(
+                        (0..page_width)
+                            .map(|_| {
+                                *next_key += 10;
+                                *next_key
+                            })
+                            .collect(),
+                    );
+                }
+                OrpFixture::Branch(
+                    (0..fanout)
+                        .map(|_| {
+                            let node = build(height - 1, fanout, page_width, next_key);
+                            OrpFixtureChild {
+                                fence: *next_key,
+                                row_count: node.row_count(),
+                                node,
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            build(height, fanout, page_width, &mut 0)
+        }
+
+        /// The row count this node's own entries add up to.
+        fn row_count(&self) -> u64 {
+            match self {
+                Self::Leaf(keys) => keys.len() as u64,
+                Self::Branch(children) => children.iter().map(|child| child.row_count).sum(),
+            }
+        }
+
+        /// Re-derives every claimed row count from the nodes below it, so a
+        /// tamper that resizes one page leaves only that page malformed.
+        fn recount(&mut self) -> u64 {
+            if let Self::Branch(children) = self {
+                for child in children.iter_mut() {
+                    child.row_count = child.node.recount();
+                }
+            }
+            self.row_count()
+        }
+
+        fn child(&mut self, index: usize) -> &mut OrpFixtureChild {
+            match self {
+                Self::Branch(children) => &mut children[index],
+                Self::Leaf(_) => panic!("an ORP fixture leaf has no children"),
+            }
+        }
+
+        /// Writes this node and everything below it, a branch at `height`.
+        fn write(
+            &self,
+            directory: &Path,
+            algorithm: GitHashAlgorithm,
+            domain: &[u8],
+            height: u8,
+        ) -> NativeOid {
+            let node = match self {
+                Self::Leaf(keys) => NodeData::OrderedLeaf {
+                    domain: domain.to_vec(),
+                    entries: keys
+                        .iter()
+                        .map(|key| OrderedLeafEntry {
+                            key: TypedKey::UInt(*key).canonical_bytes().unwrap(),
+                            value: vec![0x81, 0x01],
+                        })
+                        .collect(),
+                },
+                Self::Branch(children) => NodeData::OrderedBranch {
+                    domain: domain.to_vec(),
+                    height,
+                    entries: children
+                        .iter()
+                        .map(|child| OrderedBranchEntry {
+                            inclusive_max_key: TypedKey::UInt(child.fence)
+                                .canonical_bytes()
+                                .unwrap(),
+                            child: child.node.write(directory, algorithm, domain, height - 1),
+                            row_count: child.row_count,
+                        })
+                        .collect(),
+                },
+            };
+            write_native_node(directory, algorithm, &node)
+        }
+    }
+
+    /// Installs `index` as one relation's primary ORP-1 root of `height`. The
+    /// relation records the row count the root's own entries claim, so root
+    /// admission accepts it and only a lookup's path meets any tamper below.
+    fn install_orp_fixture_row_store(
+        directory: &Path,
+        context: &RepositoryFormatContext,
+        relation_id: [u8; 16],
+        index: &OrpFixture,
+        height: u8,
+    ) {
+        let algorithm = context
+            .validate_store_root()
+            .expect("pinned format-3 store")
+            .oid
+            .algorithm();
+        let database_id = context.require_database_id().expect("database identity");
+        let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
+        let domain = row_domain(relation_id, schema_digest);
+        let primary_root = index.write(directory, algorithm, &domain, height);
+
+        let mut relation_value = vec![0x84];
+        cbor_bytes(&mut relation_value, schema_oid.as_bytes());
+        cbor_bytes(&mut relation_value, primary_root.as_bytes());
+        relation_value.push(0xf6);
+        cbor_head(&mut relation_value, 0, index.row_count());
+        let relation_map = write_native_node(
+            directory,
+            algorithm,
+            &NodeData::OrderedLeaf {
+                domain: relations_domain(*database_id.as_bytes()),
+                entries: vec![OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .unwrap(),
+                    value: relation_value,
+                }],
+            },
+        );
+        let store_root =
+            write_native_node(directory, algorithm, &NodeData::StoreRoot { relation_map });
+        commit_store_root(directory, algorithm, &store_root);
+    }
+
     fn sealed_rows(
         context: &RepositoryFormatContext,
         schema_oid: &NativeOid,
@@ -4001,12 +4158,22 @@ mod graph_bridge_tests {
         assert_eq!(small.miss_key, None);
         assert_eq!(large.miss_key, None);
         // A missing key is an absent result rather than an error, and it reads
-        // index pages only. It is deliberately not pruned to the key's path:
-        // the contract is that a later child's fence may still cover the key,
-        // so the probe reads the index to rule them out. It still fetches no
-        // row or media payload, which is what keeps a miss cheap.
-        assert_eq!(small.miss, small.full);
-        assert_eq!(large.miss, large.full);
+        // only the path to where the key would be. ORP-1 child ranges are
+        // nonoverlapping and exhaustive, so exactly one child per level can
+        // hold the key and a miss in it ends the lookup: later siblings are
+        // never probed. Both shapes are three levels high (root, middle
+        // branch, leaf page), and every native node is read as its envelope
+        // tree and data blob, plus a refs tree when it names children, so a
+        // miss visits exactly one node per level: two branches and one leaf.
+        let tree_height = 3u64;
+        let path_objects = (tree_height - 1) * 3 + 2;
+        assert_eq!(small.miss, path_objects);
+        assert_eq!(large.miss, path_objects);
+        assert!(large.miss < large.full && small.miss < small.full);
+        // The hit walks the same single path; its inline row value costs no
+        // further object read.
+        assert_eq!(small.point, path_objects);
+        assert_eq!(large.point, path_objects);
         // A row read charges payload bytes only for a media closure, so an
         // index query that stops at root, index and row pages reports zero.
         assert_eq!(small.payload_bytes, 0);
@@ -4027,7 +4194,8 @@ mod graph_bridge_tests {
         );
 
         // A malformed branch whose fence lies about its child's range is still
-        // rejected: bounding the read must not silence that check.
+        // rejected when the lookup's path descends into that child: bounding
+        // the read must not silence that check.
         let pinned = context(root);
         let malformed_relation = [0x77; 16];
         install_branch_row_store(
@@ -4041,7 +4209,7 @@ mod graph_bridge_tests {
         let tampered_graph = tampered.open_native_graph(&tampered_snapshot).unwrap();
         let tampered_scope = tampered_graph.open_read_scope().unwrap();
         assert!(matches!(
-            tampered_graph.lookup_row(&TypedKey::UInt(20), &tampered_scope),
+            tampered_graph.lookup_row(&TypedKey::UInt(50), &tampered_scope),
             Err(crate::native_graph::GraphError::InvalidCount(_))
         ));
         assert!(matches!(
@@ -4226,14 +4394,17 @@ mod graph_bridge_tests {
     }
 
     #[test]
-    fn repository_point_lookup_checks_later_fences_after_candidate_miss() {
+    fn repository_point_lookup_miss_stops_at_the_covering_child() {
         let directory = repository();
         let root = directory.path();
         let relation_id = [0x72; 16];
         let initial = context(root);
-        // Key 20 falls within child 2's claimed max (30), but is absent there.
-        // The next child is an invalid overlapping range hidden behind fence
-        // 50; point lookup must continue far enough to reject it.
+        // Key 20 falls within child 2's range (10, 30] but is absent there.
+        // ORP-1 child ranges are nonoverlapping and exhaustive, so child 2 is
+        // the only child that can hold key 20 and the lookup is a miss. The
+        // third child is an invalid overlapping range hidden behind fence 50;
+        // it is off the miss's path and is rejected only by a lookup whose
+        // path descends into it.
         install_branch_row_store(
             root,
             &initial,
@@ -4247,20 +4418,132 @@ mod graph_bridge_tests {
         let graph = pinned.open_native_graph(&snapshot).unwrap();
         let scope = graph.open_read_scope().unwrap();
 
-        // The final profile caps each ORP page at 256 direct refs and height
-        // at 64. This four-child graph isolates the point-lookup miss path;
-        // the production scope additionally caps one operation at 2,048
-        // native Git objects, which is measured below.
-        let before_point = scope.objects_read_for_test();
+        // The graph is two levels high: a root branch (envelope tree, data
+        // blob and refs tree) over leaf pages (envelope tree and data blob).
+        // A point lookup reads one node per level, whether it hits or misses.
+        let path_objects = 3 + 2;
+        let before_miss = scope.objects_read_for_test();
+        assert_eq!(
+            graph
+                .lookup_row(&TypedKey::UInt(20), &scope)
+                .expect("a miss is an absent row"),
+            None
+        );
+        let miss_objects = scope.objects_read_for_test() - before_miss;
+        assert_eq!(miss_objects, path_objects);
+
+        let before_malformed = scope.objects_read_for_test();
         assert!(matches!(
-            graph.lookup_row(&TypedKey::UInt(20), &scope),
+            graph.lookup_row(&TypedKey::UInt(50), &scope),
             Err(crate::native_graph::GraphError::InvalidCount(_))
         ));
-        let point_objects = scope.objects_read_for_test() - before_point;
-        assert!(point_objects > 0 && point_objects <= MAX_RANGE_GRAPH_OBJECTS);
+        let malformed_objects = scope.objects_read_for_test() - before_malformed;
+        assert_eq!(malformed_objects, path_objects);
         println!(
-            "git-backed ORP point lookup object reads: {point_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
+            "git-backed ORP point lookup object reads: miss={miss_objects} \
+             malformed={malformed_objects} (operation_limit={MAX_RANGE_GRAPH_OBJECTS})"
         );
+    }
+
+    #[test]
+    fn point_lookup_rejects_each_malformed_claim_on_its_path() {
+        type Lookup = (
+            Result<Option<crate::row_store::AdmittedRow>, crate::native_graph::GraphError>,
+            u64,
+        );
+        /// Installs `index`, looks `key` up once, and reports the result with
+        /// the native Git objects that lookup read.
+        fn lookup(root: &Path, relation_id: [u8; 16], index: &OrpFixture, key: u64) -> Lookup {
+            install_orp_fixture_row_store(root, &context(root), relation_id, index, 3);
+            let pinned = context(root);
+            let snapshot = pinned.load_row_map(relation_id).expect("load ORP identity");
+            let graph = pinned.open_native_graph(&snapshot).expect("issue graph");
+            let scope = graph.open_read_scope().expect("owner read scope");
+            let before = scope.objects_read_for_test();
+            let result = graph.lookup_row(&TypedKey::UInt(key), &scope);
+            (result, scope.objects_read_for_test() - before)
+        }
+        fn invalid_count(lookup: &Lookup) -> bool {
+            matches!(
+                lookup.0,
+                Err(crate::native_graph::GraphError::InvalidCount(_))
+            )
+        }
+
+        let directory = repository();
+        let root = directory.path();
+        // Three branch levels, two children per branch, pages of two keys:
+        // keys 10..=160, root fences 80 and 160, middle fences 40, 80, 120
+        // and 160, page fences every 20. A branch node reads as its envelope
+        // tree, data blob and refs tree; a leaf page as envelope and data.
+        let canonical = || OrpFixture::canonical(3, 2, 2);
+        let root_objects = 3;
+        let path_objects = 3 + 3 + 3 + 2;
+
+        // The canonical index answers hits and a miss along one path each.
+        for (key, found) in [(10, true), (100, true), (160, true), (15, false)] {
+            let (result, objects) = lookup(root, [0x60; 16], &canonical(), key);
+            let row = result.expect("canonical lookup");
+            assert_eq!(
+                row.map(|row| row.key().clone()),
+                found.then_some(TypedKey::UInt(key)),
+                "key {key}"
+            );
+            assert_eq!(objects, path_objects, "key {key}");
+        }
+
+        // (a) The root claims 8 rows for its first middle branch, whose own
+        // entries add up to 7.
+        let mut index = canonical();
+        index.child(0).node.child(0).row_count -= 1;
+        let result = lookup(root, [0x61; 16], &index, 30);
+        assert!(invalid_count(&result), "count claim: {:?}", result.0);
+        assert_eq!(result.1, root_objects + 3);
+
+        // (b) The root's fence for its first middle branch (85) is not that
+        // branch's last fence (80).
+        let mut index = canonical();
+        index.child(0).fence = 85;
+        let result = lookup(root, [0x62; 16], &index, 30);
+        assert!(invalid_count(&result), "maximum claim: {:?}", result.0);
+        assert_eq!(result.1, root_objects + 3);
+
+        // (c) The second middle branch's first fence (80) does not sort above
+        // the root's previous fence (80).
+        let mut index = canonical();
+        index.child(1).node.child(0).fence = 80;
+        let result = lookup(root, [0x63; 16], &index, 140);
+        assert!(invalid_count(&result), "branch lower bound: {:?}", result.0);
+        assert_eq!(result.1, root_objects + 3);
+
+        // (d) The leaf under the first child of the second middle branch
+        // starts at 70, at or below the root-level lower bound (80) that the
+        // lookup passes down through two first-child steps. Its count and
+        // maximum still match their claims.
+        let mut index = canonical();
+        index.child(1).node.child(0).node.child(0).node = OrpFixture::Leaf(vec![70, 100]);
+        let result = lookup(root, [0x64; 16], &index, 100);
+        assert!(
+            invalid_count(&result),
+            "inherited lower bound: {:?}",
+            result.0
+        );
+        assert_eq!(result.1, path_objects);
+
+        // (e) An empty leaf under a branch. Every count above it is re-derived,
+        // so the only defect is a page with no maximum to equal its fence.
+        let mut index = canonical();
+        index.child(0).node.child(0).node.child(0).node = OrpFixture::Leaf(Vec::new());
+        index.recount();
+        let result = lookup(root, [0x65; 16], &index, 10);
+        assert!(invalid_count(&result), "empty leaf: {:?}", result.0);
+        assert_eq!(result.1, path_objects);
+
+        // (f) A key above the root's maximum fence is absent after reading
+        // the root alone.
+        let (result, objects) = lookup(root, [0x66; 16], &canonical(), 170);
+        assert!(matches!(result, Ok(None)), "key above maximum: {result:?}");
+        assert_eq!(objects, root_objects);
     }
 
     #[test]
