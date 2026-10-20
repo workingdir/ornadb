@@ -46,8 +46,8 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
-    RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
-    RuntimeTableIdentity, TableObjectId, WriterLease,
+    QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
+    RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 
@@ -2437,9 +2437,14 @@ fn run_repl_input(
         .runtime
         .block_on(state.begin_admitted_table_activation(&transactions.tables))
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let query_id = cli_request_nonce().to_be_bytes();
+    let expression = (source.len() <= 16 * 1024
+        && !source.is_empty()
+        && !source.as_bytes().contains(&0))
+        .then(|| source.to_owned());
     let request = RequestIdentity {
         session_id: transactions.session_id,
-        request_id: cli_request_nonce().to_be_bytes(),
+        request_id: query_id,
     };
     let scope = ReplTransactionScope {
         project: &transactions.project,
@@ -2448,27 +2453,63 @@ fn run_repl_input(
         runtime_context: snapshot.context(),
         request,
     };
-    let (value, successor, activation) = transactions
+    let writer = transactions.lease.expect("runtime writer lease initialized");
+    transactions
+        .runtime
+        .block_on(state.begin_query_observation(
+            writer,
+            QueryObservationRegistration {
+                id: query_id,
+                expression,
+                capture: snapshot.context().capture().clone(),
+            },
+        ))
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let finish_query = |status| {
+        transactions
+            .runtime
+            .block_on(state.finish_query_observation(writer, query_id, status))
+            .map(|_| ())
+            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())
+    };
+    let evaluation = transactions
         .authority
-        .evaluate_staged_repl_transaction(session, staged, &scope, bindings)
-        .map_err(repl_application_error)?;
+        .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
+    let (value, successor, activation) = match evaluation {
+        Ok(result) => result,
+        Err(error) => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(repl_application_error(error));
+        }
+    };
     if activation.mutations().is_empty() {
+        finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
         *session = successor;
         return Ok(value);
     }
-    let activation = activation
+    let activation = match activation
         .stage_for_request(&transactions.authority, snapshot.context(), request)
-        .map_err(repl_application_error)?;
-    transactions
+    {
+        Ok(activation) => activation,
+        Err(error) => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(repl_application_error(error));
+        }
+    };
+    let committed = transactions
         .runtime
         .block_on(state.commit_table_activation(
-            transactions.lease.expect("runtime writer lease initialized"),
+            writer,
             activation.context(),
             activation.mutations(),
             activation.next_digest(),
             activation.faults(),
-        ))
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        ));
+    if committed.is_err() {
+        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+        return Err("ORNA-REPL-EFFECT".to_owned());
+    }
+    finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
     *session = successor;
     Ok(value)
 }
