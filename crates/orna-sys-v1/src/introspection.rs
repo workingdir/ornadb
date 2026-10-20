@@ -7520,19 +7520,36 @@ fn planned_query_join_order(query: &QueryPlanDescription) -> Vec<(usize, &QueryJ
         .chain(joins.iter().filter_map(|join| join.statistics.as_ref()))
         .filter_map(scan_work)
         .any(|work| work >= u128::from(u64::MAX));
-    let has_join_cardinality_overflow_risk = query
-        .source_statistics
-        .as_ref()
+    let source_statistics = query.source_statistics.as_ref();
+    let has_join_cardinality_overflow_risk = source_statistics
         .and_then(scan_work)
-        .and_then(|rows| u64::try_from(rows).ok())
-        .map_or(true, |source_rows| {
-            joins
+        .zip(source_statistics.and_then(|statistics| statistics.estimated_rows))
+        .map_or(true, |(source_work, source_rows)| {
+            // Known-cost joins are sorted ahead of the unknown tail, so price that
+            // candidate order with the explain model: each join adds its scan work
+            // and, while cumulative rows are known, its left and right rows; the
+            // cumulative rows then multiply. Unknown joins cannot widen either sum.
+            let mut known = joins
                 .iter()
-                .try_fold(source_rows, |product, join| {
-                    let input_rows = scan_work(join.statistics.as_ref()?)?;
-                    product.checked_mul(u64::try_from(input_rows).ok()?)
-                })
-                .is_none()
+                .filter_map(|join| join.statistics.as_ref())
+                .filter_map(|statistics| Some((scan_work(statistics)?, statistics)))
+                .collect::<Vec<_>>();
+            known.sort_by_key(|(work, _)| *work);
+            let mut total_work = source_work;
+            let mut cumulative_rows = Some(source_rows);
+            for (work, statistics) in known {
+                total_work += work;
+                if let (Some(left), Some(right)) = (cumulative_rows, statistics.estimated_rows) {
+                    total_work += u128::from(left) + u128::from(right);
+                    cumulative_rows = left.checked_mul(right);
+                    if cumulative_rows.is_none() {
+                        return true;
+                    }
+                } else {
+                    cumulative_rows = None;
+                }
+            }
+            total_work > u128::from(u64::MAX)
         });
     if has_partial_or_mutable_statistics
         || has_complex_pipeline
