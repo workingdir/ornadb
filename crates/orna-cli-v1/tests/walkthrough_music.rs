@@ -132,6 +132,7 @@ async fn repl_update() {
     let decoded = orna_value_v1::decode_canonical_storage_value(fields).unwrap();
     assert!(format!("{decoded:?}").contains("New title"), "updated title was not persisted: {decoded:?}; REPL stdout={stdout}; stderr={}", stderr(&updated));
 }
+/// ORNA-ROW-004: committed media rows retain annotated Blob references while bytes remain graph objects.
 #[tokio::test]
 async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     let (directory, repository, relation_id) = format3_repository_for_table(MUSIC_SOURCE, "music");
