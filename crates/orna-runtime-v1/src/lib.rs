@@ -9882,32 +9882,6 @@ impl RuntimeState {
         Ok(WriterLease { owner_id, epoch: 1 })
     }
 
-    /// Acquires the writer lease for the process that holds this worktree's
-    /// runtime owner lock, fencing any previous owner (ORNA-TURSO-004/005/006).
-    ///
-    /// The owner lock is a kernel-held liveness proof: while this state holds
-    /// it, no other live process in the worktree can be the lease owner, so a
-    /// lease held by a different owner belongs to an abandoned process. That
-    /// lease is replaced by an owner-and-epoch compare-and-swap, which makes
-    /// every token from the abandoned owner fail with `OwnerLost`. A state that
-    /// does not hold the owner lock is a secondary participant and fails with
-    /// `LeaseHeld` rather than sharing a writer.
-    pub async fn acquire_fenced_writer_lease(
-        &self,
-        owner_id: [u8; 16],
-    ) -> Result<WriterLease, RuntimeError> {
-        validate_id(owner_id)?;
-        if self.runtime_owner_lock.is_none() {
-            return Err(RuntimeError::LeaseHeld);
-        }
-        match self.current_lease().await? {
-            Some(current) if current.owner_id != owner_id => {
-                self.takeover_lease(current, owner_id).await
-            }
-            _ => self.acquire_lease(owner_id).await,
-        }
-    }
-
     /// Reads the current writer lease without changing runtime state.
     ///
     /// This read does not establish that the owner is abandoned. The caller
