@@ -22,7 +22,7 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EDQUOT, EIO, ENOSPC, EditorMount, assert_errno, await_draft_guard, draft_guard, fresh_view,
-    open_rw, require_fuse_or_skip, start_editor_mount,
+    open_rw, require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, start_editor_mount,
 };
 
 /// profiles/vfs-1 errno table: EINVAL for malformed candidates. The mount
@@ -270,6 +270,41 @@ async fn write_past_file_quota_fails_with_quota_errno_and_is_not_admitted() {
         "a quota failure ignored at close never changes the accepted row",
     );
     await_draft_guard(&fixture, b'0', "a quota-rejected write holds no draft").await;
+}
+
+/// Gate E unmount/restart: a quota-rejected write was never acknowledged, so
+/// after unmount and remount only the accepted row is readable. The rejected
+/// bytes are not retained as a draft.
+#[tokio::test]
+async fn quota_rejected_write_is_not_retained_across_unmount_restart() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let accepted = fresh_view(&fixture);
+    let mut file = open_rw(&fixture);
+    assert_errno(
+        file.write_at(b"x", FILE_QUOTA_BYTES).map(|_| ()),
+        &[ENOSPC, EDQUOT],
+        "a write past the per-file quota must fail with ENOSPC or EDQUOT",
+    );
+    drop(file);
+
+    let EditorMount {
+        _mounted: previous_mount,
+        _mount_parent: mount_parent,
+        _repository_directory: repository_directory,
+        ..
+    } = fixture;
+    drop(previous_mount);
+    let restarted_mountpoint = mount_parent.path().join("restarted");
+    let _restarted_mount = spawn_editor_mount(repository_directory.path(), &restarted_mountpoint);
+    assert_eq!(
+        std::fs::read_to_string(restarted_mountpoint.join("Music/london/data.orna")).unwrap(),
+        accepted,
+        "after restart only the acknowledged row is readable",
+    );
+    run_orna_unmount(repository_directory.path(), &restarted_mountpoint);
 }
 
 /// ORNA-VFS-008 quota: ftruncate past the per-file bound fails with ENOSPC or
