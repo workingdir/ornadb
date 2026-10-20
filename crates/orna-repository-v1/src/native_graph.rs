@@ -7631,6 +7631,14 @@ mod persisted_orp_tests {
             (Raw::Int(4.into()), Raw::Array(Vec::new())),
         ]))
         .expect("valid fixture schema descriptor");
+        fixture_descriptor_node(directory, &descriptor)
+    }
+
+    /// Writes `descriptor` as a kind-6 schema node over a one-chunk byte index.
+    fn fixture_descriptor_node(
+        directory: &Path,
+        descriptor: &SchemaDescriptor,
+    ) -> (NativeOid, [u8; 32]) {
         let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
         let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
         let chunk = fixture_git_object(directory, "blob", &schema_bytes);
@@ -7681,20 +7689,34 @@ mod persisted_orp_tests {
         root: &Path,
         include_blob_field: bool,
     ) -> NativeGraphContext {
+        init_fixture_repository(root);
+        let relation_id = [0x32; 16];
+        // The schema descriptor binds relation identity and its complete field layout
+        // (Orna 1.1.0 Section 29).
+        let (schema_oid, schema_digest) =
+            fixture_schema_node(root, relation_id, include_blob_field);
+        fixture_relation_context(root, relation_id, schema_oid, schema_digest)
+    }
+
+    fn init_fixture_repository(root: &Path) {
         let init = Command::new("git")
             .current_dir(root)
             .args(["init", "--quiet", "--template="])
             .status()
             .expect("initialize capture repository");
         assert!(init.success());
+    }
 
+    /// Issues the graph context of a fixture store whose one relation has an
+    /// empty row map under the given schema node.
+    fn fixture_relation_context(
+        root: &Path,
+        relation_id: [u8; 16],
+        schema_oid: NativeOid,
+        schema_digest: [u8; 32],
+    ) -> NativeGraphContext {
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
-        let relation_id = [0x32; 16];
-        // The schema descriptor binds relation identity and its complete field layout
-        // (Orna 1.1.0 Section 29).
-        let (schema_oid, schema_digest) =
-            fixture_schema_node(root, relation_id, include_blob_field);
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -10671,6 +10693,413 @@ mod persisted_orp_tests {
                 row_fields_dependencies(&canonical_value_bytes(&nested)),
                 Err(GraphError::NonCanonicalData)
             ));
+        }
+    }
+
+    fn uuid_raw(id: [u8; 16]) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+    }
+
+    fn primitive_type(name: &str) -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.to_owned())])
+    }
+
+    fn field_descriptor(id: [u8; 16], name: &str, ty: Raw, role: u64) -> Raw {
+        Raw::Array(vec![
+            uuid_raw(id),
+            Raw::Text(name.to_owned()),
+            ty,
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    }
+
+    /// A closed table descriptor; `fields` are sorted by id and key fields
+    /// have role 0.
+    fn typed_schema(
+        relation_id: [u8; 16],
+        key_ids: &[[u8; 16]],
+        fields: Vec<Raw>,
+        definitions: Vec<Raw>,
+    ) -> SchemaDescriptor {
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw(relation_id)),
+            (
+                Raw::Int(2.into()),
+                Raw::Array(key_ids.iter().copied().map(uuid_raw).collect()),
+            ),
+            (Raw::Int(3.into()), Raw::Array(fields)),
+            (Raw::Int(4.into()), Raw::Array(definitions)),
+        ]))
+        .expect("valid typed table descriptor")
+    }
+
+    fn canonical_raw(raw: Raw) -> Vec<u8> {
+        orna_value_v1::Value::new(raw)
+            .expect("registered canonical value")
+            .encode()
+            .expect("canonical value bytes")
+    }
+
+    /// Stores rows of canonical key and stored-field bytes in a fresh store
+    /// whose one relation uses `descriptor`, through the mutation and
+    /// relation-swap path publication uses, then reopens the published root.
+    fn store_typed_rows(
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        rows: &[(Vec<u8>, Vec<u8>)],
+    ) -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create typed row repository");
+        init_fixture_repository(directory.path());
+        let (schema_oid, schema_digest) = fixture_descriptor_node(directory.path(), descriptor);
+        let mut graph =
+            fixture_relation_context(directory.path(), relation_id, schema_oid, schema_digest);
+        let mutations = rows
+            .iter()
+            .map(|(key, fields)| {
+                RowIndexMutation::insert_canonical(key, fields).expect("typed row is admitted")
+            })
+            .collect::<Vec<_>>();
+        let scope = graph.open_read_scope().expect("owner write scope");
+        let maintained = graph
+            .maintain_row_index(&mutations, &scope)
+            .expect("maintain the typed row map");
+        let version = graph.row_snapshot.version();
+        let store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                maintained.primary_root(),
+                maintained.row_count(),
+                &scope,
+            )
+            .expect("publish typed rows into the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            relation_id,
+        )
+        .expect("reload the published typed row map");
+        graph.store_root = store_root;
+        drop(scope);
+        (directory, graph)
+    }
+
+    /// Reads every row back in key order, by range and by point lookup, and
+    /// checks each against `expected` and the table descriptor.
+    fn assert_typed_rows(
+        graph: &NativeGraphContext,
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        expected: &[(TypedKey, Vec<u8>)],
+    ) {
+        let scope = graph.open_read_scope().expect("typed read scope");
+        let all = crate::row_store::KeyRange::new(None, None, 64).expect("full typed range");
+        let rows = graph
+            .range_rows(&all, &scope)
+            .expect("range the typed rows");
+        assert_eq!(rows.len(), expected.len());
+        for (row, (key, fields)) in rows.iter().zip(expected) {
+            assert_eq!(row.key(), key, "rows come back in logical key order");
+            assert_eq!(row.value().encoded_fields(), Some(fields.as_slice()));
+            let canonical_key = row.key().canonical_bytes().expect("canonical typed key");
+            descriptor
+                .validate_stored_row(relation_id, &canonical_key, fields)
+                .expect("the stored row keeps its schema types");
+            let found = graph
+                .lookup_row(key, &scope)
+                .expect("look up a typed key")
+                .expect("the typed key is present");
+            assert_eq!(found.value().encoded_fields(), Some(fields.as_slice()));
+        }
+        let last = expected.len() - 1;
+        let inner = crate::row_store::KeyRange::new(
+            Some(expected[1].0.clone()),
+            Some(expected[last].0.clone()),
+            64,
+        )
+        .expect("bounded typed range");
+        assert_eq!(
+            graph
+                .range_row_keys(&inner, &scope)
+                .expect("range the inner typed keys"),
+            expected[1..last]
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-001: rows holding Decimal, Date, Instant,
+    /// Duration, Uuid, enum, record, tuple, Option and wide Int values are
+    /// stored, published and read back unchanged from a Uuid-keyed table.
+    #[test]
+    fn typed_row_values_round_trip_through_a_published_row_map() {
+        const MOOD: [u8; 16] = [0xe0; 16];
+        const CALM: [u8; 16] = [0xe1; 16];
+        const WILD: [u8; 16] = [0xe2; 16];
+        const POINT: [u8; 16] = [0xf0; 16];
+        let relation_id = [0x52; 16];
+        let stored = |byte: u8, name: &str, ty: Raw| field_descriptor([byte; 16], name, ty, 1);
+        let nominal = |id: [u8; 16]| Raw::Array(vec![Raw::Int(5.into()), uuid_raw(id)]);
+        let descriptor = typed_schema(
+            relation_id,
+            &[[0x01; 16]],
+            vec![
+                field_descriptor([0x01; 16], "id", primitive_type("Uuid"), 0),
+                stored(0x02, "amount", primitive_type("Decimal")),
+                stored(0x03, "day", primitive_type("Date")),
+                stored(0x04, "at", primitive_type("Instant")),
+                stored(0x05, "span", primitive_type("Duration")),
+                stored(0x06, "owner", primitive_type("Uuid")),
+                stored(0x07, "mood", nominal(MOOD)),
+                stored(0x08, "point", nominal(POINT)),
+                stored(
+                    0x09,
+                    "pair",
+                    Raw::Array(vec![
+                        Raw::Int(3.into()),
+                        Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+                    ]),
+                ),
+                stored(
+                    0x0a,
+                    "discount",
+                    Raw::Array(vec![Raw::Int(2.into()), primitive_type("Decimal")]),
+                ),
+                stored(0x0b, "count", primitive_type("Int")),
+            ],
+            vec![
+                Raw::Array(vec![
+                    uuid_raw(MOOD),
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw(CALM),
+                            Raw::Text("calm".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw(WILD),
+                            Raw::Text("wild".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ]),
+                ]),
+                Raw::Array(vec![
+                    uuid_raw(POINT),
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![
+                        field_descriptor([0xf1; 16], "x", primitive_type("Int"), 1),
+                        field_descriptor([0xf2; 16], "label", primitive_type("Str"), 1),
+                    ]),
+                ]),
+            ],
+        );
+        let decimal = |coefficient: i64, exponent: i64| {
+            Raw::Tag(
+                60_000,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient.into()),
+                    Raw::Int(exponent.into()),
+                ])),
+            )
+        };
+        let time = |tag: u64, seconds: i64, nanos: u32| {
+            Raw::Tag(
+                tag,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds.into()),
+                    Raw::Int(nanos.into()),
+                ])),
+            )
+        };
+        let fields = |index: u8, mood: [u8; 16]| {
+            let ordinal = i64::from(index);
+            let discount = if index == 0 {
+                Raw::Array(vec![Raw::Int(0.into())])
+            } else {
+                Raw::Array(vec![Raw::Int(1.into()), decimal(5, -2)])
+            };
+            canonical_raw(Raw::Array(vec![
+                decimal(1_999 + 2 * ordinal, -2),
+                Raw::Tag(
+                    60_001,
+                    Box::new(Raw::Text(format!("2026-10-{}", 20 + index))),
+                ),
+                time(60_002, -86_400 * ordinal - 1, 500),
+                time(60_005, 90 + ordinal, 250_000_000),
+                uuid_raw([0x60 + index; 16]),
+                Raw::Tag(
+                    60_008,
+                    Box::new(Raw::Array(vec![uuid_raw(MOOD), uuid_raw(mood), Raw::Null])),
+                ),
+                Raw::Tag(
+                    60_009,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(POINT),
+                        Raw::Array(vec![
+                            Raw::Array(vec![uuid_raw([0xf1; 16]), Raw::Int((-3 - ordinal).into())]),
+                            Raw::Array(vec![
+                                uuid_raw([0xf2; 16]),
+                                Raw::Text(format!("north-{index}")),
+                            ]),
+                        ]),
+                    ])),
+                ),
+                Raw::Tag(
+                    60_015,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(ordinal.into()),
+                        Raw::Text("pair".to_owned()),
+                    ])),
+                ),
+                Raw::Tag(60_013, Box::new(discount)),
+                // Beyond u64: a tag-2 bignum.
+                Raw::Int(num_bigint::BigInt::from(u128::MAX) - ordinal),
+            ]))
+        };
+        let rows = [
+            (canonical_raw(uuid_raw([0x9a; 16])), fields(0, CALM)),
+            (canonical_raw(uuid_raw([0x15; 16])), fields(1, WILD)),
+            (canonical_raw(uuid_raw([0x47; 16])), fields(2, CALM)),
+        ];
+        let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+        let expected = [1, 2, 0].map(|index| {
+            let (key, fields) = &rows[index];
+            (
+                TypedKey::decode_canonical(key).expect("Uuid key decodes"),
+                fields.clone(),
+            )
+        });
+        assert!(matches!(&expected[0].0, TypedKey::Value(_)));
+        assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-002: tables keyed by Date, Instant,
+    /// Decimal, a tuple value and a composite (Date, Int) key keep their rows
+    /// in logical key order, which differs from CBOR byte order.
+    #[test]
+    fn tables_keyed_by_tagged_values_round_trip_in_logical_key_order() {
+        let relation_id = [0x53; 16];
+        let date = |text: &str| Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned())));
+        let pair = |tag: u64, first: Raw, second: Raw| {
+            Raw::Tag(tag, Box::new(Raw::Array(vec![first, second])))
+        };
+        let instant = |seconds: i64, nanos: u32| {
+            pair(60_002, Raw::Int(seconds.into()), Raw::Int(nanos.into()))
+        };
+        let decimal = |coefficient: i64, exponent: i64| {
+            pair(
+                60_000,
+                Raw::Int(coefficient.into()),
+                Raw::Int(exponent.into()),
+            )
+        };
+        let tuple = |number: i64, text: &str| {
+            pair(60_015, Raw::Int(number.into()), Raw::Text(text.to_owned()))
+        };
+        let composite =
+            |day: &str, number: i64| Raw::Array(vec![date(day), Raw::Int(number.into())]);
+        let tuple_type = Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+        ]);
+        // Key field types, keys in insertion order, the same keys in logical
+        // order, and one absent key of the same type.
+        let cases = [
+            (
+                vec![primitive_type("Date")],
+                vec![date("2026-10-20"), date("1999-12-31"), date("2026-01-05")],
+                vec![date("1999-12-31"), date("2026-01-05"), date("2026-10-20")],
+                date("2000-01-01"),
+            ),
+            (
+                vec![primitive_type("Instant")],
+                vec![instant(5, 0), instant(-3, 500), instant(0, 1)],
+                vec![instant(-3, 500), instant(0, 1), instant(5, 0)],
+                instant(1, 0),
+            ),
+            (
+                vec![primitive_type("Decimal")],
+                vec![decimal(1, 1), decimal(2, 0), decimal(-5, -1), decimal(0, 0)],
+                vec![decimal(-5, -1), decimal(0, 0), decimal(2, 0), decimal(1, 1)],
+                decimal(3, 0),
+            ),
+            (
+                vec![tuple_type],
+                vec![tuple(1, "b"), tuple(-2, "z"), tuple(1, "a"), tuple(10, "a")],
+                vec![tuple(-2, "z"), tuple(1, "a"), tuple(1, "b"), tuple(10, "a")],
+                tuple(2, "a"),
+            ),
+            (
+                vec![primitive_type("Date"), primitive_type("Int")],
+                vec![
+                    composite("2026-01-01", 5),
+                    composite("2026-01-01", -1),
+                    composite("2025-12-31", 7),
+                ],
+                vec![
+                    composite("2025-12-31", 7),
+                    composite("2026-01-01", -1),
+                    composite("2026-01-01", 5),
+                ],
+                composite("2026-01-01", 0),
+            ),
+        ];
+        for (key_types, inserted, ordered, absent) in cases {
+            let key_ids = (1..=key_types.len() as u8)
+                .map(|byte| [byte; 16])
+                .collect::<Vec<_>>();
+            let mut fields = key_ids
+                .iter()
+                .zip(key_types)
+                .map(|(id, ty)| field_descriptor(*id, &format!("key-{}", id[0]), ty, 0))
+                .collect::<Vec<_>>();
+            fields.push(field_descriptor(
+                [0x09; 16],
+                "note",
+                primitive_type("Str"),
+                1,
+            ));
+            let descriptor = typed_schema(relation_id, &key_ids, fields, Vec::new());
+            let rows = inserted
+                .into_iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    let note = canonical_raw(Raw::Array(vec![Raw::Text(format!("row-{index}"))]));
+                    (canonical_raw(key), note)
+                })
+                .collect::<Vec<_>>();
+            let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+            let expected = ordered
+                .into_iter()
+                .map(|key| {
+                    let key = canonical_raw(key);
+                    let (_, note) = rows
+                        .iter()
+                        .find(|(inserted, _)| inserted == &key)
+                        .expect("every ordered key was inserted");
+                    (
+                        TypedKey::decode_canonical(&key).expect("typed key decodes"),
+                        note.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+            let scope = graph.open_read_scope().expect("absent key scope");
+            let absent =
+                TypedKey::decode_canonical(&canonical_raw(absent)).expect("absent key decodes");
+            assert!(
+                graph
+                    .lookup_row(&absent, &scope)
+                    .expect("look up an absent typed key")
+                    .is_none()
+            );
         }
     }
 
