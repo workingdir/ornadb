@@ -1058,6 +1058,13 @@ pub trait Ovb2EffectHandler {
     ) -> Result<Option<ContextValueRelationPage>, EvaluationError> {
         Ok(None)
     }
+
+    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
+    /// without one report `sys.abi.unavailable` for explain calls.
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        None
+    }
 }
 
 struct Ovb2EffectHandlerAdapter<'a> {
@@ -1079,6 +1086,11 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
 
     fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
         Some(self.handler)
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
     }
 }
 
@@ -1255,6 +1267,11 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     fn accepts_context_values(&self) -> bool {
         true
     }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
+    }
 }
 
 impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
@@ -1273,6 +1290,11 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         EffectHandler::handle_with_budget(self.handler, callee, arguments, budget)
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
+        self.handler.explain_catalogue()
     }
 
     fn handle_registered_with_budget(
@@ -7037,10 +7059,22 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if input.is_some() || arguments.len() != 1 {
-            return Err(error("ORNA-EVAL-ARGUMENT"));
-        }
-        let query = self.evaluate(&arguments[0].value, scope, depth + 1)?;
+        // Mirrors semantic admission: piped input is the query and takes no
+        // argument; otherwise exactly one query argument is required.
+        let query = match input {
+            Some(input) => {
+                if !arguments.is_empty() {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                input
+            }
+            None => {
+                if arguments.len() != 1 {
+                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                }
+                self.evaluate(&arguments[0].value, scope, depth + 1)?
+            }
+        };
         let Value::Relation(plan) = query else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
