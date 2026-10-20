@@ -996,6 +996,36 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
+    // `--no-persistent-consumers` is a claim about the source. Verify it before
+    // the copy is built: the empty continuity inventory cannot carry stream
+    // checkpoints, so a source that holds them must refuse rather than reset.
+    let source_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2100",
+                "migration source runtime could not be inspected",
+                "retry `migrate copy` once the local runtime can start",
+            )
+        })?;
+    let holds_stream_state = source_runtime
+        .block_on(orna_runtime_v1::RuntimeState::persistent_stream_state_present(&repository))
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration source runtime state could not be inspected",
+                "repair the source runtime state; no copy was prepared",
+                format!("{error:?}"),
+            )
+        })?;
+    if holds_stream_state {
+        return Err(Diagnostic::target(
+            "E2100",
+            "migration source holds persistent stream state that is not carried",
+            "stream consumer continuity across migration is not implemented; no copy was prepared and the source checkpoints are unchanged",
+        ));
+    }
     let continuity =
         orna_repository_v1::MigrationContinuityRecord::new(Vec::new()).map_err(|error| {
             Diagnostic::target_with_detail(
