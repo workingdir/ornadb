@@ -1675,11 +1675,15 @@ fn hex_digest(bytes: &[u8]) -> String {
 /// Projects one stored Blob field name to its sibling content-file name:
 /// escaped field name plus the MIME-1 selected suffix. A field that would spell
 /// the reserved row document keeps its own distinct name (VFS-016).
+///
+/// Stored annotations are canonical MIME-1. A pair the registry refuses
+/// declares no suffix, so it projects as the octet-stream/null fallback does,
+/// as `bin`, instead of spelling an unchecked hint into a host name.
 pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
-    let selected = match suffix {
-        Some(hint) => hint,
-        None => MimeRegistry::mime1().preferred_suffix(media_type),
-    };
+    let annotation = MimeRegistry::mime1()
+        .canonical_annotation(media_type, suffix)
+        .unwrap_or_default();
+    let selected = annotation.selected_suffix();
     // The suffix is part of the projected component, so VFS-016's component
     // bound covers the whole `field + "." + suffix` spelling rather than the
     // escaped field base alone. A base that leaves no room for the suffix takes
@@ -3461,6 +3465,17 @@ mod tests {
         assert_eq!(
             project_content_name("content", "application/x-unknown", Some("xyz")),
             "content.xyz"
+        );
+        // Projection reads the registry's selected suffix, so an alias spelling
+        // projects as its canonical essence, and a hint the registry refuses is
+        // never spelled into the host name.
+        assert_eq!(
+            project_content_name("content", "Audio/X-WAV", None),
+            "content.wav"
+        );
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", Some("../mp3")),
+            "content.bin"
         );
 
         // The suffix rename never changes the stored content identity: the same
