@@ -659,6 +659,301 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     );
     assert_eq!(repository.head().unwrap().unwrap(), head_after_move);
 }
+
+/// A live `mount --cwd` over the committed `Music/london` row. The handles it
+/// keeps let a test act as another writer and read what the store holds.
+struct MountedMusicRow {
+    mounted: MountedProcess,
+    repository_directory: TempDir,
+    repository: orna_repository_v1::Repository,
+    runtime_identity: orna_runtime_v1::RuntimeIdentity,
+    digest: [u8; 32],
+    relation_id: [u8; 16],
+    row_path: std::path::PathBuf,
+    scripts: TempDir,
+    _mount_parent: TempDir,
+}
+
+/// Seeds `Music/london` with `initial`, then mounts the cwd. Returns `None`
+/// when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
+    if !fuse_test_available() {
+        return None;
+    }
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+            "Music/london.orna",
+            initial,
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: Some(initial),
+            ordinal: 0x92,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let row_path = mountpoint.join("Music/london");
+    let document_path = row_path.join("data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !document_path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return None;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose the row document"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    Some(MountedMusicRow {
+        mounted,
+        repository_directory,
+        repository,
+        runtime_identity,
+        digest,
+        relation_id,
+        row_path,
+        scripts: TempDir::new().unwrap(),
+        _mount_parent: mount_parent,
+    })
+}
+
+impl MountedMusicRow {
+    /// Saves `body` through `edit --row` on the mounted absolute row directory.
+    fn save(&self, name: &str, body: &str) -> std::process::Output {
+        let editor = self.scripts.path().join(name);
+        std::fs::write(
+            &editor,
+            format!("#!/bin/sh\nprintf '%s\\n' '{body}' > \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+            .args([
+                "--db",
+                self.repository_directory.path().to_str().unwrap(),
+                "edit",
+                "--row",
+            ])
+            .arg(&self.row_path)
+            .env("EDITOR", &editor)
+            .output()
+            .expect("run edit --row against mounted absolute row directory")
+    }
+
+    /// Commits `source_row` over `Music/london` as a writer outside this mount.
+    async fn replace_row_as_other_writer(&self, source_row: &str) {
+        let state = RuntimeState::open(&self.repository, self.runtime_identity, self.digest)
+            .await
+            .unwrap();
+        let writer = state
+            .acquire_lease(self.runtime_identity.repository_id)
+            .await
+            .unwrap();
+        let head = self.repository.head().unwrap().unwrap();
+        let format_context =
+            format3::format3_context_for_snapshot(&self.repository, head.as_str());
+        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+        media_commit::commit_source_captures_for_table(
+            &self.repository,
+            &state,
+            writer,
+            &mut bindings,
+            self.relation_id,
+            &format_context,
+            "Music",
+            &[media_commit::SourceCaptureRow {
+                key: "london",
+                blob_fields: &[],
+                source_row: Some(source_row),
+                ordinal: 0x9a,
+                insert_only: false,
+            }],
+        )
+        .await;
+    }
+
+    /// The `Music/london` row bytes the store holds now. Call after `unmount`.
+    async fn stored_row(&self) -> Vec<u8> {
+        let state = RuntimeState::open(&self.repository, self.runtime_identity, self.digest)
+            .await
+            .unwrap();
+        let table = orna_runtime_v1::RuntimeTableIdentity::new(
+            "Music",
+            orna_runtime_v1::TableObjectId::new(self.relation_id),
+        )
+        .unwrap();
+        let tables = [table];
+        state
+            .begin_admitted_table_activation(&tables)
+            .await
+            .unwrap()
+            .query_exact("Music", b"london")
+            .unwrap()
+            .unwrap()
+            .to_vec()
+    }
+
+    fn unmount(&mut self) {
+        run_unmount(
+            self.repository_directory.path(),
+            &self.mounted.mountpoint,
+        );
+        let status = self.mounted.child.wait().unwrap();
+        assert!(status.success(), "mount exits cleanly after unmount");
+    }
+}
+
+fn assert_saved(output: &std::process::Output, label: &str) {
+    assert!(
+        output.status.success(),
+        "{label} failed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+fn assert_title(row: &[u8], expected: &str) {
+    assert_eq!(
+        orna_value_v1::Value::decode(row)
+            .expect("decode the admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text(expected.to_owned())]),
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-005: consecutive saves of one row in one mount both commit; the
+/// second compares against the row the first save accepted.
+async fn cwd_mount_consecutive_saves_of_one_row_both_commit() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
+    assert_saved(&row.save("second", "{ title: \"after-two\", }"), "second save");
+    row.unmount();
+    assert_title(&row.stored_row().await, "after-two");
+}
+
+#[tokio::test]
+/// ORNA-VFS-005: a save after another writer changed the row and advanced HEAD
+/// is refused as stale, and the other writer's row is kept.
+async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
+    row.replace_row_as_other_writer("{ title: \"other\", }\n").await;
+    let repository = row.repository_directory.path().to_path_buf();
+    std::fs::write(repository.join("notes.txt"), "advance HEAD\n").unwrap();
+    format3::git(&repository, &["add", "notes.txt"]);
+    format3::git(
+        &repository,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "advance HEAD while another writer owns the row",
+        ],
+    );
+    let second = row.save("second", "{ title: \"after-two\", }");
+    let stdout = String::from_utf8_lossy(&second.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&second.stderr).into_owned();
+    assert!(
+        !second.status.success(),
+        "a save against a row another writer changed must be refused; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("stale"),
+        "the refusal names the stale baseline; stdout={stdout}; stderr={stderr}"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "other");
+}
+
+#[tokio::test]
+/// ORNA-VFS-005: a HEAD rename of a mounted table keeps saves on the pinned
+/// declaration name the mounted row mutations address.
+async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let rename = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .current_dir(&repository)
+        .args(["mv", "Music", "Archive"])
+        .output()
+        .expect("run mv at HEAD");
+    assert!(
+        rename.status.success(),
+        "mv failed; stderr={}",
+        String::from_utf8_lossy(&rename.stderr)
+    );
+    format3::git(&repository, &["add", "--all"]);
+    format3::git(
+        &repository,
+        &["commit", "--quiet", "-m", "rename Music to Archive at HEAD"],
+    );
+    let head_source = std::fs::read_to_string(repository.join("main.orna")).unwrap();
+    assert!(
+        head_source.contains("Archive"),
+        "HEAD declares the renamed table: {head_source}"
+    );
+    assert_saved(&row.save("save", "{ title: \"after\", }"), "save through pinned name");
+    row.unmount();
+    assert_title(&row.stored_row().await, "after");
+}
+
 #[tokio::test]
 /// ORNA-VFS-005: a historical snapshot mount cannot be retargeted or edited.
 async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
