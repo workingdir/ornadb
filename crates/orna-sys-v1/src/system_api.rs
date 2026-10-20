@@ -158,685 +158,1317 @@ pub fn system_binding_modules_json() -> &'static str {
 pub struct SystemApiFunctionBindings;
 
 impl SystemApiFunctionBindings {
+    /// Return safe static/nominal/codec/protocol metadata for a value.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.meta","purpose":"Return safe static/nominal/codec/protocol metadata for a value.","signature":"fn sys.meta<T>(value: T): sys.ValueMetadata<T>"}"###,
+        name = "sys.meta",
+        effect = "read",
+        signature = "fn sys.meta<T>(value: T): sys.ValueMetadata<T>",
         role = "langitem.sys.meta@1.0",
         type_graph = "system_api_inventory.json",
-        schema = "system_api_schema.json"
+        schema = "system_api_schema.json",
     )]
     pub fn sys_meta(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.meta")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Look up a stable object at a snapshot.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.object","purpose":"Look up a stable object at a snapshot.","signature":"fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef"}"###
+        name = "sys.object",
+        effect = "read",
+        signature = "fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef",
     )]
     pub fn sys_object(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.object")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a semantic name with ordinary visibility/import rules.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.resolve","purpose":"Resolve a semantic name with ordinary visibility/import rules.","signature":"fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef"}"###
+        name = "sys.resolve",
+        effect = "read",
+        signature = "fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef",
     )]
     pub fn sys_resolve(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a function reference.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.resolve_function","purpose":"Resolve a function reference.","signature":"fn sys.resolve_function(name: Str, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.FunctionRef"}"###
+        name = "sys.resolve_function",
+        effect = "read",
+        signature = "fn sys.resolve_function(name: Str, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.FunctionRef",
     )]
     pub fn sys_resolve_function(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve_function")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return structured object description.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.describe","purpose":"Return structured object description.","signature":"fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription"}"###
+        name = "sys.describe",
+        effect = "read",
+        signature = "fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription",
     )]
     pub fn sys_describe(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.describe")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return retained exact source/source maps for an object subject to redaction.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.source(ObjectRef)","purpose":"Return retained exact source/source maps for an object subject to redaction.","signature":"fn sys.source(object: sys.ObjectRef): sys.SourceDocument"}"###
+        name = "sys.source(ObjectRef)",
+        effect = "read",
+        signature = "fn sys.source(object: sys.ObjectRef): sys.SourceDocument",
     )]
     pub fn sys_source_object_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.source(ObjectRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return retained exact source/source maps for a file subject to redaction.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.source(FileRef)","purpose":"Return retained exact source/source maps for a file subject to redaction.","signature":"fn sys.source(file: sys.FileRef): sys.SourceDocument"}"###
+        name = "sys.source(FileRef)",
+        effect = "read",
+        signature = "fn sys.source(file: sys.FileRef): sys.SourceDocument",
     )]
     pub fn sys_source_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.source(FileRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return stable semantic-object revision history.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.history(ObjectRef)","purpose":"Return stable semantic-object revision history.","signature":"fn sys.history(object: sys.ObjectRef): Relation<sys.Revision>"}"###
+        name = "sys.history(ObjectRef)",
+        effect = "read",
+        signature = "fn sys.history(object: sys.ObjectRef): Relation<sys.Revision>",
     )]
     pub fn sys_history_object_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.history(ObjectRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return retained versions of one repository file.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.history(FileRef)","purpose":"Return retained versions of one repository file.","signature":"fn sys.history(file: sys.FileRef): Relation<sys.FileVersion>"}"###
+        name = "sys.history(FileRef)",
+        effect = "read",
+        signature = "fn sys.history(file: sys.FileRef): Relation<sys.FileVersion>",
     )]
     pub fn sys_history_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.history(FileRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return source attribution.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.blame(FileRef)","purpose":"Return source attribution.","signature":"fn sys.blame(target: sys.FileRef): Relation<sys.Attribution>"}"###
+        name = "sys.blame(FileRef)",
+        effect = "read",
+        signature = "fn sys.blame(target: sys.FileRef): Relation<sys.Attribution>",
     )]
     pub fn sys_blame_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blame(FileRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return semantic row/field attribution.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.blame(RowRef)","purpose":"Return semantic row/field attribution.","signature":"fn sys.blame<T>(target: sys.RowRef<T>): Relation<sys.Attribution>"}"###
+        name = "sys.blame(RowRef)",
+        effect = "read",
+        signature = "fn sys.blame<T>(target: sys.RowRef<T>): Relation<sys.Attribution>",
     )]
     pub fn sys_blame_row_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blame(RowRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Traverse outgoing dependency edges.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.dependencies","purpose":"Traverse outgoing dependency edges.","signature":"fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>"}"###
+        name = "sys.dependencies",
+        effect = "read",
+        signature = "fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
     )]
     pub fn sys_dependencies(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.dependencies")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Traverse incoming dependency edges.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.dependents","purpose":"Traverse incoming dependency edges.","signature":"fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>"}"###
+        name = "sys.dependents",
+        effect = "read",
+        signature = "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
     )]
     pub fn sys_dependents(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.dependents")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return an already resolved snapshot reference.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(SnapshotRef)","purpose":"Return an already resolved snapshot reference.","signature":"fn sys.snapshot(reference: sys.SnapshotRef = sys.database.cwd): sys.SnapshotRef"}"###
+        name = "sys.snapshot(SnapshotRef)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: sys.SnapshotRef = sys.database.cwd): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(SnapshotRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a commit snapshot.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(CommitRef)","purpose":"Resolve a commit snapshot.","signature":"fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef"}"###
+        name = "sys.snapshot(CommitRef)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(CommitRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve the branch target observed by the reference.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(BranchRef)","purpose":"Resolve the branch target observed by the reference.","signature":"fn sys.snapshot(reference: sys.BranchRef): sys.SnapshotRef"}"###
+        name = "sys.snapshot(BranchRef)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: sys.BranchRef): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(BranchRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve the peeled tag target.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(TagRef)","purpose":"Resolve the peeled tag target.","signature":"fn sys.snapshot(reference: sys.TagRef): sys.SnapshotRef"}"###
+        name = "sys.snapshot(TagRef)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: sys.TagRef): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(TagRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve an exact Git object identifier.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(GitOid)","purpose":"Resolve an exact Git object identifier.","signature":"fn sys.snapshot(reference: sys.GitOid): sys.SnapshotRef"}"###
+        name = "sys.snapshot(GitOid)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: sys.GitOid): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(GitOid)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a Git revision expression in the attached repository.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.snapshot(Str)","purpose":"Resolve a Git revision expression in the attached repository.","signature":"fn sys.snapshot(reference: Str): sys.SnapshotRef"}"###
+        name = "sys.snapshot(Str)",
+        effect = "read",
+        signature = "fn sys.snapshot(reference: Str): sys.SnapshotRef",
     )]
     pub fn sys_snapshot_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(Str)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute semantic/source/row diff.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.diff","purpose":"Compute semantic/source/row diff.","signature":"fn sys.diff(from: sys.SnapshotRef, to: sys.SnapshotRef, scope: sys.DiffScope = sys.DiffScope.all): Relation<sys.DiffEntry>"}"###
+        name = "sys.diff",
+        effect = "read",
+        signature = "fn sys.diff(from: sys.SnapshotRef, to: sys.SnapshotRef, scope: sys.DiffScope = sys.DiffScope.all): Relation<sys.DiffEntry>",
     )]
     pub fn sys_diff(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.diff")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Report changes represented by/relative to a state.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.changes","purpose":"Report changes represented by/relative to a state.","signature":"fn sys.changes(snapshot: sys.SnapshotRef = sys.database.cwd, area: sys.ChangeArea? = null): Relation<sys.Change>"}"###
+        name = "sys.changes",
+        effect = "read",
+        signature = "fn sys.changes(snapshot: sys.SnapshotRef = sys.database.cwd, area: sys.ChangeArea? = null): Relation<sys.Change>",
     )]
     pub fn sys_changes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.changes")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return structured query plan.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(Query)","purpose":"Return structured query plan.","signature":"fn sys.explain<T>(query: Query<T>): sys.Plan"}"###,
-        role = "langitem.sys.explain@1.0"
+        name = "sys.explain(Query)",
+        effect = "read",
+        signature = "fn sys.explain<T>(query: Query<T>): sys.Plan",
+        role = "langitem.sys.explain@1.0",
     )]
     pub fn sys_explain_query(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Query)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return structured function/effect plan.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(FunctionRef)","purpose":"Return structured function/effect plan.","signature":"fn sys.explain(function: sys.FunctionRef): sys.Plan"}"###,
-        role = "langitem.sys.explain@1.0"
+        name = "sys.explain(FunctionRef)",
+        effect = "read",
+        signature = "fn sys.explain(function: sys.FunctionRef): sys.Plan",
+        role = "langitem.sys.explain@1.0",
     )]
     pub fn sys_explain_function_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(FunctionRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return structured causal explanation.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.explain(Diagnostic)","purpose":"Return structured causal explanation.","signature":"fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation"}"###,
-        role = "langitem.sys.explain@1.0"
+        name = "sys.explain(Diagnostic)",
+        effect = "read",
+        signature = "fn sys.explain(diagnostic: sys.Diagnostic): sys.Explanation",
+        role = "langitem.sys.explain@1.0",
     )]
     pub fn sys_explain_diagnostic(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Diagnostic)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Read a checkpoint snapshot.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.checkpoint","purpose":"Read a checkpoint snapshot.","signature":"fn sys.checkpoint(consumer_identity: sys.ConsumerIdentity, source_identity: Str, partition: Str? = null): sys.Checkpoint?"}"###
+        name = "sys.checkpoint",
+        effect = "read",
+        signature = "fn sys.checkpoint(consumer_identity: sys.ConsumerIdentity, source_identity: Str, partition: Str? = null): sys.Checkpoint?",
     )]
     pub fn sys_checkpoint(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.checkpoint")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Render without altering structured diagnostic.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.render_diagnostic","purpose":"Render without altering structured diagnostic.","signature":"fn sys.render_diagnostic(diagnostic: sys.Diagnostic, context: PresentContext = sys.current.present_context): PresentTree"}"###
+        name = "sys.render_diagnostic",
+        effect = "read",
+        signature = "fn sys.render_diagnostic(diagnostic: sys.Diagnostic, context: PresentContext = sys.current.present_context): PresentTree",
     )]
     pub fn sys_render_diagnostic(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.render_diagnostic")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return exact language/sys/storage/protocol compatibility coordinates.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.rt.info","purpose":"Return exact language/sys/storage/protocol compatibility coordinates.","signature":"fn sys.rt.info(): sys.RuntimeInfo"}"###
+        name = "sys.rt.info",
+        effect = "read",
+        signature = "fn sys.rt.info(): sys.RuntimeInfo",
     )]
     pub fn sys_rt_info(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.rt.info")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Reflectively invoke and return an explicitly erased value envelope.
+    ///
+    /// # Snapshot rule
+    ///
+    /// An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.invoke(Value)","purpose":"Reflectively invoke and return an explicitly erased value envelope.","signature":"fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
-        role = "langitem.sys.invoke@1.0"
+        name = "sys.invoke(Value)",
+        effect = "invoke",
+        signature = "fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value",
+        role = "langitem.sys.invoke@1.0",
     )]
     pub fn sys_invoke_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke(Value)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Reflectively invoke after validating the declared result against an explicit type witness.
+    ///
+    /// # Snapshot rule
+    ///
+    /// An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.invoke<T>","purpose":"Reflectively invoke after validating the declared result against an explicit type witness.","signature":"fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
-        role = "langitem.sys.invoke@1.0"
+        name = "sys.invoke<T>",
+        effect = "invoke",
+        signature = "fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T",
+        role = "langitem.sys.invoke@1.0",
     )]
     pub fn sys_invoke_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke<T>")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Start an awaitable invocation with an explicitly erased result.
+    ///
+    /// # Ownership
+    ///
+    /// Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.
+    ///
+    /// # Snapshot rule
+    ///
+    /// An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.start(Value)","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation with an explicitly erased result.","signature":"fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
-        role = "langitem.sys.start@1.0"
+        name = "sys.start(Value)",
+        effect = "invoke",
+        signature = "fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>",
+        role = "langitem.sys.start@1.0",
     )]
     pub fn sys_start_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start(Value)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Start an awaitable invocation after validating an explicit result type witness.
+    ///
+    /// # Ownership
+    ///
+    /// Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.
+    ///
+    /// # Snapshot rule
+    ///
+    /// An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.start<T>","ownership":"Current operation owns the child, except a direct REPL sys.start expression/binding is session-owned. Inherit transaction mode is rejected; separate/read_only are permitted.","purpose":"Start an awaitable invocation after validating an explicit result type witness.","signature":"fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>","snapshot_rule":"An omitted at selects the FunctionRef pin; an explicit different database or snapshot fails sys.invoke.snapshot_mismatch. Historical snapshots permit read-only table access."}"###,
-        role = "langitem.sys.start@1.0"
+        name = "sys.start<T>",
+        effect = "invoke",
+        signature = "fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>",
+        role = "langitem.sys.start@1.0",
     )]
     pub fn sys_start_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start<T>")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Wait for a terminal result; timeout does not cancel.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.await","purpose":"Wait for a terminal result; timeout does not cancel.","signature":"fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>"}"###,
-        role = "langitem.sys.await@1.0"
+        name = "sys.await",
+        effect = "invoke",
+        signature = "fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>",
+        role = "langitem.sys.await@1.0",
     )]
     pub fn sys_await(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.await")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Idempotently request invocation cancellation.
     #[ornasys(
-        function = r###"{"effect":"invoke","name":"sys.cancel","purpose":"Idempotently request invocation cancellation.","signature":"fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool"}"###,
-        role = "langitem.sys.cancel@1.0"
+        name = "sys.cancel",
+        effect = "invoke",
+        signature = "fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool",
+        role = "langitem.sys.cancel@1.0",
     )]
     pub fn sys_cancel(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.cancel")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.commit","purpose":"Commit the validated staged state, preserving unstaged CWD changes and unpublished tail.","signature":"fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef"}"###
+        name = "sys.admin.commit",
+        effect = "admin",
+        signature = "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
     )]
     pub fn sys_admin_commit(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.commit")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and select an already resolved snapshot.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(SnapshotRef)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Validate and select an already resolved snapshot.","signature":"fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(SnapshotRef)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(SnapshotRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and select a commit snapshot.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(CommitRef)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Validate and select a commit snapshot.","signature":"fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(CommitRef)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(CommitRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and select a branch target.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(BranchRef)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Validate and select a branch target.","signature":"fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(BranchRef)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(BranchRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and select a peeled tag target.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(TagRef)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Validate and select a peeled tag target.","signature":"fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(TagRef)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(TagRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and select an exact Git object.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(GitOid)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Validate and select an exact Git object.","signature":"fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(GitOid)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(GitOid)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve, validate and select a Git revision expression.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.checkout(Str)","preconditions":"Carry nonconflicting staged, unstaged and pending database changes. Refuse overwrite by default. force requires a matching plan token and explicit host consent; invalid target assertions are never bypassed.","purpose":"Resolve, validate and select a Git revision expression.","signature":"fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef"}"###
+        name = "sys.admin.checkout(Str)",
+        effect = "admin",
+        signature = "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
     )]
     pub fn sys_admin_checkout_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(Str)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(SnapshotRef)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Create a branch at the supplied committed snapshot or current HEAD; do not switch or commit pending changes.","signature":"fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(SnapshotRef)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(SnapshotRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Create a Git branch at a commit.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(CommitRef)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Create a Git branch at a commit.","signature":"fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(CommitRef)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(CommitRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Create a Git branch at another branch target.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(BranchRef)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Create a Git branch at another branch target.","signature":"fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(BranchRef)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(BranchRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Create a Git branch at a peeled tag target.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(TagRef)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Create a Git branch at a peeled tag target.","signature":"fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(TagRef)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(TagRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Create a Git branch at an exact Git object.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(GitOid)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Create a Git branch at an exact Git object.","signature":"fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(GitOid)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(GitOid)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a Git revision expression and create a branch there.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.create_branch(Str)","preconditions":"Target must resolve to a commit; name must be a valid non-existing Git branch. An unborn HEAD or uncommitted CWD target fails without mutation.","purpose":"Resolve a Git revision expression and create a branch there.","signature":"fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef"}"###
+        name = "sys.admin.create_branch(Str)",
+        effect = "admin",
+        signature = "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
     )]
     pub fn sys_admin_create_branch_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(Str)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Durably seal pending rows without changing logical contents.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.flush","purpose":"Durably seal pending rows without changing logical contents.","signature":"fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult"}"###
+        name = "sys.admin.flush",
+        effect = "admin",
+        signature = "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
     )]
     pub fn sys_admin_flush(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.flush")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Maintain/repack the current indexed profile without logical mutation or selecting a row mode.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.compact","purpose":"Maintain/repack the current indexed profile without logical mutation or selecting a row mode.","signature":"fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult"}"###
+        name = "sys.admin.compact",
+        effect = "admin",
+        signature = "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
     )]
     pub fn sys_admin_compact(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.compact")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Set future automatic placement preference without rewriting existing rows.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.set_storage_preference","purpose":"Set future automatic placement preference without rewriting existing rows.","signature":"fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage"}"###
+        name = "sys.admin.set_storage_preference",
+        effect = "admin",
+        signature = "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+        contexts = "format-1,format-2",
     )]
     #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
     fn sys_admin_set_storage_preference(&self) -> &'static SystemFunctionDescriptor {
         panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
+    /// Atomically rewrite physical placement while preserving logical rows.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contexts":["format-1","format-2"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.rewrite_storage","purpose":"Atomically rewrite physical placement while preserving logical rows.","signature":"fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult"}"###
+        name = "sys.admin.rewrite_storage",
+        effect = "admin",
+        signature = "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+        contexts = "format-1,format-2",
     )]
     #[allow(dead_code)] // Historical metadata is retained; public access is dispatch-only.
     fn sys_admin_rewrite_storage(&self) -> &'static SystemFunctionDescriptor {
         panic!("legacy descriptor is selected through system_callable_for with an explicit historical context")
     }
 
+    /// Verify repository, metadata, storage and checkpoint invariants.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.verify","purpose":"Verify repository, metadata, storage and checkpoint invariants.","signature":"fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport"}"###
+        name = "sys.admin.verify",
+        effect = "admin",
+        signature = "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
     )]
     pub fn sys_admin_verify(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.verify")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Cancel a durable program run.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.cancel_run","purpose":"Cancel a durable program run.","signature":"fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool"}"###
+        name = "sys.admin.cancel_run",
+        effect = "admin",
+        signature = "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
     )]
     pub fn sys_admin_cancel_run(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.cancel_run")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Pause at an item/batch transaction boundary.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.pause_stream","purpose":"Pause at an item/batch transaction boundary.","signature":"fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool"}"###
+        name = "sys.admin.pause_stream",
+        effect = "admin",
+        signature = "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
     )]
     pub fn sys_admin_pause_stream(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.pause_stream")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resume a paused stream.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.resume_stream","purpose":"Resume a paused stream.","signature":"fn sys.admin.resume_stream(stream: sys.StreamRef): Bool"}"###
+        name = "sys.admin.resume_stream",
+        effect = "admin",
+        signature = "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
     )]
     pub fn sys_admin_resume_stream(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.resume_stream")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compare-and-set checkpoint reset.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.reset_checkpoint","purpose":"Compare-and-set checkpoint reset.","signature":"fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint"}"###
+        name = "sys.admin.reset_checkpoint",
+        effect = "admin",
+        signature = "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
     )]
     pub fn sys_admin_reset_checkpoint(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.reset_checkpoint")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Lease and retry the same blocked delivery; keep identity stable across failed attempts.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.retry_failure","preconditions":"Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.","purpose":"Lease and retry the same blocked delivery; keep identity stable across failed attempts.","signature":"fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>"}"###
+        name = "sys.admin.retry_failure",
+        effect = "admin",
+        signature = "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
     )]
     pub fn sys_admin_retry_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.retry_failure")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Atomically skip a supported failed position and move progress.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.skip_failure","preconditions":"Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.","purpose":"Atomically skip a supported failed position and move progress.","signature":"fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint"}"###
+        name = "sys.admin.skip_failure",
+        effect = "admin",
+        signature = "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
     )]
     pub fn sys_admin_skip_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.skip_failure")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Reprocess a preserved skipped delivery without rewinding the live checkpoint.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.replay_failure","preconditions":"Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.","purpose":"Reprocess a preserved skipped delivery without rewinding the live checkpoint.","signature":"fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>"}"###
+        name = "sys.admin.replay_failure",
+        effect = "admin",
+        signature = "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
     )]
     pub fn sys_admin_replay_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.replay_failure")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Resolve a preserved failure without marking its processing as successful.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Preconditions
+    ///
+    /// Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.resolve_failure","preconditions":"Atomically compare stable delivery identity, expected_version and expected_status. A stale observation fails before work or checkpoint movement.","purpose":"Resolve a preserved failure without marking its processing as successful.","signature":"fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure"}"###
+        name = "sys.admin.resolve_failure",
+        effect = "admin",
+        signature = "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
     )]
     pub fn sys_admin_resolve_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.resolve_failure")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Derive durable consumer identity from database identity, stable function ObjectId and canonical typed arguments. Reject secret plaintext and unsupported argument values.
     #[ornasys(
-        function = r###"{"effect":"read","name":"sys.consumer_identity","purpose":"Derive durable consumer identity from database identity, stable function ObjectId and canonical typed arguments. Reject secret plaintext and unsupported argument values.","signature":"fn sys.consumer_identity(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.ConsumerIdentity"}"###
+        name = "sys.consumer_identity",
+        effect = "read",
+        signature = "fn sys.consumer_identity(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.ConsumerIdentity",
     )]
     pub fn sys_consumer_identity(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.consumer_identity")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(SnapshotRef)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(SnapshotRef)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(SnapshotRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(CommitRef)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(CommitRef)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(CommitRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(BranchRef)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(BranchRef)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(BranchRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(TagRef)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(TagRef)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(TagRef)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(GitOid)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(GitOid)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(GitOid)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
     #[ornasys(
-        function = r###"{"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.plan_checkout(Str)","purpose":"Compute a nonmutating, state-bound checkout preview, preserving whether a branch or detached snapshot is selected.","signature":"fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan"}"###
+        name = "sys.admin.plan_checkout(Str)",
+        effect = "read",
+        signature = "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
     )]
     pub fn sys_admin_plan_checkout_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(Str)")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return the exact byte count without hydrating payloads.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.length","purpose":"Return the exact byte count without hydrating payloads.","since":"1.1.0","signature":"fn sys.blob.length(value: Blob): Int"}"###
+        name = "sys.blob.length",
+        effect = "read",
+        signature = "fn sys.blob.length(value: Blob): Int",
+        contexts = "format-3",
     )]
     pub fn sys_blob_length(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.length")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.digest","purpose":"Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.","since":"1.1.0","signature":"fn sys.blob.digest(value: Blob): Digest"}"###
+        name = "sys.blob.digest",
+        effect = "read",
+        signature = "fn sys.blob.digest(value: Blob): Digest",
+        contexts = "format-3",
     )]
     pub fn sys_blob_digest(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.digest")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.read","purpose":"Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.","since":"1.1.0","signature":"fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob"}"###
+        name = "sys.blob.read",
+        effect = "read",
+        signature = "fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob",
+        contexts = "format-3",
     )]
     pub fn sys_blob_read(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.read")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Incrementally verify the complete content and its native dependency structure.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.verify","purpose":"Incrementally verify the complete content and its native dependency structure.","since":"1.1.0","signature":"fn sys.blob.verify(value: Blob): Unit"}"###
+        name = "sys.blob.verify",
+        effect = "read",
+        signature = "fn sys.blob.verify(value: Blob): Unit",
+        contexts = "format-3",
     )]
     pub fn sys_blob_verify(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.verify")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.from_bytes","purpose":"Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.from_bytes(values: [Int]): Blob"}"###
+        name = "sys.blob.from_bytes",
+        effect = "read",
+        signature = "fn sys.blob.from_bytes(values: [Int]): Blob",
+        contexts = "format-3",
     )]
     pub fn sys_blob_from_bytes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.from_bytes")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Explicit bounded materialisation of at most 8 MiB.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.to_bytes","purpose":"Explicit bounded materialisation of at most 8 MiB.","since":"1.1.0","signature":"fn sys.blob.to_bytes(value: Blob): [Int]"}"###
+        name = "sys.blob.to_bytes",
+        effect = "read",
+        signature = "fn sys.blob.to_bytes(value: Blob): [Int]",
+        contexts = "format-3",
     )]
     pub fn sys_blob_to_bytes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.to_bytes")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Begin an owned capture with a checked total bound.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.begin","purpose":"Begin an owned capture with a checked total bound.","since":"1.1.0","signature":"fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter"}"###
+        name = "sys.blob.begin",
+        effect = "invoke",
+        signature = "fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter",
+        contexts = "format-3",
     )]
     pub fn sys_blob_begin(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.begin")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Append at most 8 MiB in order; enforce the total bound before acceptance.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.append","purpose":"Append at most 8 MiB in order; enforce the total bound before acceptance.","since":"1.1.0","signature":"fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit"}"###
+        name = "sys.blob.append",
+        effect = "invoke",
+        signature = "fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit",
+        contexts = "format-3",
     )]
     pub fn sys_blob_append(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.append")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.finish","purpose":"Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.finish(writer: sys.BlobWriter): Blob"}"###
+        name = "sys.blob.finish",
+        effect = "invoke",
+        signature = "fn sys.blob.finish(writer: sys.BlobWriter): Blob",
+        contexts = "format-3",
     )]
     pub fn sys_blob_finish(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.finish")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Abort unfinished capture; never delete a returned value.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.abort","purpose":"Abort unfinished capture; never delete a returned value.","since":"1.1.0","signature":"fn sys.blob.abort(writer: sys.BlobWriter): Unit"}"###
+        name = "sys.blob.abort",
+        effect = "invoke",
+        signature = "fn sys.blob.abort(writer: sys.BlobWriter): Unit",
+        contexts = "format-3",
     )]
     pub fn sys_blob_abort(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.abort")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"invoke","name":"sys.blob.capture_file","purpose":"Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob"}"###
+        name = "sys.blob.capture_file",
+        effect = "invoke",
+        signature = "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob",
+        contexts = "format-3",
     )]
     pub fn sys_blob_capture_file(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.capture_file")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+    ///
+    /// # Contract
+    ///
+    /// blob-value-and-storage
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"blob-value-and-storage","effect":"read","name":"sys.blob.resource","purpose":"Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.","since":"1.1.0","signature":"fn sys.blob.resource(path: Str): Blob"}"###
+        name = "sys.blob.resource",
+        effect = "read",
+        signature = "fn sys.blob.resource(path: Str): Blob",
+        contexts = "format-3",
     )]
     pub fn sys_blob_resource(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.resource")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Validate and bind the exact staged candidate without changing index, branch or user data.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"administrative-state-transitions","effect":"read","name":"sys.admin.review_commit","purpose":"Validate and bind the exact staged candidate without changing index, branch or user data.","since":"1.1.0","signature":"fn sys.admin.review_commit(): sys.CommitReview"}"###
+        name = "sys.admin.review_commit",
+        effect = "read",
+        signature = "fn sys.admin.review_commit(): sys.CommitReview",
+        contexts = "format-3",
     )]
     pub fn sys_admin_review_commit(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.review_commit")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Revalidate a reviewed candidate at protected publication and commit exactly that candidate.
+    ///
+    /// # Contract
+    ///
+    /// administrative-state-transitions
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"administrative-state-transitions","effect":"admin","name":"sys.admin.commit_reviewed","purpose":"Revalidate a reviewed candidate at protected publication and commit exactly that candidate.","since":"1.1.0","signature":"fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef"}"###
+        name = "sys.admin.commit_reviewed",
+        effect = "admin",
+        signature = "fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+        contexts = "format-3",
     )]
     pub fn sys_admin_commit_reviewed(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.commit_reviewed")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Read canonical declared MIME without payload hydration.
+    ///
+    /// # Contract
+    ///
+    /// annotated-blob-format-3
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.media_type","purpose":"Read canonical declared MIME without payload hydration.","since":"1.1.0","signature":"fn sys.blob.media_type(value: Blob): Str"}"###
+        name = "sys.blob.media_type",
+        signature = "fn sys.blob.media_type(value: Blob): Str",
+        effect = "read",
+        contexts = "format-3",
     )]
     pub fn sys_blob_media_type(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.media_type")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Read the canonical optional suffix hint without payload hydration.
+    ///
+    /// # Contract
+    ///
+    /// annotated-blob-format-3
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.suffix","purpose":"Read the canonical optional suffix hint without payload hydration.","since":"1.1.0","signature":"fn sys.blob.suffix(value: Blob): Str?"}"###
+        name = "sys.blob.suffix",
+        signature = "fn sys.blob.suffix(value: Blob): Str?",
+        effect = "read",
+        contexts = "format-3",
     )]
     pub fn sys_blob_suffix(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.suffix")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Return the same immutable bytes with MIME-1-validated canonical annotations.
+    ///
+    /// # Contract
+    ///
+    /// annotated-blob-format-3
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.annotate","purpose":"Return the same immutable bytes with MIME-1-validated canonical annotations.","since":"1.1.0","signature":"fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob"}"###,
-        role = "langitem.sys.blob.annotate@1.0"
+        name = "sys.blob.annotate",
+        signature = "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob",
+        effect = "read",
+        contexts = "format-3",
+        role = "langitem.sys.blob.annotate@1.0",
     )]
     pub fn sys_blob_annotate(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.annotate")
             .expect("annotated system API function has a descriptor")
     }
 
+    /// Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.
+    ///
+    /// # Contract
+    ///
+    /// annotated-blob-format-3
+    ///
+    /// # Since
+    ///
+    /// 1.1.0
     #[ornasys(
-        function = r###"{"contexts":["format-3"],"contract":"annotated-blob-format-3","effect":"read","name":"sys.blob.same_content","purpose":"Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.","since":"1.1.0","signature":"fn sys.blob.same_content(left: Blob, right: Blob): Bool"}"###
+        name = "sys.blob.same_content",
+        signature = "fn sys.blob.same_content(left: Blob, right: Blob): Bool",
+        effect = "read",
+        contexts = "format-3",
     )]
     pub fn sys_blob_same_content(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.same_content")
