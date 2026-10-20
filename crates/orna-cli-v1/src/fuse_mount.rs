@@ -1021,21 +1021,27 @@ impl WorkspaceFilesystem {
         );
         let mut runtime_tables = BTreeMap::new();
         if let Some(writer) = &builder.writer {
+            // Every committed table is admitted under its pinned declaration name,
+            // the name its row mutations address. The HEAD layout only gates the
+            // runtime projection; an unresolved HEAD schema leaves that table pinned.
             let mut activation_tables = Vec::with_capacity(tables.len());
             for (relation_id, _) in &tables {
-                let Ok(runtime_schema) = loader.resolve_committed_source_table_schema(
-                    repository,
-                    &writer.runtime_commit,
-                    TableObjectId::new(*relation_id),
-                ) else {
-                    continue;
-                };
-                let runtime_table = RuntimeTableIdentity::new(
-                    runtime_schema.declaration_name(),
-                    TableObjectId::new(*relation_id),
-                )
-                .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
-                let runtime_field_layout = stored_field_layout(runtime_schema.descriptor())?;
+                let table_id = TableObjectId::new(*relation_id);
+                let pinned_schema = loader
+                    .resolve_committed_source_table_schema(repository, commit, table_id)
+                    .map_err(|error| format!("committed table schema is unavailable: {error:?}"))?;
+                let runtime_table =
+                    RuntimeTableIdentity::new(pinned_schema.declaration_name(), table_id)
+                        .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
+                let runtime_field_layout = loader
+                    .resolve_committed_source_table_schema(
+                        repository,
+                        &writer.runtime_commit,
+                        table_id,
+                    )
+                    .ok()
+                    .map(|runtime_schema| stored_field_layout(runtime_schema.descriptor()))
+                    .transpose()?;
                 activation_tables.push(runtime_table.clone());
                 runtime_tables.insert(*relation_id, (runtime_table, runtime_field_layout));
             }
@@ -1067,7 +1073,7 @@ impl WorkspaceFilesystem {
             })?;
             let (runtime_table, runtime_field_layout) = runtime_tables
                 .remove(&relation_id)
-                .map(|(table, layout)| (Some(table), Some(layout)))
+                .map(|(table, layout)| (Some(table), layout))
                 .unwrap_or((None, None));
             builder.add_table_rows(
                 table_directory,
