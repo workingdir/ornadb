@@ -63,12 +63,7 @@ impl MediaFamily {
 impl BlobRole {
     /// Selects the behavior an annotation takes by default.
     pub fn for_annotation(annotation: &MediaAnnotation) -> Self {
-        let base = annotation
-            .media_type()
-            .split(';')
-            .next()
-            .unwrap_or_default();
-        match base {
+        match annotation.essence() {
             "application/json" => return Self::Text,
             "application/pdf" => return Self::Document,
             _ => {}
