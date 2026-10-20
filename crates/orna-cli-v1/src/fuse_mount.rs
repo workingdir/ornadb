@@ -30,14 +30,30 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
     vfs::{
-        EditDraft, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave, VfsDurableSave,
-        VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate, VfsSaveCoordinates,
-        VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
+        EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        VfsDurableSave, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection, VfsSaveCandidate,
+        VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement, project_component,
     },
 };
+use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax_v1::{Expr, parse_row};
 use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
+
+/// Per-file bound for every mounted draft and scratch: the compact profile's
+/// file bound (64 MiB). A write or truncate past it is quota-rejected (EDQUOT)
+/// and never admitted.
+const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
+
+/// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
+/// for the per-file quota, EIO for other draft failures.
+fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
+    match result {
+        Err(EditDraftError::FileTooLarge) => Errno::EDQUOT,
+        _ => Errno::EIO,
+    }
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -1283,7 +1299,7 @@ pub(super) fn edit_path(
                 let scratch = Arc::new(
                     writer
                         .runtime
-                        .block_on(target.begin_temporary_replacement(usize::MAX)),
+                        .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                 );
                 (save, initial, Some((target, scratch, field, expected)))
             }
@@ -1300,7 +1316,7 @@ pub(super) fn edit_path(
         Some(Arc::new(
             writer
                 .runtime
-                .block_on(save.target.open_draft(64 * 1024 * 1024)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         ))
     } else {
         None
@@ -1718,7 +1734,7 @@ impl WorkspaceFilesystem {
         let scratch = Arc::new(
             writer
                 .runtime
-                .block_on(target.begin_temporary_replacement(usize::MAX)),
+                .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
         writer
             .runtime
@@ -2014,7 +2030,7 @@ impl Filesystem for WorkspaceFilesystem {
         let draft = Arc::new(
             save.writer
                 .runtime
-                .block_on(save.target.open_draft(usize::MAX)),
+                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
         );
         if let Some(size) = truncate_size
             && save.writer.runtime.block_on(draft.truncate(size)).is_err()
@@ -2117,7 +2133,7 @@ impl Filesystem for WorkspaceFilesystem {
             let scratch = Arc::new(
                 save.writer
                     .runtime
-                    .block_on(target.begin_temporary_replacement(usize::MAX)),
+                    .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
             );
             let inode = match state.add_file(
                 parent.0,
@@ -2584,7 +2600,7 @@ impl Filesystem for WorkspaceFilesystem {
             if is_scratch && !had_retained_scratch {
                 draft_state.retained_scratch.remove(&inode.0);
             }
-            reply.error(Errno::EIO);
+            reply.error(draft_errno(&result));
         } else {
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
@@ -2801,7 +2817,7 @@ impl Filesystem for WorkspaceFilesystem {
                     if is_scratch && !had_retained_scratch {
                         draft_state.retained_scratch.remove(&inode.0);
                     }
-                    reply.error(Errno::EIO);
+                    reply.error(draft_errno(&result));
                     return;
                 }
                 if let Some(bytes) = candidate_bytes {
