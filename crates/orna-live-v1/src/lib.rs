@@ -5882,6 +5882,10 @@ pub enum WebSocketOutput {
         payload: Vec<u8>,
     },
     Pong(Vec<u8>),
+    /// A host-initiated keepalive Ping. An executable host that owns the
+    /// socket sends it when its peer has been silent, so a half-open
+    /// connection cannot hold an attachment indefinitely.
+    Ping(Vec<u8>),
     /// A WebSocket close, optionally carrying one RFC 6455 close code and
     /// its already-validated UTF-8 reason bytes.
     ///
@@ -5907,6 +5911,10 @@ impl fmt::Debug for WebSocketOutput {
                 .finish(),
             Self::Pong(payload) => formatter
                 .debug_struct("WebSocketOutput::Pong")
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Ping(payload) => formatter
+                .debug_struct("WebSocketOutput::Ping")
                 .field("payload_bytes", &payload.len())
                 .finish(),
             Self::Close { code, reason } => formatter
@@ -5939,6 +5947,7 @@ pub fn encode_websocket_output(
         WebSocketOutput::Accepted(_) => return Ok(None),
         WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
         WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
+        WebSocketOutput::Ping(payload) => (9, payload.as_slice()),
         WebSocketOutput::Close { code, reason } => {
             close_payload = code
                 .map(|code| {
@@ -6926,6 +6935,16 @@ impl LiveTransport {
     /// accept, TLS, cancellation, attachment identity, and clock ownership;
     /// this bridge only adapts the accepted socket to the transport's
     /// byte-stream contract.
+    ///
+    /// The bridge borrows the transport for the whole connection and has no
+    /// cancellation or read deadline, so it suits a transport owned by that
+    /// one connection. A host that shares one transport between connections
+    /// must not hold it across socket I/O: it drives
+    /// [`Self::begin_websocket_upgrade`] and
+    /// [`Self::commit_websocket_upgrade`], then
+    /// [`Self::prepare_websocket_application`] and
+    /// [`Self::complete_application`] one frame at a time, and cancels the
+    /// workers named by [`Self::take_retired_attachments`].
     ///
     /// # Errors
     ///
