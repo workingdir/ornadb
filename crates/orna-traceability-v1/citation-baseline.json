@@ -1,5 +1,5 @@
 {
-  "max_uncited": 517,
+  "max_uncited": 515,
   "cited_ids": [
     "ORNA-ADMIN-002",
     "ORNA-APP-013",
@@ -167,8 +167,10 @@
     "ORNA-INFER-001",
     "ORNA-INFER-002",
     "ORNA-INFER-003",
+    "ORNA-INFER-004",
     "ORNA-INFER-007",
     "ORNA-INFER-008",
+    "ORNA-INFER-010",
     "ORNA-INFER-011",
     "ORNA-INGEST-001",
     "ORNA-INGEST-002",
