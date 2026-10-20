@@ -78,6 +78,11 @@ fn pinned_list_map_and_set_builders_preserve_their_collection_contracts() {
 fn prove_pinned_collection_builders() {
     let mut session = builders_session();
     import_builders(&mut session);
+    assert_eq!(
+        session.submit("let absent_pairs: [(Str, Int)] = [];"),
+        Ok(None),
+        "typed empty pair binding"
+    );
 
     for source in [
         include_str!("fixtures/stdlib-collection-builders-list-order-q730o.orna"),
