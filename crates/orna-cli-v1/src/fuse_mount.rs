@@ -1415,8 +1415,15 @@ impl WorkspaceFilesystem {
         let mut retained_scratch = HashSet::new();
         if let Some(writer) = &writer {
             for record in writer.scratch_store.load()? {
-                let inode = Self::restore_temporary_scratch(&mut builder, writer, record)?;
-                retained_scratch.insert(inode);
+                let logical_path = record.identity.logical_path.clone();
+                match Self::restore_temporary_scratch(&mut builder, writer, record) {
+                    Ok(inode) => {
+                        retained_scratch.insert(inode);
+                    }
+                    Err(error) => eprintln!(
+                        "skipped unresolved persisted temporary scratch {logical_path}: {error}"
+                    ),
+                }
             }
         }
 
@@ -2168,6 +2175,20 @@ impl Filesystem for WorkspaceFilesystem {
             // A rejected replacement is the only copy of its draft until a rename of
             // it is accepted; removing its name must not discard it.
             reply.error(Errno::EBUSY);
+            return;
+        }
+        let (save, identity) = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Temporary { save, identity, .. }) => {
+                (Arc::clone(save), Arc::clone(identity))
+            }
+            _ => {
+                reply.error(Errno::EROFS);
+                return;
+            }
+        };
+        if let Err(error) = save.writer.scratch_store.remove(&identity) {
+            eprintln!("mounted temporary scratch removal failed: {error}");
+            reply.error(Errno::EIO);
             return;
         }
         if state
