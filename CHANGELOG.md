@@ -83,6 +83,10 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
+  Instant, Decimal, enum, reference or tuple values store and order rows by
+  logical key, and Int and UInt spellings of one integer are one key.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
