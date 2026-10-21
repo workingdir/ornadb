@@ -1,1 +1,1 @@
-std.collection.first([4, 5])
+first([4, 5])
