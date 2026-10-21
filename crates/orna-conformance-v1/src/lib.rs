@@ -2762,6 +2762,12 @@ fn validate_requirement_evidence_test(
         .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
     let kind = object.get("kind").and_then(Value::as_str);
     let subject = object.get("subject").and_then(Value::as_str);
+    let subject_is_malformed = object.get("subject").is_some_and(|value| !value.is_string());
+    if subject_is_malformed {
+        return Err(CorpusError(
+            "requirement evidence test subject must match requirement".into(),
+        ));
+    }
     match kind {
         // 1.1.0: implementation suites are bound to their requirement; scenario
         // tests are bound to the scenario ID they execute.
