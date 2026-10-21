@@ -1,1 +1,1 @@
-std.collection.min(rows: [1.0f], callback: value => value)
+min(rows: [1.0f], callback: value => value)
