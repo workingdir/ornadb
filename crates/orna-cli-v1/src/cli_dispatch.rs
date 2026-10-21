@@ -1204,7 +1204,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         return Err(Diagnostic::usage(
             "E1001",
             "`migrate copy` needs an explicit consumer-continuity choice",
-            "supply `--no-persistent-consumers` when no persistent consumer state must be carried",
+            "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
     }
     let annotation_defaults = annotation_defaults.ok_or_else(|| {
@@ -1234,15 +1234,46 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
-    let continuity =
-        orna_repository_v1::MigrationContinuityRecord::new(Vec::new()).map_err(|error| {
-            Diagnostic::target_with_detail(
+    // Persistent stream checkpoints are carried into the prepared destination
+    // under the identity correspondence recorded there before any row is
+    // imported. Live per-attempt stream state is not carried: a source holding
+    // it refuses before a copy is built and its state is left unchanged.
+    let source_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
                 "E2100",
-                "migration consumer continuity could not be represented",
-                "retry with the migration continuity inventory available",
-                format!("{error:?}"),
+                "migration source runtime could not be inspected",
+                "retry `migrate copy` once the local runtime can start",
             )
         })?;
+    let carry = source_runtime
+        .block_on(orna_runtime_v1::read_stream_carry(&repository))
+        .map_err(|error| match error {
+            orna_runtime_v1::StreamCarryError::NotCarriable(tables) => {
+                Diagnostic::target_with_detail(
+                    "E2100",
+                    "migration source holds live stream state that is not carried",
+                    "release or drain the source's live stream state; no copy was prepared and the source is unchanged",
+                    format!("tables={}", tables.join(", ")),
+                )
+            }
+            orna_runtime_v1::StreamCarryError::Runtime(error) => Diagnostic::target_with_detail(
+                "E2100",
+                "migration source runtime state could not be inspected",
+                "repair the source runtime state; no copy was prepared",
+                format!("{error:?}"),
+            ),
+        })?;
+    let continuity = carry.continuity_record().map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration consumer continuity could not be represented",
+            "retry with the migration continuity inventory available",
+            format!("{error:?}"),
+        )
+    })?;
     let copy = orna_repository_v1::migration_copy::prepare_format3_migration(
         &repository,
         &std::path::PathBuf::from(destination),
@@ -1257,12 +1288,50 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
+    let destination_repository =
+        orna_repository_v1::Repository::discover(copy.destination()).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration destination could not be opened",
+                "verify the prepared destination and retry with the same migration coordinates",
+                format!("{error:?}"),
+            )
+        })?;
+    let recorded_journal = destination_repository
+        .read_publication_journal()
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration destination journal could not be read",
+                "verify the prepared destination and retry with the same migration coordinates",
+                format!("{error:?}"),
+            )
+        })?;
+    let recorded_continuity = recorded_journal
+        .as_ref()
+        .and_then(|journal| journal.migration_continuity());
+    source_runtime
+        .block_on(orna_runtime_v1::import_stream_carry(
+            &destination_repository,
+            &carry,
+            recorded_continuity,
+        ))
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration stream checkpoints could not be carried",
+                "verify the destination continuity record and that the destination holds no carried checkpoints; the copy was prepared but no checkpoint was imported",
+                format!("{error:?}"),
+            )
+        })?;
     println!(
-        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={}",
+        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={} carried_checkpoints={} carried_history={}",
         copy.source_format_number(),
         copy.source_commit().as_str(),
         copy.candidate_journal().new_head().as_str(),
         copy.destination().display(),
+        carry.checkpoint_count(),
+        carry.history_count(),
     );
     Ok(())
 }
