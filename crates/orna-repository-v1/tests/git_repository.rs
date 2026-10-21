@@ -3790,7 +3790,9 @@ fn publication_rejects_a_known_managed_edit_before_ref_advance() {
         journal.stage(),
         orna_repository_v1::PublicationJournalStage::Prepared
     );
-    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+    // The refusal precedes the Prepared journal, so nothing fences a retry
+    // once the editor's bytes are resolved (ORNA-PUB-006).
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
 #[test]
@@ -3965,19 +3967,24 @@ fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation
     assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
 }
 
-#[test]
-fn recovery_keeps_a_pre_ref_publication_pending() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
+/// Builds a one-row legacy candidate on `head` and its Prepared journal.
+fn row_publication(
+    repo: &Repository,
+    head: &orna_repository_v1::GitCommitRef,
+    index: &IndexGeneration,
+    row: &[u8],
+    intent: [u8; 16],
+) -> (
+    orna_repository_v1::PrivateCommit,
+    orna_repository_v1::PublicationJournal,
+) {
     let managed = ManagedPath::new("generated/row.orna").unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let index_before = repo.index_generation().unwrap();
     let candidate = repo
         .build_private_commit(
-            &head,
+            head,
             &[orna_repository_v1::ManagedFileChange::new(
                 managed.clone(),
-                Some(b"candidate row\n".to_vec()),
+                Some(row.to_vec()),
             )],
             "orna: publish runtime data",
         )
@@ -3985,25 +3992,299 @@ fn recovery_keeps_a_pre_ref_publication_pending() {
     let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
         head.clone(),
         candidate.commit().clone(),
-        index_before.tree().unwrap().clone(),
-        [8; 16],
+        index.tree().unwrap().clone(),
+        intent,
         vec![orna_repository_v1::PublicationJournalEntry::new(
-            managed.clone(),
+            managed,
             None,
-            Some(b"candidate row\n".to_vec()),
+            Some(row.to_vec()),
         )],
     )
     .unwrap();
+    (candidate, journal)
+}
+
+/// Recovery row "Ref still at H" (ORNA-PUB-006, ORNA-PUB-012): a Prepared
+/// journal whose candidate never reached HEAD is discarded even though the
+/// unreferenced candidate object survives and the user staged unrelated work
+/// since. The staged work is preserved and the batch publishes on retry.
+#[test]
+fn recovery_discards_a_pre_ref_journal_and_keeps_staged_work() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let (candidate, journal) =
+        row_publication(&repo, &head, &index_before, b"candidate row\n", [8; 16]);
     repo.write_publication_journal(&journal).unwrap();
+    fs::write(
+        root.path().join("ordinary.txt"),
+        "staged after interruption\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let staged = repo.index_generation().unwrap();
+    assert_ne!(staged, index_before);
+    assert_eq!(
+        git(
+            root.path(),
+            &["cat-file", "-t", candidate.commit().as_str()]
+        ),
+        "commit"
+    );
+
+    assert_eq!(repo.recover_publication().unwrap(), Some(staged.clone()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(repo.index_generation().unwrap(), staged);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+
+    let (retry, mut retry_journal) =
+        row_publication(&repo, &head, &staged, b"retried row\n", [9; 16]);
+    repo.publish_candidate(&staged, &retry, &mut retry_journal)
+        .unwrap();
+    repo.mark_runtime_complete([9; 16], &mut retry_journal)
+        .unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(retry.commit()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged after interruption"
+    );
+}
+
+/// A detached HEAD refuses publication before the Prepared journal exists,
+/// so attaching the branch again lets the next publication succeed.
+#[test]
+fn publication_on_a_detached_head_leaves_no_journal_and_succeeds_once_attached() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    git(root.path(), &["switch", "--quiet", "--detach"]);
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"detached row\n", [12; 16]);
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(orna_repository_v1::RepositoryError::DetachedHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        head.as_str()
+    );
+    assert_eq!(repo.index_generation().unwrap(), index);
+
+    git(root.path(), &["switch", "--quiet", "main"]);
+    assert_eq!(repo.recover_publication().unwrap(), None);
+    let index = repo.index_generation().unwrap();
+    let (retry, mut retry_journal) =
+        row_publication(&repo, &head, &index, b"attached row\n", [13; 16]);
+    repo.publish_candidate(&index, &retry, &mut retry_journal)
+        .unwrap();
+    repo.mark_runtime_complete([13; 16], &mut retry_journal)
+        .unwrap();
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        retry.commit().as_str()
+    );
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+/// A ref CAS that loses to a concurrent ref writer discards the journal its
+/// attempt wrote, so the pending batch is not fenced behind it.
+#[test]
+fn publication_that_loses_its_ref_cas_leaves_no_blocking_journal() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [14; 16]);
+    assert!(root.path().join(".git/refs/heads/main").is_file());
+    let ref_lock = root.path().join(".git/refs/heads/main.lock");
+    fs::write(&ref_lock, b"concurrent ref writer\n").unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(repo.index_generation().unwrap(), index);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(fs::read(&ref_lock).unwrap(), b"concurrent ref writer\n");
+
+    fs::remove_file(&ref_lock).unwrap();
+    assert_eq!(repo.recover_publication().unwrap(), None);
+    repo.publish_candidate(&index, &candidate, &mut journal)
+        .unwrap();
+    repo.mark_runtime_complete([14; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(candidate.commit()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+/// PUB-3 step 7: an index write that lands after the base was captured is
+/// refused before the ref CAS, so publication never installs an index that
+/// stages the inverse of its batch.
+#[test]
+fn publication_refuses_an_index_write_that_lands_before_the_ref_cas() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [18; 16]);
+    let index_path = root.path().join(".git/index");
+    let captured = fs::read(&index_path).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "raced staging\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let raced = fs::read(&index_path).unwrap();
+    fs::write(&index_path, &captured).unwrap();
+
+    let published =
+        repo.publish_candidate_with_stage_hook(&index, &candidate, &mut journal, |stage| {
+            if stage == PublicationJournalStage::Prepared {
+                // A writer outside Git's lock protocol lands its staged change.
+                fs::write(&index_path, &raced).unwrap();
+            }
+        });
+
+    assert!(matches!(published, Err(RepositoryError::StaleIndex { .. })));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(fs::read(&index_path).unwrap(), raced);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "raced staging"
+    );
+}
+
+/// ORNA-PUB-005: every object the candidate adds must be durable before the
+/// ref names it. An object that cannot be flushed refuses publication before
+/// the CAS and leaves no journal behind.
+#[test]
+fn publication_flushes_candidate_objects_before_the_ref_names_them() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [19; 16]);
+    let blob = git(
+        root.path(),
+        &[
+            "rev-parse",
+            &format!("{}:generated/row.orna", candidate.commit().as_str()),
+        ],
+    );
+    let loose = root
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let aside = root.path().join(".git/orna-test-row-object");
+    fs::rename(&loose, &aside).unwrap();
+    // The object path no longer names a file that can be flushed.
+    fs::create_dir(&loose).unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(RepositoryError::Graph(
+            orna_repository_v1::GraphError::DurabilityFailed
+        ))
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+
+    fs::remove_dir(&loose).unwrap();
+    fs::rename(&aside, &loose).unwrap();
+    repo.publish_candidate(&index, &candidate, &mut journal)
+        .unwrap();
+    repo.mark_runtime_complete([19; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(candidate.commit()));
+}
+
+/// A Prepared journal is discarded once HEAD moves to a commit that lacks the
+/// candidate, and kept as a recovery conflict once HEAD descends from it.
+#[test]
+fn recovery_discards_a_prepared_journal_only_while_head_lacks_the_candidate() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (_, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [16; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    git(
+        root.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "human commit"],
+    );
+    let human = repo.head().unwrap().unwrap();
+
+    assert_eq!(
+        repo.recover_publication().unwrap(),
+        Some(repo.index_generation().unwrap())
+    );
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(human));
+
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [17; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    git(
+        root.path(),
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "human commit on the candidate",
+        ],
+    );
 
     assert!(matches!(
         repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::PublicationPending)
+        Err(orna_repository_v1::RepositoryError::StaleHead)
     ));
-    assert_eq!(repo.head().unwrap(), Some(head));
-    assert_eq!(repo.index_generation().unwrap(), index_before);
-    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
     assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+/// Recovery row "Ref no longer H or N": a CAS that landed before the
+/// publisher died leaves the batch published on its branch. After the user
+/// switches to another branch, recovery must keep the journal as a conflict
+/// rather than discard it and publish the batch a second time (ORNA-PUB-008).
+#[test]
+fn recovery_keeps_a_prepared_journal_whose_candidate_another_branch_holds() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [20; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    git(
+        root.path(),
+        &["switch", "--quiet", "-c", "other", head.as_str()],
+    );
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        candidate.commit().as_str()
+    );
 }
 
 #[test]
