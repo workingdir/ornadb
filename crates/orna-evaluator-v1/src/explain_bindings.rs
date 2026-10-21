@@ -121,7 +121,7 @@ fn plan_record(plan: &Plan) -> Result<Value, EvaluationError> {
         "actual_available".to_owned(),
         Value::Bool(plan.actual_available()),
     );
-    fields.insert("warnings".to_owned(), Value::List(Vec::new()));
+    fields.insert("warnings".to_owned(), Value::list(Vec::new()));
     Ok(Value::Record(fields))
 }
 
