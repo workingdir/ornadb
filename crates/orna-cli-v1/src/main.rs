@@ -1651,7 +1651,7 @@ fn semantic_catalogue(
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
     } else {
@@ -1802,7 +1802,7 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1841,7 +1841,7 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1868,7 +1868,7 @@ fn run_project_invocation_with_arguments(
         })?;
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2070,7 +2070,7 @@ fn run_pure_invocation(
         }
     }
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2151,7 +2151,7 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return None;
     }
