@@ -2247,7 +2247,11 @@ fn repl_runtime(
                     "fix the project module graph and source boundaries, then run check again",
                 )
             })?;
-        let session = AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+        let session = AdmittedReplSession::from_loaded_project(
+            &project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
             .map_err(|error| repl_session_error(&error))?;
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
@@ -2324,9 +2328,14 @@ impl ReplSnapshotSessionLoader<'_> {
     }
 
     fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
-        // Keep the existing standard-import boundary intact: no host standard
-        // sources are supplied, so uncaptured imports remain inadmissible.
-        AdmittedReplSession::from_loaded_project(project, [], Limits::default()).map_err(|_| ())
+        // Admit the project's own pinned standard sources; uncaptured imports
+        // remain inadmissible because the project has no standard profile.
+        AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .map_err(|_| ())
     }
 }
 
