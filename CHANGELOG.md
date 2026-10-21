@@ -5,6 +5,16 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `std.io.fs` operations resolve every path from the root directory handle held
+  since the host allowed it, one component at a time without following
+  symbolic links, and act on the final entry through its open parent directory.
+  Parent traversal, absolute paths, symbolic links and `.git` metadata are
+  refused as `sys.host.filesystem.denied`, while a missing target reports
+  `sys.host.filesystem.not_found`; only `symlink_metadata` still describes a
+  final link, without following it. Writes without overwrite create
+  exclusively, moves without overwrite never replace a destination, and
+  listings omit `.git`. Platforms other than Linux refuse these operations as
+  unavailable.
 - `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
   it to its activation snapshot: the admitted project tables, plus
   `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
