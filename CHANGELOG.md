@@ -20,9 +20,15 @@ been published.
   time adds the Time exponent and returns a length quantity. Dimension expressions
   parse qualified names without consuming multiplication or division operators.
 
+- `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
+  any freeze, with `E2300` and a request to migrate with `orna migrate copy`; it
+  writes nothing and the pending range stays. The loose and compact (Parquet)
+  row writers, their recovery paths and the CLI compact-journal recovery are
+  retired; format-1/2 commits keep their readers (ORNA-UPGRADE-003,
+  ORNA-ROW-013).
+
 - Format-3 store-only publication validates canonical row keys without legacy
-  loose-row path resolution, including no-op preparation. Legacy formats retain
-  their existing loose-path resolution.
+  loose-row path resolution, including no-op preparation.
 
 - Explicit format-3 row rekeys retain their relation identity and canonical old/new
   addresses in the publication journal so replay and recovery do not infer a move
