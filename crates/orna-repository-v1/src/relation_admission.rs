@@ -33,7 +33,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, IndexGeneration, IndexTreeRef,
-    PrivateCommit, Repository, RepositoryError, RepositoryFormat, Uuid, bind_tree_entry_in_index,
+    PrivateCommit, Repository, RepositoryError, RepositoryFormat, RepositoryFormatContext, Uuid,
+    bind_tree_entry_in_index,
     blob_store::GearChunker,
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, MAX_GRAPH_HEIGHT, MAX_REFS,
@@ -444,8 +445,75 @@ impl Repository {
         if format.repository_format() != RepositoryFormat::Format3 {
             return Err(RelationAdmissionError::NotFormat3);
         }
-        let database_id = *format.require_database_id()?.as_bytes();
-        let Some(store_root) = self.tree_store_root(commit.as_str())? else {
+        self.store_relations_in(commit.as_str(), *format.require_database_id()?.as_bytes())
+    }
+
+    /// Reads the committed identity inventory from a format-3 snapshot's
+    /// store. `Ok(None)` means the snapshot has no inventory relation: it is a
+    /// legacy snapshot (an older format, no store, or a store written before
+    /// the inventory moved into it).
+    pub fn read_committed_object_identities(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
+        let format = self.open_pinned_format_context(commit.as_str())?;
+        self.read_object_identities_in(&format, commit.as_str())
+    }
+
+    /// Reads the identity inventory the staged candidate's store carries:
+    /// the committed one, or one an earlier staging wrote, so a retried
+    /// commit keeps its IDs. `Ok(None)` when the staged store has none.
+    pub fn read_staged_object_identities(
+        &self,
+        staged: &StagedCandidate,
+    ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
+        let format = self.open_private_candidate_format_context(&staged.candidate)?;
+        self.read_object_identities_in(&format, staged.candidate.tree.as_str())
+    }
+
+    /// The bytes of a legacy commit's tracked identity sidecar, or `None` when
+    /// the commit does not track one. Only commits written before the
+    /// inventory moved into the store carry it.
+    pub fn read_legacy_identity_sidecar(
+        &self,
+        commit: &GitCommitRef,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
+        if !self.tracks_legacy_identity_sidecar(commit.as_str())? {
+            return Ok(None);
+        }
+        Ok(Some(self.read_committed_file(
+            commit,
+            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
+            max_bytes,
+        )?))
+    }
+
+    /// The legacy identity sidecar the staged candidate's tree tracks, as a
+    /// legacy repository's index still does before its first store staging.
+    pub fn read_staged_legacy_identity_sidecar(
+        &self,
+        staged: &StagedCandidate,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
+        let tree = staged.candidate.tree.as_str();
+        if !self.tracks_legacy_identity_sidecar(tree)? {
+            return Ok(None);
+        }
+        Ok(Some(self.read_tree_file(
+            tree,
+            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
+            max_bytes,
+        )?))
+    }
+
+    /// The relation UUIDs bound by the store a tree-ish names, validated.
+    fn store_relations_in(
+        &self,
+        treeish: &str,
+        database_id: [u8; 16],
+    ) -> Result<BTreeSet<[u8; 16]>, RelationAdmissionError> {
+        let Some(store_root) = self.tree_store_root(treeish)? else {
             return Ok(BTreeSet::new());
         };
         Ok(NativeGraphContext::read_store_relations(
@@ -459,18 +527,16 @@ impl Repository {
         .collect())
     }
 
-    /// Reads the committed identity inventory from a format-3 snapshot's
-    /// store. `Ok(None)` means the snapshot has no inventory relation: it is a
-    /// legacy snapshot (an older format, no store, or a store written before
-    /// the inventory moved into it).
-    pub fn read_committed_object_identities(
+    /// Reads the identity relation of the store `treeish` names through the
+    /// format context pinned to that same tree.
+    fn read_object_identities_in(
         &self,
-        commit: &GitCommitRef,
+        format: &RepositoryFormatContext,
+        treeish: &str,
     ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
-        let format = self.open_pinned_format_context(commit.as_str())?;
         if format.repository_format() != RepositoryFormat::Format3
             || !self
-                .committed_store_relations(commit)?
+                .store_relations_in(treeish, *format.require_database_id()?.as_bytes())?
                 .contains(&OBJECT_IDENTITY_RELATION_ID)
         {
             return Ok(None);
@@ -524,37 +590,27 @@ impl Repository {
         Ok(Some(identities))
     }
 
-    /// The bytes of a legacy commit's tracked identity sidecar, or `None` when
-    /// the commit does not track one. Only commits written before the
-    /// inventory moved into the store carry it.
-    pub fn read_legacy_identity_sidecar(
+    /// Whether a tree-ish tracks the legacy identity sidecar as a file.
+    fn tracks_legacy_identity_sidecar(
         &self,
-        commit: &GitCommitRef,
-        max_bytes: usize,
-    ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
+        treeish: &str,
+    ) -> Result<bool, RelationAdmissionError> {
         let mut command = self.command();
         command.args([
             "ls-tree",
             "-z",
             "--full-tree",
-            commit.as_str(),
+            treeish,
             "--",
             LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
         ]);
         let listed = self.run(command)?.stdout;
-        if !listed.split(|byte| *byte == 0).any(|entry| {
+        Ok(listed.split(|byte| *byte == 0).any(|entry| {
             entry
                 .rsplit(|byte| *byte == b'\t')
                 .next()
                 .is_some_and(|path| path == LEGACY_OBJECT_IDENTITY_SIDECAR_PATH.as_bytes())
-        }) {
-            return Ok(None);
-        }
-        Ok(Some(self.read_committed_file(
-            commit,
-            LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
-            max_bytes,
-        )?))
+        }))
     }
 
     /// The repository format the ordinary index's tree declares. An unborn
@@ -1556,7 +1612,21 @@ mod tests {
         let root = directory.path();
         fs::write(root.join(LEGACY_OBJECT_IDENTITY_SIDECAR_PATH), b"legacy").unwrap();
         git(root, &["add", LEGACY_OBJECT_IDENTITY_SIDECAR_PATH]);
+        let staged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository
+                .read_staged_legacy_identity_sidecar(&staged, 1 << 20)
+                .unwrap(),
+            Some(b"legacy".to_vec())
+        );
         stage(&repository, &[relation(1)]).expect("stage the store");
+        let restaged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository
+                .read_staged_legacy_identity_sidecar(&restaged, 1 << 20)
+                .unwrap(),
+            None
+        );
         assert_eq!(
             git(
                 root,
@@ -1566,6 +1636,26 @@ mod tests {
         );
         // The worktree file is not deleted; it is merely no longer staged.
         assert!(root.join(LEGACY_OBJECT_IDENTITY_SIDECAR_PATH).exists());
+    }
+
+    /// The staged candidate is an unreachable private commit, so the
+    /// inventory a staging wrote is read back before anything is committed,
+    /// and a retried commit keeps the IDs it allocated.
+    #[test]
+    fn a_retried_staging_reads_the_inventory_it_staged() {
+        let (_directory, repository) = initialized_repository();
+        let unstaged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository.read_staged_object_identities(&unstaged).unwrap(),
+            None
+        );
+        stage(&repository, &[relation(1)]).expect("stage the store");
+        assert!(repository.head().unwrap().is_none(), "nothing is committed");
+        let restaged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository.read_staged_object_identities(&restaged).unwrap(),
+            Some(identities_for(&[relation(1)]))
+        );
     }
 
     /// Deterministic bytes that cut Gear chunks at varied lengths.
