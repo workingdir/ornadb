@@ -1,1 +1,1 @@
-std.collection.one(rows: [7])
+one(rows: [7])
