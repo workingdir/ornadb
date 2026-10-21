@@ -13,7 +13,8 @@ use std::{
 
 use num_bigint::BigInt;
 use orna_repository_v1::{
-    GitCommitRef, Repository, RepositoryError, Uuid, relation_admission::StoredObjectIdentity,
+    GitCommitRef, Repository, RepositoryError, Uuid,
+    relation_admission::{StagedCandidate, StoredObjectIdentity},
 };
 use orna_semantic_v1::{
     Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
@@ -475,24 +476,35 @@ impl ObjectIdentityManifest {
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
-        Self::read_committed_if_present(repository, commit)?.ok_or(ObjectIdentityError::Io)
-    }
-
-    /// Like [`Self::read_committed`], but `Ok(None)` when the commit carries
-    /// no identity inventory at all, as a commit made before any identity was
-    /// allocated does.
-    pub fn read_committed_if_present(
-        repository: &Repository,
-        commit: &GitCommitRef,
-    ) -> Result<Option<Self>, ObjectIdentityError> {
         if let Some(stored) = repository
             .read_committed_object_identities(commit)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored);
+        }
+        let bytes = repository
+            .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .ok_or(ObjectIdentityError::Io)?;
+        Self::decode(&bytes)
+    }
+
+    /// Reads the inventory the staged candidate of the ordinary index
+    /// carries: its staged store's inventory relation, or else the legacy
+    /// sidecar its staged tree tracks. `Ok(None)` before any identity was
+    /// allocated, as for the first commit of a database.
+    pub fn read_staged(
+        repository: &Repository,
+        staged: &StagedCandidate,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_staged_object_identities(staged)
             .map_err(|_| ObjectIdentityError::Io)?
         {
             return Self::from_stored(&stored).map(Some);
         }
         repository
-            .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .read_staged_legacy_identity_sidecar(staged, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
             .map_err(|_| ObjectIdentityError::Io)?
             .map(|bytes| Self::decode(&bytes))
             .transpose()
