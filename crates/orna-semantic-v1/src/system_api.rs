@@ -736,6 +736,16 @@ impl SystemApi {
             .map(|_| enum_name.to_owned())
     }
 
+    /// Splits a closed `sys.<Enum>.<variant>` path into its enum and variant.
+    pub(crate) fn enum_constant(&self, path: &[&str]) -> Option<(String, String)> {
+        let (variant, enum_path) = path.split_last()?;
+        let enum_name = enum_path.join(".");
+        self.enums
+            .get(&enum_name)
+            .filter(|variants| variants.contains(*variant))
+            .map(|_| (enum_name, (*variant).to_owned()))
+    }
+
     pub(crate) fn describes_type(&self, name: &str) -> bool {
         self.types.contains_key(name)
             || self.relations.contains_key(name)
@@ -825,6 +835,11 @@ impl SystemApi {
     pub(crate) fn provider_linked(&self, _member: SystemMember<'_>) -> bool {
         false
     }
+}
+
+/// The enum and variant named by a closed `sys.<Enum>.<variant>` path.
+pub fn system_enum_constant(path: &[&str]) -> Option<(String, String)> {
+    embedded_system_api().enum_constant(path)
 }
 
 pub(crate) fn embedded_system_api() -> &'static SystemApi {

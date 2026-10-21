@@ -676,6 +676,49 @@ fn binary_run_executes_a_named_public_project_function() {
 }
 
 #[test]
+fn binary_run_evaluates_a_sys_enum_constant_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-mismatch-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(!output.status.success());
+    assert_ne!(output.stdout, b"invocation completed\n");
+}
+
+#[test]
 fn binary_run_without_a_target_executes_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
