@@ -23,3 +23,22 @@ fn range_upper_endpoint_accepts_control_expressions() {
         expression_is_accepted(source);
     }
 }
+
+fn expression_is_rejected(source: &str) {
+    let parsed = parse_expression(source);
+    assert!(!parsed.is_ok(), "{source} should be rejected by the grammar");
+}
+
+// W27-02 (grammar pipeline_stage = postfix_expression): a stage cannot be
+// followed by additive, multiplicative, power, or range operators, because
+// those bind tighter than the pipeline operator and the grammar has no
+// production that continues a stage with them.
+#[test]
+fn pipeline_stage_is_a_postfix_expression() {
+    for source in ["1 | f + 1", "1 | f * 2", "1 | f .. 2", "1 | f ^ 2", "1 |? f - 1"] {
+        expression_is_rejected(source);
+    }
+    for source in ["1 | f(2) | g.h", "a | f ?? b", "a | f == b", "1 | f || b"] {
+        expression_is_accepted(source);
+    }
+}
