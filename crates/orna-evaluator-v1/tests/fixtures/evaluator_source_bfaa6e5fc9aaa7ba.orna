@@ -1,1 +1,1 @@
-std.collection.take(rows, 1)
+take(rows, 1)
