@@ -101,7 +101,9 @@ fn commit_directory(directory: &Path, message: &str) {
 
 #[test]
 fn committed_project_carries_verified_source_snapshot_identity() {
-    let (directory, repository) = repository(&[("main.orna", "pub let answer: Int = 42\n")]);
+    // A module unit holds declarations only (ORNA-SOURCE-002); `let` is a REPL
+    // input, not a top-level module item (34-grammar.md, top_level_item).
+    let (directory, repository) = repository(&[("main.orna", "pub fn answer(): Int = 42;\n")]);
     commit_all(&directory);
     let commit = repository.head().unwrap().unwrap();
     let project = ProjectLoader::default()
@@ -163,8 +165,10 @@ fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
 
     assert_eq!(project.loose_rows().len(), 1);
     assert_eq!(project.loose_rows()[0].logical_path(), "Music/london.orna");
+    // The candidate adds a valid top-level declaration (ORNA-SOURCE-002) so
+    // its source differs from the committed module.
     let candidate_source =
-        "pub table Music(id: Str) { title: Str, }\npub let answer: Int = 42\n";
+        "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n";
     let candidate = repository
         .build_private_commit(
             &commit,
