@@ -57,3 +57,65 @@ jobs:
           CARGO_BUILD_JOBS: 2
           RUST_TEST_THREADS: 2
         run: cargo test --locked -p orna-repository-v1 --lib --no-fail-fast -- --nocapture
+
+  # Integration and library targets behind the acceptance gates and recent fixes.
+  # Tests listed in scripts/known-test-failures.toml fail on main; they are skipped
+  # here and run nightly (.github/workflows/nightly-gates.yml) until their fix lands.
+  crate-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test the syntax, value, storage, project and runtime suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(-p orna-syntax-v1 -p orna-value-v1 -p orna-storage-v1 -p orna-project-v1 -p orna-runtime-v1)
+          python3 scripts/gate_evidence.py skip-args "${packages[@]}" > "$RUNNER_TEMP/skips"
+          mapfile -t skips < "$RUNNER_TEMP/skips"
+          cargo test --locked --no-fail-fast "${packages[@]}" --tests -- --exact "${skips[@]}" --nocapture
+
+      - name: Test the orna-repository-v1 integration suites
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gate_evidence.py skip-args -p orna-repository-v1 > "$RUNNER_TEMP/skips"
+          mapfile -t skips < "$RUNNER_TEMP/skips"
+          cargo test --locked --no-fail-fast -p orna-repository-v1 --test '*' -- --exact "${skips[@]}" --nocapture
+
+      - name: Test the orna-evaluator-v1 library and evaluator suite
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gate_evidence.py skip-args -p orna-evaluator-v1 > "$RUNNER_TEMP/skips"
+          mapfile -t skips < "$RUNNER_TEMP/skips"
+          cargo test --locked --no-fail-fast -p orna-evaluator-v1 --lib --test evaluator -- --exact "${skips[@]}" --nocapture
+
+  # Gate D: SIGKILL at each publication boundary. Needs the crash-barriers test feature.
+  publication-crash-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test the publication crash matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/gate_evidence.py skip-args -p orna-cli-v1 > "$RUNNER_TEMP/skips"
+          mapfile -t skips < "$RUNNER_TEMP/skips"
+          cargo test --locked --no-fail-fast -p orna-cli-v1 --features crash-barriers \
+            --test publication_crash_matrix -- --exact "${skips[@]}" --nocapture
