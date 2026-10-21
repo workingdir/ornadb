@@ -73,9 +73,8 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
 /// so a refused publication writes nothing: legacy snapshots keep their
 /// versioned readers but have no row writer (ORNA-UPGRADE-003). Unreadable
 /// metadata is not decided here; the format-3 validation of the frozen range
-/// reports it. A migration journal over a legacy `HEAD` means `orna migrate
-/// copy` already prepared this worktree, so the refusal names that candidate
-/// instead of asking for another copy; the journal is only read.
+/// reports it. When `orna migrate copy` already prepared this worktree, the
+/// refusal names that candidate instead of the upgrade work item.
 fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(), Diagnostic> {
     let head = repository.head().map_err(|error| {
         publish_error("committed snapshot could not be read", format!("{error:?}"))
@@ -88,16 +87,10 @@ fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(),
     else {
         return Ok(());
     };
-    // The journal lives in the runtime directory. Without one there is no
-    // journal, and reading would only create the coordination lock.
-    let migration_prepared = repository.runtime_paths().root().exists()
-        && repository.read_publication_journal().is_ok_and(|journal| {
-            journal.is_some_and(|journal| journal.migration_continuity().is_some())
-        });
     Err(legacy_read_only_refusal(
         "publication target is a read-only legacy snapshot",
         format,
-        migration_prepared,
+        repository.holds_prepared_migration(),
     ))
 }
 
@@ -527,13 +520,15 @@ fn table_row_counts(mutations: &[TableMutation]) -> BTreeMap<String, usize> {
     counts
 }
 
-/// The remedy for a format-1/2 snapshot: this build has no row writer for it,
-/// so its data reaches format 3 only through a migration copy.
-const LEGACY_READ_ONLY_HELP: &str = "this build has no writer for format-1/2 snapshots; prepare a format-3 copy with `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`; pending runtime changes in this worktree are not carried into DEST";
+/// The remedy for a format-1/2 snapshot. This build has no row writer and no
+/// in-place upgrade for it, so the help names the work item that delivers the
+/// upgrade instead of a command that cannot finish the job. It is the same
+/// remedy that every refused runtime write reports.
+const LEGACY_READ_ONLY_HELP: &str = orna_repository_v1::LegacyWriteRefused::REMEDY;
 
 /// The remedy inside a prepared migration copy: its format-3 candidate is
 /// journalled, but nothing in this build activates it.
-const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated";
+const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
 
 /// ORNA-PUB-012: names the read-only legacy format, states that nothing was
 /// written, and gives the remedy that fits the worktree's migration state.
@@ -656,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_refusal_names_the_format_and_the_migration() {
+    fn legacy_snapshot_refusal_names_the_format_and_the_upgrade_work_item() {
         let diagnostic = describe_storage_failure(
             "publication target is a read-only legacy snapshot",
             &orna_storage_v1::Error::LegacyReadOnly { format: 2 },
@@ -667,19 +662,11 @@ mod tests {
             "publication target is a read-only legacy snapshot"
         );
         assert_eq!(diagnostic.help, LEGACY_READ_ONLY_HELP);
-        assert!(
-            diagnostic
-                .help
-                .starts_with("this build has no writer for format-1/2 snapshots;")
+        assert_eq!(
+            diagnostic.help,
+            "this build has no writer or in-place upgrade for format-1/2 snapshots; the format-3 upgrade is tracked as ornadb-5il1.184"
         );
-        assert!(diagnostic.help.contains(
-            "`orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`"
-        ));
-        assert!(
-            diagnostic
-                .help
-                .ends_with("pending runtime changes in this worktree are not carried into DEST")
-        );
+        assert!(!diagnostic.help.contains("migrate copy"));
         assert!(
             diagnostic
                 .detail
@@ -697,7 +684,7 @@ mod tests {
         assert!(
             diagnostic
                 .help
-                .ends_with("a format-3 migration candidate is prepared here but not activated")
+                .ends_with("a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192")
         );
         assert!(!diagnostic.help.contains("migrate copy"));
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
