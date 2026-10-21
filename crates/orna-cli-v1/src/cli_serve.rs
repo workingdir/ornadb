@@ -51,8 +51,6 @@ const SERVE_ENTRY: &str = "serve";
 /// Wall-clock bound for one request line and its headers. A peer that
 /// trickles bytes cannot hold a connection thread past it.
 const REQUEST_HEAD_TIMEOUT: StdDuration = StdDuration::from_secs(15);
-/// Bound on each blocked read of a request body and each blocked write.
-const HTTP_IO_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 const WEBSOCKET_READ_CHUNK_BYTES: usize = 8 * 1024;
 /// RFC 6455 close code sent to a peer that stayed silent past the keepalive
 /// bound (1001, going away).
@@ -85,6 +83,8 @@ struct ServeOptions {
     /// accept loop answers a connection beyond it with 503 without reading
     /// its request.
     max_connections: usize,
+    /// Bound on receiving one HTTP request body and on sending one response.
+    transfer: TransferBudget,
 }
 
 impl Default for ServeOptions {
@@ -94,7 +94,44 @@ impl Default for ServeOptions {
             keepalive: WebSocketKeepalive::default(),
             session_lease_ms: SESSION_LEASE_MS,
             max_connections: MAX_CONNECTIONS,
+            transfer: TransferBudget::default(),
         }
+    }
+}
+
+/// Wall-clock budget for one HTTP transfer, a request body or a response: a
+/// fixed allowance plus the time the transfer takes at a minimum rate. It
+/// covers the whole transfer, so a peer that trickles a body, or reads a
+/// response a few bytes at a time, cannot hold a connection thread past it,
+/// while a 512 MiB Git push at the minimum rate still fits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TransferBudget {
+    /// Allowance for any transfer, however small.
+    base: StdDuration,
+    /// The slowest transfer rate the budget allows for, in bytes per second.
+    min_bytes_per_second: u64,
+}
+
+impl Default for TransferBudget {
+    fn default() -> Self {
+        Self {
+            base: StdDuration::from_secs(15),
+            min_bytes_per_second: 64 * 1024,
+        }
+    }
+}
+
+impl TransferBudget {
+    /// The deadline for moving `bytes`, starting now.
+    fn deadline(self, bytes: usize) -> Instant {
+        let bytes = u128::from(u64::try_from(bytes).unwrap_or(u64::MAX));
+        let millis = bytes * 1000 / u128::from(self.min_bytes_per_second.max(1));
+        let allowance = self.base.saturating_add(StdDuration::from_millis(
+            u64::try_from(millis).unwrap_or(u64::MAX),
+        ));
+        let now = Instant::now();
+        // An allowance beyond the clock's range fails closed.
+        now.checked_add(allowance).unwrap_or(now)
     }
 }
 
@@ -656,24 +693,23 @@ fn sweep_sessions(state: &Weak<ServeState>, executor: &tokio::runtime::Runtime) 
 }
 
 fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
-    stream.set_write_timeout(Some(HTTP_IO_TIMEOUT))?;
+    let transfer = state.options.transfer;
     let mut reader = BufReader::new(stream);
     let Ok((mut request, body_length)) =
         read_request_head(&mut reader, Instant::now() + REQUEST_HEAD_TIMEOUT)
     else {
-        return write_response(reader.get_mut(), bad_request_response());
+        return write_response(reader.get_mut(), bad_request_response(), transfer);
     };
     // Refuse from the head alone, before the body is read or allocated, so a
     // foreign or cross-origin request cannot make this host wait for or
     // buffer up to the route's body limit.
     if let Some(refusal) = state.loopback.refusal(&request) {
-        return write_response(reader.get_mut(), refusal);
+        return write_response(reader.get_mut(), refusal, transfer);
     }
-    reader.get_ref().set_read_timeout(Some(HTTP_IO_TIMEOUT))?;
-    let mut body = vec![0; body_length];
-    if reader.read_exact(&mut body).is_err() {
-        return write_response(reader.get_mut(), bad_request_response());
-    }
+    let Ok(body) = read_request_body(&mut reader, body_length, transfer.deadline(body_length))
+    else {
+        return write_response(reader.get_mut(), bad_request_response(), transfer);
+    };
     request.body = body;
     if is_websocket_route(&request) {
         // Bytes the peer sent after its handshake belong to the WebSocket.
@@ -691,7 +727,7 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
         state.options.allow_push,
         &request,
     );
-    write_response(&mut stream, response)
+    write_response(&mut stream, response, transfer)
 }
 
 /// Answers one `/orna/session` request through the transport's child-aware
@@ -741,8 +777,12 @@ fn serve_session_http_request(
             body: br#"{"code":"live.unavailable","message":"request rejected"}"#.to_vec(),
         };
     }
-    stream.write_all(&encode_http_response(&response, state.transport_limits)?)?;
-    stream.flush()
+    let encoded = encode_http_response(&response, state.transport_limits)?;
+    write_before(
+        stream,
+        &[&encoded],
+        state.options.transfer.deadline(encoded.len()),
+    )
 }
 
 fn current_thread_executor() -> io::Result<tokio::runtime::Runtime> {
@@ -1987,10 +2027,89 @@ fn read_head_line(
     }
 }
 
-fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
-    stream.write_all(&response_head(&response))?;
-    stream.write_all(&response.body)?;
-    stream.flush()
+/// Reads a request body of `length` bytes, which must have arrived in full
+/// by `deadline`. Every read is bounded by the time left, so a peer that
+/// trickles the body cannot hold the connection past the deadline.
+fn read_request_body(
+    reader: &mut BufReader<TcpStream>,
+    length: usize,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    let mut body = vec![0; length];
+    let mut filled = 0;
+    while filled < length {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request body deadline elapsed",
+            ));
+        }
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        match reader.read(&mut body[filled..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete request body",
+                ));
+            }
+            Ok(read) => filled += read,
+            // A timed-out read is judged against the deadline above.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(body)
+}
+
+/// Writes `response`, all of it within `budget`.
+fn write_response(
+    stream: &mut TcpStream,
+    response: Response,
+    budget: TransferBudget,
+) -> io::Result<()> {
+    let head = response_head(&response);
+    let deadline = budget.deadline(head.len().saturating_add(response.body.len()));
+    write_before(stream, &[&head, &response.body], deadline)
+}
+
+/// Writes `parts` in order, all of them by `deadline`. Every blocked write
+/// is bounded by the time left, so a peer that stops reading, or reads a few
+/// bytes at a time, cannot hold the connection past the deadline.
+fn write_before(stream: &mut TcpStream, parts: &[&[u8]], deadline: Instant) -> io::Result<()> {
+    for part in parts {
+        let mut unsent = *part;
+        while !unsent.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "response deadline elapsed",
+                ));
+            }
+            stream.set_write_timeout(Some(remaining))?;
+            match stream.write(unsent) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(written) => unsent = &unsent[written..],
+                // A timed-out write is judged against the deadline above.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The status line and headers of `response`, through the blank line that
@@ -3250,6 +3369,148 @@ mod tests {
         }
     }
 
+    /// ORNA-WIRE-005: a request body must arrive within one transfer budget
+    /// measured over the whole body. A peer that trickles a declared body a
+    /// byte at a time is answered 400 at the deadline, instead of keeping its
+    /// connection thread for as long as it keeps sending.
+    #[test]
+    fn a_trickled_request_body_is_cut_off_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=trickle"],
+        );
+        let transfer = TransferBudget {
+            base: StdDuration::from_millis(500),
+            min_bytes_per_second: u64::MAX,
+        };
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                transfer,
+                ..ServeOptions::default()
+            },
+        );
+        let started = Instant::now();
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        client
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        write!(
+            client,
+            "POST /orna/session HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+        )
+        .expect("request head");
+        // At one byte every 100 ms the body would take ten seconds.
+        let mut trickle = client.try_clone().expect("second client handle");
+        let trickler = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if trickle.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(StdDuration::from_millis(100));
+            }
+        });
+        let response = read_until_closed(&mut client);
+        let elapsed = started.elapsed();
+        assert!(
+            response.starts_with(b"HTTP/1.1 400 "),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(
+            elapsed >= transfer.base && elapsed < StdDuration::from_secs(5),
+            "the deadline bounds the whole body: {elapsed:?}"
+        );
+        trickler.join().expect("trickling client");
+    }
+
+    /// ORNA-WIRE-005: a response must be taken within one transfer budget
+    /// measured over the whole response. A client that stops reading a large
+    /// page cannot keep its connection thread: the server gives up at the
+    /// deadline, and the client later finds the page cut short.
+    #[test]
+    fn a_response_the_client_stops_reading_is_abandoned_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=stalled"],
+        );
+        // Each quote renders as the six bytes of `&quot;`, so the page is
+        // about 12 MB, more than the loopback socket buffers hold.
+        std::fs::write(directory.path().join("quotes.txt"), vec![b'"'; 2_000_000])
+            .expect("large text file");
+        git_succeeds(directory.path(), &["add", "--", "quotes.txt"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Orna test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "large page",
+            ],
+        );
+        let commit = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(directory.path())
+            .output()
+            .expect("HEAD")
+            .stdout;
+        let commit = String::from_utf8(commit).expect("HEAD UTF-8");
+        let transfer = TransferBudget {
+            base: StdDuration::from_millis(500),
+            min_bytes_per_second: u64::MAX,
+        };
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                transfer,
+                ..ServeOptions::default()
+            },
+        );
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        client
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        write!(
+            client,
+            "GET /blob/{}/quotes.txt HTTP/1.1\r\nHost: {address}\r\n\r\n",
+            commit.trim()
+        )
+        .expect("request");
+        // Read the head only, then stop reading until well past the deadline.
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            client.read_exact(&mut byte).expect("response head");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("UTF-8 response head");
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let declared: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|length| length.parse().ok())
+            .expect("declared body length");
+        assert!(
+            declared > 10_000_000,
+            "the page outgrows the socket buffers"
+        );
+        std::thread::sleep(transfer.base * 4);
+        let body = read_until_closed(&mut client);
+        assert!(
+            body.len() < declared,
+            "the server stops writing at its deadline: {} of {declared} bytes",
+            body.len()
+        );
+    }
+
     const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
     const TEST_IDENTITY: RuntimeIdentity = RuntimeIdentity {
         database_id: [31; 16],
@@ -3500,6 +3761,28 @@ mod tests {
                 error.kind(),
                 io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
             ),
+        }
+    }
+
+    /// Reads until the server ends the connection, by end of stream or reset.
+    fn read_until_closed(stream: &mut TcpStream) -> Vec<u8> {
+        let mut received = Vec::new();
+        let mut chunk = [0; 64 * 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return received,
+                Ok(read) => received.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return received;
+                }
+                Err(error) => panic!("the server ends the connection in time: {error}"),
+            }
         }
     }
 
