@@ -4207,6 +4207,34 @@ pub fn domain_digest(domain: &str, payload: &Raw) -> Result<[u8; 32]> {
     hash.update(bytes);
     Ok(hash.finalize().into())
 }
+
+/// SHA-256 of ASCII domain, NUL and the canonical SOV-3 bytes of a payload
+/// that needs no format-3 context. Tagged values are rejected at any depth:
+/// their encoding depends on context this function does not carry.
+pub fn sov3_context_free_domain_digest(domain: &str, payload: &Raw) -> Result<[u8; 32]> {
+    if !domain.is_ascii() || domain.as_bytes().contains(&0) || raw_contains_tag(payload) {
+        return Err(Error::InvalidValue);
+    }
+    let bytes = encode_context_raw(payload, ValueFormat::Sov3, None, MimeRegistry::mime1())?;
+    let mut hash = Sha256::new();
+    hash.update(domain.as_bytes());
+    hash.update([0]);
+    hash.update(bytes);
+    Ok(hash.finalize().into())
+}
+
+fn raw_contains_tag(raw: &Raw) -> bool {
+    match raw {
+        Raw::Tag(..) => true,
+        Raw::Array(items) => items.iter().any(raw_contains_tag),
+        Raw::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| raw_contains_tag(key) || raw_contains_tag(value)),
+        Raw::Null | Raw::Bool(_) | Raw::Int(_) | Raw::Float(_) | Raw::Bytes(_) | Raw::Text(_) => {
+            false
+        }
+    }
+}
 pub fn row_identity(
     database: [u8; 16],
     table: [u8; 16],
