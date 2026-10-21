@@ -3025,6 +3025,17 @@ mod tests {
         (temp, repository)
     }
 
+    /// Coordinator fixtures publish through the format-probing path, which
+    /// requires tracked format metadata; a legacy format 2 record declares it.
+    fn legacy_coordinator_repository() -> (TempDir, Repository) {
+        let (temp, repository) = repository();
+        fs::create_dir(temp.path().join(".orna")).unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "format 2\n").unwrap();
+        git(temp.path(), &["add", ".orna/format.orna"]);
+        git(temp.path(), &["commit", "-m", "legacy format metadata"]);
+        (temp, repository)
+    }
+
     fn decode_base64(value: &str) -> Vec<u8> {
         fn digit(byte: u8) -> u8 {
             match byte {
@@ -3718,6 +3729,9 @@ mod tests {
             .complete_compact_publication(&pending, &freeze)
             .await
             .unwrap();
+        fs::write(temp.path().join("ordinary.txt"), "native writer\n").unwrap();
+        git(temp.path(), &["add", "ordinary.txt"]);
+        git(temp.path(), &["commit", "-m", "native writer"]);
         let profile = CompactOvbProfile::new(compact_schema()).unwrap();
         let result = RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
@@ -4172,7 +4186,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_publishes_and_completes_a_real_runtime_prefix() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4257,7 +4271,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_rejects_runtime_cleanup_before_reconciliation() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4329,7 +4343,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_rejects_runtime_cleanup_after_native_head_drift() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4453,7 +4467,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4529,7 +4543,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4660,7 +4674,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_recovery_consumes_only_the_frozen_prefix() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4756,7 +4770,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_recovery_rejects_native_head_drift_before_runtime_cleanup() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
@@ -4838,7 +4852,7 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_recovery_is_idempotent_after_runtime_completion() {
-        let (_temp, repository) = repository();
+        let (_temp, repository) = legacy_coordinator_repository();
         let runtime = RuntimeState::open(
             &repository,
             orna_runtime_v1::RuntimeIdentity {
