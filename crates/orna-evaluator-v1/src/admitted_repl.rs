@@ -394,7 +394,7 @@ impl AdmittedReplSession {
             Err(error) => return Err(self.publish_failure(error)),
         };
         if !admission.effects.effects.is_empty() {
-            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-EFFECT")));
+            return Err(self.publish_failure(effect_rejection(&admission.effects)));
         }
         let mut runtime = self.runtime.clone();
         let value = match runtime.submit_admitted(&input).map_err(ReplError::runtime) {
@@ -507,7 +507,7 @@ impl AdmittedReplSession {
         // This admitted-input path has no source text, so diagnostics carry no spans.
         let admission = candidate.stage_input(input, "")?;
         if !admission.effects.effects.is_empty() {
-            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+            return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = candidate.runtime.clone();
         let value = runtime
@@ -535,7 +535,7 @@ impl AdmittedReplSession {
         }
         let admission = self.stage_input(&input, source)?;
         if !admission.effects.effects.is_empty() {
-            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+            return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = self.runtime.clone();
         runtime
@@ -886,6 +886,41 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
     )
 }
 
+/// The rejection for input that performs effects in a session that never
+/// runs them. Names the effects, so the person can see what made it effectful.
+pub fn effect_rejection(effects: &EffectSummary) -> ReplError {
+    let names = effects
+        .effects
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = ReplError::redacted("ORNA-REPL-EFFECT");
+    error.detail = Some(Box::new(ReplDetail {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        message: format!("this input performs effects: {names}"),
+        span: None,
+        notes: vec!["the core REPL session never runs effects".to_owned()],
+        help: vec![
+            "evaluate a pure expression here".to_owned(),
+            "or run the input in a project repository REPL, where effects are committed"
+                .to_owned(),
+        ],
+    }));
+    error
+}
+
+/// The span of the submitted input without its surrounding whitespace. Used
+/// when analysis cannot narrow a diagnostic below the whole input.
+fn whole_input_span(source: &str) -> Option<std::ops::Range<usize>> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let start = source.len() - source.trim_start().len();
+    Some(start..start + trimmed.len())
+}
+
 fn parse_error(diagnostics: &[SyntaxDiagnostic], source: &str) -> ReplError {
     let mut error = ReplError::redacted("ORNA-EVAL-PARSE");
     if let Some(diagnostic) = diagnostics.first() {
@@ -971,7 +1006,7 @@ fn stage_error(
         (None, None) => ReplDetail {
             code: code.to_owned(),
             message: first.message().to_owned(),
-            span: None,
+            span: whole_input_span(source),
             notes: first
                 .notes()
                 .iter()
@@ -998,9 +1033,17 @@ fn unresolved_detail(context: &ReplContext, code: &str, name: &str, source: &str
             .iter()
             .map(|module| format!("add `use {module}.{name}` to bring `{name}` into scope")),
     );
-    help.push(format!(
-        "declare `{name}` before using it, for example `let {name} = <value>`"
-    ));
+    if hints.namespaces.is_empty() {
+        help.push(format!(
+            "declare `{name}` before using it, for example `let {name} = <value>`"
+        ));
+    }
+    help.extend(
+        hints
+            .namespaces
+            .iter()
+            .map(|namespace| format!("add `use {namespace};` to bring module `{name}` into scope")),
+    );
     ReplDetail {
         code: code.to_owned(),
         message: format!("name `{name}` cannot be resolved"),
@@ -1689,6 +1732,70 @@ mod tests {
                 .help
                 .iter()
                 .any(|help| help == "close the parenthesis with `)`"),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unresolved_name_points_at_the_identifier_with_a_declare_remedy() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("nofn(1)\n").unwrap_err();
+
+        assert_eq!(error.code(), "ORNA-S012-UNRESOLVED");
+        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        assert_eq!(detail.message, "name `nofn` cannot be resolved");
+        assert_eq!(detail.span, Some(0..4));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("declare `nofn` before using it")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unresolved_name_matching_a_loaded_module_suggests_its_use_import() {
+        let (_directory, project) = loaded_project(
+            &[
+                (
+                    "main.orna",
+                    include_str!(
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                    ),
+                ),
+                (
+                    "library.orna",
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                    ),
+                ),
+            ],
+            None,
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            &project,
+            Vec::<(String, String)>::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let error = session.submit("library.twice(\"x\")\n").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        assert_eq!(detail.message, "name `library` cannot be resolved");
+        assert_eq!(detail.span, Some(0..7));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "add `use library;` to bring module `library` into scope"),
+            "{:?}",
+            detail.help
+        );
+        assert!(
+            detail.help.iter().all(|help| !help.contains("let library")),
             "{:?}",
             detail.help
         );
