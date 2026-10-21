@@ -1,1 +1,1 @@
-fn bad(values: [Int]) = std.collection.sum(values);
+fn bad(values: [Int]) = sum(values);
