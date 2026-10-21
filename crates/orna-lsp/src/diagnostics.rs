@@ -16,18 +16,12 @@ use lsp_server::{Message, Notification};
 use lsp_types::{Diagnostic, PublishDiagnosticsParams, Uri};
 
 use crate::analysis;
-use crate::documents::{Document, PositionMapper};
+use crate::documents::PositionMapper;
 use crate::project::{self, OpenModule, Project, ProjectHome};
+use crate::workspace::OpenDocument;
 
-/// One open document and the project it belongs to, if any.
-#[derive(Clone)]
-pub(crate) struct OpenFile {
-    pub document: Document,
-    pub home: Option<ProjectHome>,
-}
-
-/// The editor state diagnostics are computed from.
-pub(crate) type Snapshot = Arc<Vec<OpenFile>>;
+/// The open documents diagnostics are computed from.
+pub(crate) type Snapshot = Arc<Vec<Arc<OpenDocument>>>;
 
 /// Diagnostics for one URI, with the document version they describe.
 pub(crate) struct Report {
@@ -40,51 +34,52 @@ pub(crate) struct Report {
 }
 
 /// Diagnostics for `uri` in `snapshot`, as the worker would publish them.
-pub(crate) fn document_report(snapshot: &[OpenFile], uri: &Uri) -> Option<Report> {
-    let file = snapshot.iter().find(|file| &file.document.uri == uri)?;
-    let Some(home) = &file.home else {
-        return Some(syntax_report(&file.document));
+pub(crate) fn document_report(snapshot: &[Arc<OpenDocument>], uri: &Uri) -> Option<Report> {
+    let open = snapshot.iter().find(|open| &open.document.uri == uri)?;
+    let Some(home) = &open.home else {
+        return Some(syntax_report(open));
     };
     project_reports(snapshot, &home.project)
         .into_iter()
         .find(|report| &report.uri == uri)
 }
 
-fn syntax_report(document: &Document) -> Report {
-    let mapper = PositionMapper::new(&document.text);
+fn syntax_report(open: &OpenDocument) -> Report {
+    let file = open.analysis();
+    let mapper = PositionMapper::new(file.text());
     Report {
-        uri: document.uri.clone(),
-        version: Some(document.version),
-        diagnostics: analysis::check_document(document, &mapper),
+        uri: open.document.uri.clone(),
+        version: Some(open.document.version),
+        diagnostics: analysis::syntax_diagnostics(file.uri(), &file.parse, &mapper),
         root: None,
     }
 }
 
 /// Reports for every open module of `project` and every closed module with
 /// diagnostics, in URI order.
-fn project_reports(snapshot: &[OpenFile], project: &Arc<Project>) -> Vec<Report> {
+fn project_reports(snapshot: &[Arc<OpenDocument>], project: &Arc<Project>) -> Vec<Report> {
     let root = project.root().to_path_buf();
     let members = snapshot
         .iter()
-        .filter_map(|file| {
-            let home = file.home.as_ref()?;
-            Arc::ptr_eq(&home.project, project).then_some((file, home.logical_path.as_str()))
+        .filter_map(|open| {
+            let home = open.home.as_ref()?;
+            Arc::ptr_eq(&home.project, project).then_some((open, home.logical_path.as_str()))
         })
         .collect::<Vec<_>>();
     let syntax = members
         .iter()
-        .map(|(file, logical_path)| (*logical_path, syntax_report(&file.document)))
+        .map(|(open, logical_path)| (*logical_path, syntax_report(open)))
         .collect::<Vec<_>>();
-    let open = members
+    let open_modules = members
         .iter()
         .zip(&syntax)
-        .map(|((file, logical_path), (_, report))| OpenModule {
+        .map(|((open, logical_path), (_, report))| OpenModule {
             logical_path,
-            text: &file.document.text,
+            text: &open.document.text,
             has_syntax_errors: !report.diagnostics.is_empty(),
         })
         .collect::<Vec<_>>();
-    let mut checked = project::check(project, &open).diagnostics;
+    let mut checked = project::check(project, &open_modules).diagnostics;
     let mut reports = Vec::new();
     for (logical_path, mut report) in syntax {
         report
@@ -208,7 +203,7 @@ fn reports_for(job: &Job, published: &Published) -> Vec<Report> {
         } else if !reports.iter().any(|report| &report.uri == uri) {
             reports.push(
                 match job.snapshot.iter().find(|file| &file.document.uri == uri) {
-                    Some(file) => syntax_report(&file.document),
+                    Some(file) => syntax_report(file),
                     None => cleared(uri, None),
                 },
             );
