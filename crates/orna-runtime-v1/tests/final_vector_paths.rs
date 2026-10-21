@@ -2,7 +2,9 @@
 //! component projection reproduces every published host spelling, including
 //! the long `~key-` alias (`profiles/vfs-1.md`, "Row/key directory mapping").
 
-use orna_runtime_v1::vfs::{VfsComponent, project_component, unproject_component};
+use orna_runtime_v1::vfs::{
+    VfsComponent, project_component, project_key_component, unproject_component,
+};
 use sha2::{Digest, Sha256};
 
 /// A byte-identical copy of the Orna 1.1.0 release file, pinned to its release
@@ -45,4 +47,31 @@ fn final_vector_paths_project_to_the_published_components() {
             Err(error) => panic!("paths[{index}] does not unproject: {error:?}"),
         }
     }
+}
+
+/// The long alias digests the canonical typed key component, so 250 digits
+/// keyed as an integer and as a Str project to different names (VFS-1, "Row/key
+/// directory mapping": a text `1` and an integer 1 cannot collide).
+#[test]
+fn typed_long_key_aliases_digest_the_typed_encoding() {
+    let digits = "9".repeat(250);
+    let integer = num_bigint::BigInt::parse_bytes(digits.as_bytes(), 10).expect("decimal digits");
+    let integer_encoding = orna_value_v1::Value::int(integer)
+        .encode()
+        .expect("an Int encodes");
+    let integer_alias = project_key_component(&digits, &integer_encoding);
+    assert_eq!(
+        integer_alias,
+        format!("~key-{}", hex(&Sha256::digest(&integer_encoding)))
+    );
+
+    let text_encoding = orna_value_v1::encode_typed(&digits).expect("a Str encodes");
+    assert_eq!(
+        project_key_component(&digits, &text_encoding),
+        project_component(&digits)
+    );
+    assert_ne!(integer_alias, project_component(&digits));
+
+    // Under the bound the spelling is the canonical text whatever the type.
+    assert_eq!(project_key_component("42", &[0x18, 0x2a]), "42");
 }
