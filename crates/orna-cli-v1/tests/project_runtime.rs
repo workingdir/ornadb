@@ -1426,8 +1426,7 @@ async fn core_transactions_and_assertions_work_without_std() {
     assert_eq!(committed.len(), 1);
 }
 
-#[test]
-fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+fn captured_standard_project() -> (tempfile::TempDir, String) {
     let directory = tempfile::tempdir().expect("project");
     let module_path = directory.path().join("stdlib/std");
     std::fs::create_dir_all(&module_path).expect("standard module path");
@@ -1465,6 +1464,12 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         &["update-index", "--add", "--cacheinfo", &link],
     );
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+    (directory, module_commit)
+}
+
+#[test]
+fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+    let (directory, module_commit) = captured_standard_project();
 
     let repository = Repository::discover(directory.path()).expect("project repository");
     let project = orna_project_v1::ProjectLoader::default()
@@ -1502,6 +1507,37 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
     assert_eq!(run.stdout, b"invocation completed\n");
     assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn binary_repl_imports_a_captured_standard_module() {
+    use std::io::Write as _;
+
+    let (directory, _module_commit) = captured_standard_project();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .arg("repl")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("CLI REPL");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"use std.math.{increment};\nincrement(41)\n")
+        .expect("write standard import");
+    let output = child.wait_with_output().expect("CLI REPL output");
+    assert!(output.status.success(), "repl stderr: {:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "repl stderr: {:?}", output.stderr);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("42"),
+        "repl stdout: {:?}",
+        output.stdout
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("error["));
 }
 
 #[tokio::test(flavor = "current_thread")]
