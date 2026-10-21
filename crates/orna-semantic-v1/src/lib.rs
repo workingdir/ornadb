@@ -4672,20 +4672,27 @@ fn check_item(
                         "primary-key fields must have simple names",
                     )),
                 }
-                if let Some(annotation) = &key.annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "primary-key fields must declare a type",
-                    ));
-                }
+                let annotation_resolved = match &key.annotation {
+                    Some(annotation) => {
+                        let before = diagnostics.len();
+                        validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                        diagnostics.len() == before
+                    }
+                    None => {
+                        diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
+                        false
+                    }
+                };
                 let ty = key
                     .annotation
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
+                // A key type that failed annotation validation already carries
+                // its diagnostic; it has no encoding left to judge.
+                if annotation_resolved
+                    && let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+                {
                     diagnostics.push(diag(DIAG_TYPE, message));
                 }
             }
