@@ -1689,4 +1689,48 @@ mod tests {
         );
         assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
     }
+
+    fn review_and_commit(repository: &Repository, message: &str) -> GitCommitRef {
+        let review = repository
+            .review_staged_candidate(
+                Uuid::from_bytes([10; 16]),
+                Uuid::from_bytes([11; 16]),
+                3,
+                RepositoryFormat::Format3,
+                crate::RuntimeGeneration::new(4),
+                vec![0x81, 0x00],
+            )
+            .expect("review the staged candidate");
+        repository
+            .commit_reviewed_candidate(&review, message)
+            .expect("commit the reviewed candidate")
+    }
+
+    #[test]
+    fn a_later_reviewed_commit_binds_the_restaged_store() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), b"tracked").unwrap();
+        git(root, &["add", "notes.txt"]);
+        stage(&repository, &[relation(1)]).expect("stage the first store");
+        let first = review_and_commit(&repository, "first");
+
+        // A new relation plus a staged deletion whose worktree copy stays.
+        git(root, &["rm", "--cached", "--quiet", "notes.txt"]);
+        stage(&repository, &[relation(1), relation(2)]).expect("admit a second relation");
+        let second = review_and_commit(&repository, "second");
+
+        assert_eq!(
+            git(root, &["rev-list", "--parents", "-n", "1", second.as_str()]).trim(),
+            format!("{} {}", second.as_str(), first.as_str())
+        );
+        assert_eq!(
+            repository.committed_store_relations(&second).unwrap(),
+            BTreeSet::from([relation(1), relation(2), OBJECT_IDENTITY_RELATION_ID])
+        );
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(git(root, &["ls-files", "--", "notes.txt"]), "");
+        assert_eq!(fs::read(root.join("notes.txt")).unwrap(), b"tracked");
+        assert_eq!(git(root, &["status", "--porcelain"]), "?? notes.txt\n");
+    }
 }
