@@ -274,8 +274,9 @@ impl From<ReplError> for ReplFailure {
 }
 
 /// Locates a span as `line N, column M`, then the source line with carets
-/// under the span. Returns `None` when the span is not on character
-/// boundaries of `source`.
+/// under the span. A line containing a string literal is withheld, because
+/// submitted text may be sensitive; the location and carets remain. Returns
+/// `None` when the span is not on character boundaries of `source`.
 fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
     let start = span.start;
     if start > source.len() || !source.is_char_boundary(start) {
@@ -293,9 +294,13 @@ fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
         .map_or(1, |text| text.chars().count().max(1));
     let gutter = line_number.to_string();
     let pad = " ".repeat(gutter.len());
+    let line = if source[line_start..line_end].contains('"') {
+        "<source withheld: line contains a string literal>"
+    } else {
+        &source[line_start..line_end]
+    };
     Some(format!(
-        "  --> line {line_number}, column {column}\n{pad} |\n{gutter} | {}\n{pad} | {}{}",
-        &source[line_start..line_end],
+        "  --> line {line_number}, column {column}\n{pad} |\n{gutter} | {line}\n{pad} | {}{}",
         " ".repeat(column - 1),
         "^".repeat(width),
     ))
@@ -1444,6 +1449,22 @@ mod tests {
             lines.iter().any(|line| line.starts_with("help: declare `he` before using it")),
             "{text}"
         );
+    }
+
+    #[test]
+    fn string_literal_line_is_withheld_from_the_snippet() {
+        let source = "let secret_name: Int = \"private\";\n";
+        let failure = located(
+            "ORNA-S021-TYPE",
+            "static types are incompatible",
+            0..source.len() - 1,
+            "change the expression or its declared type",
+        );
+        let text = render_repl_failure(&failure, source);
+
+        assert!(text.contains("  --> line 1, column 1"), "{text}");
+        assert!(text.contains("<source withheld: line contains a string literal>"), "{text}");
+        assert!(!text.contains("private"), "{text}");
     }
 
     #[test]
