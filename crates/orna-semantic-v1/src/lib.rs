@@ -38,7 +38,7 @@ pub use semantic_payload::{
     analyze_semantic_payloads,
 };
 
-pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
+pub use repl::{NameHints, ReplAdmission, ReplCommitError, ReplContext};
 
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
@@ -46,6 +46,29 @@ pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
 pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
 pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";
+/// Note prefix carrying the identifier of an `ORNA-S012-UNRESOLVED` diagnostic.
+pub const UNRESOLVED_NAME_NOTE: &str = "unresolved name: ";
+
+/// Returns the unresolved identifier recorded on an unresolved-name diagnostic.
+pub fn unresolved_name(diagnostic: &Diagnostic) -> Option<&str> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_NAME_NOTE))
+}
+
+/// Note prefix carrying `module.member` for an unresolved module member.
+pub const UNRESOLVED_MEMBER_NOTE: &str = "unresolved member: ";
+
+/// Returns the `(module, member)` pair recorded on an unresolved module member diagnostic.
+pub fn unresolved_member(diagnostic: &Diagnostic) -> Option<(&str, &str)> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_MEMBER_NOTE))
+        .and_then(|path| path.rsplit_once('.'))
+}
+
 pub const DIAG_DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
@@ -8550,7 +8573,7 @@ fn infer_node(
                         effects: EffectSummary::default(),
                     },
                     None => {
-                        diagnostics.push(diag(
+                        let mut diagnostic = diag(
                             if matches!(text.as_str(), "Ok" | "Err") {
                                 DIAG_LEGACY_RESULT
                             } else {
@@ -8561,7 +8584,14 @@ fn infer_node(
                             } else {
                                 "name cannot be resolved"
                             },
-                        ));
+                        );
+                        if !matches!(text.as_str(), "Ok" | "Err") {
+                            diagnostic = diagnostic.with_note(
+                                SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
+                                    .expect("identifier text is safe"),
+                            );
+                        }
+                        diagnostics.push(diagnostic);
                         Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -9552,7 +9582,11 @@ fn infer_node(
                 } else if !types_match(&left.ty, &right.ty)
                     && !types_match(&right.ty, &left.ty)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -9561,7 +9595,11 @@ fn infer_node(
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -17213,7 +17251,16 @@ fn resolve_qualified_module_member(
             effects: symbol.effects.clone(),
         },
         None => {
-            diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
+            diagnostics.push(
+                diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
+                    SafeText::new(format!(
+                        "{UNRESOLVED_MEMBER_NOTE}{}.{}",
+                        namespace.display(),
+                        path[path.len() - 1]
+                    ))
+                    .expect("identifier text is safe"),
+                ),
+            );
             Inferred {
                 ty: Type::Error,
                 effects: EffectSummary::default(),
@@ -17232,7 +17279,60 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
             }
             _ => "static types are incompatible",
         };
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(type_mismatch(message, expected, actual));
+    }
+}
+
+/// A static type mismatch that names both types, so the person can see which
+/// side has which type. The message stays stable; the types ride in a note.
+fn type_mismatch(message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(DIAG_TYPE, message).with_note(
+        SafeText::new(format!(
+            "expected {}, found {}",
+            type_label(expected),
+            type_label(actual)
+        ))
+        .expect("valid diagnostic note"),
+    )
+}
+
+/// Spells a static type the way source writes it.
+fn type_label(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Decimal => "Decimal".into(),
+        Type::Float => "Float".into(),
+        Type::Date => "Date".into(),
+        Type::Instant => "Instant".into(),
+        Type::Text => "Text".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
+        Type::List(element) => format!("List<{}>", type_label(element)),
+        Type::Range(element) => format!("Range<{}>", type_label(element)),
+        Type::Relation(element) => format!("Relation<{}>", type_label(element)),
+        Type::Stream(element) => format!("Stream<{}>", type_label(element)),
+        Type::Optional(inner) => format!("Optional<{}>", type_label(inner)),
+        Type::Tuple(items) => format!(
+            "({})",
+            items.iter().map(type_label).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Record(_) => "record".into(),
+        Type::Applied { base, arguments } if arguments.is_empty() => base.clone(),
+        Type::Applied { base, arguments } => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Quantity { .. } => "quantity".into(),
+        Type::MoneyPerUnit { .. } => "money rate".into(),
+        Type::Function { .. } => "function".into(),
+        Type::Named(name) => name.clone(),
+        Type::Bottom => "no value".into(),
+        Type::Error => "unknown type".into(),
     }
 }
 
