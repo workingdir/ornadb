@@ -2139,12 +2139,12 @@ fn analyze_retaining_context_with_providers(
         scope.unlinked_system_members = unlinked_system_members.clone();
         let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
         visible_unit_namespaces.extend(scope.modules.values().cloned());
-        scope.source_units = result
+        scope.source_units = Rc::new(result
             .source_units
             .iter()
             .filter(|(identity, _)| visible_unit_namespaces.contains(&identity.namespace))
             .map(|(identity, metadata)| (identity.clone(), metadata.clone()))
-            .collect();
+            .collect());
         scope
             .payload_enum_types
             .extend(imported_payload_enum_bindings(
