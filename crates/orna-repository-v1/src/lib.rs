@@ -2932,7 +2932,7 @@ impl Repository {
         // runtime's tail consumption relies on it. A ref backend whose refs
         // cannot be flushed is refused before the ref moves.
         native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
-        self.sync_candidate_objects(expected_head, candidate.commit())?;
+        self.sync_candidate_objects(Some(expected_head), candidate.commit())?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
         native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
@@ -2942,13 +2942,14 @@ impl Repository {
     }
 
     /// Flushes every object `candidate` adds over `base`: the commit, its root
-    /// tree, and each tree and blob on a changed path. `write-tree` and
-    /// `commit-tree` leave their loose objects unflushed under Git's default
-    /// `core.fsync`, so without this a crash after the ref names them could
-    /// lose or truncate them.
+    /// tree, and each tree and blob on a changed path. Without a base (a root
+    /// commit) every tree and blob of the candidate is flushed. `write-tree`
+    /// and `commit-tree` leave their loose objects unflushed under Git's
+    /// default `core.fsync`, so without this a crash after the ref names them
+    /// could lose or truncate them.
     fn sync_candidate_objects(
         &self,
-        base: &GitCommitRef,
+        base: Option<&GitCommitRef>,
         candidate: &GitCommitRef,
     ) -> Result<(), RepositoryError> {
         let algorithm = match self.native_object_id_length()? {
@@ -2962,15 +2963,28 @@ impl Repository {
             oid(candidate.as_str())?,
             oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
         ]);
-        let changes = self.git_bytes_no_lazy_fetch([
-            "diff-tree",
-            "-r",
-            "-t",
-            "-z",
-            "--no-renames",
-            base.as_str(),
-            candidate.as_str(),
-        ])?;
+        let changes = match base {
+            Some(base) => self.git_bytes_no_lazy_fetch([
+                "diff-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--no-renames",
+                base.as_str(),
+                candidate.as_str(),
+            ])?,
+            // `--root` reports every path of a parentless commit as added.
+            None => self.git_bytes_no_lazy_fetch([
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "-t",
+                "-z",
+                "--no-renames",
+                candidate.as_str(),
+            ])?,
+        };
         // Raw `-z` output alternates `:<old mode> <new mode> <old> <new> <status>`
         // records with their paths.
         let mut fields = changes
@@ -4125,7 +4139,9 @@ impl Repository {
     /// the symbolic branch moves from absent to it by compare-and-set. The
     /// ordinary index already equals the new commit's tree and the worktree
     /// keeps its unstaged differences, so there is no index or worktree
-    /// reconciliation to journal.
+    /// reconciliation to journal. Like every other ref advance, the commit
+    /// and all of its objects are flushed before the ref names them, and the
+    /// ref is flushed before the result is recorded (ORNA-PUB-005).
     fn commit_reviewed_root_candidate(
         &self,
         review: &ReviewedCandidateReview,
@@ -4162,6 +4178,11 @@ impl Repository {
         {
             return Err(RepositoryError::InvalidFormatMigration);
         }
+        // PUB-3 step 3: complete objects and their durability barriers
+        // precede the visible ref. A ref backend whose refs cannot be
+        // flushed is refused before the branch is created.
+        native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
+        self.sync_candidate_objects(None, candidate.commit())?;
         let absent = "0".repeat(self.native_object_id_length()?);
         let mut create = self.command();
         create.args([
@@ -4171,6 +4192,7 @@ impl Repository {
             absent.as_str(),
         ]);
         self.run(create)?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
@@ -4563,7 +4585,7 @@ impl Repository {
                 // The publisher may have stopped between its CAS and the
                 // barriers after it, so the candidate and the ref must be
                 // durable before RefAdvanced is recorded (ORNA-PUB-005).
-                self.sync_candidate_objects(journal.old_head(), journal.new_head())?;
+                self.sync_candidate_objects(Some(journal.old_head()), journal.new_head())?;
                 self.sync_head_ref()?;
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
