@@ -10,10 +10,10 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
     DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
-    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
-    StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind, Type, analyze,
-    analyze_with_catalogue,
+    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_TYPE_MISMATCH,
+    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace,
+    StandardCatalogueError, StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind,
+    Type, analyze, analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -18099,7 +18099,9 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
         "mismatched-compound-assignment.orna",
         include_str!("fixtures/inline-semantic_graph/7f30f77a4e31.orna"),
     )]);
-    assert!(has(&mismatched_compound, DIAG_TYPE));
+    // `value += true` is `value = value + true`; Int + Bool is not an
+    // arithmetic operand pair (ORNA-CFLOW-006).
+    assert!(has(&mismatched_compound, DIAG_TYPE_MISMATCH));
 
     let field_assignment = analyze(&[ModuleInput::new(
         "field-assignment.orna",
@@ -18162,9 +18164,11 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         .find(|module| module.namespace.display() == "while")
         .unwrap();
     let poll = &module.symbols["poll"];
+    // The trailing `while` is the block tail and a loop completes with
+    // `Unit` (ORNA-CFLOW-001), not the `null` value.
     assert!(matches!(
         &poll.ty,
-        Type::Function { result, .. } if result.as_ref() == &Type::Null
+        Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
     assert!(poll.effects.effects.contains("database write"));
     assert!(poll.effects.may_fail);

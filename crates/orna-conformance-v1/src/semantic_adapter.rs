@@ -233,6 +233,8 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
             | "ORNA-A091-003"
             | "ORNA-A091-007"
             | "ORNA-A091-012"
+            | "E2001"
+            | "E5001"
     ) || diagnostic.message() == "type name cannot be resolved"
 }
 

@@ -659,6 +659,7 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
     assert_ne!(branch_head, *pending.commit());
     let branch_index = repository.index_generation().unwrap();
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
+    // ORNA-PUB-009: an advanced branch requires reconciliation; ancestor acceptance is rejected.
     assert_eq!(
         RuntimePublicationCoordinator::recover_compact_validated(
             &repository,
@@ -666,13 +667,12 @@ async fn compact_ref_advance_after_runtime_commit_preserves_branch_update() {
             &CompactOvbProfile::new(profile()).unwrap(),
             &publication_identity(),
         )
-        .await
-        .unwrap(),
-        Some(branch_index.clone())
+        .await,
+        Err(orna_storage_v1::Error::RefConflict)
     );
     assert_eq!(repository.head().unwrap(), Some(branch_head));
     assert_eq!(repository.index_generation().unwrap(), branch_index);
-    assert!(repository.read_publication_journal().unwrap().is_none());
+    assert!(repository.read_publication_journal().unwrap().is_some());
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
     assert_eq!(
         runtime
