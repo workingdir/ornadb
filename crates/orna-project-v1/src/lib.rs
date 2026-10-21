@@ -155,6 +155,16 @@ impl ResolvedTableSchema {
         self.table.declaration_name()
     }
 
+    /// The table's qualified name in its module namespace (root tables stay
+    /// bare): the identity runtime mutations and the identity manifest use,
+    /// so same-named tables in different modules never alias.
+    pub fn qualified_name(&self) -> String {
+        match self.table.module_name() {
+            "" => self.table.declaration_name().to_owned(),
+            module => format!("{module}.{}", self.table.declaration_name()),
+        }
+    }
+
     pub fn table_object_id(&self) -> TableObjectId {
         TableObjectId::new(*self.table.table_object_id())
     }
@@ -1106,7 +1116,7 @@ impl ProjectLoader {
             &project,
             table_object_id,
         )?;
-        if mutation.table() != schema.declaration_name()
+        if mutation.table() != schema.qualified_name()
             || mutation.table_object_id() != Some(schema.table_object_id())
         {
             return Err(ProjectLoadError::InvalidSourceRow);

@@ -142,7 +142,7 @@ fn validate_candidate_source_rows(
                     format!("{error:?}; the pending range was preserved"),
                 )
             })?;
-            if schema.declaration_name() != mutation.table()
+            if schema.qualified_name() != mutation.table()
                 || schema.table_object_id() != table_id
                 || schema.source_commit() != head
                 || schema.snapshot_id() != &snapshot_id
