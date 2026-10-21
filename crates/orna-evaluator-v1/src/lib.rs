@@ -53,6 +53,7 @@ pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
 pub use admitted_repl::{
     AdmittedReplSession, ReplDetail, ReplError, RepositoryScope, StagedReplActivation,
+    effect_rejection,
 };
 pub use cancellation::CancellationToken;
 use relation::{

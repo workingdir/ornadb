@@ -1407,4 +1407,79 @@ mod tests {
             io::ErrorKind::Other
         );
     }
+
+    fn located(code: &str, message: &str, span: std::ops::Range<usize>, help: &str) -> ReplFailure {
+        ReplFailure {
+            code: code.to_owned(),
+            detail: Some(ReplDetail {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                span: Some(span),
+                notes: Vec::new(),
+                help: vec![help.to_owned()],
+            }),
+        }
+    }
+
+    #[test]
+    fn unresolved_name_renders_its_line_column_caret_and_remedy() {
+        let failure = located(
+            "ORNA-S012-UNRESOLVED",
+            "name `he` cannot be resolved",
+            0..2,
+            "declare `he` before using it, for example `let he = <value>`",
+        );
+        let text = render_repl_failure(&failure, "he\n");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert_eq!(lines[0], "error[ORNA-S012-UNRESOLVED]: name `he` cannot be resolved");
+        assert!(lines.contains(&"  --> line 1, column 1"), "{text}");
+        assert!(lines.contains(&"1 | he"), "{text}");
+        assert!(lines.contains(&"  | ^^"), "{text}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("help: declare `he` before using it")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn end_of_input_error_caret_sits_after_the_last_token() {
+        let failure = located(
+            "ORNA-PARSE-001",
+            "expected namespace path",
+            3..3,
+            "name the module to import after `use`, for example `use library;`",
+        );
+        let text = render_repl_failure(&failure, "use\n");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(lines.contains(&"  --> line 1, column 4"), "{text}");
+        assert!(lines.contains(&"  |    ^"), "{text}");
+    }
+
+    #[test]
+    fn multi_line_error_reports_the_line_of_its_span() {
+        let source = "let a = 1;\nnofn(2)\n";
+        let failure = located(
+            "ORNA-S012-UNRESOLVED",
+            "name `nofn` cannot be resolved",
+            11..15,
+            "declare `nofn` before using it",
+        );
+        let text = render_repl_failure(&failure, source);
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(lines.contains(&"  --> line 2, column 1"), "{text}");
+        assert!(lines.contains(&"2 | nofn(2)"), "{text}");
+        assert!(lines.contains(&"  | ^^^^"), "{text}");
+    }
+
+    #[test]
+    fn failure_without_located_detail_renders_its_fixed_remedy_without_a_location() {
+        let text = render_repl_failure(&ReplFailure::code("ORNA-EVAL-PARSE"), "use\n");
+
+        assert!(text.starts_with("error[ORNA-EVAL-PARSE]: "), "{text}");
+        assert!(!text.contains("-->"), "{text}");
+        assert!(text.contains("\nhelp: "), "{text}");
+    }
 }
