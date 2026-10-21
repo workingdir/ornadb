@@ -40,6 +40,7 @@ pub mod publication_describe;
 mod publication_transaction;
 pub mod relation_admission;
 mod row_store;
+pub mod schema_evolution;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
