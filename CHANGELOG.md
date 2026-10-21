@@ -139,6 +139,13 @@ been published.
   instead of bounding each blocked read or write. A peer that sends or reads a
   few bytes at a time can no longer keep a connection busy.
 
+- Live session HTTP errors use the statuses `30-protocol.md` assigns: a
+  WebSocket upgrade from another origin gets 403 instead of 410, and a DELETE
+  carrying a token other than the live session's current one gets 401 instead
+  of 410. A child-free DELETE that would first have to drain application work
+  gets 503 instead of 400. `Content-Type: application/json; charset=utf-8` is
+  accepted.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
