@@ -28,11 +28,14 @@ been published.
   parse qualified names without consuming multiplication or division operators.
 
 - `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
-  any freeze, with `E2300` and a request to migrate with `orna migrate copy`; it
-  writes nothing and the pending range stays. The loose and compact (Parquet)
-  row writers, their recovery paths and the CLI compact-journal recovery are
-  retired; format-1/2 commits keep their readers (ORNA-UPGRADE-003,
-  ORNA-ROW-013).
+  any freeze, with `E2300`; it writes nothing and the pending range stays. The
+  help says this build has no writer for format-1/2 snapshots and gives the
+  full `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`
+  command, noting that pending runtime changes are not carried into `DEST`.
+  Inside a prepared migration copy it says the format-3 candidate is prepared
+  but not activated instead. The loose and compact (Parquet) row writers, their
+  recovery paths and the CLI compact-journal recovery are retired; format-1/2
+  commits keep their readers (ORNA-UPGRADE-003, ORNA-ROW-013).
 
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
@@ -107,6 +110,35 @@ been published.
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
+- MIME and file-name code reads one MIME-1 registry pinned to the Orna 1.1.0
+  `profiles/media-1.json`. Octet-stream and unregistered media types accept any
+  safe suffix hint, and stored Blob annotations with quoted parameters or `_`
+  hints read back. `sys.blob.capture_file` now supplies the
+  `application/octet-stream` annotation with no suffix instead of guessing from
+  the file extension; declare the media type with `sys.blob.annotate`.
+
+- The parser no longer changes valid source silently: a comparison followed
+  later by `> (` keeps all of its tokens; a braced control statement (`if`,
+  `case`, `for`, `while` or `loop`) ends before a following `(`, `[`, `-`, `+`
+  or `..` item; control headers never read `Name {` as a constructor (an
+  unparenthesised one before the body is reported); table subjectless
+  predicates keep their operator; and spaceless arithmetic such as
+  `1+10-20-30` is not a date.
+- Case guards such as `x if x < limit:`, `assert` as a variant, label, field or
+  member name, and default parameters of generic functions parse in modules as
+  in the REPL. Legacy assertion, colon-bound and assignment-expression
+  diagnostics now come from the failing production in every entry point.
+- Publication refuses a detached HEAD, a stale reviewed candidate, managed-file
+  edits and store conflicts before it writes its prepared journal, and rechecks
+  the captured index immediately before the ref compare-and-set. A refused or
+  lost compare-and-set discards that journal, so the pending batch can be
+  retried. Recovery likewise discards a prepared journal when neither HEAD nor
+  any local branch contains its candidate, even if the candidate object
+  survives or the index changed since; legacy-migration journals stay
+  resumable. Recovery also recognises a reconciled `.orna/store` index
+  installed before its journal stage. New candidate objects are flushed before
+  the ref names them, and the ref is flushed before the runtime tail is
+  consumed.
 
 ## 1.0.0 — release inventory (publication pending)
 
