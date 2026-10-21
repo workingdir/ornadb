@@ -305,12 +305,12 @@ impl crate::GitCommitRef {
 }
 
 /// Opaque proof that the pinned `main.orna` source/schema root was present in
-/// the admitted snapshot. The native commit identity remains repository-owned.
+/// the admitted snapshot as a regular blob. The native commit identity remains
+/// repository-owned.
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
     oid: NativeOid,
-    digest: [u8; 32],
 }
 
 /// Opaque proof that the pinned `.orna/store` tree had a valid native-tree
@@ -448,20 +448,15 @@ impl RepositoryFormatContext {
         &self.snapshot
     }
 
-    /// A non-authoritative schema/root validation seam for later values and
-    /// row layers. It validates only the fixed source root in this slice.
+    /// Pins the committed `main.orna` source root by its native blob OID.
+    ///
+    /// The source bytes are not read here. Store format 3 bounds only
+    /// `database.orna` at 64 KiB (store-format-3 §1); a module source is
+    /// admitted under the source-module bound when a table is bound to it.
+    /// Reading and capping the source on every row-map load would make a
+    /// project with a larger `main.orna` unable to open any row.
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
-        let source = match self
-            .snapshot
-            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
-        {
-            Ok(source) => source,
-            Err(RepositoryError::GitUnavailable) => {
-                return Err(FormatContextError::SchemaRootUnavailable);
-            }
-            Err(_) => return Err(FormatContextError::SchemaRootInvalid),
-        };
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let oid = committed_path_oid(
             &self.repository,
@@ -479,7 +474,6 @@ impl RepositoryFormatContext {
         Ok(SchemaRootPin {
             snapshot: self.snapshot.clone(),
             oid,
-            digest: Sha256::digest(&source).into(),
         })
     }
 
@@ -1579,6 +1573,62 @@ mod graph_bridge_tests {
             context
                 .require_database_id()
                 .expect("admitted format-3 identity")
+        );
+    }
+
+    /// store-format-3 §1 bounds only `database.orna` at 64 KiB. A larger
+    /// `main.orna` still pins the schema root, loads the row map and opens
+    /// the graph (A07-storage-rows-09).
+    #[test]
+    fn a_main_source_over_64_kib_still_opens_the_row_map() {
+        let directory = repository();
+        let root = directory.path();
+        let mut source = MAIN_SOURCE.to_owned();
+        while source.len() <= 64 * 1024 {
+            source.push_str("// Padding that keeps this module source above 64 KiB.\n");
+        }
+        fs::write(root.join("main.orna"), &source).expect("write the oversized source");
+        commit(root);
+
+        let relation_id = [0x5a; 16];
+        let initial = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &initial, relation_id);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let rows = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(1, inline_value())],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &rows, 1);
+
+        let pinned = context(root);
+        let schema_root = pinned
+            .validate_schema_root()
+            .expect("an oversized source still pins the schema root");
+        let head_source = git_output(root, &["rev-parse", "HEAD:main.orna"], None);
+        assert_eq!(
+            schema_root.oid.to_hex(),
+            std::str::from_utf8(&head_source)
+                .expect("rev-parse prints an OID")
+                .trim()
+        );
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the row map loads beside an oversized source");
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("the graph opens beside an oversized source");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        assert!(
+            graph
+                .lookup_row(&TypedKey::UInt(1), &scope)
+                .expect("bounded point lookup")
+                .is_some()
         );
     }
 
