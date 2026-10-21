@@ -92,3 +92,31 @@ fn automatic_ids_survive_delete_reset_checkout_and_branch_switch() {
     assert_eq!(recorded(&three), "3");
     assert_eq!(recorded(&declared), "0");
 }
+
+#[test]
+fn ids_allocated_by_a_failed_activation_are_never_reused() {
+    // ORNA-AUTOID-002 forbids reuse; ORNA-AUTOID-003 makes the gap a failed
+    // allocation leaves expected. The `if` block inserts (allocating ID 3)
+    // and then fails, so the REPL reports an evaluation error and commits
+    // nothing.
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, NOTES);
+    let note = admitted_relations(&commit_source(&root, "Declare Note"))["Note"].clone();
+    assert_eq!(insert_notes(&root, &["a", "b"]), vec![1, 2]);
+
+    let failed = orna_repl(
+        &root,
+        "if true { main.Note.insert({ text: \"lost\" }); fail(error(code: \"test.stop\", message: \"stop\")); }",
+    );
+    assert_success(&failed, "REPL session with a failing activation");
+    assert!(
+        transcript(&failed).contains("ORNA-EVAL-ERROR"),
+        "{}",
+        transcript(&failed)
+    );
+
+    // The next allocation continues above the failed activation's ID 3.
+    assert_eq!(insert_notes(&root, &["c"]), vec![4]);
+    publish(&root, "Notes after a failed activation");
+    assert_eq!(query_rows(&root, &["query", &note, "--format", "json"]), 3);
+}

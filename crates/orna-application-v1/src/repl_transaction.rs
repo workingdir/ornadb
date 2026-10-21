@@ -44,15 +44,18 @@ impl ApplicationAuthority {
             scope,
             next_row_ordinal: 0,
         };
-        let (value, successor) = session
-            .evaluate_staged_with_effects(staged, &mut effects)
-            .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        // Reserve before the evaluation outcome is inspected: an activation that fails
+        // after allocating an automatic ID still hands that ID out, so it must never be
+        // reused (ORNA-AUTOID-002). The gap it leaves is expected (ORNA-AUTOID-003).
+        let evaluation = session.evaluate_staged_with_effects(staged, &mut effects);
         reserve_automatic_ids(
             scope,
             &ids_for_storage,
             &watermarks,
             &effects.mutations.automatic_id_high_water(),
         )?;
+        let (value, successor) = evaluation
+            .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
         let activation = effects
             .mutations
             .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
