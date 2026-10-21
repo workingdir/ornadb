@@ -1,1 +1,1 @@
-fn bad(values: [Int]) = std.collection.map(rows: values, callback: value => value);
+fn bad(values: [Int]) = map(rows: values, callback: value => value);
