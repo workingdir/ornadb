@@ -127,7 +127,7 @@ Compare keys as unsigned 64-bit integers. This is the normative bit-level implem
 
 ## Blob and information quantity
 
-`Blob` is raw binary content. Storage size is a numeric quantity with an information unit.
+`Blob` is immutable binary content with canonical declared media type and optional suffix; its physical representation may be lazy. Its raw-byte commitment is independent of those annotations. Its exact value, range, identity and storage rules are in [Blob values](#blob-values) and [Git-native storage](#blob-storage). It is not a filename or a byte-count quantity. Storage size is a numeric quantity with an information unit.
 
 ```text
 payload: Blob
@@ -509,4 +509,3 @@ For explicit `Target.from(source)`:
 5. Invoke its `from` function.
 6. If invocation fails, propagate normally. If it succeeds, require the target value type.
 7. Do not search for an intermediate `U` and do not chain `Target.from(U.from(source))` implicitly.
-

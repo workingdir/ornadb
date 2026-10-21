@@ -1,0 +1,53 @@
+{
+  "version": "1.1.0",
+  "publication_revision": "final-2026-10-05",
+  "profiles": {
+    "repository-engine-1.1": {
+      "required": [
+        "OGS-1",
+        "ORP-1",
+        "OGB-2",
+        "ROV-3",
+        "SOV-3",
+        "OVB-2",
+        "MIME-1",
+        "CAPTURE-3",
+        "PUB-3",
+        "CHECKOUT-3",
+        "UPGRADE-3"
+      ],
+      "must_include": "retained applicable language/runtime contracts"
+    },
+    "vfs-linux-v1": {
+      "requires": "repository-engine-1.1",
+      "mandatory": "reads and writes, EDIT-1, real editor and crash tests"
+    },
+    "source-hosted-app-v1": {
+      "conditional": true,
+      "required_prefixes": [
+        "ORNA-APP-"
+      ],
+      "optional_browser_requirements": [
+        "ORNA-APP-015",
+        "ORNA-APP-016"
+      ]
+    },
+    "orna-browser-client-v1": {
+      "conditional": true,
+      "requires": "source-hosted-app-v1",
+      "required": [
+        "ORNA-APP-015",
+        "ORNA-APP-016"
+      ]
+    },
+    "media-inspection-v1": {
+      "conditional": true,
+      "required_prefixes": [
+        "ORNA-MEDIA-"
+      ],
+      "conditional_analysis": [
+        "ORNA-KNOW-"
+      ]
+    }
+  }
+}
