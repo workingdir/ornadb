@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
