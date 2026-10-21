@@ -227,7 +227,7 @@ fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
         )
     })?;
     filesystem
-        .capture_file_stream(root_text, relative_path, max_bytes)
+        .capture_file(root_text, relative_path, max_bytes)
         .map_err(|error| source_error(path, error, String::new()))
 }
 

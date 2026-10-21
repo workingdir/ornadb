@@ -13,7 +13,7 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
-use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
+use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
 
@@ -919,6 +919,12 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
         self.explain_catalogue.as_deref()
     }
 
+    /// Captures return lazy ROV-3 values in the repository capture context;
+    /// every other value keeps the OVB-2 profile.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -999,7 +1005,11 @@ impl SysHostBindingRegistry {
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
             .map_err(|failure| capture_file_failure(operation, failure))?;
-        let candidate = repository.capture_blob_candidate(&mut source, max_bytes);
+        // The stream already holds the source within `max_bytes` and the
+        // provider limit, so its observed length is the writer's ceiling;
+        // growth past it is reported below as a changed source.
+        let length = source.length();
+        let candidate = repository.capture_blob_candidate(&mut source, length);
         source
             .verify_unchanged()
             .map_err(|failure| capture_file_failure(operation, failure))?;
@@ -1017,10 +1027,14 @@ impl SysHostBindingRegistry {
         // Capture is one of the old constructors: it supplies the
         // octet-stream/null annotation whatever the file is called, and an
         // importer declares the media type afterwards with `sys.blob.annotate`
-        // (ORNA-MIME-001).
-        let blob = Blob::from_bytes(source.into_captured_bytes());
-        let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
-            .map(Some)
+        // (ORNA-MIME-001). The value names the candidate's descriptor in the
+        // capture context, so no captured byte is held in memory
+        // (ORNA-BLOB-007; store-format-3 ROV-3).
+        let value = repository
+            .candidate_value(&candidate)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        let blob = value
+            .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         self.capture_candidates
             .lock()
@@ -1030,7 +1044,7 @@ impl SysHostBindingRegistry {
                 media_type: blob.media_type().to_owned(),
                 suffix: blob.suffix().map(str::to_owned),
             });
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -1315,6 +1329,7 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_value_v1::Blob;
 
     #[test]
     fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
