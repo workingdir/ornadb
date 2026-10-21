@@ -42,7 +42,11 @@ fn final_vector_paths_project_to_the_published_components() {
                 // for a Str key is its OVB-1 encoding, not its raw UTF-8 bytes.
                 let encoding =
                     orna_value_v1::encode_typed(&input.to_owned()).expect("a Str key encodes");
-                assert_eq!(hex(&digest), hex(&Sha256::digest(encoding)), "paths[{index}]");
+                assert_eq!(
+                    hex(&digest),
+                    hex(&Sha256::digest(encoding)),
+                    "paths[{index}]"
+                );
             }
             Err(error) => panic!("paths[{index}] does not unproject: {error:?}"),
         }
