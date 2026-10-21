@@ -1539,7 +1539,7 @@ mod tests {
 
     #[test]
     fn discarded_results_still_propagate_nested_evaluation_errors() {
-        let value = crate::Value::List(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
+        let value = crate::Value::list(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
         assert_eq!(
             value
                 .discard_result()
