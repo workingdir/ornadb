@@ -464,9 +464,21 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         "a range with no visible change does not fail the verb: {}",
         String::from_utf8_lossy(&second.stderr)
     );
+    // W02-06: the verb says what happened to the mutations it consumed
+    // instead of claiming they were already committed (ORNA-UX-004).
+    let first_line = second_out.lines().next().unwrap_or_default();
+    let cleared = ["was cleared", "were cleared"].iter().any(|ending| {
+        first_line.ends_with(&format!(
+            " made no visible change to the committed snapshot and {ending}"
+        ))
+    });
     assert!(
-        second_out.contains("already committed"),
-        "the verb reports that the changes are already committed: {second_out:?}"
+        first_line.starts_with("nothing to publish: ")
+            && first_line.contains(" runtime mutation")
+            && cleared
+            && second_out.contains(" unchanged rows")
+            && !second_out.contains("already committed"),
+        "the verb reports the mutations it cleared: {second_out:?}"
     );
     assert_eq!(
         head(root_path),
