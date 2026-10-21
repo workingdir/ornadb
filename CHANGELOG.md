@@ -99,6 +99,17 @@ been published.
   member name, and default parameters of generic functions parse in modules as
   in the REPL. Legacy assertion, colon-bound and assignment-expression
   diagnostics now come from the failing production in every entry point.
+- Publication refuses a detached HEAD, a stale reviewed candidate, managed-file
+  edits and store conflicts before it writes its prepared journal, and rechecks
+  the captured index immediately before the ref compare-and-set. A refused or
+  lost compare-and-set discards that journal, so the pending batch can be
+  retried. Recovery likewise discards a prepared journal when neither HEAD nor
+  any local branch contains its candidate, even if the candidate object
+  survives or the index changed since; legacy-migration journals stay
+  resumable. Recovery also recognises a reconciled `.orna/store` index
+  installed before its journal stage. New candidate objects are flushed before
+  the ref names them, and the ref is flushed before the runtime tail is
+  consumed.
 
 ## 1.0.0 — release inventory (publication pending)
 
