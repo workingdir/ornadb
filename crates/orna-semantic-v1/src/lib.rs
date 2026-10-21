@@ -11416,6 +11416,14 @@ fn infer_finite_list_collection_call(
         ["sort_by"] if root_collection_intrinsic_is_unshadowed("sort_by", scope, local) => {
             "sort_by"
         }
+        [operation]
+            if matches!(
+                *operation,
+                "filter" | "map" | "flat_map" | "take" | "drop" | "distinct" | "union" | "count"
+            ) && root_collection_intrinsic_is_unshadowed(operation, scope, local) =>
+        {
+            *operation
+        }
         _ => standard_collection_module_operation(callee, scope, local)?,
     };
     Some(infer_finite_list_collection(
