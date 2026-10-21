@@ -5,6 +5,9 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
+- A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
+- A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
