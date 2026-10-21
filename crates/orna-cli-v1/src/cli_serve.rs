@@ -3284,6 +3284,30 @@ mod tests {
         assert_eq!(resume_reply(address, &session).status, 410);
     }
 
+    /// 30-protocol §Session creation and ownership, W20-04: a session that
+    /// has run an evaluation can be deleted once its socket has gone. DELETE
+    /// joins its finished application work and answers 204; before, it
+    /// answered 400 `live.malformed_request`.
+    #[test]
+    fn delete_ends_a_detached_session_that_has_evaluated() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=detached"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [81; 16]));
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        assert!(closed_by_server(&mut socket));
+
+        assert_eq!(delete_session_once_released(address, &session), 204);
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
     /// 30-protocol §Session creation and ownership, A13-live-serving-15:
     /// expiry terminates the owner and cancels its children. Once a session's
     /// lease elapses, the owner sweep ends it without any client request, so
