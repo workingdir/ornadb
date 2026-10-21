@@ -2256,8 +2256,7 @@ mod graph_bridge_tests {
             .maintain_row_index(
                 &[RowIndexMutation::Insert {
                     key: TypedKey::UInt(0),
-                    value: RowValue::inline(inline_value(), Vec::new())
-                        .expect("canonical prepended row"),
+                    fields: inline_value(),
                 }],
                 &scope,
             )
@@ -2367,7 +2366,7 @@ mod graph_bridge_tests {
             },
             RowIndexMutation::Insert {
                 key: TypedKey::UInt(0),
-                value: RowValue::inline(inline_value(), Vec::new()).expect("canonical row value"),
+                fields: inline_value(),
             },
         ];
         let churn = graph
