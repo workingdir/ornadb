@@ -33,7 +33,11 @@ fn orna(directory: &Path, arguments: &[&str]) -> Output {
 
 fn assert_output(output: &Output, stdout: &str) {
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stdout, "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        stdout,
+        "{output:?}"
+    );
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
@@ -53,7 +57,10 @@ fn section_six_example_constructs_matches_and_stores_enum_values() {
         assert_output(&orna(directory, &["repl", submission]), expected);
     }
 
-    assert_output(&orna(directory, &["run", "main.seed"]), "invocation completed\n");
+    assert_output(
+        &orna(directory, &["run", "main.seed"]),
+        "invocation completed\n",
+    );
     let status = orna(directory, &["status", "--short"]);
     assert!(status.status.success(), "{status:?}");
     assert!(
