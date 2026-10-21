@@ -41,8 +41,9 @@ pub enum SystemProviderHost {
     /// A host executes the member through the provider it installs for an
     /// operation of the generated host-operation registry.
     HostOperationRegistry,
-    /// `orna serve` dispatches the member through the live runtime
-    /// administration boundary.
+    /// `orna-application-v1` forwards the member to the trusted source-effect
+    /// dispatcher its host supplies; `orna serve` supplies the live runtime
+    /// administration dispatcher.
     LiveAdministration,
     /// The `orna run` and `orna serve` hosts read the rows from runtime
     /// publication metadata.
@@ -57,7 +58,7 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 6] = [
+const DECLARED_LINKS: [SystemProviderLink; 7] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
@@ -72,14 +73,20 @@ const DECLARED_LINKS: [SystemProviderLink; 6] = [
         host: SystemProviderHost::Evaluator,
     },
     // `orna-application-v1`: `AsyncSourceMutationEffectHandler` forwards both
-    // stream transitions to the `orna-live-v1` runtime administration
-    // dispatcher.
+    // stream transitions and `sys.cancel` to the trusted source-effect
+    // dispatcher. The `orna-live-v1` dispatcher of `orna serve` executes the
+    // stream transitions and answers cancellation with the portable
+    // `sys.invoke.effect_unavailable`.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.admin.pause_stream"),
         host: SystemProviderHost::LiveAdministration,
     },
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.admin.resume_stream"),
+        host: SystemProviderHost::LiveAdministration,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.cancel"),
         host: SystemProviderHost::LiveAdministration,
     },
     // `orna-evaluator-v1` recognises both canonical names as relation
@@ -234,7 +241,7 @@ mod tests {
             SystemSurfaceMember::Callable("sys.snapshot(Str)"),
             SystemSurfaceMember::Callable("sys.explain(FunctionRef)"),
             SystemSurfaceMember::Relation("sys.Plan"),
-            SystemSurfaceMember::Callable("sys.cancel"),
+            SystemSurfaceMember::Callable("sys.start(Value)"),
             SystemSurfaceMember::Relation("sys.Run"),
             SystemSurfaceMember::Relation("sys.storage.objects"),
             SystemSurfaceMember::HistoricalView("sys.Storage"),
@@ -248,6 +255,7 @@ mod tests {
             SystemSurfaceMember::Callable("sys.blob.annotate"),
             SystemSurfaceMember::Callable("sys.explain(Query)"),
             SystemSurfaceMember::Callable("sys.blob.capture_file"),
+            SystemSurfaceMember::Callable("sys.cancel"),
             SystemSurfaceMember::Relation("sys.Storage"),
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
