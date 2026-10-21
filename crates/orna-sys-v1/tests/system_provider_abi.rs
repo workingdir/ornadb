@@ -6,9 +6,10 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderId, ProviderOffer, ProviderRoleRegistry,
     SemanticRoleId, SystemDispatchTable, SystemEffect, SystemOperationProvider, SystemProviderAbi,
     TypeId, TypedValue, ValueMetadataFacts, ValueMetadataResolver, system_api_json,
-    system_api_schema_json, system_binding_stubs, system_dispatch_table, system_function_descriptor,
-    system_provider_abi, system_value_metadata,
-    system_provider_abi_json, system_provider_abi_schema_json, validate_provider_offer,
+    system_api_schema_json, system_binding_stubs, system_dispatch_table,
+    system_function_descriptor, system_host_operation_registry, system_provider_abi,
+    system_provider_abi_json, system_provider_abi_schema_json, system_value_metadata,
+    validate_provider_offer,
 };
 use serde_json::Value;
 
@@ -26,9 +27,6 @@ const PROVIDER_METADATA_EDGE_FIXTURE: &str = include_str!("fixtures/provider-met
 #[path = "../src/abi_version.rs"]
 #[allow(dead_code)]
 mod abi_version;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
@@ -38,6 +36,9 @@ mod build_provider;
 #[path = "../build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
+#[path = "../src/host_registry_model.rs"]
+#[allow(dead_code)]
+mod host_registry_model;
 
 const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.precondition_failed",
@@ -45,17 +46,87 @@ const SHARED_PROVIDER_FAILURES: [&str; 3] = [
     "sys.abi.provider_failed",
 ];
 
-/// Failure codes that `sys.blob.annotate` declares under the shared `sys.blob`
-/// family (source/34-system-reference.md, `sys.blob.annotate`) rather than under
-/// the operation name, so the namespace rule below cannot derive them.
-const FAMILY_FAILURES: [(&str, [&str; 3]); 1] = [(
-    "sys.blob.annotate",
-    [
-        "sys.blob.invalid_media_type",
-        "sys.blob.invalid_suffix",
-        "sys.blob.incompatible_suffix",
-    ],
-)];
+/// Failure classes the specification prose assigns to one operation.
+const SPEC_FAILURES: &[(&str, &[&str])] = &[
+    // source/15-system.md INVOKE-1 step 1, ORNA-SYS-079, ORNA-SYS-132.
+    (
+        "sys.invoke<T>",
+        &[
+            "sys.invoke.snapshot_mismatch",
+            "sys.invoke.idempotency_mismatch",
+            "sys.invoke.return_type",
+        ],
+    ),
+    ("sys.start<T>", &["sys.invoke.return_type"]),
+    // source/10-execution.md "Starting and awaiting": `inherit` is invalid.
+    ("sys.start(Value)", &["sys.invoke.transaction_mode"]),
+    // source/15-system.md "Reflective invocation", ORNA-SYS-020.
+    (
+        "sys.await",
+        &["sys.invoke.await_timeout", "sys.handle.foreign_runtime"],
+    ),
+    // source/16-administration.md "Shared preconditions and failure classes"
+    // and "Repository operations".
+    (
+        "sys.admin.create_branch(Str)",
+        &[
+            "sys.git.unborn_head",
+            "sys.git.uncommitted_snapshot",
+            "sys.git.invalid_ref",
+            "sys.git.branch_exists",
+        ],
+    ),
+    (
+        "sys.admin.checkout(Str)",
+        &["sys.git.dirty_conflict", "sys.git.stale_plan"],
+    ),
+    (
+        "sys.admin.commit",
+        &[
+            "sys.admin.read_only",
+            "sys.admin.busy",
+            "sys.git.nothing_to_commit",
+        ],
+    ),
+    // source/16-administration.md "Reviewed commit boundary (1.1)".
+    (
+        "sys.admin.commit_reviewed",
+        &["sys.git.stale_review", "sys.git.nothing_to_commit"],
+    ),
+    // source/16-administration.md "Storage operations", ORNA-SYS-119.
+    ("sys.admin.compact", &["sys.storage.rewrite_conflict"]),
+    ("sys.admin.verify", &["sys.admin.verification_failed"]),
+    // source/16-administration.md "Runs, streams and delivery state",
+    // ORNA-SYS-064.
+    (
+        "sys.admin.reset_checkpoint",
+        &["sys.checkpoint.conflict", "sys.checkpoint.not_replayable"],
+    ),
+    (
+        "sys.admin.skip_failure",
+        &["sys.failure.skip_unsupported", "sys.failure.stale_version"],
+    ),
+    ("sys.admin.resolve_failure", &["sys.failure.state_conflict"]),
+    // source/36-blob-values.md "Shared API": an invalid declaration or hint
+    // fails before change.
+    (
+        "sys.blob.annotate",
+        &[
+            "sys.blob.invalid_media_type",
+            "sys.blob.invalid_suffix",
+            "sys.blob.incompatible_suffix",
+        ],
+    ),
+    // source/38-ingestion-inspection.md ORNA-INGEST-002, ORNA-INGEST-003.
+    (
+        "sys.blob.capture_file",
+        &[
+            "sys.blob.source_denied",
+            "sys.blob.limit",
+            "sys.blob.source_changed",
+        ],
+    ),
+];
 
 fn bind_type_parameter(ty: &AbiType, parameter: &str, witness: &AbiType) -> AbiType {
     match ty {
@@ -1246,10 +1317,16 @@ fn provider_linkage_reports_missing_version_effect_and_duplicate_gaps() {
     );
 }
 
+/// ORNA-SYS-096, ORNA-SYS-097: every operation declares its portable failures
+/// explicitly. Each declared code is published, every operation also declares
+/// the global and shared provider-boundary codes, every published code is
+/// reachable, the failure classes the specification prose assigns to an
+/// operation are declared by it, and a host operation registered under a
+/// portable name declares no failure its portable contract lacks.
 #[test]
-fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
+fn every_dispatch_operation_declares_its_portable_failure_vocabulary() {
     let api: Value = serde_json::from_str(&system_api_json()).unwrap();
-    let declared_failures = api["failure_codes"]
+    let published = api["failure_codes"]
         .as_array()
         .unwrap()
         .iter()
@@ -1259,6 +1336,11 @@ fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
     let table = system_dispatch_table();
     assert_eq!(table.operations().count(), functions.len());
 
+    let mut reachable = build_support::GLOBAL_FAILURE_CODES
+        .into_iter()
+        .chain(build_support::NON_CALLABLE_FAILURE_CODES)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
     let mut public_operation_ids = BTreeSet::new();
     for function in functions {
         let operation_id = function["name"].as_str().unwrap();
@@ -1267,53 +1349,36 @@ fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
             .operation(operation_id)
             .unwrap_or_else(|| panic!("missing typed operation `{operation_id}`"));
         assert_eq!(contract.signature.source, function["signature"]);
-
-        let namespace = operation_id
-            .find(['(', '<'])
-            .map_or(operation_id, |end| &operation_id[..end]);
-        let expected_failures = declared_failures
-            .iter()
-            .filter(|code| {
-                *code == namespace
-                    || code
-                        .strip_prefix(namespace)
-                        .is_some_and(|tail| tail.starts_with('.'))
-            })
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let family_failures = FAMILY_FAILURES
-            .iter()
-            .find(|(operation, _)| *operation == operation_id)
-            .map_or_else(BTreeSet::new, |(_, codes)| {
-                codes.iter().map(|code| code.to_string()).collect::<BTreeSet<_>>()
-            });
-        for code in &family_failures {
-            assert!(
-                declared_failures.contains(code),
-                "family failure `{code}` for `{operation_id}` is absent from the published failure_codes"
-            );
-        }
-        let expected_failures = expected_failures
-            .into_iter()
-            .chain(family_failures)
-            .collect::<BTreeSet<_>>();
-        let registered_failures = contract
+        for code in contract
             .failures
             .iter()
-            .filter(|code| !SHARED_PROVIDER_FAILURES.contains(&code.as_str()))
-            .map(|code| code.as_str().to_owned())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            registered_failures, expected_failures,
-            "portable failure vocabulary for `{operation_id}`"
-        );
-        for code in SHARED_PROVIDER_FAILURES {
+            .map(FailureCode::as_str)
+            .filter(|code| !SHARED_PROVIDER_FAILURES.contains(code))
+        {
+            assert!(
+                published.contains(code),
+                "`{operation_id}` declares unpublished failure `{code}`"
+            );
+            assert!(
+                !build_support::NON_CALLABLE_FAILURE_CODES.contains(&code),
+                "`{operation_id}` declares the non-callable failure `{code}`"
+            );
+            reachable.insert(code.to_owned());
+        }
+        for code in build_support::GLOBAL_FAILURE_CODES
+            .into_iter()
+            .chain(SHARED_PROVIDER_FAILURES)
+        {
             assert!(
                 contract.declares_failure(&FailureCode::new(code).unwrap()),
-                "shared provider boundary code `{code}` is absent from `{operation_id}`"
+                "`{operation_id}` does not declare `{code}`"
             );
         }
     }
+    assert_eq!(
+        reachable, published,
+        "every published failure code is reachable"
+    );
     assert_eq!(
         public_operation_ids,
         table
@@ -1322,6 +1387,34 @@ fn every_dispatch_operation_matches_its_published_failure_vocabulary() {
             .collect(),
         "published operations and typed dispatch entries remain 1:1"
     );
+
+    for (operation_id, codes) in SPEC_FAILURES {
+        let contract = table
+            .operation(operation_id)
+            .unwrap_or_else(|| panic!("missing typed operation `{operation_id}`"));
+        for code in *codes {
+            assert!(
+                contract.declares_failure(&FailureCode::new(*code).unwrap()),
+                "`{operation_id}` must declare `{code}`"
+            );
+        }
+    }
+
+    for host in system_host_operation_registry()
+        .operations()
+        .filter(|operation| operation.name.starts_with("sys."))
+    {
+        let contract = table
+            .operation(&host.name)
+            .unwrap_or_else(|| panic!("host operation `{}` has no portable contract", host.name));
+        for code in &host.failures {
+            assert!(
+                contract.declares_failure(&FailureCode::new(code).unwrap()),
+                "host operation `{}` declares `{code}` outside its portable contract",
+                host.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -2744,8 +2837,8 @@ fn provider_tuple_entry_edges_preserve_generated_binding_and_dispatch_contracts(
                     Argument { name, value }
                 })
                 .collect::<Vec<_>>();
-            let argument_map = ArgumentMap::new(source_entries.iter().cloned())
-                .unwrap_or_else(|error| {
+            let argument_map =
+                ArgumentMap::new(source_entries.iter().cloned()).unwrap_or_else(|error| {
                     panic!("{case_name} fixture forms an argument map: {error:?}")
                 });
             let reversed_map = ArgumentMap::new(source_entries.iter().rev().cloned())
@@ -2953,12 +3046,9 @@ fn provider_tuple_entry_edges_preserve_generated_binding_and_dispatch_contracts(
         b"wrong".to_vec(),
     ));
     assert_eq!(
-        table.dispatch_to_provider(
-            generated.name,
-            &wrong_direct_provider,
-            &arguments,
-            |_| Ok(())
-        ),
+        table.dispatch_to_provider(generated.name, &wrong_direct_provider, &arguments, |_| Ok(
+            ()
+        )),
         Err(result_diagnostic.clone())
     );
     assert_eq!(wrong_direct_provider.calls.load(Ordering::SeqCst), 1);
@@ -5919,7 +6009,10 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
     );
 
     assert_eq!(
-        role_contract.builtin_provider.as_ref().map(ProviderId::as_str),
+        role_contract
+            .builtin_provider
+            .as_ref()
+            .map(ProviderId::as_str),
         fixture["builtin_provider"].as_str()
     );
     assert!(role_contract.required);
@@ -6147,7 +6240,10 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
             wrong_result,
             Err(ProviderDiagnostic::ResultTypeMismatch {
                 operation: contract.id.clone(),
-                expected: fixture["result_diagnostic_type"].as_str().unwrap().to_owned(),
+                expected: fixture["result_diagnostic_type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
                 actual: wrong_result_type.to_owned(),
             })
         );
@@ -6173,12 +6269,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
                 |_| Ok(()),
             )
         } else {
-                table.dispatch_to_provider(
-                operation_name,
-                &arity_provider,
-                &[],
-                |_| Ok(()),
-            )
+            table.dispatch_to_provider(operation_name, &arity_provider, &[], |_| Ok(()))
         };
         assert_eq!(
             arity_result,
