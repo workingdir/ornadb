@@ -1451,6 +1451,17 @@ pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
     }
 }
 
+/// The database identity of either a canonical format-3 record or a preserved
+/// legacy sidecar. A pending migration candidate carries the sidecar identity
+/// forward, so the runtime identity must read it from there.
+pub(super) fn parse_any_database_id(bytes: &[u8]) -> Result<DatabaseId, ()> {
+    match parse_database_record(bytes).map_err(|_| ())? {
+        DatabaseRecord::Format3(database_id) | DatabaseRecord::LegacySidecar(database_id) => {
+            Ok(database_id)
+        }
+    }
+}
+
 #[cfg(test)]
 mod graph_bridge_tests {
     use std::{

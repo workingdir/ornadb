@@ -1,1 +1,1 @@
-[1, 2, 3] | std.collection.drop(count: 2)
+[1, 2, 3] | drop(count: 2)
