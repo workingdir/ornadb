@@ -14,7 +14,7 @@ use std::{
 use num_bigint::BigInt;
 use orna_repository_v1::{
     GitCommitRef, Repository, RepositoryError, Uuid,
-    relation_admission::{StagedCandidate, StoredObjectIdentity},
+    relation_admission::{RelationAdmissionError, StagedCandidate, StoredObjectIdentity},
 };
 use orna_semantic_v1::{
     Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
@@ -138,12 +138,45 @@ pub enum ObjectIdentityError {
     InvalidEncoding,
     InvalidSource,
     IdentityCollision,
+    /// A rename names an object with no active committed or staged identity.
+    MissingIdentity,
+    /// The Git index or `HEAD` changed while identities were being staged.
+    StaleIndex,
     Io,
 }
+
+impl std::fmt::Display for ObjectIdentityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidEncoding => "the object identity inventory is not canonical",
+            Self::InvalidSource => {
+                "the source does not declare the renamed object under its new name"
+            }
+            Self::IdentityCollision => "the new name already has an object identity",
+            Self::MissingIdentity => "the object has no committed or staged identity to keep",
+            Self::StaleIndex => {
+                "the Git index or HEAD changed while the identity was staged; retry"
+            }
+            Self::Io => "the object identity inventory could not be read or staged",
+        })
+    }
+}
+
+impl std::error::Error for ObjectIdentityError {}
 
 impl From<RepositoryError> for ObjectIdentityError {
     fn from(_: RepositoryError) -> Self {
         Self::Io
+    }
+}
+
+impl From<RelationAdmissionError> for ObjectIdentityError {
+    fn from(error: RelationAdmissionError) -> Self {
+        match error {
+            RelationAdmissionError::StaleIndex => Self::StaleIndex,
+            RelationAdmissionError::InvalidIdentity => Self::InvalidEncoding,
+            _ => Self::Io,
+        }
     }
 }
 
@@ -508,6 +541,89 @@ impl ObjectIdentityManifest {
             .map_err(|_| ObjectIdentityError::Io)?
             .map(|bytes| Self::decode(&bytes))
             .transpose()
+    }
+
+    /// Reads the inventory the ordinary Git index stages: the identity
+    /// relation of its `.orna/store`, or the legacy sidecar of an index that
+    /// predates that relation. `Ok(None)` while nothing is staged or
+    /// committed, when no object has an identity yet.
+    ///
+    /// This is the inventory the next `orna commit` reconciles, so it answers
+    /// whether a rename can keep an object's ObjectId (ORNA-OBJECT-003).
+    pub fn read_index(repository: &Repository) -> Result<Option<Self>, ObjectIdentityError> {
+        let Some(staged) = Self::capture_index_inventory(repository)? else {
+            return Ok(None);
+        };
+        Self::read_staged(repository, &staged)
+    }
+
+    /// Captures the ordinary index when it stages a store or the legacy
+    /// sidecar, the only places an identity inventory can be staged.
+    fn capture_index_inventory(
+        repository: &Repository,
+    ) -> Result<Option<StagedCandidate>, ObjectIdentityError> {
+        if !repository.index_stages_object_identities()? {
+            return Ok(None);
+        }
+        Ok(Some(repository.capture_staged_candidate()?))
+    }
+
+    /// Moves each renamed identity to its new name in the inventory the
+    /// ordinary index stages, and stages the resulting `.orna/store`
+    /// (ORNA-OBJECT-003). Nothing is committed: the change is reviewable with
+    /// `git status`, and the next `orna commit` keeps the ObjectId.
+    ///
+    /// `modules` is the source after the rename, which must declare every
+    /// new name. Each old name must have an active identity and each new
+    /// name must have none. A table carries its fields and a type carries its
+    /// fields, variants and variant fields, as in
+    /// [`Self::reconcile_with_renames`]. No other identity is allocated or
+    /// retired, so declarations staged and unstaged differently keep theirs.
+    /// `Ok(None)` when the index stages no inventory: no object has an
+    /// identity to keep yet, so the rename is plain source text.
+    pub fn stage_renames(
+        repository: &Repository,
+        modules: &[ModuleInput],
+        renames: &[ObjectIdentityRename],
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        let Some(staged) = Self::capture_index_inventory(repository)? else {
+            return Ok(None);
+        };
+        let Some(previous) = Self::read_staged(repository, &staged)? else {
+            return Ok(None);
+        };
+        for rename in renames {
+            if previous
+                .id(rename.kind, &rename.old_qualified_name)
+                .is_none()
+            {
+                return Err(ObjectIdentityError::MissingIdentity);
+            }
+            if previous
+                .id(rename.kind, &rename.new_qualified_name)
+                .is_some()
+            {
+                return Err(ObjectIdentityError::IdentityCollision);
+            }
+        }
+        let declared = source_identity_keys(modules)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut records = previous.records;
+        apply_explicit_renames(&mut records, &declared, renames)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records)?;
+        let next = Self { records };
+        if staged.store_root().is_none() {
+            // A legacy index with only the sidecar: the store and its
+            // inventory relation are created by the next `orna commit`.
+            return Err(ObjectIdentityError::Io);
+        }
+        repository.stage_object_identities(&staged, &next.to_stored())?;
+        Ok(Some(next))
     }
 
     /// The inventory as store rows for the sealed identity relation.
@@ -1813,7 +1929,7 @@ fn source_identity_keys(
     Ok(keys)
 }
 
-fn module_namespace(path: &str) -> Option<String> {
+pub(crate) fn module_namespace(path: &str) -> Option<String> {
     let path = path.strip_suffix(".orna")?;
     if path.starts_with('/') || path.contains('\\') || path.contains('\0') {
         return None;
@@ -3119,5 +3235,146 @@ pub table Invoice(id: Str) {
             assert_eq!(next.id(kind, new), first.id(kind, old), "{kind:?} {new}");
             assert!(next.id(kind, old).is_none(), "{kind:?} {old}");
         }
+    }
+
+    fn git_in(root: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    const RENAME_SOURCE: &str =
+        "pub enum Color { red, green, }\npub table Music(id: Str) { title: Str, hue: Color, }\n";
+
+    /// `orna init`, the source staged with Git, and a staged store holding
+    /// only the reconciled identity inventory.
+    fn staged_inventory() -> (tempfile::TempDir, Repository, ObjectIdentityManifest) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repository = orna_repository_v1::initialize_repository(root)
+            .unwrap()
+            .into_repository();
+        fs::write(root.join("main.orna"), RENAME_SOURCE).unwrap();
+        git_in(root, &["add", "main.orna", ".orna/database.orna"]);
+        let identities = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", RENAME_SOURCE)],
+            None,
+        )
+        .unwrap();
+        let staged = repository.capture_staged_candidate().unwrap();
+        repository
+            .stage_store_admission(&staged, &[], &identities.to_stored())
+            .unwrap();
+        (directory, repository, identities)
+    }
+
+    #[test]
+    fn a_fresh_index_has_no_identity_to_keep() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = orna_repository_v1::initialize_repository(directory.path())
+            .unwrap()
+            .into_repository();
+        assert_eq!(ObjectIdentityManifest::read_index(&repository), Ok(None));
+        let renames = [ObjectIdentityRename::new(
+            ObjectKind::Table,
+            "Music",
+            "Song",
+        )];
+        assert_eq!(
+            ObjectIdentityManifest::stage_renames(&repository, &[], &renames),
+            Ok(None)
+        );
+    }
+
+    /// ORNA-OBJECT-003: a staged rename keeps the ObjectId, changes only the
+    /// staged store, and allocates or retires nothing else.
+    #[test]
+    fn staged_renames_move_identities_in_the_index_store() {
+        let (directory, repository, identities) = staged_inventory();
+        let root = directory.path();
+        assert_eq!(
+            ObjectIdentityManifest::read_index(&repository).unwrap(),
+            Some(identities.clone())
+        );
+        let renamed_source = "pub enum Color { crimson, green, }\npub table Song(id: Str) { name: Str, hue: Color, }\n";
+        let renamed = [ModuleInput::new("main.orna", renamed_source)];
+        let renames = [
+            ObjectIdentityRename::new(ObjectKind::Table, "Music", "Song"),
+            ObjectIdentityRename::new(ObjectKind::Field, "Music.title", "Song.name"),
+            ObjectIdentityRename::new(ObjectKind::Variant, "Color.red", "Color.crimson"),
+        ];
+        let next = ObjectIdentityManifest::stage_renames(&repository, &renamed, &renames)
+            .unwrap()
+            .expect("the index stages an inventory");
+        for (kind, old, new) in [
+            (ObjectKind::Table, "Music", "Song"),
+            (ObjectKind::Field, "Music.title", "Song.name"),
+            (ObjectKind::Field, "Music.id", "Song.id"),
+            (ObjectKind::Field, "Music.hue", "Song.hue"),
+            (ObjectKind::Variant, "Color.red", "Color.crimson"),
+            (ObjectKind::Variant, "Color.green", "Color.green"),
+            (ObjectKind::Type, "Color", "Color"),
+        ] {
+            assert_eq!(
+                next.id(kind, new),
+                identities.id(kind, old),
+                "{kind:?} {new}"
+            );
+        }
+        assert_eq!(next.records().len(), identities.records().len());
+        assert!(next.records().iter().all(|record| !record.is_retired()));
+        assert_eq!(
+            ObjectIdentityManifest::read_index(&repository).unwrap(),
+            Some(next.clone())
+        );
+        // Only the staged store changed: the staged and worktree source are
+        // the caller's to edit and stage.
+        assert_eq!(git_in(root, &["show", ":main.orna"]), RENAME_SOURCE);
+        assert_eq!(
+            fs::read_to_string(root.join("main.orna")).unwrap(),
+            RENAME_SOURCE
+        );
+        assert!(repository.head().unwrap().is_none(), "nothing is committed");
+
+        let refused = |renames: &[ObjectIdentityRename]| {
+            ObjectIdentityManifest::stage_renames(&repository, &renamed, renames).unwrap_err()
+        };
+        assert_eq!(
+            refused(&[ObjectIdentityRename::new(
+                ObjectKind::Field,
+                "Music.title",
+                "Song.title"
+            )]),
+            ObjectIdentityError::MissingIdentity
+        );
+        assert_eq!(
+            refused(&[ObjectIdentityRename::new(
+                ObjectKind::Field,
+                "Song.id",
+                "Song.name"
+            )]),
+            ObjectIdentityError::IdentityCollision
+        );
+        assert_eq!(
+            refused(&[ObjectIdentityRename::new(
+                ObjectKind::Field,
+                "Song.name",
+                "Song.label"
+            )]),
+            ObjectIdentityError::InvalidSource
+        );
+        // A refused rename leaves the staged inventory as it was.
+        assert_eq!(
+            ObjectIdentityManifest::read_index(&repository).unwrap(),
+            Some(next)
+        );
     }
 }
