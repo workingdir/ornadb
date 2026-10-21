@@ -3282,7 +3282,12 @@ pub table Invoice(id: Str) {
         .unwrap();
         let staged = repository.capture_staged_candidate().unwrap();
         repository
-            .stage_store_admission(&staged, &[], &identities.to_stored())
+            .stage_store_admission(
+                &staged,
+                &[],
+                &identities.to_stored(),
+                orna_repository_v1::relation_admission::CommittedRelationChanges::Allowed,
+            )
             .unwrap();
         (directory, repository, identities)
     }

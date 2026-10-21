@@ -402,6 +402,28 @@ impl LoadedProject {
             .map_err(|_| ProjectLoadError::InvalidTableSchema)
     }
 
+    /// The stored value of each closed constant insert-time default of the
+    /// table `artifact` describes, keyed by field ObjectId. When schema
+    /// evolution introduces such a required field, each committed row
+    /// receives this value, frozen at the introducing commit
+    /// (ORNA-FIELD-003, ORNA-EVOL-009). A default that needs evaluation has
+    /// no entry (ORNA-FIELD-005).
+    pub fn constant_default_stored_values(
+        &self,
+        artifact: &SourceTableSchemaArtifact,
+    ) -> BTreeMap<[u8; 16], Raw> {
+        let Ok(schema) = StoredSchema::new(artifact.descriptor()) else {
+            return BTreeMap::new();
+        };
+        table_constant_defaults(self, artifact.module_name(), artifact.declaration_name())
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let field = schema.field(&name).filter(|field| field.role() == 1)?;
+                let stored = schema.lower_field(field, &value).ok()?;
+                Some((*field.id(), stored))
+            })
+            .collect()
+    }
 }
 /// Admit a completed format-3 row by its typed key and value, without deriving
 /// a loose-row filename that has no authority in the native row store.

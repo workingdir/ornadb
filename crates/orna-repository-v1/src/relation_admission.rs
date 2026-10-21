@@ -42,6 +42,7 @@ use crate::{
         StoreRelationEntry, sync_all_pack_files, sync_directory,
     },
     row_store::{KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowValue, TypedKey},
+    schema_evolution::{EvolutionPlan, EvolutionRefusal, SchemaChanges},
 };
 
 /// Stable relation UUID of the sealed object-identity system relation.
@@ -84,17 +85,18 @@ pub enum RelationAdmissionError {
     StaleIndex,
     /// The staged `.orna/store` entry is not a native tree.
     InvalidStoreEntry,
-    /// The staged source changes the descriptor of a committed relation.
-    /// Schema evolution needs an explicit admission this writer does not
-    /// perform, so the staged store would not decode under the staged schema
-    /// (ORNA-STAGE-002).
-    SchemaChanged {
+    /// A committed relation would evolve to the staged schema, or be removed
+    /// with its retired table, while unpublished runtime rows written under
+    /// the committed schemas wait to be published; they would no longer fit
+    /// the store they publish into.
+    PendingRuntimeRows {
         relation_id: [u8; 16],
     },
-    /// The staged store keeps a relation that no admitted staged table owns,
-    /// so its rows would not belong to a reachable table (ORNA-REPO-004).
-    OrphanRelation {
+    /// The staged source changes a committed relation's schema in a way its
+    /// committed rows cannot follow (ORNA-EVOL-002).
+    Evolution {
         relation_id: [u8; 16],
+        refusal: EvolutionRefusal,
     },
     /// One relation was supplied twice, or a table used the system relation's
     /// identity.
@@ -124,14 +126,17 @@ impl std::fmt::Display for RelationAdmissionError {
             Self::InvalidStoreEntry => {
                 formatter.write_str("the staged .orna/store is not a native tree")
             }
-            Self::SchemaChanged { relation_id } => write!(
+            Self::PendingRuntimeRows { relation_id } => write!(
                 formatter,
-                "the staged source changes the committed schema of relation {}; schema evolution is not admitted",
+                "relation {} would change while unpublished runtime rows wait to be published",
                 Uuid::from_bytes(*relation_id)
             ),
-            Self::OrphanRelation { relation_id } => write!(
+            Self::Evolution {
+                relation_id,
+                refusal,
+            } => write!(
                 formatter,
-                "relation {} has no admitted table in the staged source; removing a table is not admitted",
+                "relation {} cannot evolve to the staged schema: {refusal}",
                 Uuid::from_bytes(*relation_id)
             ),
             Self::DuplicateRelation { relation_id } => write!(
@@ -287,12 +292,14 @@ pub fn object_identity_descriptor() -> Result<SchemaDescriptor, RelationAdmissio
     .map_err(|_| RelationAdmissionError::InvalidIdentity)
 }
 
-/// One source table the staged candidate admits: its stable relation UUID
-/// and its closed storage descriptor.
+/// One source table the staged candidate admits: its stable relation UUID,
+/// its closed storage descriptor and, for schema evolution, the stored value
+/// of each closed constant insert-time default by field ObjectId.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedRelation {
     relation_id: [u8; 16],
     descriptor: SchemaDescriptor,
+    introductions: BTreeMap<[u8; 16], Raw>,
 }
 
 impl StagedRelation {
@@ -300,7 +307,18 @@ impl StagedRelation {
         Self {
             relation_id,
             descriptor,
+            introductions: BTreeMap::new(),
         }
+    }
+
+    /// The stored values of the table's closed constant insert-time
+    /// defaults, keyed by field ObjectId. When schema evolution introduces
+    /// such a required field, each committed row receives this value, frozen
+    /// at the introducing commit (ORNA-FIELD-003, ORNA-EVOL-009).
+    #[must_use]
+    pub fn with_introductions(mut self, introductions: BTreeMap<[u8; 16], Raw>) -> Self {
+        self.introductions = introductions;
+        self
     }
 
     pub const fn relation_id(&self) -> &[u8; 16] {
@@ -309,6 +327,59 @@ impl StagedRelation {
 
     pub fn descriptor(&self) -> &SchemaDescriptor {
         &self.descriptor
+    }
+}
+
+/// Whether a staging may change the relations the staged store already
+/// commits: evolve one to the staged schema, or remove the relation of a
+/// retired table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommittedRelationChanges {
+    Allowed,
+    /// Unpublished runtime rows were written under the committed schemas, so
+    /// a changed relation would strand them.
+    PendingRuntimeRows,
+}
+
+/// A committed relation whose rows this staging rewrote to the staged schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvolvedRelation {
+    relation_id: [u8; 16],
+    changes: SchemaChanges,
+    rows: u64,
+}
+
+impl EvolvedRelation {
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn changes(&self) -> &SchemaChanges {
+        &self.changes
+    }
+
+    /// The committed rows rewritten to the staged schema.
+    pub const fn rows(&self) -> u64 {
+        self.rows
+    }
+}
+
+/// A committed relation this staging removed because its table's identity
+/// retired from the staged source (ORNA-OBJECT-004).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemovedRelation {
+    relation_id: [u8; 16],
+    rows: u64,
+}
+
+impl RemovedRelation {
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    /// The committed rows that leave the staged store with the relation.
+    pub const fn rows(&self) -> u64 {
+        self.rows
     }
 }
 
@@ -346,6 +417,8 @@ impl StagedCandidate {
 pub struct StoreAdmission {
     store_root: NativeOid,
     admitted: Vec<[u8; 16]>,
+    evolved: Vec<EvolvedRelation>,
+    removed: Vec<RemovedRelation>,
     changed: bool,
 }
 
@@ -358,6 +431,16 @@ impl StoreAdmission {
     /// Relations created by this staging, in relation-UUID order.
     pub fn admitted(&self) -> &[[u8; 16]] {
         &self.admitted
+    }
+
+    /// Committed relations this staging evolved, in relation-UUID order.
+    pub fn evolved(&self) -> &[EvolvedRelation] {
+        &self.evolved
+    }
+
+    /// Committed relations this staging removed, in relation-UUID order.
+    pub fn removed(&self) -> &[RemovedRelation] {
+        &self.removed
     }
 
     /// Whether the index changed. An already complete store is left alone.
@@ -398,10 +481,15 @@ impl Repository {
     /// and its complete identity inventory.
     ///
     /// A missing store is created. A table without a relation gets its schema
-    /// node, one empty leaf and a canonical relation-map insert; a table whose
-    /// relation exists must keep the committed descriptor exactly. The
-    /// identity inventory relation is rewritten from `identities`, and the
-    /// legacy identity sidecar leaves the index. The new store is bound at
+    /// node, one empty leaf and a canonical relation-map insert. A table whose
+    /// relation exists under another descriptor evolves: every committed row
+    /// is rewritten to the staged schema and admitted against it, and the
+    /// relation gets the new schema node and primary map (ORNA-EVOL-002). A
+    /// committed relation whose table retired from the staged source leaves
+    /// the store with its rows (ORNA-OBJECT-004). Neither change is made
+    /// while `changes` reports unpublished runtime rows. The identity
+    /// inventory relation is rewritten from `identities`, and the legacy
+    /// identity sidecar leaves the index. The new store is bound at
     /// `.orna/store` in the ordinary index under Git's index lock, its node
     /// metadata is materialized in the worktree like a publication's, and
     /// every other staged or unstaged path is preserved.
@@ -410,31 +498,38 @@ impl Repository {
         staged: &StagedCandidate,
         relations: &[StagedRelation],
         identities: &[StoredObjectIdentity],
+        changes: CommittedRelationChanges,
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let database_id = *staged.database_id.as_bytes();
         let mut writer = NodeWriter::new(self)?;
-        let base = match staged.store_root.as_ref() {
-            Some(root) => {
-                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)?
-            }
-            None => Vec::new(),
+        let (base, committed) = match staged.store_root.as_ref() {
+            Some(root) => (
+                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)?,
+                Some(self.open_private_candidate_format_context(&staged.candidate)?),
+            ),
+            None => (Vec::new(), None),
         };
-        let (entries, admitted) = admit_relations(&mut writer, base, relations, Some(identities))?;
-        let store_root = write_store_root(&mut writer, database_id, &entries)?;
+        let admitted = admit_relations(
+            &mut writer,
+            base,
+            committed.as_ref(),
+            relations,
+            identities,
+            changes,
+        )?;
+        let store_root = write_store_root(&mut writer, database_id, &admitted.entries)?;
         let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
-        if staged.store_root.as_ref() == Some(&store_root) && !sidecar_staged {
-            return Ok(StoreAdmission {
-                store_root,
-                admitted,
-                changed: false,
-            });
+        let changed = staged.store_root.as_ref() != Some(&store_root) || sidecar_staged;
+        if changed {
+            writer.sync()?;
+            self.install_staged_store(staged, &store_root)?;
         }
-        writer.sync()?;
-        self.install_staged_store(staged, &store_root)?;
         Ok(StoreAdmission {
             store_root,
-            admitted,
-            changed: true,
+            admitted: admitted.created,
+            evolved: admitted.evolved,
+            removed: admitted.removed,
+            changed,
         })
     }
 
@@ -868,23 +963,42 @@ impl Repository {
     }
 }
 
-/// Merges `relations` into the validated `base` relation entries. New
-/// relations get their schema node and one empty leaf; existing ones must keep
-/// their committed schema node exactly. When `identities` is supplied the
-/// inventory relation is rewritten from it, and every base relation must be
-/// owned by a staged table or be the inventory itself.
+/// The relation entries of a staged store and how they changed.
+struct AdmittedRelations {
+    /// Every relation entry, in relation-UUID order.
+    entries: Vec<StoreRelationEntry>,
+    /// Relations created by this staging, in relation-UUID order.
+    created: Vec<[u8; 16]>,
+    evolved: Vec<EvolvedRelation>,
+    removed: Vec<RemovedRelation>,
+}
+
+/// Merges `relations` into the validated `base` relation entries of the
+/// store `committed` reads. New relations get their schema node and one empty
+/// leaf; a relation under a changed descriptor evolves; a base relation no
+/// staged table owns is removed; the inventory relation is rewritten from
+/// `identities`. Evolution and removal need `changes` to allow them.
 fn admit_relations(
     writer: &mut NodeWriter<'_>,
     base: Vec<StoreRelationEntry>,
+    committed: Option<&RepositoryFormatContext>,
     relations: &[StagedRelation],
-    identities: Option<&[StoredObjectIdentity]>,
-) -> Result<(Vec<StoreRelationEntry>, Vec<[u8; 16]>), RelationAdmissionError> {
+    identities: &[StoredObjectIdentity],
+    changes: CommittedRelationChanges,
+) -> Result<AdmittedRelations, RelationAdmissionError> {
     let mut entries = base
         .into_iter()
         .map(|entry| (entry.relation_id, entry))
         .collect::<BTreeMap<_, _>>();
     let mut staged = BTreeSet::new();
-    let mut admitted = Vec::new();
+    let mut created = Vec::new();
+    let mut evolved = Vec::new();
+    let allow = |relation_id: [u8; 16]| match changes {
+        CommittedRelationChanges::Allowed => Ok(()),
+        CommittedRelationChanges::PendingRuntimeRows => {
+            Err(RelationAdmissionError::PendingRuntimeRows { relation_id })
+        }
+    };
     for relation in relations {
         if relation.relation_id == OBJECT_IDENTITY_RELATION_ID
             || !staged.insert(relation.relation_id)
@@ -894,12 +1008,25 @@ fn admit_relations(
             });
         }
         let (schema_oid, schema_digest) = write_schema_node(writer, &relation.descriptor)?;
-        match entries.get(&relation.relation_id) {
+        match entries.get(&relation.relation_id).cloned() {
             Some(existing) if existing.schema_oid == schema_oid => {}
-            Some(_) => {
-                return Err(RelationAdmissionError::SchemaChanged {
+            Some(existing) => {
+                allow(relation.relation_id)?;
+                let committed = committed.ok_or(RelationAdmissionError::InvalidStoreEntry)?;
+                let (entry, schema_changes) = evolve_relation(
+                    writer,
+                    committed,
+                    relation,
+                    &existing,
+                    schema_oid,
+                    schema_digest,
+                )?;
+                evolved.push(EvolvedRelation {
                     relation_id: relation.relation_id,
+                    changes: schema_changes,
+                    rows: entry.row_count,
                 });
+                entries.insert(relation.relation_id, entry);
             }
             None => {
                 let primary_root = NativeGraphContext::build_canonical_ordered_map(
@@ -917,27 +1044,95 @@ fn admit_relations(
                         row_count: 0,
                     },
                 );
-                admitted.push(relation.relation_id);
+                created.push(relation.relation_id);
             }
         }
     }
-    if let Some(identities) = identities {
-        if let Some(orphan) = entries
-            .keys()
-            .find(|id| **id != OBJECT_IDENTITY_RELATION_ID && !staged.contains(*id))
-        {
-            return Err(RelationAdmissionError::OrphanRelation {
-                relation_id: *orphan,
+    let retired = entries
+        .keys()
+        .filter(|id| **id != OBJECT_IDENTITY_RELATION_ID && !staged.contains(*id))
+        .copied()
+        .collect::<Vec<_>>();
+    let mut removed = Vec::with_capacity(retired.len());
+    for relation_id in retired {
+        allow(relation_id)?;
+        if let Some(entry) = entries.remove(&relation_id) {
+            removed.push(RemovedRelation {
+                relation_id,
+                rows: entry.row_count,
             });
         }
-        let entry = write_identity_relation(writer, identities)?;
-        if !entries.contains_key(&OBJECT_IDENTITY_RELATION_ID) {
-            admitted.push(OBJECT_IDENTITY_RELATION_ID);
-        }
-        entries.insert(OBJECT_IDENTITY_RELATION_ID, entry);
     }
-    admitted.sort_unstable();
-    Ok((entries.into_values().collect(), admitted))
+    let entry = write_identity_relation(writer, identities)?;
+    if !entries.contains_key(&OBJECT_IDENTITY_RELATION_ID) {
+        created.push(OBJECT_IDENTITY_RELATION_ID);
+    }
+    entries.insert(OBJECT_IDENTITY_RELATION_ID, entry);
+    created.sort_unstable();
+    Ok(AdmittedRelations {
+        entries: entries.into_values().collect(),
+        created,
+        evolved,
+        removed,
+    })
+}
+
+/// Rewrites every committed row of `existing` to the staged schema and
+/// builds the relation's new primary map under the new schema digest.
+fn evolve_relation(
+    writer: &mut NodeWriter<'_>,
+    committed: &RepositoryFormatContext,
+    relation: &StagedRelation,
+    existing: &StoreRelationEntry,
+    schema_oid: NativeOid,
+    schema_digest: [u8; 32],
+) -> Result<(StoreRelationEntry, SchemaChanges), RelationAdmissionError> {
+    let relation_id = relation.relation_id;
+    let refused = |refusal| RelationAdmissionError::Evolution {
+        relation_id,
+        refusal,
+    };
+    if existing.secondary_root.is_some() {
+        return Err(refused(EvolutionRefusal::IndexedRelation));
+    }
+    let rows = committed.load_row_map(relation_id)?;
+    let graph = committed.open_native_graph(&rows)?;
+    let scope = graph.open_read_scope()?;
+    let old = graph.read_schema_descriptor(&scope)?;
+    let plan = EvolutionPlan::new(
+        relation_id,
+        &old,
+        &relation.descriptor,
+        existing.row_count,
+        &relation.introductions,
+    )
+    .map_err(refused)?;
+    let committed_rows = graph.committed_rows_with_fields(&scope)?;
+    let mut rewritten = Vec::with_capacity(committed_rows.len());
+    for (key, fields) in committed_rows {
+        let canonical_key = key
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let fields = plan.rewrite_row(&canonical_key, &fields).map_err(refused)?;
+        let value = RowValue::decode_canonical_fields(fields)
+            .map_err(|_| refused(EvolutionRefusal::RowTooLarge))?;
+        rewritten.push(RowEntry::new(key, value));
+    }
+    let primary_root = NativeGraphContext::build_canonical_ordered_map(
+        &rows_domain(&relation_id, &schema_digest),
+        &rewritten,
+        &mut |node| writer.node(node),
+    )?;
+    Ok((
+        StoreRelationEntry {
+            relation_id,
+            schema_oid,
+            primary_root,
+            secondary_root: None,
+            row_count: rewritten.len() as u64,
+        },
+        plan.changes().clone(),
+    ))
 }
 
 /// Writes the inventory relation's schema node and its complete row map.
@@ -1493,7 +1688,12 @@ mod tests {
             .iter()
             .map(|id| StagedRelation::new(*id, table_descriptor(*id, "Str")))
             .collect::<Vec<_>>();
-        repository.stage_store_admission(&staged, &tables, &identities_for(relations))
+        repository.stage_store_admission(
+            &staged,
+            &tables,
+            &identities_for(relations),
+            CommittedRelationChanges::Allowed,
+        )
     }
 
     #[test]
@@ -1516,6 +1716,7 @@ mod tests {
                 &staged,
                 &[StagedRelation::new(music, table_descriptor(music, "Str"))],
                 &identities,
+                CommittedRelationChanges::Allowed,
             )
             .expect("stage the store");
         assert!(admission.changed());
@@ -1574,6 +1775,7 @@ mod tests {
                     identities.reverse();
                     identities
                 },
+                CommittedRelationChanges::Allowed,
             )
             .unwrap()
     }
@@ -1597,13 +1799,16 @@ mod tests {
             .iter()
             .map(|id| StagedRelation::new(*id, table_descriptor(*id, "Str")))
             .collect::<Vec<_>>();
-        let (entries, _) = admit_relations(
+        let entries = admit_relations(
             &mut writer,
             Vec::new(),
+            None,
             &tables,
-            Some(&identities_for(&all)),
+            &identities_for(&all),
+            CommittedRelationChanges::Allowed,
         )
-        .unwrap();
+        .unwrap()
+        .entries;
         let database_id = *repository
             .capture_staged_candidate()
             .unwrap()
@@ -1627,8 +1832,11 @@ mod tests {
         );
     }
 
+    /// A changed descriptor evolves its relation and a retired table's
+    /// relation leaves the store, but only while no unpublished runtime rows
+    /// were written under the committed schemas; duplicates never stage.
     #[test]
-    fn staging_refuses_schema_changes_orphans_and_duplicates() {
+    fn committed_relations_change_only_without_pending_runtime_rows() {
         let (directory, repository) = initialized_repository();
         let root = directory.path();
         let (music, video) = (relation(1), relation(2));
@@ -1637,37 +1845,74 @@ mod tests {
 
         let staged = repository.capture_staged_candidate().unwrap();
         let identities = identities_for(&[music, video]);
-        let refuse = |tables: &[StagedRelation]| {
+        let refuse = |tables: &[StagedRelation], changes| {
             repository
-                .stage_store_admission(&staged, tables, &identities)
+                .stage_store_admission(&staged, tables, &identities, changes)
                 .expect_err("staging must refuse")
         };
         let current = |id| StagedRelation::new(id, table_descriptor(id, "Str"));
+        let retyped = StagedRelation::new(music, table_descriptor(music, "Int"));
+        let pending = CommittedRelationChanges::PendingRuntimeRows;
         assert!(matches!(
-            refuse(&[StagedRelation::new(music, table_descriptor(music, "Int")), current(video)]),
-            RelationAdmissionError::SchemaChanged { relation_id } if relation_id == music
+            refuse(&[retyped.clone(), current(video)], pending),
+            RelationAdmissionError::PendingRuntimeRows { relation_id } if relation_id == music
         ));
         assert!(matches!(
-            refuse(&[current(music)]),
-            RelationAdmissionError::OrphanRelation { relation_id } if relation_id == video
+            refuse(&[current(music)], pending),
+            RelationAdmissionError::PendingRuntimeRows { relation_id } if relation_id == video
         ));
-        assert!(matches!(
-            refuse(&[current(music), current(music), current(video)]),
-            RelationAdmissionError::DuplicateRelation { relation_id } if relation_id == music
-        ));
-        assert!(matches!(
-            refuse(&[
-                current(music),
-                current(video),
-                StagedRelation::new(
-                    OBJECT_IDENTITY_RELATION_ID,
-                    table_descriptor(OBJECT_IDENTITY_RELATION_ID, "Str")
+        for changes in [pending, CommittedRelationChanges::Allowed] {
+            assert!(matches!(
+                refuse(&[current(music), current(music), current(video)], changes),
+                RelationAdmissionError::DuplicateRelation { relation_id } if relation_id == music
+            ));
+            assert!(matches!(
+                refuse(
+                    &[
+                        current(music),
+                        current(video),
+                        StagedRelation::new(
+                            OBJECT_IDENTITY_RELATION_ID,
+                            table_descriptor(OBJECT_IDENTITY_RELATION_ID, "Str")
+                        ),
+                    ],
+                    changes
                 ),
-            ]),
-            RelationAdmissionError::DuplicateRelation { .. }
-        ));
+                RelationAdmissionError::DuplicateRelation { .. }
+            ));
+        }
         // A refused staging leaves the index exactly as captured.
         assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+        // With no pending rows the empty relation takes the new schema and
+        // the retired table's relation leaves the store.
+        let admission = repository
+            .stage_store_admission(
+                &staged,
+                &[retyped],
+                &identities_for(&[music]),
+                CommittedRelationChanges::Allowed,
+            )
+            .expect("evolve one relation and remove the other");
+        assert_eq!(admission.evolved().len(), 1);
+        assert_eq!(admission.evolved()[0].relation_id(), &music);
+        assert_eq!(admission.evolved()[0].changes().converted(), &["title".to_owned()]);
+        assert_eq!(admission.removed().len(), 1);
+        assert_eq!(admission.removed()[0].relation_id(), &video);
+        let head = review_and_commit(&repository, "evolve");
+        assert_eq!(
+            repository.committed_store_relations(&head).unwrap(),
+            BTreeSet::from([music, OBJECT_IDENTITY_RELATION_ID])
+        );
+        let format = repository.open_pinned_format_context(head.as_str()).unwrap();
+        let rows = format.load_row_map(music).unwrap();
+        let graph = format.open_native_graph(&rows).unwrap();
+        assert_eq!(
+            graph
+                .read_schema_descriptor(&graph.open_read_scope().unwrap())
+                .unwrap(),
+            table_descriptor(music, "Int")
+        );
     }
 
     #[test]
