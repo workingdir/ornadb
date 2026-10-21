@@ -23,11 +23,14 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+mod located;
 mod repl;
 mod semantic_payload;
 mod system_api;
 mod object_identity;
 mod source_row;
+
+pub use located::{DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located};
 
 pub use object_identity::{ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind};
 
@@ -2317,6 +2320,16 @@ fn analyze_retaining_context(
     catalogue: &Catalogue,
     retain_context: bool,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    let mut origins = located::OriginRecorder::disabled();
+    analyze_recording_origins(inputs, catalogue, retain_context, &mut origins)
+}
+
+fn analyze_recording_origins(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+    origins: &mut located::OriginRecorder,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
@@ -2326,6 +2339,7 @@ fn analyze_retaining_context(
     let mut source_unit_items = Vec::new();
     let mut siblings: BTreeMap<Vec<String>, BTreeMap<String, String>> = BTreeMap::new();
     for input in inputs {
+        origins.enter_module(&result.diagnostics, &input.logical_path);
         let Some(namespace) = namespace_for_path(&input.logical_path, &mut result.diagnostics)
         else {
             continue;
@@ -2378,6 +2392,7 @@ fn analyze_retaining_context(
             matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })
                 .then(|| (namespace.clone(), input.logical_path.clone(), item.clone()))
         }));
+        origins.bind_namespace(&namespace, &input.logical_path);
         parsed.push((namespace, parse.value));
     }
     result.source_units = analyze_source_units(&source_unit_items);
@@ -2394,6 +2409,7 @@ fn analyze_retaining_context(
         &mut dependency_summaries,
     );
     for (namespace, tree) in &parsed {
+        origins.enter_namespace(&result.diagnostics, namespace);
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
@@ -2438,6 +2454,7 @@ fn analyze_retaining_context(
             .collect::<BTreeMap<_, _>>();
         let mut plans = Vec::new();
         for item in &tree.items {
+            origins.enter_item(&result.diagnostics, namespace, &item.span);
             check_item(
                 item,
                 &mut symbols,
@@ -2463,6 +2480,7 @@ fn analyze_retaining_context(
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
     }
+    origins.finish(&result.diagnostics);
     result
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
