@@ -3729,10 +3729,15 @@ impl Repository {
             return Err(RepositoryError::LocalStateUnavailable);
         }
         let generation = digits.first().copied().unwrap_or(0);
-        let head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
-        let repository_format = self.open_pinned_format_context(head.as_str())
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?
-            .repository_format();
+        let repository_format = match self.head()? {
+            Some(head) => self
+                .open_pinned_format_context(head.as_str())
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?
+                .repository_format(),
+            // An unborn branch has no committed format: its first commit takes
+            // the format its staged metadata declares.
+            None => self.staged_repository_format()?,
+        };
         let descriptor = capture.snapshot().encode()
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         self.review_staged_candidate(
@@ -3767,7 +3772,16 @@ impl Repository {
             return Err(RepositoryError::StaleCwd);
         }
         let mut path_diff = self.command();
-        path_diff.args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z"]).arg(cwd.head().ok_or(RepositoryError::UnbornHead)?.as_str()).arg(index_tree.as_str());
+        match cwd.head() {
+            Some(head) => path_diff
+                .args(["diff-tree", "--no-commit-id", "--name-only", "-r", "-z"])
+                .arg(head.as_str())
+                .arg(index_tree.as_str()),
+            // On an unborn branch every staged path is new.
+            None => path_diff
+                .args(["ls-tree", "-r", "--name-only", "-z", "--full-tree"])
+                .arg(index_tree.as_str()),
+        };
         let candidate_paths = self.run(path_diff)?.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()).map(|path| String::from_utf8(path.to_vec()).map_err(|_| RepositoryError::UnsafeManagedPath)).collect::<Result<Vec<_>, _>>()?;
         let mut review = ReviewedCandidateReview {
             database_id, runtime_id, pending_generation, repository_format,
@@ -3885,7 +3899,15 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
-        let old_head = review.cwd.head().ok_or(RepositoryError::UnbornHead)?.clone();
+        let Some(old_head) = review.cwd.head().cloned() else {
+            return self.commit_reviewed_root_candidate(
+                review,
+                message,
+                &result_path,
+                &intent_hex,
+                &message_digest_hex,
+            );
+        };
         let mut commit_tree = self.command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-p", old_head.as_str(), "-m"])
@@ -3929,6 +3951,69 @@ impl Repository {
         fs::write(&result_path, format!("{intent_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()))
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
+        Ok(candidate.commit().clone())
+    }
+
+    /// Commits a reviewed candidate on an unborn branch. "The first actual
+    /// commit creates that branch ref" (16-administration, unborn branches):
+    /// the commit names exactly the reviewed index tree with no parent, and
+    /// the symbolic branch moves from absent to it by compare-and-set. The
+    /// ordinary index already equals the new commit's tree and the worktree
+    /// keeps its unstaged differences, so there is no index or worktree
+    /// reconciliation to journal.
+    fn commit_reviewed_root_candidate(
+        &self,
+        review: &ReviewedCandidateReview,
+        message: &str,
+        result_path: &Path,
+        intent_hex: &str,
+        message_digest_hex: &str,
+    ) -> Result<GitCommitRef, RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.ensure_no_git_operation_in_progress()?;
+        // The index is not rewritten, so Git's index lock is not taken: a
+        // concurrent `git add` after this check stays staged against the new
+        // commit, and the branch itself moves only by compare-and-set.
+        self.verify_reviewed_candidate_locked(review)?;
+        if self.head()?.is_some() {
+            return Err(RepositoryError::StaleReviewedCandidate);
+        }
+        let reference = self.symbolic_head_ref()?;
+        let mut commit_tree = self.command();
+        commit_tree
+            .args(["commit-tree", review.index_tree.as_str(), "-m"])
+            .arg(message);
+        let candidate = PrivateCommit {
+            tree: review.index_tree.clone(),
+            commit: self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?,
+        };
+        let context = self
+            .open_private_candidate_format_context(&candidate)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if context.repository_format() != review.repository_format
+            || context.repository_format() != RepositoryFormat::Format3
+            || context.validate_schema_root().is_err()
+            || context.validate_store_root().is_err()
+        {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let absent = "0".repeat(self.native_object_id_length()?);
+        let mut create = self.command();
+        create.args([
+            "update-ref",
+            reference.as_str(),
+            candidate.commit().as_str(),
+            absent.as_str(),
+        ]);
+        self.run(create)?;
+        if self.head()?.as_ref() != Some(candidate.commit()) {
+            return Err(RepositoryError::StaleHead);
+        }
+        fs::write(
+            result_path,
+            format!("{intent_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()),
+        )
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         Ok(candidate.commit().clone())
     }
 

@@ -540,6 +540,24 @@ impl Repository {
         )?))
     }
 
+    /// The repository format the ordinary index's tree declares. An unborn
+    /// branch has no committed format, so its first reviewed commit takes
+    /// the staged one.
+    pub(crate) fn staged_repository_format(&self) -> Result<RepositoryFormat, RepositoryError> {
+        let index = self.index_generation()?;
+        let tree = index
+            .tree()
+            .cloned()
+            .ok_or(RepositoryError::SysGitNothingToCommit)?;
+        let candidate = self
+            .private_commit_for_tree(&tree, index.head())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(self
+            .open_private_candidate_format_context(&candidate)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?
+            .repository_format())
+    }
+
     /// SHA-256 of the ordinary index file, or of nothing when it is absent.
     fn index_file_digest(&self) -> Result<[u8; 32], RelationAdmissionError> {
         let index = self.git_path("index")?;
@@ -1319,6 +1337,7 @@ mod tests {
             .expect("orna init")
             .into_repository();
         crate::test_support::configure_fixture_git_identity(root);
+        git(root, &["config", "commit.gpgsign", "false"]);
         fs::write(
             root.join("main.orna"),
             "pub table Table0(id: Str) { title: Str, }\n",
@@ -1590,5 +1609,67 @@ mod tests {
             let mut writer = NodeWriter::new(&repository).unwrap();
             assert_eq!(write_byte_index(&mut writer, &content).unwrap(), byte_root);
         }
+    }
+
+    #[test]
+    fn the_first_reviewed_commit_creates_the_unborn_branch() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        stage(&repository, &[relation(1)]).expect("stage the store");
+        fs::write(root.join("unstaged.txt"), b"unstaged").unwrap();
+        let branch = git(root, &["symbolic-ref", "HEAD"]);
+        assert!(repository.head().unwrap().is_none(), "the branch is unborn");
+
+        let review = repository
+            .review_staged_candidate(
+                Uuid::from_bytes([10; 16]),
+                Uuid::from_bytes([11; 16]),
+                3,
+                RepositoryFormat::Format3,
+                crate::RuntimeGeneration::new(4),
+                vec![0x81, 0x00],
+            )
+            .expect("review the unborn branch's staged candidate");
+        assert!(review.cwd.head().is_none());
+        assert!(
+            review
+                .candidate_paths
+                .iter()
+                .any(|path| path == "main.orna")
+        );
+        let committed = repository
+            .commit_reviewed_candidate(&review, "initial source")
+            .expect("the first reviewed commit creates the branch");
+
+        // "The first actual commit creates that branch ref": a root commit of
+        // exactly the reviewed index tree, on the same symbolic branch.
+        assert_eq!(repository.head().unwrap(), Some(committed.clone()));
+        assert_eq!(git(root, &["symbolic-ref", "HEAD"]), branch);
+        assert_eq!(
+            git(
+                root,
+                &["rev-list", "--parents", "-n", "1", committed.as_str()]
+            )
+            .trim(),
+            committed.as_str()
+        );
+        assert_eq!(
+            git(
+                root,
+                &["rev-parse", &format!("{}^{{tree}}", committed.as_str())]
+            )
+            .trim(),
+            review.index_tree.as_str()
+        );
+        // Unstaged work is not consumed.
+        assert_eq!(git(root, &["status", "--porcelain"]), "?? unstaged.txt\n");
+        // The recorded result answers a retry without a second commit.
+        assert_eq!(
+            repository
+                .commit_reviewed_candidate(&review, "initial source")
+                .unwrap(),
+            committed
+        );
+        assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
     }
 }
