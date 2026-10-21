@@ -60,16 +60,13 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<(), Diagno
             "fix the first reported source contract error, stage it, then commit again",
         ));
     }
-    let previous = orna_project_v1::ObjectIdentityManifest::read_committed_if_present(
-        repository,
-        staged.candidate().commit(),
-    )
-    .map_err(|error| {
-        staging_error(
-            "staged object identities could not be read",
-            format!("{error:?}"),
-        )
-    })?;
+    let previous = orna_project_v1::ObjectIdentityManifest::read_staged(repository, &staged)
+        .map_err(|error| {
+            staging_error(
+                "staged object identities could not be read",
+                format!("{error:?}"),
+            )
+        })?;
     let identities =
         orna_project_v1::ObjectIdentityManifest::reconcile(project.modules(), previous.as_ref())
             .map_err(|error| {
