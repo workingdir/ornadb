@@ -1,1 +1,1 @@
-std.collection.drop([1], -1)
+drop([1], -1)
