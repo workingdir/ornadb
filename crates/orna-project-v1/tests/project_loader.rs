@@ -219,6 +219,61 @@ fn loads_only_reachable_modules_in_deterministic_logical_order() {
     );
 }
 
+/// Editors check unsaved buffers: an overlay replaces the saved module text
+/// and an overlay-only module is importable before it is written.
+#[test]
+fn overlays_replace_saved_modules_and_make_unsaved_imports_reachable() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub fn saved(): Int = 1;\n"),
+        ("unused.orna", "pub fn unused(): Int = 2;\n"),
+    ]);
+    let overlays = std::collections::BTreeMap::from([
+        (
+            "main.orna".to_owned(),
+            "use helpers;\npub fn edited(): Int = helpers.value();\n".to_owned(),
+        ),
+        (
+            "helpers.orna".to_owned(),
+            "pub fn value(): Int = 3;\n".to_owned(),
+        ),
+    ]);
+
+    let project = ProjectLoader::default()
+        .load_with_overlays(&repository, &overlays)
+        .unwrap();
+    let modules = project
+        .modules()
+        .iter()
+        .map(|module| (module.logical_path.as_str(), module.source.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modules,
+        [
+            ("helpers.orna", overlays["helpers.orna"].as_str()),
+            ("main.orna", overlays["main.orna"].as_str()),
+        ]
+    );
+    assert!(!directory.path().join("helpers.orna").exists());
+    let analysis = analyze_with_catalogue(project.modules(), &Catalogue::authoritative_core());
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+
+    let saved = ProjectLoader::default()
+        .load_with_overlays(&repository, &Default::default())
+        .unwrap();
+    assert_eq!(saved.modules().len(), 1);
+    assert_eq!(saved.modules()[0].source, "pub fn saved(): Int = 1;\n");
+    assert!(matches!(
+        ProjectLoader::default().load_with_overlays(
+            &repository,
+            &std::collections::BTreeMap::from([(
+                "main.orna".to_owned(),
+                "use missing;\n".to_owned()
+            )])
+        ),
+        Err(ProjectLoadError::ImportUnavailable)
+    ));
+}
+
 #[test]
 fn records_reachable_standard_module_names_without_changing_ordinary_loading() {
     let (_directory, repository) = repository(&[
