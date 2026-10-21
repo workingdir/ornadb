@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(
             (
                 invalid_format.code,
-                invalid_format.title,
+                invalid_format.title.as_ref(),
                 invalid_format.help
             ),
             (
@@ -881,7 +881,7 @@ mod tests {
         let error = parse_cli(&args(&["--color", "invalid", "status"]))
             .expect_err("invalid color mode is rejected");
         assert_eq!(
-            (error.code, error.title, error.help),
+            (error.code, error.title.as_ref(), error.help),
             (
                 "E1002",
                 "unsupported value for `--color`",
@@ -891,7 +891,7 @@ mod tests {
 
         let error = parse_cli(&args(&["unknown"])).expect_err("unknown command is rejected");
         assert_eq!(
-            (error.code, error.title, error.help),
+            (error.code, error.title.as_ref(), error.help),
             (
                 "E1002",
                 "unknown Orna command",
