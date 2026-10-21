@@ -5,6 +5,20 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
+  active calls: function, closure and callback bodies. Expression nesting inside
+  one body no longer consumes it, so recursion depth no longer shrinks as bodies
+  nest deeper. The parser bounds expression nesting. Pattern and decoded-value
+  nesting are checked from their own roots against the same limit. Exceeding
+  any of these fails with `ORNA-EVAL-LIMIT` and never returns a partial result
+  (ORNA-CLOSURE-004).
+- An assignment inside a `case` arm now replaces the enclosing `let` slot, as
+  assignments inside blocks and loops already did (ORNA-CFLOW-005). Names bound
+  by the arm pattern stay local to the arm.
+- Counting an in-memory list costs one evaluator step instead of one step per
+  element. A plain `=` assignment no longer copies the value it replaces.
+  Callback calls no longer copy the callee's syntax tree. Block, loop and `case`
+  write-back moves values instead of copying them.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
