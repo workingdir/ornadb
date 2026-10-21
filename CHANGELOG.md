@@ -131,6 +131,9 @@ been published.
   then, and 400 once the session had evaluated anything. A sweep ends sessions
   whose lease has elapsed in the same way.
 
+- `orna serve` serves at most 64 connections at once. The accept loop answers
+  any further connection with 503 straight away, without reading its request.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
