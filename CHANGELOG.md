@@ -5,6 +5,10 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A format-3 project whose `main.orna` is larger than 64 KiB can query,
+  publish, show history and mount its rows. Opening a row map pins the
+  committed `main.orna` by its blob OID instead of reading the source under a
+  64 KiB cap that store format 3 sets only for `database.orna`.
 - `orna commit` stages the format-3 store: a database made by `orna init`
   gets its `.orna/store` on the first commit, which creates the branch on an
   unborn HEAD. Each newly declared table is admitted with its schema node, an
