@@ -3717,6 +3717,25 @@ impl Repository {
         self.read_publication_journal_locked()
     }
 
+    /// Reports whether a persisted journal belongs to a reviewed commit. The
+    /// review anchor naming the candidate is pinned before any journal is
+    /// written, so a journal whose intent has an anchor at its candidate is
+    /// completed by `commit_reviewed_candidate` and never by a runtime freeze.
+    pub fn publication_journal_is_reviewed(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<bool, RepositoryError> {
+        let Some(intent) = journal.runtime_intent_id() else {
+            return Ok(false);
+        };
+        let anchor = format!(
+            "refs/orna/review-candidates/{}",
+            intent.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        );
+        let pinned = self.commit_optional(&format!("{anchor}^{{commit}}"))?;
+        Ok(pinned.is_some_and(|commit| commit.as_str() == journal.new_head().as_str()))
+    }
+
     pub(crate) fn read_publication_journal_locked(
         &self,
     ) -> Result<Option<PublicationJournal>, RepositoryError> {
@@ -3774,6 +3793,20 @@ impl Repository {
         }
         let index = self.git_path("index")?;
         GitIndexLock::reclaim_abandoned(index.with_extension("lock"), journal.lock_binding()?)
+    }
+
+    /// Reclaims an Orna-marked `index.lock` left by a publisher that stopped
+    /// after taking Git's lock but before writing its Prepared journal. No
+    /// journal binds such a lock, so the Orna marker must carry a publisher
+    /// binding (not the all-zero ordinary-writer binding) and the owner must be
+    /// proven dead. Any other lock is left in place for Git and does not fail
+    /// recovery; the next publisher reports it as present.
+    fn reclaim_orphan_publication_index_lock(&self) -> Result<(), RepositoryError> {
+        let index = self.git_path("index")?;
+        match GitIndexLock::reclaim_unbound_orphan(index.with_extension("lock")) {
+            Err(RepositoryError::GitIndexLockPresent) => Ok(()),
+            result => result,
+        }
     }
 
     fn write_checkout_recovery_journal_locked(
@@ -4304,6 +4337,9 @@ impl Repository {
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
+        // ORNA-PUB-006/PUB-016: the Orna-marked index lock now exists but no
+        // Prepared journal does; recovery must reclaim it without a binding.
+        crate::publication_crash_barrier("index-lock");
         // PUB-3 step 7: every precondition of the ref CAS is revalidated under
         // the lock before the Prepared journal exists. A refusal here leaves
         // no record that could fence the pending batch (ORNA-PUB-006).
@@ -4426,6 +4462,7 @@ impl Repository {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
         let Some(mut journal) = self.read_publication_journal_locked()? else {
+            self.reclaim_orphan_publication_index_lock()?;
             return Ok(None);
         };
         self.reclaim_abandoned_publication_index_lock(&journal)?;
@@ -8649,13 +8686,13 @@ impl GitIndexLockDirectory {
     fn abandoned_marker(
         &self,
         name: &OsStr,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
     ) -> Result<GitIndexLockFile, RepositoryError> {
         let file = self.read_regular(name)?;
         let Some(marker) = GitIndexLockMarker::decode(&file.bytes) else {
             return Err(RepositoryError::GitIndexLockPresent);
         };
-        if marker.journal_binding != journal_binding
+        if !GitIndexLockMarker::binding_permits_reclaim(marker.journal_binding, journal_binding)
             || marker.owner_liveness() != GitIndexLockOwnerLiveness::ProvenDead
         {
             return Err(RepositoryError::GitIndexLockPresent);
@@ -8738,6 +8775,17 @@ impl GitIndexLock {
     }
 
     fn reclaim_abandoned(path: PathBuf, journal_binding: [u8; 32]) -> Result<(), RepositoryError> {
+        Self::reclaim_bound(path, Some(journal_binding))
+    }
+
+    /// Reclaims an Orna-marked lock whose publisher stopped before writing its
+    /// journal, so no journal binding exists to check. The marker must carry a
+    /// non-zero publisher binding and the owner must be proven dead.
+    fn reclaim_unbound_orphan(path: PathBuf) -> Result<(), RepositoryError> {
+        Self::reclaim_bound(path, None)
+    }
+
+    fn reclaim_bound(path: PathBuf, journal_binding: Option<[u8; 32]>) -> Result<(), RepositoryError> {
         #[cfg(target_os = "linux")]
         {
             Self::reclaim_abandoned_linux(path, journal_binding, |_, _| {})
@@ -8753,13 +8801,13 @@ impl GitIndexLock {
         journal_binding: [u8; 32],
         hook: impl FnMut(GitIndexLockReclaimPoint, &Path),
     ) -> Result<(), RepositoryError> {
-        Self::reclaim_abandoned_linux(path, journal_binding, hook)
+        Self::reclaim_abandoned_linux(path, Some(journal_binding), hook)
     }
 
     #[cfg(target_os = "linux")]
     fn reclaim_abandoned_linux(
         path: PathBuf,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
         mut hook: impl FnMut(GitIndexLockReclaimPoint, &Path),
     ) -> Result<(), RepositoryError> {
         let (directory, canonical) = GitIndexLockDirectory::open(&path)?;
@@ -8825,7 +8873,7 @@ impl GitIndexLock {
         directory: &GitIndexLockDirectory,
         canonical: &OsStr,
         private_entry: &OsStr,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
         path: &Path,
     ) -> Result<(), RepositoryError> {
         let file = directory.abandoned_marker(private_entry, journal_binding)?;
@@ -8862,7 +8910,7 @@ impl GitIndexLock {
         canonical: &OsStr,
         claim: &OsStr,
         expected: &GitIndexLockFile,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
         hook: &mut impl FnMut(GitIndexLockReclaimPoint, &Path),
         claim_path: &Path,
     ) -> Result<(), RepositoryError> {
@@ -8910,7 +8958,7 @@ impl GitIndexLock {
         claim: &OsStr,
         disposal: &OsStr,
         expected: &GitIndexLockFile,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
     ) -> Result<(), RepositoryError> {
         let current = directory.abandoned_marker(disposal, journal_binding)?;
         if current != *expected || !directory.metadata_matches(disposal, current.metadata)? {
@@ -8991,7 +9039,7 @@ impl GitIndexLock {
     #[cfg(not(target_os = "linux"))]
     fn reclaim_abandoned_unavailable(
         path: PathBuf,
-        journal_binding: [u8; 32],
+        journal_binding: Option<[u8; 32]>,
     ) -> Result<(), RepositoryError> {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -9005,7 +9053,7 @@ impl GitIndexLock {
         let Some(marker) = GitIndexLockMarker::decode(&bytes) else {
             return Err(RepositoryError::GitIndexLockPresent);
         };
-        if marker.journal_binding != journal_binding {
+        if !GitIndexLockMarker::binding_permits_reclaim(marker.journal_binding, journal_binding) {
             return Err(RepositoryError::GitIndexLockPresent);
         }
         Err(RepositoryError::GitIndexLockPresent)
@@ -9058,6 +9106,16 @@ fn process_owner_liveness(
 }
 
 impl GitIndexLockMarker {
+    /// Journal-bound reclaim requires the exact binding. Unbound reclaim requires
+    /// a publisher binding; the all-zero binding marks ordinary Orna writers,
+    /// whose locks publication recovery never reclaims.
+    fn binding_permits_reclaim(marker_binding: [u8; 32], journal_binding: Option<[u8; 32]>) -> bool {
+        match journal_binding {
+            Some(expected) => marker_binding == expected,
+            None => marker_binding != [0; 32],
+        }
+    }
+
     fn new(journal_binding: [u8; 32]) -> Result<Self, RepositoryError> {
         let pid = std::process::id();
         #[cfg(target_os = "linux")]
@@ -10150,6 +10208,58 @@ mod tests {
 
         drop(lock);
         assert!(!lock_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unbound_orphan_reclaim_takes_only_a_dead_orna_lock() {
+        let root = tempfile::TempDir::new().unwrap();
+        let lock_path = root.path().join("index.lock");
+        fs::write(&lock_path, dead_publisher_lock_bytes([10; 32], [3; 16])).unwrap();
+        GitIndexLock::reclaim_unbound_orphan(lock_path.clone()).unwrap();
+        assert!(!lock_path.exists());
+
+        let foreign = b"foreign Git index lock bytes\n".to_vec();
+        fs::write(&lock_path, &foreign).unwrap();
+        assert!(matches!(
+            GitIndexLock::reclaim_unbound_orphan(lock_path.clone()),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), foreign);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_owner_orna_lock_is_never_reclaimed() {
+        let root = tempfile::TempDir::new().unwrap();
+        let lock_path = root.path().join("index.lock");
+        // The marker names this live process, so its owner is not provably dead.
+        let live = GitIndexLockMarker::new([10; 32]).unwrap().encode();
+        fs::write(&lock_path, &live).unwrap();
+        assert!(matches!(
+            GitIndexLock::reclaim_unbound_orphan(lock_path.clone()),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert!(matches!(
+            GitIndexLock::reclaim_abandoned(lock_path.clone(), [10; 32]),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), live);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_ordinary_writer_lock_with_zero_binding_is_never_reclaimed() {
+        let root = tempfile::TempDir::new().unwrap();
+        let lock_path = root.path().join("index.lock");
+        // All-zero binding marks an ordinary Orna writer, not a publisher.
+        let ordinary = dead_publisher_lock_bytes([0; 32], [4; 16]);
+        fs::write(&lock_path, &ordinary).unwrap();
+        assert!(matches!(
+            GitIndexLock::reclaim_unbound_orphan(lock_path.clone()),
+            Err(RepositoryError::GitIndexLockPresent)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), ordinary);
     }
 
     #[cfg(target_os = "linux")]
