@@ -1659,11 +1659,16 @@ mod tests {
             StageOutcome::Passed
         ));
 
+        let declared = Corpus::load_default()
+            .expect("reference corpus loads")
+            .scenarios["count"]
+            .as_u64()
+            .expect("declared scenario count");
         let report = run_profile(
             Corpus::load_default().expect("reference corpus loads"),
             RunnerProfile::BoundedExpressionRuntime,
         );
-        assert_eq!(report.scenarios.len(), 144);
+        assert_eq!(report.scenarios.len() as u64, declared);
         assert!(
             report
                 .implementation_claim

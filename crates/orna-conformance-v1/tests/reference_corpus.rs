@@ -2371,7 +2371,8 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
             text: "Generic parameters are explicit in public source when a generic abstraction is intended; local type arguments may be inferred.".into(),
         }],
         requirement_evidence: RequirementEvidence {
-            meaning: "focused report-stage witness".into(),
+            version: "1.1.0".into(),
+            scope: "focused report-stage witness".into(),
             requirements: vec![RequirementEvidenceEntry {
                 requirement: "ORNA-GENERIC-001".into(),
                 tests: vec![requirement_test(accepted_id), requirement_test(rejected_id)],
@@ -2575,7 +2576,8 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
             },
         ],
         requirement_evidence: RequirementEvidence {
-            meaning: "focused system semantic Harness witness".into(),
+            version: "1.1.0".into(),
+            scope: "focused system semantic Harness witness".into(),
             requirements: vec![
                 RequirementEvidenceEntry {
                     requirement: "ORNA-SYS-005".into(),
