@@ -51,6 +51,13 @@ const REQUEST_HEAD_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 /// Bound on each blocked read of a request body and each blocked write.
 const HTTP_IO_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 const WEBSOCKET_READ_CHUNK_BYTES: usize = 8 * 1024;
+/// RFC 6455 close code sent to a peer that stayed silent past the keepalive
+/// bound (1001, going away).
+const CLOSE_IDLE: u16 = 1001;
+/// RFC 6455 close code sent when the session retired this socket's
+/// attachment, for example because a resume replaced it (1008, policy
+/// violation).
+const CLOSE_RETIRED: u16 = 1008;
 
 /// Operator choices for one `orna serve` process.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -667,7 +674,8 @@ impl WebSocketWorker<'_> {
     }
 
     /// Serves frames until the peer closes, the transport retires this
-    /// attachment, or the peer stays silent past the keepalive bound.
+    /// attachment, or the peer stays silent past the keepalive bound. The
+    /// last two end with a best-effort Close frame.
     /// Silence is measured from the peer's last bytes or the end of the last
     /// step served for it, whichever is later: time spent evaluating its own
     /// requests, while nothing is read from it, is not silence.
@@ -688,10 +696,12 @@ impl WebSocketWorker<'_> {
                 last_activity = Instant::now();
             }
             if self.cancelled.load(Ordering::Acquire) {
+                self.close(CLOSE_RETIRED);
                 return Ok(());
             }
             let silent = last_activity.elapsed();
             if silent >= keepalive.idle_timeout {
+                self.close(CLOSE_IDLE);
                 return Ok(());
             }
             if !pinged && silent >= keepalive.ping_after {
@@ -707,6 +717,9 @@ impl WebSocketWorker<'_> {
                 wake.saturating_sub(silent).max(StdDuration::from_millis(1)),
             ))?;
             match stream.read(&mut chunk) {
+                // Cancellation shuts down this socket's read half, which also
+                // reads as end of stream; the loop then sends its Close frame.
+                Ok(0) if self.cancelled.load(Ordering::Acquire) => {}
                 Ok(0) => return Ok(()),
                 Ok(read) => {
                     input.extend_from_slice(&chunk[..read]);
@@ -723,6 +736,16 @@ impl WebSocketWorker<'_> {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Sends a Close frame before the worker drops its socket. It is bounded
+    /// by the socket's write timeout, and a failed write is ignored because
+    /// the connection is ending anyway.
+    fn close(&self, code: u16) {
+        let _ = self.write(&WebSocketOutput::Close {
+            code: Some(code),
+            reason: Vec::new(),
+        });
     }
 
     /// Admits each complete frame in `bytes` and any frames already buffered
@@ -2802,10 +2825,8 @@ mod tests {
         let resumed = resume_session(address, &session);
         assert_eq!(resumed.id, session.id);
         assert_ne!(resumed.token, session.token);
-        assert!(
-            closed_by_server(&mut replaced),
-            "the replaced socket is closed by its cancelled worker"
-        );
+        // The cancelled worker sends its closing handshake, then disconnects.
+        expect_server_close(&mut replaced, CLOSE_RETIRED);
 
         let mut current = open_websocket(address, &resumed);
         send_frame(&mut current, 8, &1000_u16.to_be_bytes());
@@ -2854,10 +2875,8 @@ mod tests {
 
         let (opcode, _) = read_frame(&mut socket).expect("final keepalive ping");
         assert_eq!(opcode, 9);
-        assert!(
-            closed_by_server(&mut socket),
-            "a silent peer is disconnected after the idle bound"
-        );
+        // A silent peer is told the host is going away, then disconnected.
+        expect_server_close(&mut socket, CLOSE_IDLE);
         assert_eq!(delete_session_once_released(address, &session), 204);
     }
 
@@ -3144,6 +3163,18 @@ mod tests {
                 io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
             ),
         }
+    }
+
+    /// Reads the server's closing handshake: one Close frame carrying `code`,
+    /// then the end of the connection.
+    fn expect_server_close(stream: &mut TcpStream, code: u16) {
+        let (opcode, payload) = read_frame(stream).expect("server Close frame");
+        assert_eq!(opcode, 8, "the server sends a Close frame");
+        assert_eq!(payload, code.to_be_bytes());
+        assert!(
+            closed_by_server(stream),
+            "the server disconnects after its Close frame"
+        );
     }
 
     fn uuid_bytes(text: &str) -> [u8; 16] {
