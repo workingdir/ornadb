@@ -7851,7 +7851,7 @@ impl Context<'_, '_> {
         }
         let native_collection = native_binding.is_some_and(|binding| {
             binding.kind == StandardBindingKind::Collection
-                && (binding.operation.starts_with("__") || binding.operation == "map")
+                && captured_collection_binding_is_native(binding.operation, self.functions)
         });
         let native_asof_join = portable_collection_name(callee) == Some("asof_join")
             && !self.restrict_function_names
@@ -13992,6 +13992,40 @@ fn captured_timezone_snapshot_matches(functions: &Functions) -> bool {
     )
 }
 
+/// A pinned `*_from` helper whose body is a `while` loop. Historical pins
+/// define these helpers recursively; the loop rewrite makes the Orna body the
+/// evaluation target, while historical pins keep their native bindings
+/// (ORNA-LIB-001).
+fn captured_collection_helper_is_loop(functions: &Functions, name: &str) -> bool {
+    let Some(helper) = functions.get(name) else {
+        return false;
+    };
+    matches!(
+        &helper.body,
+        Expr::Block { statements, .. }
+            if statements.iter().any(|statement| matches!(
+                statement,
+                Statement::Control {
+                    value: Expr::Control {
+                        kind: ControlKind::While,
+                        ..
+                    },
+                    ..
+                }
+            ))
+    )
+}
+
+/// Whether a registered collection binding still evaluates in Rust for a
+/// captured pin. `__` leaves are always native. `map` stays native only while
+/// its pinned `map_from` is not a loop. Other public operations take their
+/// Orna bodies for list inputs; relation inputs are routed before this gate.
+fn captured_collection_binding_is_native(operation: &str, functions: &Functions) -> bool {
+    operation.starts_with("__")
+        || (operation == "map"
+            && !captured_collection_helper_is_loop(functions, "std.collection.map_from"))
+}
+
 fn format_duration_context(context: Option<&Value>) -> Result<(), EvaluationError> {
     let (locale, zone) = match context {
         None => ("en", "UTC"),
@@ -15136,6 +15170,78 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// `std.collection.map_from` at the historical pin a987024 (recursive).
+    const HISTORICAL_MAP_FROM: &str = "fn map_from<T, U>(
+    values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]
+): [U] =
+    if index >= end {
+        output
+    } else {
+        map_from(values, transform, index + 1, end, append(output, transform(values[index])))
+    };
+";
+
+    /// Loads every function of a standard collection module under `std.collection.`.
+    fn collection_functions_for(source: &str) -> Functions {
+        let parsed = orna_syntax_v1::parse_module(source);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let mut functions = Functions::new();
+        for item in parsed.value.items {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
+            else {
+                continue;
+            };
+            functions.insert(
+                format!("std.collection.{}", signature.name),
+                PureFunction {
+                    parameters: signature.parameters,
+                    body,
+                    environment: Environment::new(),
+                },
+            );
+        }
+        functions
+    }
+
+    #[test]
+    fn captured_collection_map_gate_follows_the_pinned_map_from_shape() {
+        // Historical pins keep the native map binding: their body is not a loop.
+        assert!(captured_collection_binding_is_native(
+            "map",
+            &collection_functions_for(HISTORICAL_MAP_FROM)
+        ));
+        // The current pin defines map_from as a while loop, so the Orna body shadows native map.
+        assert!(!captured_collection_binding_is_native(
+            "map",
+            &collection_functions_for(include_str!("../../../stdlib/std/collection.orna"))
+        ));
+        assert!(captured_collection_binding_is_native("map", &Functions::new()));
+        assert!(captured_collection_binding_is_native("__stable_sort", &Functions::new()));
+    }
+
+    #[test]
+    fn pinned_collection_loop_bodies_resolve_without_registry_hits() {
+        let pinned = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
+        for (operation, helper) in [
+            ("chunk", "chunk_from"),
+            ("flatten", "flatten_from"),
+            ("filter", "filter_from"),
+            ("map", "map_from"),
+            ("partition", "partition_from"),
+            ("zip", "zip_from"),
+            ("pairs", "pairs_from"),
+            ("window", "windows_from"),
+            ("split_when", "split_when_from"),
+        ] {
+            assert!(pinned.contains_key(&format!("std.collection.{operation}")), "{operation}");
+            assert!(
+                captured_collection_helper_is_loop(&pinned, &format!("std.collection.{helper}")),
+                "{helper} must be a while loop in the pin"
+            );
+            assert!(!captured_collection_binding_is_native(operation, &pinned), "{operation}");
+        }
+    }
 
     #[test]
     fn registry_covers_pinned_intrinsic_and_sys_host_stubs() {
