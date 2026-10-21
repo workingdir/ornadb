@@ -172,6 +172,9 @@ fn unicode_16_uppercase(value: &str) -> String {
 pub struct Limits {
     pub max_source_bytes: usize,
     pub max_steps: u64,
+    /// Maximum active calls (function, closure and callback bodies) and
+    /// maximum nesting of any single pattern or decoded value. Expression
+    /// nesting inside a body is bounded by the parser and is not counted.
     pub max_depth: usize,
     pub max_collection_items: usize,
     pub max_string_bytes: usize,
@@ -1488,6 +1491,7 @@ pub fn planner_metadata(
     let mut context = Context {
         limits,
         steps: 0,
+        calls: 0,
         functions: &functions,
         aliases: None,
         session_functions: None,
@@ -1621,6 +1625,7 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
     let mut context = Context {
         limits,
         steps: 0,
+        calls: 0,
         functions: &functions,
         aliases: None,
         session_functions: None,
@@ -1729,6 +1734,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
     let mut context = Context {
         limits,
         steps: 0,
+        calls: 0,
         functions,
         aliases: None,
         session_functions: None,
@@ -1867,6 +1873,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
     let mut context = Context {
         limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
+        calls: 0,
         functions,
         aliases: None,
         session_functions: None,
@@ -1909,6 +1916,7 @@ pub fn evaluate_function(
     let mut context = Context {
         limits,
         steps: 0,
+        calls: 0,
         functions: &functions,
         aliases: None,
         session_functions: None,
@@ -1957,6 +1965,7 @@ pub fn invoke_named_with_nominals(
     let mut context = Context {
         limits,
         steps: 0,
+        calls: 0,
         functions,
         aliases: None,
         session_functions: None,
@@ -2029,6 +2038,7 @@ fn invoke_named_with_effects_and_reuse(
     let mut context = Context {
         limits,
         steps: limits.max_steps.saturating_sub(budget.remaining()),
+        calls: 0,
         functions,
         aliases: None,
         session_functions: None,
@@ -2110,6 +2120,7 @@ pub fn invoke_named_with_context_effects(
         let mut context = Context {
             limits,
             steps: limits.max_steps.saturating_sub(budget.remaining()),
+            calls: 0,
             functions,
             aliases: None,
             session_functions: None,
@@ -2186,7 +2197,24 @@ fn supplied_context_arguments(
         .collect())
 }
 
+/// Runs one source activation. Every activation counts against
+/// `Limits::max_depth`; exceeding it fails with the explicit `ORNA-EVAL-LIMIT`
+/// resource code (ORNA-CLOSURE-004), never with a partial result.
 fn invoke_pure(
+    context: &mut Context,
+    parameters: &[Parameter],
+    body: &Expr,
+    scope: Scope,
+    supplied: BTreeMap<ArgumentKey, Value>,
+    depth: usize,
+) -> Result<Value, EvaluationError> {
+    context.enter_call()?;
+    let result = bind_and_evaluate(context, parameters, body, scope, supplied, depth);
+    context.calls -= 1;
+    result
+}
+
+fn bind_and_evaluate(
     context: &mut Context,
     parameters: &[Parameter],
     body: &Expr,
@@ -2194,7 +2222,6 @@ fn invoke_pure(
     supplied: BTreeMap<ArgumentKey, Value>,
     depth: usize,
 ) -> Result<Value, EvaluationError> {
-    context.depth(depth)?;
     context.items(parameters.len())?;
     context.items(supplied.len())?;
     let mut keys = BTreeSet::new();
@@ -2234,7 +2261,7 @@ fn invoke_pure(
                 depth,
             )?
         };
-        if !bind(&parameter.pattern, value, &mut scope, context, depth + 1)? {
+        if !bind(&parameter.pattern, value, &mut scope, context, 1)? {
             return Err(error("ORNA-EVAL-TYPE"));
         }
         context.items(scope.0.len())?;
@@ -3759,6 +3786,9 @@ struct CallReuseKey {
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
+    /// Active source activations: function, closure and callback bodies.
+    /// `Limits::max_depth` bounds this count (ORNA-CLOSURE-004).
+    calls: usize,
     functions: &'functions Functions,
     aliases: Option<&'functions BTreeMap<String, String>>,
     session_functions: Option<&'functions BTreeSet<String>>,
@@ -3918,6 +3948,9 @@ fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt
     Some(seconds * BigInt::from(1_000_000_000u64) + nanoseconds)
 }
 
+/// Runs one task callback on a worker thread. The child starts with the
+/// owner's active calls, so recursion through task combinators stays within
+/// `Limits::max_depth`.
 fn invoke_task_callback(
     callback: Value,
     functions: &Functions,
@@ -3928,12 +3961,13 @@ fn invoke_task_callback(
     repl_bindings: bool,
     restrict_function_names: bool,
     reject_unhandled_field_calls: bool,
-    depth: usize,
+    active_calls: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
 ) -> Result<Value, EvaluationError> {
     let mut context = Context {
         limits,
         steps: 0,
+        calls: active_calls,
         functions,
         aliases,
         session_functions,
@@ -3948,7 +3982,7 @@ fn invoke_task_callback(
         reuse: CallReuse::disabled(),
         cancellation: Some(&cancellation),
     };
-    context.invoke_callable(&callback, Vec::new(), depth)
+    context.invoke_callable(&callback, Vec::new(), 0)
 }
 
 /// Run finite callback lists with a bounded number of owned worker threads.
@@ -3958,7 +3992,7 @@ fn invoke_task_callback(
 fn run_task_callbacks(
     callbacks: &[Value],
     mut child_effects: Vec<Option<Box<dyn EffectHandler + Send>>>,
-    callback_depth: usize,
+    active_calls: usize,
     parent: Option<CancellationToken>,
     functions: &Functions,
     aliases: Option<&BTreeMap<String, String>>,
@@ -4014,7 +4048,7 @@ fn run_task_callbacks(
                             repl_bindings,
                             restrict_function_names,
                             reject_unhandled_field_calls,
-                            callback_depth,
+                            active_calls,
                             effects,
                         )
                     }))
@@ -4146,6 +4180,15 @@ impl Context<'_, '_> {
             Ok(())
         }
     }
+    /// One more activation must fit within `Limits::max_depth` active calls.
+    fn check_call_room(&self) -> Result<(), EvaluationError> {
+        self.depth(self.calls.saturating_add(1))
+    }
+    fn enter_call(&mut self) -> Result<(), EvaluationError> {
+        self.check_call_room()?;
+        self.calls += 1;
+        Ok(())
+    }
     fn items(&self, count: usize) -> Result<(), EvaluationError> {
         if count > self.limits.max_collection_items {
             Err(error("ORNA-EVAL-LIMIT"))
@@ -4164,9 +4207,7 @@ impl Context<'_, '_> {
         &mut self,
         failure: &EvaluationError,
         name: &str,
-        depth: usize,
     ) -> Result<Value, EvaluationError> {
-        self.depth(depth)?;
         let canonical = failure
             .canonical
             .as_ref()
@@ -4194,7 +4235,7 @@ impl Context<'_, '_> {
                     self.string(key.clone())?;
                     let canonical = CanonicalValue::new(value.raw().clone())
                         .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                    let value = Value::from_canonical(&canonical, self, depth + 1)?;
+                    let value = Value::from_canonical(&canonical, self, 1)?;
                     fields.insert(key, value);
                 }
                 Ok(Value::Record(fields))
@@ -4208,9 +4249,7 @@ impl Context<'_, '_> {
         reference: &CanonicalValue,
         name: &str,
         scope: &Scope,
-        depth: usize,
     ) -> Result<Value, EvaluationError> {
-        self.depth(depth)?;
         let Raw::Tag(60010, payload) = reference.raw() else {
             return Err(error("ORNA-EVAL-VALUE"));
         };
@@ -4225,7 +4264,7 @@ impl Context<'_, '_> {
         // does not fetch or materialize the referenced row.
         if name == "key" {
             let key = CanonicalValue::new(key.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-            return Value::from_canonical(&key, self, depth + 1);
+            return Value::from_canonical(&key, self, 1);
         }
 
         self.invalidate_call_reuse();
@@ -4242,7 +4281,7 @@ impl Context<'_, '_> {
             .checked_add(debited)
             .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         let target = target?.ok_or_else(|| error("ORNA-EVAL-FIELD"))?;
-        match Value::from_canonical(&target, self, depth + 1)? {
+        match Value::from_canonical(&target, self, 0)? {
             Value::Record(fields) => fields
                 .get(name)
                 .cloned()
@@ -4354,7 +4393,6 @@ impl Context<'_, '_> {
         base: Value,
         name: &str,
         scope: &mut Scope,
-        depth: usize,
     ) -> Result<Value, EvaluationError> {
         match base {
             Value::Record(fields) => fields
@@ -4364,8 +4402,8 @@ impl Context<'_, '_> {
             Value::NominalRecord { type_id, fields } => {
                 self.nominal_field(&type_id, &fields, name, scope)
             }
-            Value::Reference(reference) => self.reference_field(&reference, name, scope, depth + 1),
-            Value::Error(failure) => self.error_field(&failure, name, depth + 1),
+            Value::Reference(reference) => self.reference_field(&reference, name, scope),
+            Value::Error(failure) => self.error_field(&failure, name),
             Value::Int(value) => self.numeric_postfix(value, name),
             Value::Decimal(value) => self.numeric_decimal_postfix(value, name),
             _ if self.transfer.is_some() => Ok(Value::Null),
@@ -4378,9 +4416,10 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        // Expression nesting is bounded by `Limits::max_depth`, but debug frames
-        // for the evaluator's large match arms can exceed a test thread's default
-        // stack well before that bound. Grow onto a fresh segment near the limit.
+        // Expression nesting inside one body is bounded by the parser and
+        // `Limits::max_depth` bounds active calls, but debug frames for the
+        // evaluator's large match arms can exceed a test thread's default
+        // stack well before those bounds. Grow onto a fresh segment near the limit.
         stacker::maybe_grow(EVALUATOR_STACK_RED_ZONE, EVALUATOR_STACK_SEGMENT, || {
             self.evaluate_node(expression, scope, depth)
         })
@@ -4397,7 +4436,6 @@ impl Context<'_, '_> {
             return Ok(Value::Null);
         }
         self.step()?;
-        self.depth(depth)?;
         let result = match expression {
             Expr::Name { text, .. } => scope
                 .0
@@ -4531,7 +4569,7 @@ impl Context<'_, '_> {
             }
             Expr::Field { base, name, .. } => {
                 let base = self.evaluate(base, scope, depth + 1)?;
-                self.field_value(base, name, scope, depth)
+                self.field_value(base, name, scope)
             }
             Expr::Control {
                 kind: ControlKind::If,
@@ -4622,7 +4660,7 @@ impl Context<'_, '_> {
                 let bound_names = pattern_names(binding);
                 for value in values {
                     let mut iteration = scope.clone();
-                    if !bind(binding, value, &mut iteration, self, depth + 1)? {
+                    if !bind(binding, value, &mut iteration, self, 1)? {
                         return Err(error("ORNA-EVAL-TYPE"));
                     }
                     self.evaluate(body, &mut iteration, depth + 1)?;
@@ -4633,7 +4671,7 @@ impl Context<'_, '_> {
                                 if bound_names.contains(name) {
                                     continue;
                                 }
-                                if let Some(value) = iteration.0.get(name).cloned() {
+                                if let Some(value) = iteration.0.remove(name) {
                                     scope.0.insert(name.clone(), value);
                                 }
                             }
@@ -4649,7 +4687,7 @@ impl Context<'_, '_> {
                         if bound_names.contains(name) {
                             continue;
                         }
-                        if let Some(value) = iteration.0.get(name).cloned() {
+                        if let Some(value) = iteration.0.remove(name) {
                             scope.0.insert(name.clone(), value);
                         }
                     }
@@ -4999,7 +5037,7 @@ impl Context<'_, '_> {
             match statement {
                 Statement::Let { pattern, value, .. } => {
                     let value = self.evaluate(value, &mut local, depth + 1)?;
-                    if !bind(pattern, value, &mut local, self, depth + 1)? {
+                    if !bind(pattern, value, &mut local, self, 1)? {
                         return Err(error("ORNA-EVAL-TYPE"));
                     }
                     declared_names.extend(pattern_names(pattern));
@@ -5060,7 +5098,7 @@ impl Context<'_, '_> {
             if declared_names.contains(&name) {
                 continue;
             }
-            if let Some(value) = local.0.get(&name).cloned() {
+            if let Some(value) = local.0.remove(&name) {
                 scope.0.insert(name, value);
             }
         }
@@ -5080,21 +5118,35 @@ impl Context<'_, '_> {
         if scope.1.contains(name) {
             return Err(error("ORNA-EVAL-IMMUTABLE-CAPTURE"));
         }
-        let current = scope
-            .0
-            .get(name)
-            .cloned()
-            .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+        // Compound operators read the slot before the right-hand side runs. A
+        // plain `=` only requires the slot, so it does not copy the old value.
+        let current = match operator {
+            AssignmentOperator::Set if scope.0.contains_key(name) => None,
+            _ => Some(
+                scope
+                    .0
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?,
+            ),
+        };
         let value = self.evaluate(expression, scope, depth + 1)?;
         if self.transfer.is_some() {
             return Ok(());
         }
-        let value = match operator {
-            AssignmentOperator::Set => value,
-            AssignmentOperator::Add => self.apply_binary("+", current, value)?,
-            AssignmentOperator::Subtract => self.apply_binary("-", current, value)?,
-            AssignmentOperator::Multiply => self.apply_binary("*", current, value)?,
-            AssignmentOperator::Divide => self.apply_binary("/", current, value)?,
+        let value = match (operator, current) {
+            (AssignmentOperator::Set, _) => value,
+            (AssignmentOperator::Add, Some(current)) => self.apply_binary("+", current, value)?,
+            (AssignmentOperator::Subtract, Some(current)) => {
+                self.apply_binary("-", current, value)?
+            }
+            (AssignmentOperator::Multiply, Some(current)) => {
+                self.apply_binary("*", current, value)?
+            }
+            (AssignmentOperator::Divide, Some(current)) => {
+                self.apply_binary("/", current, value)?
+            }
+            (_, None) => return Err(error("ORNA-EVAL-NAME")),
         };
         scope.0.insert(name.clone(), value);
         Ok(())
@@ -6602,7 +6654,6 @@ impl Context<'_, '_> {
                 plan.source_identity,
                 after.as_deref(),
                 page_limit,
-                depth,
             )?;
             let page_len = rows.len();
             for value in rows {
@@ -6988,7 +7039,6 @@ impl Context<'_, '_> {
         scope: RelationReadScope,
         after: Option<&[u8]>,
         page_limit: usize,
-        depth: usize,
     ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
         enum SourcePage {
             Canonical(RelationPage),
@@ -7045,7 +7095,7 @@ impl Context<'_, '_> {
             SourcePage::Canonical(page) => page
                 .rows
                 .iter()
-                .map(|row| Value::from_canonical(row, self, depth + 1))
+                .map(|row| Value::from_canonical(row, self, 0))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|rows| (rows, page.next)),
             SourcePage::Contextual(page) => {
@@ -7064,7 +7114,7 @@ impl Context<'_, '_> {
                         {
                             return Err(error("ORNA-EVAL-VALUE"));
                         }
-                        Value::from_context_value(row, self, depth + 1)
+                        Value::from_context_value(row, self, 0)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((rows, page.next))
@@ -7177,15 +7227,14 @@ impl Context<'_, '_> {
         let input = self.string(input.to_owned())?;
         let node = parse_json_node(&input)?;
         let CodecTypeWitness::Named(witness) = witness else {
-            return json_node_to_value(node, self, depth);
+            return json_node_to_value(node, self, 0);
         };
         let Some(definition) = scope.3.get(witness).cloned() else {
-            return json_node_to_value(node, self, depth);
+            return json_node_to_value(node, self, 0);
         };
         if !definition.variants.is_empty() {
             return Err(error("ORNA-EVAL-VALUE"));
         }
-        self.depth(depth)?;
         self.step()?;
         let JsonNode::Object(entries) = node else {
             return Err(error("ORNA-EVAL-VALUE"));
@@ -7205,7 +7254,7 @@ impl Context<'_, '_> {
             } else if ignore_unknown_fields {
                 // Ignored fields still consume evaluator limits so a large
                 // unknown subtree cannot bypass the bounded decoder.
-                let _ = json_node_to_value(value, self, depth + 1)?;
+                let _ = json_node_to_value(value, self, 1)?;
             } else {
                 return Err(error("ORNA-EVAL-VALUE"));
             }
@@ -7216,7 +7265,7 @@ impl Context<'_, '_> {
         for field in &definition.fields {
             let value = if field.public {
                 if let Some(node) = supplied.remove(&field.name) {
-                    json_node_to_value(node, self, depth + 1)?
+                    json_node_to_value(node, self, 1)?
                 } else if let Some(default) = &field.default {
                     let previous_namespace = self.namespace.clone();
                     self.namespace = definition.owner.clone();
@@ -7426,7 +7475,7 @@ impl Context<'_, '_> {
                 }
                 receiver => {
                     pre_evaluated_callee =
-                        Some(self.field_value(receiver, name, scope, depth + 1)?);
+                        Some(self.field_value(receiver, name, scope)?);
                 }
             }
         }
@@ -8029,7 +8078,7 @@ impl Context<'_, '_> {
                     .entry(name.clone())
                     .or_insert_with(|| definition.clone());
             }
-            self.depth(depth + 1)?;
+            self.check_call_room()?;
             self.items(arguments.len() + usize::from(input.is_some()))?;
             let mut supplied = BTreeMap::new();
             let mut positional = 0;
@@ -8211,7 +8260,7 @@ impl Context<'_, '_> {
         } else if stream.is_some() {
             self.stream(name, values, depth)
         } else if concurrent.is_some() {
-            self.concurrent(name, values, depth)
+            self.concurrent(name, values)
         } else if native_ui.is_some() {
             self.ui_node(values)
         } else if native_hash.is_some() {
@@ -8312,7 +8361,7 @@ impl Context<'_, '_> {
         self.items(arms.len())?;
         for arm in arms {
             let mut local = scope.clone();
-            if !bind(&arm.pattern, value.clone(), &mut local, self, depth + 1)? {
+            if !bind(&arm.pattern, value.clone(), &mut local, self, 1)? {
                 continue;
             }
             if let Some(guard) = &arm.guard {
@@ -8323,7 +8372,21 @@ impl Context<'_, '_> {
                     _ => return Err(error("ORNA-EVAL-TYPE")),
                 }
             }
-            return self.evaluate(&arm.body, &mut local, depth + 1);
+            let result = self.evaluate(&arm.body, &mut local, depth + 1)?;
+            // ORNA-CFLOW-005: assignments in the arm replace the enclosing
+            // function-local slots, as in a block; names the arm pattern binds
+            // stay local to the arm.
+            let bound_names = pattern_names(&arm.pattern);
+            let outer_names = scope.0.keys().cloned().collect::<Vec<_>>();
+            for name in outer_names {
+                if bound_names.contains(&name) {
+                    continue;
+                }
+                if let Some(value) = local.0.remove(&name) {
+                    scope.0.insert(name, value);
+                }
+            }
+            return Ok(result);
         }
         Err(error("ORNA-EVAL-NO-MATCH"))
     }
@@ -8834,7 +8897,6 @@ impl Context<'_, '_> {
         else {
             return Err(error("ORNA-EVAL-TYPE"));
         };
-        self.depth(depth)?;
         self.items(provider.sources.len())?;
         let mut cursors = provider.sources.clone();
         let mut source_names = BTreeSet::new();
@@ -9544,19 +9606,14 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
-    fn concurrent(
-        &mut self,
-        name: &str,
-        values: Vec<Value>,
-        depth: usize,
-    ) -> Result<Value, EvaluationError> {
+    fn concurrent(&mut self, name: &str, values: Vec<Value>) -> Result<Value, EvaluationError> {
         match (name, values.as_slice()) {
             ("parallel", [Value::List(callbacks)]) => {
                 self.items(callbacks.len())?;
                 if callbacks.is_empty() {
                     return Ok(Value::List(Vec::new()));
                 }
-                self.depth(depth.saturating_add(1))?;
+                self.check_call_room()?;
                 let parent = self.cancellation.cloned();
                 let mut child_effects = Vec::with_capacity(callbacks.len());
                 self.disable_call_reuse_for_fork();
@@ -9570,7 +9627,7 @@ impl Context<'_, '_> {
                 let (results, _) = run_task_callbacks(
                     callbacks,
                     child_effects,
-                    depth.saturating_add(1),
+                    self.calls,
                     parent.clone(),
                     self.functions,
                     self.aliases,
@@ -9609,7 +9666,7 @@ impl Context<'_, '_> {
                 if callbacks.is_empty() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
-                self.depth(depth.saturating_add(1))?;
+                self.check_call_room()?;
                 let parent = self.cancellation.cloned();
                 let mut child_effects = Vec::with_capacity(callbacks.len());
                 self.disable_call_reuse_for_fork();
@@ -9623,7 +9680,7 @@ impl Context<'_, '_> {
                 let (results, winner) = run_task_callbacks(
                     callbacks,
                     child_effects,
-                    depth.saturating_add(1),
+                    self.calls,
                     parent.clone(),
                     self.functions,
                     self.aliases,
@@ -9664,7 +9721,7 @@ impl Context<'_, '_> {
                     },
                 ],
             ) => {
-                self.depth(depth.saturating_add(1))?;
+                self.check_call_room()?;
                 if seconds.is_negative() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
@@ -9679,6 +9736,7 @@ impl Context<'_, '_> {
                 let repl_bindings = self.repl_bindings;
                 let restrict_function_names = self.restrict_function_names;
                 let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
+                let active_calls = self.calls;
                 self.disable_call_reuse_for_fork();
                 let child_effects = self
                     .effects
@@ -9703,7 +9761,7 @@ impl Context<'_, '_> {
                                 repl_bindings,
                                 restrict_function_names,
                                 reject_unhandled_field_calls,
-                                depth.saturating_add(1),
+                                active_calls,
                                 child_effects,
                             )
                         }))
@@ -10693,9 +10751,8 @@ impl Context<'_, '_> {
     }
     fn count(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
         self.items(values.len())?;
-        for _ in values {
-            self.step()?;
-        }
+        // A finite list knows its length: one bounded step, not one per item.
+        self.step()?;
         Ok(Value::Int(BigInt::from(values.len())))
     }
     fn sum(&mut self, values: &[Value]) -> Result<Value, EvaluationError> {
@@ -12098,18 +12155,16 @@ impl Context<'_, '_> {
         arguments: Vec<Value>,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        let functions = self.functions;
         let (parameters, body, mut captured, session_owned, namespace) = match callable {
             Value::Function {
                 name,
                 nominal_definitions,
             } => {
-                let function = self
-                    .functions
-                    .get(name)
-                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
                 (
-                    function.parameters.clone(),
-                    function.body.clone(),
+                    &function.parameters,
+                    &function.body,
                     Scope::from_environment_with_nominals(
                         &function.environment,
                         nominal_definitions,
@@ -12121,15 +12176,14 @@ impl Context<'_, '_> {
                 )
             }
             Value::Closure(closure) => (
-                closure.parameters.clone(),
-                closure.body.clone(),
+                &closure.parameters,
+                &closure.body,
                 closure.captured.clone(),
                 self.repl_bindings,
                 closure.namespace.clone(),
             ),
             _ => return Err(error("ORNA-EVAL-TYPE")),
         };
-        self.depth(depth + 1)?;
         self.items(arguments.len())?;
         if arguments.len() > parameters.len() {
             return Err(error("ORNA-EVAL-ARGUMENT"));
@@ -12148,7 +12202,7 @@ impl Context<'_, '_> {
         self.repl_bindings = session_owned;
         let previous_namespace = self.namespace.clone();
         self.namespace = namespace;
-        let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
+        let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
         self.namespace = previous_namespace;
         self.repl_bindings = previous_repl_bindings;
         result
@@ -12159,18 +12213,16 @@ impl Context<'_, '_> {
         input: Value,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
+        let functions = self.functions;
         let (parameters, body, captured, session_owned, namespace) = match callable {
             Value::Function {
                 name,
                 nominal_definitions,
             } => {
-                let function = self
-                    .functions
-                    .get(name)
-                    .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+                let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
                 (
-                    function.parameters.clone(),
-                    function.body.clone(),
+                    &function.parameters,
+                    &function.body,
                     Scope::from_environment_with_nominals(
                         &function.environment,
                         nominal_definitions,
@@ -12182,15 +12234,14 @@ impl Context<'_, '_> {
                 )
             }
             Value::Closure(closure) => (
-                closure.parameters.clone(),
-                closure.body.clone(),
+                &closure.parameters,
+                &closure.body,
                 closure.captured.clone(),
                 self.repl_bindings,
                 closure.namespace.clone(),
             ),
             _ => return Err(error("ORNA-EVAL-TYPE")),
         };
-        self.depth(depth + 1)?;
         self.items(1)?;
         let Some(parameter) = parameters.first() else {
             return Err(error("ORNA-EVAL-ARGUMENT"));
@@ -12201,7 +12252,7 @@ impl Context<'_, '_> {
         self.repl_bindings = session_owned;
         let previous_namespace = self.namespace.clone();
         self.namespace = namespace;
-        let result = invoke_pure(self, &parameters, &body, captured, supplied, depth + 1);
+        let result = invoke_pure(self, parameters, body, captured, supplied, depth + 1);
         self.namespace = previous_namespace;
         self.repl_bindings = previous_repl_bindings;
         result
@@ -15325,6 +15376,7 @@ mod tests {
         Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions,
             aliases: None,
             session_functions: None,
@@ -16800,6 +16852,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -16874,6 +16927,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17024,6 +17078,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17169,6 +17224,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17204,6 +17260,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17670,6 +17727,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17703,6 +17761,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
@@ -17735,6 +17794,7 @@ mod tests {
         let mut context = Context {
             limits: Limits::default(),
             steps: 0,
+            calls: 0,
             functions: &functions,
             aliases: None,
             session_functions: None,
