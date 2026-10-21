@@ -4984,6 +4984,33 @@ fn is_builtin_protocol_without_local_surface(name: &str) -> bool {
     matches!(name, "Display" | "Present")
 }
 
+/// `Currency` is a core protocol so `Money<C>` stays meaningful without `std`
+/// (09-standard-library.md). Its member surface is fixed by ORNA-MONEY-004:
+/// the stable static properties `code: Str` and `minor_digits: Int`
+/// (05-types.md, "Money and currencies"). A module may implement it without
+/// declaring it.
+const CORE_CURRENCY_PROTOCOL: &str =
+    "pub protocol Currency {\n    static code: Str;\n    static minor_digits: Int;\n}\n";
+
+static CORE_CURRENCY_SURFACE: std::sync::LazyLock<Vec<ProtocolMember>> =
+    std::sync::LazyLock::new(|| {
+        parse_module_with_file(CORE_CURRENCY_PROTOCOL, "core/Currency.orna".to_owned())
+            .value
+            .items
+            .into_iter()
+            .find_map(|item| match item.declaration {
+                Declaration::Protocol { members, .. } => Some(members),
+                _ => None,
+            })
+            .expect("the core Currency protocol surface parses")
+    });
+
+/// The specified member surface of a core protocol that source need not
+/// declare.
+fn core_protocol_surface(name: &str) -> Option<&'static [ProtocolMember]> {
+    (name == "Currency").then(|| CORE_CURRENCY_SURFACE.as_slice())
+}
+
 /// Resolve a transparent local type alias to a locally declared, non-generic
 /// protocol.  This intentionally does not cross imported module boundaries
 /// or substitute generic protocol parameters: those identities remain the
@@ -5010,7 +5037,8 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 /// imported-member conformance, complete callable semantics, and full runtime
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
-/// Only the builtin Display/Present names retain a missing-member-surface
+/// The core `Currency` protocol is checked against its specified surface;
+/// only the builtin Display/Present names retain a missing-member-surface
 /// residual. Mixed protocols check generic and non-generic members alike.
 /// `From<Source>` checks the closed source/member shape below, but does not
 /// implement conversion selection or runtime dispatch.
@@ -5152,39 +5180,48 @@ fn validate_nested_implementation_members(
         ));
         return;
     }
-    let Some(protocol_name) = resolve_local_protocol_name(&path[0], scope) else {
-        match scope.names.get(&path[0]) {
+    let required_members = match resolve_local_protocol_name(&path[0], scope) {
+        Some(protocol_name) => {
+            let Some(required_members) = local_protocols.get(&protocol_name) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity cannot be resolved",
+                ));
+                return;
+            };
+            required_members.as_slice()
+        }
+        None => match scope.names.get(&path[0]) {
             Some(symbol) if symbol.kind == SymbolKind::Protocol => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "imported protocol identity cannot be resolved",
                 ));
+                return;
             }
             Some(_) => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "protocol implementation identity is not a protocol",
                 ));
+                return;
             }
             None if is_builtin_protocol_without_local_surface(&path[0]) => {
                 // Display and Present are the two presentation protocol names
                 // supplied by the frozen surface without a local member AST.
+                return;
             }
-            None => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "unresolved protocol implementation identity",
-                ));
-            }
-        }
-        return;
-    };
-    let Some(required_members) = local_protocols.get(&protocol_name) else {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "protocol implementation identity cannot be resolved",
-        ));
-        return;
+            None => match core_protocol_surface(&path[0]) {
+                Some(surface) => surface,
+                None => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "unresolved protocol implementation identity",
+                    ));
+                    return;
+                }
+            },
+        },
     };
 
     let mut implemented_names = BTreeSet::new();
