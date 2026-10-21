@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-colon-bound.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-BOUND-COLON",
+  "message_contains": "protocol bounds use `<T impl Protocol>`",
+  "status": "expected-not-executed"
+}

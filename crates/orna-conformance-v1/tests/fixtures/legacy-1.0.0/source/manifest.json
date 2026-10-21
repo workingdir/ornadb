@@ -1,0 +1,218 @@
+[
+  {
+    "id": "scope",
+    "title": "About this specification",
+    "part": "Orientation",
+    "file": "source/01-scope.md"
+  },
+  {
+    "id": "concepts",
+    "title": "Concepts and boundaries",
+    "part": "Orientation",
+    "file": "source/02-concepts.md"
+  },
+  {
+    "id": "source-modules",
+    "title": "Source, modules and namespaces",
+    "part": "Language",
+    "file": "source/03-source-modules.md"
+  },
+  {
+    "id": "lexical",
+    "title": "Lexical structure and literal forms",
+    "part": "Language",
+    "file": "source/04-lexical.md"
+  },
+  {
+    "id": "types",
+    "title": "Types, numbers and nominal values",
+    "part": "Language",
+    "file": "source/05-types.md"
+  },
+  {
+    "id": "expressions",
+    "title": "Declarations, expressions and failure",
+    "part": "Language",
+    "file": "source/06-expressions.md"
+  },
+  {
+    "id": "tables",
+    "title": "Tables, rows and assertions",
+    "part": "Language",
+    "file": "source/07-tables.md"
+  },
+  {
+    "id": "relations",
+    "title": "Relations, queries and historical evaluation",
+    "part": "Language",
+    "file": "source/08-relations.md"
+  },
+  {
+    "id": "standard-library",
+    "title": "Core operations and the standard library",
+    "part": "Language",
+    "file": "source/09-standard-library.md"
+  },
+  {
+    "id": "execution",
+    "title": "Activations, transactions and task ownership",
+    "part": "Execution",
+    "file": "source/10-execution.md"
+  },
+  {
+    "id": "streams",
+    "title": "Stream programs and consumer identity",
+    "part": "Execution",
+    "file": "source/11-streams.md"
+  },
+  {
+    "id": "checkpoints",
+    "title": "Checkpoints and failed deliveries",
+    "part": "Execution",
+    "file": "source/12-checkpoints.md"
+  },
+  {
+    "id": "presentation",
+    "title": "Inspection, display, presentation and codecs",
+    "part": "Execution",
+    "file": "source/13-presentation.md"
+  },
+  {
+    "id": "pages",
+    "title": "Pages and live views",
+    "part": "Execution",
+    "file": "source/14-pages.md"
+  },
+  {
+    "id": "system",
+    "title": "The system model",
+    "part": "Execution",
+    "file": "source/15-system.md"
+  },
+  {
+    "id": "administration",
+    "title": "Administrative operations",
+    "part": "Execution",
+    "file": "source/16-administration.md"
+  },
+  {
+    "id": "repl",
+    "title": "The interactive session",
+    "part": "Execution",
+    "file": "source/17-repl.md"
+  },
+  {
+    "id": "cli",
+    "title": "Command-line interface",
+    "part": "Execution",
+    "file": "source/18-cli.md"
+  },
+  {
+    "id": "repository",
+    "title": "Repository, CWD, index and HEAD",
+    "part": "Persistence",
+    "file": "source/19-repository.md"
+  },
+  {
+    "id": "embedded",
+    "title": "Embedded ownership and local durability",
+    "part": "Persistence",
+    "file": "source/20-embedded.md"
+  },
+  {
+    "id": "branching",
+    "title": "Branching, staging and checkout",
+    "part": "Persistence",
+    "file": "source/21-branching.md"
+  },
+  {
+    "id": "publication",
+    "title": "Publication and crash recovery",
+    "part": "Persistence",
+    "file": "source/22-publication.md"
+  },
+  {
+    "id": "storage",
+    "title": "Physical storage and representation",
+    "part": "Persistence",
+    "file": "source/23-storage.md"
+  },
+  {
+    "id": "git-history",
+    "title": "Git history, remotes and partial clones",
+    "part": "Persistence",
+    "file": "source/24-git-history.md"
+  },
+  {
+    "id": "evolution",
+    "title": "Schema evolution, semantic diff and merge",
+    "part": "Persistence",
+    "file": "source/25-evolution.md"
+  },
+  {
+    "id": "security",
+    "title": "Trust, isolation and extensions",
+    "part": "Boundaries",
+    "file": "source/26-security.md"
+  },
+  {
+    "id": "secrets",
+    "title": "Secrets and encrypted files",
+    "part": "Boundaries",
+    "file": "source/27-secrets.md"
+  },
+  {
+    "id": "serving",
+    "title": "Serving a database",
+    "part": "Boundaries",
+    "file": "source/28-serving.md"
+  },
+  {
+    "id": "formats",
+    "title": "Canonical values and schema descriptors",
+    "part": "Interchange",
+    "file": "source/29-formats.md"
+  },
+  {
+    "id": "protocol",
+    "title": "Live protocol and session recovery",
+    "part": "Interchange",
+    "file": "source/30-protocol.md"
+  },
+  {
+    "id": "examples",
+    "title": "Worked reference database",
+    "part": "Reference",
+    "file": "source/31-examples.md"
+  },
+  {
+    "id": "conformance",
+    "title": "Conformance cases and evidence",
+    "part": "Reference",
+    "file": "source/32-conformance.md"
+  },
+  {
+    "id": "diagnostics",
+    "title": "Diagnostic reference",
+    "part": "Reference",
+    "file": "source/33-diagnostics.md"
+  },
+  {
+    "id": "system-reference",
+    "title": "System API reference",
+    "part": "Reference",
+    "file": "source/34-system-reference.md"
+  },
+  {
+    "id": "grammar",
+    "title": "Complete grammar",
+    "part": "Reference",
+    "file": "source/34-grammar.md"
+  },
+  {
+    "id": "references",
+    "title": "Normative dependencies",
+    "part": "Reference",
+    "file": "source/35-references.md"
+  }
+]
