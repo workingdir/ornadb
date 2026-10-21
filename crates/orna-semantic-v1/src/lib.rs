@@ -23669,12 +23669,6 @@ fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static s
     let (Some(left), Some(right)) = (numeric_unit(left), numeric_unit(right)) else {
         return None;
     };
-    // Without a selected `Currency` nominal, `10.GBP` is not Money
-    // (ORNA-LIT-007), yet two distinct currency codes still name different
-    // currencies (ORNA-MONEY-002; examples/invalid/currency-addition.orna).
-    if left != right && is_currency_code(left) && is_currency_code(right) {
-        return Some("cannot add different currencies without conversion");
-    }
     let (Some(left), Some(right)) = (unit_dimension(left), unit_dimension(right)) else {
         return None;
     };
