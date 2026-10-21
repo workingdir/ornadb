@@ -1,6 +1,6 @@
 {
   "id": "vectors/float-order-and-statistics",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "requirements": [
     "ORNA-FLOAT-001",
     "ORNA-FLOAT-002",

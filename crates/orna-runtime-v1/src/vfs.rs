@@ -16,7 +16,7 @@ use orna_repository_v1::{
     ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, ProtectedContentTransfer,
     RepositoryCaptureCapability,
 };
-use orna_value_v1::MimeRegistry;
+use orna_value_v1::{MimeRegistry, Raw, Value as OvbValue};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1525,44 +1525,52 @@ impl VfsNameNamespace {
     }
 }
 
-/// Projects one canonical typed key component to its host component, escaping
-/// every byte outside `[A-Za-z0-9._-]` as uppercase `%HH` and escaping the
-/// reserved names, trailing dots and DOS device basenames that would otherwise
-/// alias. Names over the component bound become a deterministic `~key-` digest
-/// alias instead of being dropped or merged (VFS-016).
+/// Projects one Str key component (or a Str-named table or namespace) to its
+/// host component, escaping every byte outside `[A-Za-z0-9._-]` as uppercase
+/// `%HH` and escaping the reserved names, trailing dots and DOS device
+/// basenames that would otherwise alias. A name over the component bound
+/// becomes the deterministic `~key-` alias of its canonical OVB-1 encoding
+/// instead of being dropped or merged (VFS-016).
 pub fn project_component(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Key)
+    project_namespaced(text, VfsNameNamespace::Key, || str_component_digest(text))
+}
+
+/// Projects one typed key component from its canonical key text and its
+/// canonical OVB-1 encoding (for a row key, `TypedKey::canonical_bytes`). The
+/// text decides the spelling; a component over the bound becomes the `~key-`
+/// alias of the encoding's SHA-256, because VFS-1 digests the canonical typed
+/// key component, so the text `1` and the integer 1 never share an alias
+/// (VFS-016).
+pub fn project_key_component(text: &str, canonical_encoding: &[u8]) -> String {
+    project_namespaced(text, VfsNameNamespace::Key, || {
+        Sha256::digest(canonical_encoding).into()
+    })
 }
 
 /// Projects one stored field name to its host component. Field components use
 /// the `~field-` alias prefix for names over the byte bound, so the same long
 /// text in a key and in a field never lands on one host name (VFS-016).
 pub fn project_field_name(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Field)
+    project_namespaced(text, VfsNameNamespace::Field, || field_name_digest(text))
 }
 
-fn project_namespaced(text: &str, namespace: VfsNameNamespace) -> String {
+fn project_namespaced(
+    text: &str,
+    namespace: VfsNameNamespace,
+    component_digest: impl FnOnce() -> [u8; 32],
+) -> String {
     if text.is_empty() {
         return "~empty".to_owned();
     }
+    // Every byte outside `[A-Za-z0-9._-]` is escaped, `~` and `%` included, so a
+    // spelling under the bound can never claim the alias namespace and always
+    // stays an exact, reversible `%HH` encoding of the canonical text.
     let out = escape_component_bytes(text.bytes().enumerate(), is_reserved_component(text));
-    // A canonical name under the bound that already spells an alias prefix
-    // (`~`, or any `%` spelling) is respelled, because the alias namespace is
-    // reserved for names over the bound. The respelling is still an exact
-    // `%HH` encoding of the same canonical text, so the name stays reversible
-    // (VFS-016). Over the bound the digest alias is unreachable for a literal
-    // `~key-` name only when the digest input is the canonical text itself.
-    if out.len() <= VFS_MAX_COMPONENT_BYTES && !out.starts_with('~') {
-        return out;
-    }
     if out.len() > VFS_MAX_COMPONENT_BYTES {
-        return long_alias(text, namespace);
+        long_alias(namespace, &component_digest())
+    } else {
+        out
     }
-    // A canonical name under the bound whose own spelling starts with the
-    // alias prefix is respelled by escaping its first byte, so it never claims
-    // the alias namespace. The respelling is an exact `%HH` encoding of the
-    // same canonical text and stays reversible (VFS-016).
-    escape_component_bytes(text.bytes().enumerate(), true)
 }
 
 /// Escapes one canonical component's bytes: every byte outside
@@ -1621,29 +1629,35 @@ fn is_reserved_component(text: &str) -> bool {
 }
 
 /// `~key-<64 hex SHA-256 of the canonical typed key component>` for keys and
-/// `~field-<same digest>` for stored field names, per the VFS-1 long-name
-/// rule. One derivation serves projection and verification, so a digest can
-/// never name a component it did not come from (VFS-016).
-fn long_alias(text: &str, namespace: VfsNameNamespace) -> String {
-    format!(
-        "{}{}",
-        namespace.alias_prefix(),
-        hex_digest(component_digest_input(text).as_bytes())
-    )
+/// `~field-<the same digest form>` for stored field names (VFS-1, "Row/key
+/// directory mapping"). The digest names the component's canonical OVB-1
+/// encoding, never its host spelling or raw UTF-8 bytes, so one derivation
+/// serves projection and verification and a digest can never name a
+/// component it did not come from (VFS-016).
+fn long_alias(namespace: VfsNameNamespace, digest: &[u8; 32]) -> String {
+    let mut alias = String::with_capacity(namespace.alias_prefix().len() + 64);
+    alias.push_str(namespace.alias_prefix());
+    for byte in digest {
+        alias.push_str(&format!("{byte:02x}"));
+    }
+    alias
 }
 
-/// The digest input for one long alias: the canonical typed component text
-/// itself. Key and field namespaces stay distinct through the alias prefix, so
-/// the same canonical text in a key and in a field never shares a host name.
-fn component_digest_input(text: &str) -> &str {
-    text
+/// The SHA-256 of one Str component's canonical OVB-1 encoding: the typed
+/// component a long key or field alias names.
+fn str_component_digest(text: &str) -> [u8; 32] {
+    let encoding = OvbValue::new(Raw::Text(text.to_owned()))
+        .and_then(|value| value.encode())
+        .expect("every Str has a canonical OVB-1 encoding");
+    Sha256::digest(encoding).into()
 }
 
-/// The digest bound into a `~field-` alias for one canonical field name. The
-/// snapshot-bound long-name index re-derives it from the full retained name,
-/// so a colliding digest is detected instead of merged (VFS-016).
+/// The digest bound into a `~field-` alias for one stored field name: the
+/// SHA-256 of the name's canonical OVB-1 Str encoding. The snapshot-bound
+/// long-name index re-derives it from the full retained name, so a colliding
+/// digest is detected instead of merged (VFS-016).
 pub fn field_name_digest(field: &str) -> [u8; 32] {
-    Sha256::digest(component_digest_input(field).as_bytes()).into()
+    str_component_digest(field)
 }
 
 /// Resolves one `~field-` alias digest against a retained candidate field
@@ -1661,15 +1675,6 @@ pub fn resolve_field_alias(digest: &[u8; 32], candidates: &[&str]) -> Result<Str
         resolved = Some(candidate);
     }
     resolved.map(str::to_owned).ok_or(VfsPathError::UnknownRow)
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
 
 /// Projects one stored Blob field name to its sibling content-file name:
@@ -1693,7 +1698,7 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
         return format!(
             "{}.{}",
-            long_alias(field, VfsNameNamespace::Field),
+            long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
             selected
         );
     }
@@ -3628,10 +3633,17 @@ mod tests {
         assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
         assert!(name.starts_with("~field-"));
         assert!(name.ends_with(".mp3"));
-        // The alias is the field namespace digest of the stored name, so the
+        // The alias digests the stored name's canonical OVB-1 Str encoding (a
+        // 200-byte Str is the CBOR text head `78 c8` then its bytes), so the
         // snapshot-bound long-name index re-derives and verifies the full name
-        // rather than trusting the truncated spelling (VFS-016).
-        assert_eq!(name, format!("~field-{}.mp3", hex_digest(field.as_bytes())));
+        // rather than trusting the truncated spelling (VFS-1, VFS-016).
+        let encoding = [&[0x78, 0xc8][..], field.as_bytes()].concat();
+        let digest = Sha256::digest(&encoding)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(name, format!("~field-{digest}.mp3"));
+        assert_eq!(field_name_digest(&field)[..], Sha256::digest(&encoding)[..]);
 
         // A base with room for the suffix still spells the escaped name
         // directly; only the over-bound spelling changes.
