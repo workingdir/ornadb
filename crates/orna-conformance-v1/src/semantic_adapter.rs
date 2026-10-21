@@ -3788,9 +3788,11 @@ impl DurableTransactionalEvaluator {
     }
 
 
-    /// Publishes the caller-selected frozen runtime prefix through the loose
-    /// Git projection. Publication is explicit: source execution only stages
-    /// durable runtime mutations and never advances the repository by itself.
+    /// Publishes the caller-selected frozen runtime prefix into the format-3
+    /// native store as one Git commit. Publication is explicit: source
+    /// execution only stages durable runtime mutations and never advances the
+    /// repository by itself. Format-3 rows have no loose path, so `path_for`
+    /// is never called.
     pub async fn publish_pending(
         &self,
         repository: &Repository,
