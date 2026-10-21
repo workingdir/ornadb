@@ -488,7 +488,15 @@ fn format3_repository_parts(
         &["commit", "--quiet", "-m", "format3 capture fixture"],
     );
 
-    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    // The byte index names its chunk by the chunk's SHA-256; the kind-6 node
+    // and the rows domain carry the format-3 schema identity: SHA-256 of
+    // `orna.schema.v3`, NUL and the descriptor bytes.
+    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let schema_digest: [u8; 32] = Sha256::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_source)
+        .finalize()
+        .into();
     let chunk_oid = git_object(root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
     append_cbor_head(&mut byte_index, 0, schema_source.len());
@@ -496,7 +504,7 @@ fn format3_repository_parts(
     byte_index.push(0x83);
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
-    append_cbor_bytes(&mut byte_index, &schema_digest);
+    append_cbor_bytes(&mut byte_index, &chunk_digest);
     let byte_index_oid = native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
     let mut schema = vec![0x85, 0x01, 0x06];
