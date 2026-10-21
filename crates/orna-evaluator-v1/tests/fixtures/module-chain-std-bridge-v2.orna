@@ -1,2 +1,2 @@
 use std.chain.leaf.{finish};
-pub fn map_values(value: Int): [Int] = std.collection.map([value + 20], item => std.chain.leaf.finish(item));
+pub fn map_values(value: Int): [Int] = map([value + 20], item => std.chain.leaf.finish(item));
