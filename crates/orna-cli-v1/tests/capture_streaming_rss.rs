@@ -101,7 +101,6 @@ fn product_capture_streams_a_source_larger_than_its_memory_budget() {
         .expect("the streamed capture is accepted for a row");
 
     let peak = process_peak_rss_bytes();
-    eprintln!("capture streaming: source_bytes={source_bytes} peak_rss_bytes={peak}");
     assert!(
         peak < PEAK_RSS_BOUND,
         "capturing {source_bytes} bytes peaked at {peak} resident bytes"
