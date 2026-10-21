@@ -16,8 +16,10 @@ use orna_repository_v1::{
 };
 use tempfile::TempDir;
 
-const INTERNAL_REF: &str = "refs/orna/ids/0123456789abcdef";
-const ALLOCATOR_REF: &str = "refs/orna/allocator";
+/// A consumer checkpoint ref, synchronised by commit ancestry.
+const INTERNAL_REF: &str = "refs/orna/checkpoints/fedcba9876543210";
+/// One table's automatic-ID allocator watermark (`ORNA-AUTOID-004`).
+const ALLOCATOR_REF: &str = "refs/orna/ids/00112233445566778899aabbccddeeff";
 const OTHER_INTERNAL_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
 const STALE_INTERNAL_REF: &str = "refs/orna/runs/0123456789abcdef";
 const FETCH_CHILD_LOCAL: &str = "ORNA_FETCH_ROUTING_LOCAL";
@@ -271,6 +273,18 @@ fn internal_witness(object_id: &str) -> RequiredInternalRef {
     internal_witness_for(INTERNAL_REF, object_id)
 }
 
+/// Writes an allocator watermark blob holding the decimal `value`.
+fn watermark(directory: &Path, value: &str) -> String {
+    let file = directory.join(".git").join("orna-watermark");
+    fs::write(&file, value).unwrap();
+    let object = git(
+        directory,
+        &["hash-object", "-w", "--no-filters", file.to_str().unwrap()],
+    );
+    fs::remove_file(file).unwrap();
+    object
+}
+
 fn request(
     ordinary: impl IntoIterator<Item = RequestedRef>,
     continuity: impl IntoIterator<Item = RequiredInternalRef>,
@@ -282,9 +296,10 @@ fn request(
 fn push_keeps_second_phase_atomic_after_allocator_first() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
+    let first_watermark = watermark(&fixture.source, "1");
     git(
         &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &initial],
+        &["update-ref", ALLOCATOR_REF, &first_watermark],
     );
     let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
     git(&fixture.source, &["push", "origin", &allocator_refspec]);
@@ -296,9 +311,10 @@ fn push_keeps_second_phase_atomic_after_allocator_first() {
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "next"]);
     let next = git(&fixture.source, &["rev-parse", "HEAD"]);
+    let next_watermark = watermark(&fixture.source, "2");
     git(
         &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &next],
+        &["update-ref", ALLOCATOR_REF, &next_watermark],
     );
     git(
         &fixture.source,
@@ -339,7 +355,7 @@ fn push_keeps_second_phase_atomic_after_allocator_first() {
     assert!(matches!(error, FetchError::PushFailed));
     assert_eq!(
         git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
-        next
+        next_watermark
     );
     assert_eq!(
         git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
@@ -426,9 +442,10 @@ fn push_does_not_treat_allocator_shadow_as_allocator() {
 fn push_rejects_unsupported_atomic_before_allocator_advance() {
     let fixture = Fixture::new();
     let initial = fixture.initial_head();
+    let first_watermark = watermark(&fixture.source, "1");
     git(
         &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &initial],
+        &["update-ref", ALLOCATOR_REF, &first_watermark],
     );
     let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
     git(&fixture.source, &["push", "origin", &allocator_refspec]);
@@ -440,9 +457,10 @@ fn push_rejects_unsupported_atomic_before_allocator_advance() {
     git(&fixture.source, &["add", "main.orna"]);
     git(&fixture.source, &["commit", "-m", "next"]);
     let next = git(&fixture.source, &["rev-parse", "HEAD"]);
+    let next_watermark = watermark(&fixture.source, "2");
     git(
         &fixture.source,
-        &["update-ref", ALLOCATOR_REF, &next],
+        &["update-ref", ALLOCATOR_REF, &next_watermark],
     );
     git(
         &fixture.source,
@@ -469,7 +487,7 @@ fn push_rejects_unsupported_atomic_before_allocator_advance() {
     ));
     assert_eq!(
         git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
-        initial
+        first_watermark
     );
     assert_eq!(
         git(&fixture.remote, &["rev-parse", INTERNAL_REF]),
