@@ -93,6 +93,8 @@ const DEFAULT_STEPS: u64 = (DEFAULT_ITEMS as u64 * DEFAULT_ITEMS as u64) / 2
     + 10_000;
 const DEFAULT_DEPTH: usize = 64;
 const DEFAULT_ITEMS: usize = 2_048;
+/// Rows requested per storage-backed relation page. Evaluation stays demand-driven: each consumer draws exactly the rows it needs, so a failure in an unread tail is never observed. The runtime caps a page at 1,024 rows (InvalidPageSize above that).
+const RELATION_SCAN_PAGE_ROWS: usize = 1;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
 /// Native stack headroom kept before evaluation requests a fresh stack segment.
@@ -6492,7 +6494,7 @@ impl Context<'_, '_> {
         self.for_each_relation_value_with_page_limit(
             plan,
             depth,
-            self.limits.max_collection_items,
+            RELATION_SCAN_PAGE_ROWS,
             visit,
         )
     }
