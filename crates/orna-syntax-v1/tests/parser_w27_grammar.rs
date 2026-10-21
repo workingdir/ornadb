@@ -1,7 +1,7 @@
 //! Parser conformance for the W27 grammar audit against `grammar/orna.ebnf`.
 //! Each test pins one audited divergence and states the production it follows.
 
-use orna_syntax_v1::{Expr, Pattern, parse_expression};
+use orna_syntax_v1::{Expr, Pattern, parse_expression, parse_module};
 
 fn expression_is_accepted(source: &str) {
     let parsed = parse_expression(source);
@@ -83,4 +83,18 @@ fn parenthesised_single_pattern_is_grouping() {
 fn enum_record_pattern_requires_qualified_variant() {
     expression_is_accepted("case x { Shape.circle { r }: r }");
     expression_is_rejected("case x { Shape { r }: r }");
+}
+
+// W27-07 (grammar use_tail): alias and import-list names are identifiers (or `_`
+// for an alias), never keywords.
+#[test]
+fn use_alias_and_import_names_are_identifiers() {
+    for source in ["use a.b as c;", "use a.b as _;", "use a.{ b, c };", "use a.b.*;"] {
+        let parsed = parse_module(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+    }
+    for source in ["use a.b as case;", "use a.{ case };"] {
+        let parsed = parse_module(source);
+        assert!(!parsed.is_ok(), "{source} must be rejected");
+    }
 }
