@@ -1,1 +1,1 @@
-std.collection.first([1], value => value / 0)
+first([1], value => value / 0)

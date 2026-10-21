@@ -1,1 +1,1 @@
-std.collection.union(right: [2, 3], left: [1, 2])
+union(right: [2, 3], left: [1, 2])
