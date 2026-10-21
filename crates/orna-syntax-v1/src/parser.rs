@@ -2884,7 +2884,12 @@ impl Parser {
                     }
                     let mut arguments = Vec::new();
                     let mut fields = Vec::new();
-                    if self.is_punct("{") {
+                    if self.is_punct("{") && path.len() == 1 {
+                        self.error_here(
+                            "ORNA-PARSE-001",
+                            "enum record pattern requires a qualified variant",
+                        );
+                    } else if self.is_punct("{") {
                         self.bump();
                         while !self.eof() && !self.is_punct("}") {
                             if !self.contextual() {
