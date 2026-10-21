@@ -265,6 +265,8 @@ pub struct Scenario {
     pub when: Vec<String>,
     pub then: Vec<String>,
     pub requirements: Vec<String>,
+    /// Absent on 1.1.0 scenarios that carry only `implementation_status`.
+    #[serde(default)]
     pub evidence_level: String,
 }
 
@@ -410,7 +412,8 @@ pub struct Requirement {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequirementEvidence {
-    pub meaning: String,
+    pub version: String,
+    pub scope: String,
     pub requirements: Vec<RequirementEvidenceEntry>,
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -2757,12 +2760,22 @@ fn validate_requirement_evidence_test(
     let object = test
         .as_object()
         .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
-    if let Some(subject) = object.get("subject") {
-        if subject.as_str() != Some(requirement) {
+    let kind = object.get("kind").and_then(Value::as_str);
+    let subject = object.get("subject").and_then(Value::as_str);
+    match kind {
+        // 1.1.0: implementation suites are bound to their requirement; scenario
+        // tests are bound to the scenario ID they execute.
+        Some("implementation-suite") if subject != Some(requirement) => {
             return Err(CorpusError(
                 "requirement evidence test subject must match requirement".into(),
             ));
         }
+        Some("scenario") if subject.is_none_or(str::is_empty) => {
+            return Err(CorpusError(
+                "scenario evidence test must name its scenario subject".into(),
+            ));
+        }
+        _ => {}
     }
     evidence_test_stages(test)
         .map(|_| ())
