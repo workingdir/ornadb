@@ -58,7 +58,7 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 7] = [
+const DECLARED_LINKS: [SystemProviderLink; 6] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
@@ -73,20 +73,17 @@ const DECLARED_LINKS: [SystemProviderLink; 7] = [
         host: SystemProviderHost::Evaluator,
     },
     // `orna-application-v1`: `AsyncSourceMutationEffectHandler` forwards both
-    // stream transitions and `sys.cancel` to the trusted source-effect
-    // dispatcher. The `orna-live-v1` dispatcher of `orna serve` executes the
-    // stream transitions and answers cancellation with the portable
-    // `sys.invoke.effect_unavailable`.
+    // stream transitions to the trusted source-effect dispatcher, and the
+    // `orna-live-v1` dispatcher of `orna serve` executes them. `sys.cancel`
+    // takes the same route but stays unlinked: every production dispatcher
+    // answers it with a constant failure and no production source produces a
+    // `sys.InvocationHandle` to cancel.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.admin.pause_stream"),
         host: SystemProviderHost::LiveAdministration,
     },
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.admin.resume_stream"),
-        host: SystemProviderHost::LiveAdministration,
-    },
-    SystemProviderLink {
-        member: SystemSurfaceMember::Callable("sys.cancel"),
         host: SystemProviderHost::LiveAdministration,
     },
     // `orna-evaluator-v1` recognises both canonical names as relation
@@ -242,6 +239,7 @@ mod tests {
             SystemSurfaceMember::Callable("sys.explain(FunctionRef)"),
             SystemSurfaceMember::Relation("sys.Plan"),
             SystemSurfaceMember::Callable("sys.start(Value)"),
+            SystemSurfaceMember::Callable("sys.cancel"),
             SystemSurfaceMember::Relation("sys.Run"),
             SystemSurfaceMember::Relation("sys.storage.objects"),
             SystemSurfaceMember::HistoricalView("sys.Storage"),
@@ -255,7 +253,6 @@ mod tests {
             SystemSurfaceMember::Callable("sys.blob.annotate"),
             SystemSurfaceMember::Callable("sys.explain(Query)"),
             SystemSurfaceMember::Callable("sys.blob.capture_file"),
-            SystemSurfaceMember::Callable("sys.cancel"),
             SystemSurfaceMember::Relation("sys.Storage"),
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
