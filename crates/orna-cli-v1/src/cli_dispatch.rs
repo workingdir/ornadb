@@ -361,7 +361,7 @@ fn run_mv(
     };
 
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(&modules, &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
