@@ -2248,15 +2248,21 @@ impl SysStreamProjection {
         observation: &StreamObservation,
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
-        let stream_is_terminal = matches!(
+        // A closed stream has no further delivery, retry, skip or replay
+        // transition. A failed delivery is not closed: it stays open for an
+        // authorised retry, skip or replay, so it is live until acknowledged.
+        let stream_is_closed = matches!(
             observation.status,
             StreamObservationStatus::Completed
-                | StreamObservationStatus::Failed
                 | StreamObservationStatus::Cancelled
                 | StreamObservationStatus::Orphaned
         );
-        if (run.status.is_terminal() && !stream_is_terminal)
-            || (observation.live && (!run.live || stream_is_terminal))
+        // Run end orphans in-flight streams but leaves a failed delivery
+        // open, so a terminal run may still retain a failed stream.
+        let stream_is_settled_by_run_end =
+            stream_is_closed || observation.status == StreamObservationStatus::Failed;
+        if (run.status.is_terminal() && !stream_is_settled_by_run_end)
+            || (observation.live && (!run.live || stream_is_closed))
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -6588,6 +6594,14 @@ impl RuntimeState {
         self.require_owner(&transaction, writer)
             .await
             .map_err(TableActivationError::Runtime)?;
+        if table_mutations_already_durable_tx(&transaction, &encoded)
+            .await
+            .map_err(TableActivationError::Runtime)?
+        {
+            // An exact replay of a save the relation already holds publishes
+            // nothing new: no row effect, mutation record or checkpoint.
+            return Ok(current);
+        }
         if !transfers.is_empty() {
             let Some(expected_graph_repository_id) = self.graph_repository_id.as_ref() else {
                 return Err(TableActivationError::Runtime(
@@ -19168,6 +19182,45 @@ fn validate_admitted_table_identities(
     Ok(())
 }
 
+/// Reports whether `mutations` are an exact replay of records the relation
+/// already holds. A mutation's record is written in the same transaction that
+/// applies its row effect, so an identical retained record proves that effect
+/// is present. A batch that is only partly retained, or retained with different
+/// bytes, reuses a mutation identity and is invalid.
+async fn table_mutations_already_durable_tx(
+    connection: &Connection,
+    mutations: &[Mutation],
+) -> Result<bool, RuntimeError> {
+    let mut retained = 0_usize;
+    for mutation in mutations {
+        let mut rows = connection
+            .query(
+                "SELECT payload, digest FROM pending_mutation WHERE mutation_id = ?1",
+                params![mutation.id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            continue;
+        };
+        let payload: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if payload != mutation.payload || digest != mutation.digest {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        retained += 1;
+    }
+    match retained {
+        0 => Ok(false),
+        count if count == mutations.len() => Ok(true),
+        _ => Err(RuntimeError::InvalidTableMutation),
+    }
+}
+
 async fn append_mutations_tx(
     connection: &Connection,
     expected: &CwdCapture,
@@ -22564,28 +22617,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_table_activation_rejects_a_missing_delete_without_advancing_state() {
+    async fn typed_table_activation_records_a_missing_delete_as_an_advancing_no_op() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
-        let before = context.capture().clone();
-
-        assert_eq!(
-            state
-                .commit_table_activation(
-                    lease,
-                    &context,
-                    &[table_mutation(9, 1, None)],
-                    digest(10),
-                    &NoFault,
-                )
-                .await,
-            Err(RuntimeError::InvalidTableMutation)
-        );
-        assert_eq!(state.capture().await.unwrap(), before);
-        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
-        assert!(state.pending().await.unwrap().is_empty());
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(9, 1, None)],
+                digest(10),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(state.latest_checkpoint().await.unwrap().is_some());
+        assert_eq!(state.pending().await.unwrap().len(), 1);
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
@@ -39592,18 +39640,18 @@ mod tests {
                     .unwrap(),
                 CommitResult::Rejected(RejectReason::StreamPaused)
             );
-            let reset = match stream
-                .apply_async(CommitIntent::Reset {
-                    key: key.clone(),
-                    expected: CheckpointPrecondition::from(&before),
-                    to: reset_position.clone(),
-                })
+            let reset = reopened
+                .reset_checkpoint(
+                    writer,
+                    CheckpointResetRequest {
+                        key: key.clone(),
+                        expected: CheckpointPrecondition::from(&before),
+                        to: reset_position.clone(),
+                        reason: "operator rewind".into(),
+                    },
+                )
                 .await
-                .unwrap()
-            {
-                CommitResult::CheckpointReset { checkpoint } => checkpoint,
-                other => panic!("unexpected checkpoint reset result: {other:?}"),
-            };
+                .unwrap();
             assert_eq!(reset.committed, Some(reset_position.clone()));
             assert_eq!(reset.version, 1);
             assert_eq!(
@@ -42373,18 +42421,18 @@ mod tests {
                     .unwrap(),
                 CommitResult::StreamStatusChanged { .. }
             ));
-            let reset = match stream
-                .apply_async(CommitIntent::Reset {
-                    key: delivery.checkpoint_key(),
-                    expected: (&terminal_checkpoint).into(),
-                    to: delivery.position.clone(),
-                })
+            let reset = reopened
+                .reset_checkpoint(
+                    writer,
+                    CheckpointResetRequest {
+                        key: delivery.checkpoint_key(),
+                        expected: (&terminal_checkpoint).into(),
+                        to: delivery.position.clone(),
+                        reason: "operator rewind".into(),
+                    },
+                )
                 .await
-                .unwrap()
-            {
-                CommitResult::CheckpointReset { checkpoint } => checkpoint,
-                other => panic!("unexpected reset result: {other:?}"),
-            };
+                .unwrap();
             assert!(matches!(
                 stream
                     .apply_async(CommitIntent::Resume {
