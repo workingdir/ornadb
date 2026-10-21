@@ -51,7 +51,10 @@ mod unicode_16_case_properties;
 mod browser_profile;
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
-pub use admitted_repl::{AdmittedReplSession, ReplError, RepositoryScope, StagedReplActivation};
+pub use admitted_repl::{
+    AdmittedReplSession, ReplDetail, ReplError, RepositoryScope, StagedReplActivation,
+    effect_rejection,
+};
 pub use cancellation::CancellationToken;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
