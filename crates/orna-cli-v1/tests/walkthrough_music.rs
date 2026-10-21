@@ -107,7 +107,7 @@ async fn repl_update() {
 
     let invalid = run_repl(root, r#"main.music.update("london", { title: 7 })"#);
     let invalid_output = format!("{}{}", String::from_utf8_lossy(&invalid.stdout), stderr(&invalid));
-    assert!(invalid_output.contains("ORNA-S021-TYPE"), "invalid update should be rejected: {invalid_output}");
+    assert!(invalid_output.contains("E2001"), "invalid update should be rejected: {invalid_output}");
     assert!(!root.join("music/london.orna").exists(), "invalid REPL update should not create a loose row file");
     let invalid_publish = run(root, &["publish"]);
     assert_eq!(invalid_publish.status.code(), Some(0), "invalid update left a publication: {}", stderr(&invalid_publish));
