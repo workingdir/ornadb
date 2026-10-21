@@ -11749,15 +11749,47 @@ fn is_portable_statistics_operation(operation: &str) -> bool {
     )
 }
 
-// The pinned collection source declares one generic finite-list signature.
-// Nonempty calls get their element type from the rows; empty aggregates use
-// the caller's context where available and otherwise keep the Int zero rule.
-fn finite_list_aggregate_element(
-    _callee: &Expr,
-    _operation: &str,
-    _scope: &Scope,
-) -> Option<Type> {
-    None
+// The pinned collection source declares each aggregate. A generic export such
+// as `sum<T>(rows: [T]): T` takes its element type from the rows; a
+// monomorphic export such as `sum(rows: [Decimal]): Decimal` pins the element
+// type every call must supply and, with it, the declared result.
+fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
+    if !matches!(operation, "sum" | "min" | "max") {
+        return None;
+    }
+    let namespace = match qualified_path(callee)?.as_slice() {
+        ["std", module @ ("collection" | "query"), _] => {
+            Namespace(vec!["std".into(), (*module).into()])
+        }
+        [alias, _] => scope.modules.get(*alias)?.clone(),
+        _ => return None,
+    };
+    if !(namespace.0.len() == 2
+        && namespace.0[0] == "std"
+        && matches!(namespace.0[1].as_str(), "collection" | "query"))
+    {
+        return None;
+    }
+    let symbol = scope
+        .available_modules
+        .get(&namespace)?
+        .exports
+        .get(operation)?;
+    let Type::Function {
+        parameters, result, ..
+    } = &symbol.ty
+    else {
+        return None;
+    };
+    let [Type::List(element)] = parameters.as_slice() else {
+        return None;
+    };
+    let pinned_result = if operation == "sum" {
+        result.as_ref() == element.as_ref()
+    } else {
+        matches!(result.as_ref(), Type::Optional(inner) if inner == element)
+    };
+    (symbol.generic_parameters.is_empty() && pinned_result).then(|| element.as_ref().clone())
 }
 
 /// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
