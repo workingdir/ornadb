@@ -48,10 +48,11 @@ pub use blob_store::ContentIdentity;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
-    CompactManifestWitness, CompactPublicationPending, CompactPublicationPlan,
-    CompactPublicationReconciliation, CompactPublicationRecovery, CompactRuntimeReceipt,
-    CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
+    CompactManifestWitness, CompactPublicationPending, CompactRuntimeReceipt, CompactSegmentRole,
+    validate_compact_page_uncompressed_sizes,
 };
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+pub use compact::{CompactPublicationPlan, CompactSegment};
 pub use init::format_context::{
     CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
     HistoricalFormatContext, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
@@ -76,8 +77,8 @@ pub use publication_transaction::{
 };
 pub use crash_barrier::publication_crash_barrier;
 pub use row_store::{
-    AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowDependency,
-    RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+    AdmittedRow, KeyRange, KeyValue, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity,
+    RowDependency, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 
@@ -1059,8 +1060,9 @@ impl PublicationJournal {
     }
 
     /// Binds a compact manifest identity and all referenced immutable objects
-    /// into this restart record.  Publication/recovery verifies the binding
-    /// before exposing or consuming the corresponding runtime prefix.
+    /// into this restart record. Only the test-only legacy fixture writer
+    /// still records one; recovery refuses such journals.
+    #[cfg(any(test, feature = "legacy-fixture-writer"))]
     pub fn with_compact_manifest(
         mut self,
         witness: CompactManifestWitness,
@@ -3945,7 +3947,7 @@ impl Repository {
             old_head, candidate.commit().clone(), review.index_tree.clone(), runtime_intent_id, entries,
         )?;
         self.publish_candidate_impl_with_migration(
-            &review.cwd.index, &candidate, &mut journal, false, false, Some(review), &mut on_stage,
+            &review.cwd.index, &candidate, &mut journal, false, Some(review), &mut on_stage,
         )?;
         on_stage(PublicationJournalStage::WorktreeReconciled);
         fs::write(&result_path, format!("{intent_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()))
@@ -4044,7 +4046,7 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
     ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, None, |_| {})
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, None, |_| {})
     }
     /// Executes publication and observes durable ref/index journal stages.
     pub fn publish_candidate_with_stage_hook(
@@ -4058,7 +4060,6 @@ impl Repository {
             expected_index,
             candidate,
             journal,
-            false,
             false,
             None,
             on_stage,
@@ -4135,36 +4136,16 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
 
-        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, true, None, |_| {})
+        self.publish_candidate_impl_with_migration(expected_index, candidate, journal, true, None, |_| {})
     }
 
-    /// The common PUB-1 ref/index/worktree machinery. Compact candidates are
-    /// admitted only from the opaque compact operation, which owns the
-    /// witnessed runtime-completion transition.
-    pub(crate) fn publish_candidate_impl(
-        &self,
-        expected_index: &IndexGeneration,
-        candidate: &PrivateCommit,
-        journal: &mut PublicationJournal,
-        permit_compact: bool,
-    ) -> Result<IndexGeneration, RepositoryError> {
-        self.publish_candidate_impl_with_migration(
-            expected_index,
-            candidate,
-            journal,
-            permit_compact,
-            false,
-            None,
-            |_| {},
-        )
-    }
-
+    /// The common PUB-1 ref/index/worktree machinery. A compact journal is
+    /// refused: its retired writer has no completion path in this build.
     fn publish_candidate_impl_with_migration(
         &self,
         expected_index: &IndexGeneration,
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
-        permit_compact: bool,
         permit_legacy_migration: bool,
         review: Option<&ReviewedCandidateReview>,
         mut on_stage: impl FnMut(PublicationJournalStage),
@@ -4184,10 +4165,7 @@ impl Repository {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
         if journal.compact_manifest().is_some() {
-            if !permit_compact {
-                return Err(RepositoryError::RuntimeCompletionRequired);
-            }
-            self.verify_compact_publication_binding(journal, candidate)?;
+            return Err(RepositoryError::RuntimeCompletionRequired);
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
         if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
@@ -9472,10 +9450,6 @@ pub enum RepositoryError {
     InvalidCheckoutJournal,
     CheckoutRecoveryRequired,
     RuntimeCompletionRequired,
-    /// A compact candidate is stale at the selected branch head. Its journal
-    /// remains retained and the caller must use the typed compact recovery
-    /// boundary to rebuild or reconcile it.
-    CompactReconciliationRequired,
     /// Native graph work failed while building or pinning a publication
     /// candidate. The graph context's own error identity is preserved.
     Graph(GraphError),
@@ -9548,9 +9522,6 @@ impl fmt::Display for RepositoryError {
             }
             Self::RuntimeCompletionRequired => {
                 f.write_str("runtime publication completion is required")
-            }
-            Self::CompactReconciliationRequired => {
-                f.write_str("compact publication requires explicit reconciliation")
             }
             Self::Graph(error) => write!(f, "native graph operation failed: {error}"),
             Self::PlatformUnsupported => {
@@ -11208,7 +11179,7 @@ mod tests {
         ).unwrap();
         let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             repository.publish_candidate_impl_with_migration(
-                &review.cwd.index, &candidate, &mut journal, false, false, Some(&review),
+                &review.cwd.index, &candidate, &mut journal, false, Some(&review),
                 |stage| if stage == PublicationJournalStage::RefAdvanced { panic!("simulated interruption") },
             ).unwrap();
         }));
