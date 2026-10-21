@@ -1483,7 +1483,13 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
             EvidenceStatus::Failed | EvidenceStatus::Cancelled | EvidenceStatus::Skipped
         )
     });
-    if fixture_failed || scenario_failed {
+    // A known-gap vector suite is unexecuted, so like a skipped scenario it
+    // never counts as a pass.
+    let vector_suite_failed = report
+        .vector_suites
+        .iter()
+        .any(|suite| suite.status != EvidenceStatus::Passed);
+    if fixture_failed || scenario_failed || vector_suite_failed {
         1
     } else {
         0
@@ -1504,7 +1510,7 @@ mod tests {
     };
     use orna_conformance_v1::{
         CoverageReport, EvidenceClass, EvidenceStatus, ImplementationClaim, RunReport,
-        ScenarioResult,
+        ScenarioResult, VectorSuiteEvidence,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -1534,6 +1540,7 @@ mod tests {
             semantic_evidence: Vec::new(),
             runtime_evidence: Vec::new(),
             skipped_evidence: Vec::new(),
+            vector_suites: Vec::new(),
             coverage: CoverageReport {
                 mapped_stage_evidence: 0,
                 unmapped_stage_evidence: 0,
@@ -1554,6 +1561,25 @@ mod tests {
             report_exit_code(&report_with_scenario_status(EvidenceStatus::Passed)),
             0
         );
+    }
+
+    #[test]
+    fn report_exit_code_rejects_failed_and_known_gap_vector_suites() {
+        let with_suite = |status: EvidenceStatus| {
+            let mut report = report_with_scenario_status(EvidenceStatus::Passed);
+            report.vector_suites.push(VectorSuiteEvidence {
+                suite: "value-vectors.json".into(),
+                status,
+                detail: "test evidence".into(),
+                executed_cases: 1,
+                failures: Vec::new(),
+                known_gap: None,
+            });
+            report
+        };
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Failed)), 1);
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Skipped)), 1);
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Passed)), 0);
     }
 
     #[test]
