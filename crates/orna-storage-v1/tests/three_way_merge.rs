@@ -21153,8 +21153,17 @@ fn paired_tombstone_position_priority_is_shared_by_both_submission_modes() {
     let before_stale_fragment = stale_fragment_history.clone();
     assert_eq!(
         stale_fragment_history.submit_depth_merge_fragment(0, 0, 0, &[(id(1), fixture_key.clone())]),
+        Err(BranchMergeTombstoneHistoryError::FragmentCountMismatch {
+            order: 0,
+            expected: 1,
+            actual: 0,
+        }),
+        "a committed wave's count stays authoritative for stale retries",
+    );
+    assert_eq!(
+        stale_fragment_history.submit_depth_merge_fragment(0, 0, 1, &[(id(1), fixture_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 0 }),
-        "same-mode stale classification precedes fragment metadata validation",
+        "identical same-mode replay of a committed wave is stale",
     );
     assert_eq!(stale_fragment_history, before_stale_fragment);
     assert_eq!(stale_history, before_stale);
@@ -21230,8 +21239,14 @@ fn paired_mixed_mode_priority_survives_completed_depth_restore_waves() {
     assert_eq!(fragment_wave, before_released_conflict);
     assert_eq!(
         fragment_wave.submit_depth_merge_fragment(2, 0, 2, &[]),
+        Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 2 }),
+        "changed fragment data after release conflicts with the committed delta",
+    );
+    assert_eq!(fragment_wave, before_released_conflict);
+    assert_eq!(
+        fragment_wave.submit_depth_merge_fragment(2, 0, 2, &[(id(1), fixture_key.clone())]),
         Err(BranchMergeTombstoneHistoryError::DuplicateOrStale { order: 2 }),
-        "same-mode replay after release remains stale",
+        "identical same-mode replay after release remains stale",
     );
     assert_eq!(fragment_wave, before_released_conflict);
 
@@ -37784,9 +37799,9 @@ fn nested_handoff_identity_survives_paired_compaction_rewind_fold_chains_p38rq()
             right_chain: row.fields[&id(3)].encode().unwrap(),
         })
         .collect::<Vec<_>>();
-    assert_eq!(handoff_identities.len(), 4);
-    assert_eq!(compaction_identities.len(), 4);
-    assert_eq!(rewind_identities.len(), 4);
+    assert_eq!(handoff_identities.len(), 3);
+    assert_eq!(compaction_identities.len(), 3);
+    assert_eq!(rewind_identities.len(), 3);
     assert_eq!(handoff_identities[0], handoff_identities[1]);
     assert_ne!(handoff_identities[1], handoff_identities[2]);
     assert_eq!(compaction_identities[0], compaction_identities[1]);

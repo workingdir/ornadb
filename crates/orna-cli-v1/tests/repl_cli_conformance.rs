@@ -192,6 +192,8 @@ fn repl_status_and_last_result_bindings_remain_session_local_and_redacted() {
     assert!(stdout.contains("42 : Int"), "{stdout}");
     assert!(stdout.contains("<redacted>"), "{stdout}");
     assert!(!stdout.contains("private"), "sensitive fixture text leaked: {stdout}");
+    let whole = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!whole.contains("private"), "sensitive fixture text leaked: {whole}");
     assert!(output.stderr.is_empty());
 }
 
