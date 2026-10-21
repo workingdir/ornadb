@@ -1651,7 +1651,7 @@ fn semantic_catalogue(
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
     } else {
@@ -1734,45 +1734,13 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    let metadata = orna_repository_v1::inspect_metadata(repository).map_err(|_| {
+    orna_runtime_v1::repository_runtime_identity(repository).map_err(|_| {
         Diagnostic::target(
             "E2200",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
         )
-    })?;
-    let Some(metadata) = metadata else {
-        return Err(Diagnostic::target(
-            "E2200",
-            "repository runtime metadata is unavailable",
-            "initialize the Orna repository before running a durable project invocation",
-        ));
-    };
-
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
-        let salt = u8::try_from(index).expect("fixed identity length");
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    if initial_digest == [0; 32] {
-        initial_digest[0] = 1;
-    }
-    Ok((
-        RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    ))
+    })
 }
 
 fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
@@ -1834,7 +1802,7 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1873,7 +1841,7 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1900,7 +1868,7 @@ fn run_project_invocation_with_arguments(
         })?;
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2102,7 +2070,7 @@ fn run_pure_invocation(
         }
     }
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2183,7 +2151,7 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return None;
     }
@@ -2279,7 +2247,11 @@ fn repl_runtime(
                     "fix the project module graph and source boundaries, then run check again",
                 )
             })?;
-        let session = AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+        let session = AdmittedReplSession::from_loaded_project(
+            &project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
             .map_err(|error| repl_session_error(&error))?;
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
@@ -2356,9 +2328,14 @@ impl ReplSnapshotSessionLoader<'_> {
     }
 
     fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
-        // Keep the existing standard-import boundary intact: no host standard
-        // sources are supplied, so uncaptured imports remain inadmissible.
-        AdmittedReplSession::from_loaded_project(project, [], Limits::default()).map_err(|_| ())
+        // Admit the project's own pinned standard sources; uncaptured imports
+        // remain inadmissible because the project has no standard profile.
+        AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .map_err(|_| ())
     }
 }
 

@@ -1,1 +1,1 @@
-std.collection.sort_by(["aa", "é", "z"], value => std.encoding.ovb.encode(value))
+sort_by(["aa", "é", "z"], value => std.encoding.ovb.encode(value))
