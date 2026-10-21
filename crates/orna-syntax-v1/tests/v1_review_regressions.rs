@@ -122,60 +122,33 @@ fn control_condition_binary_rhs_leaves_body_brace_for_control() {
     assert!(matches!(*body, Expr::Block { .. }));
 }
 
-fn assert_nested_nominal_condition(source: &str, expected_path: &[&str]) {
-    let body = accepted_body(source);
-    let Expr::Control {
-        condition: Some(condition),
-        body: Some(body),
-        ..
-    } = body
-    else {
-        panic!("expected a braced control expression");
-    };
-    let Expr::Binary { rhs, .. } = *condition else {
-        panic!("expected a compound control condition");
-    };
-    let Expr::Nominal { path, .. } = *rhs else {
-        panic!("expected a nominal constructor in the condition");
-    };
-    assert_eq!(
-        path.iter()
-            .map(|segment| segment.text.as_str())
-            .collect::<Vec<_>>(),
-        expected_path
-    );
-    assert!(matches!(*body, Expr::Block { .. }));
-}
-
-#[test]
-fn compound_control_conditions_allow_nested_nominal_constructors() {
-    assert_nested_nominal_condition(
-        include_str!("fixtures/v1_review_source_003.orna"),
-        &["Status"],
-    );
-    assert_nested_nominal_condition(
-        include_str!("fixtures/v1_review_source_004.orna"),
-        &["Status"],
-    );
-    assert_nested_nominal_condition(
-        include_str!("fixtures/v1_review_source_005.orna"),
-        &["Model", "Status"],
+fn assert_parenthesize_constructor_diagnostic(source: &str) {
+    let parsed = parse_module(source);
+    assert!(
+        parsed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "ORNA-PARSE-001"
+                && diagnostic.message
+                    == "nominal constructors before a control body must be parenthesized"
+        }),
+        "expected the parenthesize-constructor diagnostic for {source:?}: {:?}",
+        parsed.diagnostics
     );
 }
 
+// Orna 1.1.0 lexical structure, "Contextual names and construction": in an
+// `if`, `while`, `for` or `case` header an unparenthesised `{` begins the
+// control body, not a constructor, wherever the constructor operand sits in
+// the header. These sources previously parsed as nested constructors.
 #[test]
-fn compound_case_conditions_allow_nested_nominal_constructors() {
-    let body = accepted_body(include_str!("fixtures/v1_review_source_006.orna"));
-    let Expr::Control {
-        condition: Some(condition),
-        arms,
-        ..
-    } = body
-    else {
-        panic!("expected a case expression");
-    };
-    assert!(matches!(*condition, Expr::Binary { op, .. } if op == "&&"));
-    assert_eq!(arms.len(), 1);
+fn compound_control_conditions_reject_unparenthesized_nominal_constructors() {
+    assert_parenthesize_constructor_diagnostic(include_str!("fixtures/v1_review_source_003.orna"));
+    assert_parenthesize_constructor_diagnostic(include_str!("fixtures/v1_review_source_005.orna"));
+    rejected(include_str!("fixtures/v1_review_source_004.orna"));
+}
+
+#[test]
+fn compound_case_conditions_reject_unparenthesized_nominal_constructors() {
+    rejected(include_str!("fixtures/v1_review_source_006.orna"));
 }
 
 #[test]
