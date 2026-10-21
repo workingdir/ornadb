@@ -23513,74 +23513,52 @@ fn descriptor_member_type(
     substitutions: &BTreeMap<String, Type>,
 ) -> Option<Type> {
     let field = system_api::embedded_system_api().field(system_type, member)?;
-    descriptor_type_with_records(field, substitutions, &mut BTreeSet::new())
+    descriptor_type_with_substitutions(field, substitutions)
 }
 
-fn descriptor_type_with_records(
+/// A described member keeps the nominal identity of its descriptor type, so a
+/// read such as `checkpoint.position` agrees with a `sys.CheckpointPosition`
+/// annotation or signature parameter (ORNA-NOMINAL-002), and an opaque
+/// `sys.Value` is never unboxed into a structural record. Chained reads resolve
+/// each step through `infer_system_member`; only type parameters substitute.
+fn descriptor_type_with_substitutions(
     ty: &system_api::SystemType,
     substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
 ) -> Option<Type> {
     match ty {
-        system_api::SystemType::Named(name) => {
-            if let Some(ty) = substitutions.get(name) {
-                return Some(ty.clone());
-            }
-            descriptor_relation_record_type(name, substitutions, expanding)
-                .or_else(|| Some(descriptor_type(ty)))
-        }
+        system_api::SystemType::Named(name) => Some(
+            substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| descriptor_type(ty)),
+        ),
         system_api::SystemType::Applied { base, arguments }
             if matches!(base.as_str(), "Relation" | "Query") =>
         {
-            Some(Type::Relation(Box::new(descriptor_type_with_records(
-                arguments.first()?,
-                substitutions,
-                expanding,
-            )?)))
+            Some(Type::Relation(Box::new(
+                descriptor_type_with_substitutions(arguments.first()?, substitutions)?,
+            )))
         }
         system_api::SystemType::Applied { base, arguments } if base == "Stream" => {
-            Some(Type::Stream(Box::new(descriptor_type_with_records(
+            Some(Type::Stream(Box::new(descriptor_type_with_substitutions(
                 arguments.first()?,
                 substitutions,
-                expanding,
             )?)))
         }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
                 .iter()
-                .map(|argument| descriptor_type_with_records(argument, substitutions, expanding))
+                .map(|argument| descriptor_type_with_substitutions(argument, substitutions))
                 .collect::<Option<Vec<_>>>()?,
         }),
         system_api::SystemType::List(element) => Some(Type::List(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
         system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
     }
-}
-
-fn descriptor_relation_record_type(
-    system_type: &str,
-    substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
-) -> Option<Type> {
-    let fields = system_api::embedded_system_api().record_fields(system_type)?;
-    if fields.is_empty() || !expanding.insert(system_type.to_owned()) {
-        return None;
-    }
-    let fields = fields
-        .iter()
-        .map(|(name, ty)| {
-            Some((
-                name.clone(),
-                descriptor_type_with_records(ty, substitutions, expanding)?,
-            ))
-        })
-        .collect::<Option<BTreeMap<_, _>>>();
-    expanding.remove(system_type);
-    fields.map(Type::Record)
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
