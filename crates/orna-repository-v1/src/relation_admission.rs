@@ -103,6 +103,9 @@ pub enum RelationAdmissionError {
     },
     /// An identity record is not a valid inventory entry.
     InvalidIdentity,
+    /// The ordinary index stages no `.orna/store`, so it has no identity
+    /// inventory to change; the first `orna commit` creates one.
+    NoStagedStore,
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -137,6 +140,7 @@ impl std::fmt::Display for RelationAdmissionError {
                 Uuid::from_bytes(*relation_id)
             ),
             Self::InvalidIdentity => formatter.write_str("an object identity record is invalid"),
+            Self::NoStagedStore => formatter.write_str("the Git index stages no .orna/store"),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -434,6 +438,50 @@ impl Repository {
         })
     }
 
+    /// Stages `identities` as the complete identity inventory of the staged
+    /// store, leaving every other staged relation exactly as it is.
+    ///
+    /// This is how a semantic rename (`orna mv`, an editor rename) moves an
+    /// ObjectId to its new name without committing: the staged store is the
+    /// committed metadata the next `orna commit` reads its identities from
+    /// (ORNA-OBJECT-002, ORNA-OBJECT-003). The store is installed under the
+    /// same locks and stale-index checks as [`Self::stage_store_admission`].
+    /// Returns whether the index changed.
+    pub fn stage_object_identities(
+        &self,
+        staged: &StagedCandidate,
+        identities: &[StoredObjectIdentity],
+    ) -> Result<bool, RelationAdmissionError> {
+        let base_root = staged
+            .store_root
+            .as_ref()
+            .ok_or(RelationAdmissionError::NoStagedStore)?;
+        let database_id = *staged.database_id.as_bytes();
+        let mut writer = NodeWriter::new(self)?;
+        let mut entries = NativeGraphContext::read_store_relations(
+            self,
+            writer.algorithm,
+            database_id,
+            base_root,
+        )?
+        .into_iter()
+        .map(|entry| (entry.relation_id, entry))
+        .collect::<BTreeMap<_, _>>();
+        entries.insert(
+            OBJECT_IDENTITY_RELATION_ID,
+            write_identity_relation(&mut writer, identities)?,
+        );
+        let entries = entries.into_values().collect::<Vec<_>>();
+        let store_root = write_store_root(&mut writer, database_id, &entries)?;
+        let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
+        if &store_root == base_root && !sidecar_staged {
+            return Ok(false);
+        }
+        writer.sync()?;
+        self.install_staged_store(staged, &store_root)?;
+        Ok(true)
+    }
+
     /// The relation UUIDs a format-3 commit's `.orna/store` binds, empty when
     /// the commit has no store. Every page of the relation map is validated
     /// before the set is returned.
@@ -700,6 +748,22 @@ impl Repository {
             64 => Ok(GitHashAlgorithm::Sha256),
             _ => Err(RepositoryError::UnsupportedObjectFormat.into()),
         }
+    }
+
+    /// Whether the ordinary index stages anything that can hold an object
+    /// identity inventory: a `.orna/store` tree or the legacy sidecar. An
+    /// index of a database whose first commit is not yet staged has neither,
+    /// so no object has an identity yet.
+    pub fn index_stages_object_identities(&self) -> Result<bool, RelationAdmissionError> {
+        let mut command = self.command();
+        command.args(["ls-files", "-z", "--", STORE_PATH]);
+        let store_prefix = format!("{STORE_PATH}/");
+        let stages_store = self
+            .run(command)?
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|entry| entry.starts_with(store_prefix.as_bytes()));
+        Ok(stages_store || self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?)
     }
 
     /// Whether `path` is an entry of the ordinary index, or of `index` when
@@ -1656,6 +1720,61 @@ mod tests {
             repository.read_staged_object_identities(&restaged).unwrap(),
             Some(identities_for(&[relation(1)]))
         );
+    }
+
+    /// Restaging the inventory alone keeps every table relation's entry, and
+    /// an index without a store has no inventory to restage.
+    #[test]
+    fn staging_identities_keeps_every_other_relation() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let unstaged = repository.capture_staged_candidate().unwrap();
+        assert!(matches!(
+            repository.stage_object_identities(&unstaged, &identities_for(&[relation(1)])),
+            Err(RelationAdmissionError::NoStagedStore)
+        ));
+        let music = relation(1);
+        stage(&repository, &[music]).expect("stage the store");
+        let committed = |commit: &GitCommitRef| {
+            repository
+                .open_pinned_format_context(commit.as_str())
+                .unwrap()
+                .load_row_map(music)
+                .unwrap()
+                .version()
+                .clone()
+        };
+        let music_version = committed(&review_and_commit(&repository, "first"));
+
+        let staged = repository.capture_staged_candidate().unwrap();
+        assert!(
+            !repository
+                .stage_object_identities(&staged, &identities_for(&[music]))
+                .unwrap(),
+            "the committed inventory is not staged again"
+        );
+        let renamed = vec![StoredObjectIdentity::new(music, 1, "Song", false)];
+        assert!(
+            repository
+                .stage_object_identities(&staged, &renamed)
+                .unwrap()
+        );
+        assert_eq!(
+            git(root, &["diff", "--cached", "--name-only"]),
+            ".orna/store\n"
+        );
+        let restaged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository.read_staged_object_identities(&restaged).unwrap(),
+            Some(renamed)
+        );
+        // The table relation keeps its schema node and primary map.
+        let renamed_version = committed(&review_and_commit(&repository, "rename"));
+        assert_eq!(
+            renamed_version.schema().schema_oid(),
+            music_version.schema().schema_oid()
+        );
+        assert_eq!(renamed_version.primary_root(), music_version.primary_root());
     }
 
     /// Deterministic bytes that cut Gear chunks at varied lengths.
