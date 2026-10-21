@@ -484,15 +484,18 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
     else {
         return write_response(reader.get_mut(), bad_request_response());
     };
+    // Refuse from the head alone, before the body is read or allocated, so a
+    // foreign or cross-origin request cannot make this host wait for or
+    // buffer up to the route's body limit.
+    if let Some(refusal) = state.loopback.refusal(&request) {
+        return write_response(reader.get_mut(), refusal);
+    }
     reader.get_ref().set_read_timeout(Some(HTTP_IO_TIMEOUT))?;
     let mut body = vec![0; body_length];
     if reader.read_exact(&mut body).is_err() {
         return write_response(reader.get_mut(), bad_request_response());
     }
     request.body = body;
-    if let Some(refusal) = state.loopback.refusal(&request) {
-        return write_response(reader.get_mut(), refusal);
-    }
     if is_websocket_route(&request) {
         // Bytes the peer sent after its handshake belong to the WebSocket.
         let initial = reader.buffer().to_vec();
@@ -2727,6 +2730,24 @@ mod tests {
         );
         assert_eq!(upload.status, 403);
         assert_eq!(upload.body, r#"{"error":"origin_denied"}"#);
+
+        // The refusal is decided from the request head alone: a cross-origin
+        // request that declares a large body and never sends it is answered at
+        // once, without the host waiting for or buffering that body.
+        let started = Instant::now();
+        let declared = exchange(
+            address,
+            &format!(
+                "POST /git/git-upload-pack HTTP/1.1\r\nHost: {own}\r\nOrigin: http://rebound.example\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: 1000000\r\n\r\n"
+            ),
+        );
+        assert_eq!(declared.status, 403);
+        assert_eq!(declared.body, r#"{"error":"origin_denied"}"#);
+        assert!(
+            started.elapsed() < StdDuration::from_secs(5),
+            "the refusal does not wait for the declared body: {:?}",
+            started.elapsed()
+        );
 
         // A WebSocket handshake through a rebound name never reaches the
         // session layer.
