@@ -322,7 +322,7 @@ fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {
         "contacts/Contact/alice-smith.orna",
         "contacts/Contact",
         &key_path,
-        cases[0],
+        cases[0].0,
     );
     assert_message(
         &admit_row_unit(&analysis, &wrong),
@@ -333,7 +333,7 @@ fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {
         "contacts/Contact/alice-smith.orna",
         "contacts/Contact",
         &key_path,
-        cases[1],
+        cases[1].0,
     );
     assert_message(
         &admit_row_unit(&analysis, &unknown),
@@ -344,7 +344,7 @@ fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {
         "contacts/Contact/alice-smith.orna",
         "contacts/Contact",
         &key_path,
-        cases[2],
+        cases[2].0,
     );
     assert_message(
         &admit_row_unit(&analysis, &missing),
