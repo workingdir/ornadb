@@ -3,8 +3,8 @@ mod test_support;
 
 use orna_conformance_v1::{
     BoundedEvaluator, ConformanceAdapter, Corpus, DurableTransactionalEvaluator, EvidenceStatus,
-    Harness, ProjectEnvironment, ProjectExpectations, ProjectUnit, RuntimeAdapter,
-    RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
+    Harness, PendingPublicationError, ProjectEnvironment, ProjectExpectations, ProjectUnit,
+    RuntimeAdapter, RuntimeEvaluator, Scenario, SourceUnit, StageOutcome,
 };
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
@@ -704,7 +704,8 @@ async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
 
 /// ORNA-UPGRADE-003: a format-2 snapshot keeps its reader but has no row
 /// writer, so publishing the frozen source prefix onto it is refused before
-/// any Git object, ref, index or loose row is written.
+/// the prefix is frozen and before any Git object, ref, index or loose row is
+/// written.
 #[tokio::test]
 async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_writing() {
     let (temp, repository) = durable_repository();
@@ -760,7 +761,7 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
         .collect::<String>();
     let managed = LoosePath::for_key("Note", &[key]).unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         evaluator
             .publish_pending(
                 &repository,
@@ -778,7 +779,13 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
                 "orna: publish durable source",
             )
             .await,
-        Err(RuntimeError::StorageUnavailable)
+        Err(PendingPublicationError::LegacyReadOnly { format: 2 })
+    );
+
+    // The refusal comes before the freeze, so no publication intent exists.
+    assert!(matches!(
+        state.publication_freeze([65; 16]).await,
+        Err(RuntimeError::RecoveryInvalid)
     ));
 
     assert_eq!(repository.head().unwrap(), Some(head));
