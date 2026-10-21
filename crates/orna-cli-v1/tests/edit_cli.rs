@@ -161,7 +161,11 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
-    let capture = format!("sys.blob.capture_file({root}, \"pixel.png\", 65536)");
+    // Capture supplies only the octet-stream/null fallback, so the import
+    // declares the type that projects the row's `content.png` file.
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"pixel.png\", 65536), \"image/png\")"
+    );
     media_commit::commit_source_captures_for_table(
         &repository,
         &state,
