@@ -20,7 +20,6 @@ use orna_value_v1::{
 };
 use tempfile::TempDir;
 
-#[tokio::test]
 /// Exercises capture through the runtime into a format-3 row reference: raw
 /// identity survives annotated OVB-2/ROV-3 conversion and metadata conversion
 /// performs no payload reads. ORNA-BLOB-004, ORNA-BLOB-007, ORNA-BLOB-009,
@@ -30,6 +29,7 @@ use tempfile::TempDir;
 /// non-regular and over-quota sources fail with the portable
 /// `sys.blob.source_denied` and `sys.blob.limit` codes (ORNA-INGEST-002,
 /// ORNA-SYS-097).
+#[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let commit = repository.head().unwrap().unwrap();
