@@ -496,15 +496,16 @@ impl Workspace {
     /// A bare name in `module`.
     fn lookup(&self, module: usize, key: &str) -> Resolved {
         if self.shared_scope {
-            let mut found = self.modules.iter().enumerate().flat_map(|(index, _)| {
-                self.top_level[index]
-                    .get(key)
-                    .into_iter()
-                    .flatten()
-                    .map(move |declaration| Target::Declared {
+            // Same-name declarations of one module are one overload group,
+            // resolved to its first declaration as in a project; only the
+            // same name declared by two modules is ambiguous.
+            let mut found = self.top_level.iter().enumerate().filter_map(|(index, tops)| {
+                tops.get(key).and_then(|declarations| declarations.first()).map(|declaration| {
+                    Target::Declared {
                         module: index,
                         index: *declaration,
-                    })
+                    }
+                })
             });
             return match (found.next(), found.next()) {
                 (Some(target), None) => Resolved::Target(target),
