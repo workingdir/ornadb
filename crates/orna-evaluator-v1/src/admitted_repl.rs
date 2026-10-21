@@ -552,7 +552,7 @@ impl AdmittedReplSession {
         if parsed.is_ok() {
             return Ok(parsed.value);
         }
-        Err(parse_error(&parsed.diagnostics))
+        Err(parse_error(&parsed.diagnostics, source))
     }
 
     fn stage_input(&self, input: &ReplInput, source: &str) -> Result<ReplAdmission, ReplError> {
@@ -886,18 +886,74 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
     )
 }
 
-fn parse_error(diagnostics: &[SyntaxDiagnostic]) -> ReplError {
+fn parse_error(diagnostics: &[SyntaxDiagnostic], source: &str) -> ReplError {
     let mut error = ReplError::redacted("ORNA-EVAL-PARSE");
     if let Some(diagnostic) = diagnostics.first() {
+        // End-of-input tokens sit after the trailing newline the terminal
+        // adds; point just past the last written character instead.
+        let content_end = source.trim_end().len();
+        let start = diagnostic.span.start.min(content_end);
+        let end = diagnostic.span.end.min(content_end).max(start);
+        let mut help = diagnostic.help.clone();
+        if help.is_empty()
+            && let Some(remedy) = parse_remedy(&diagnostic.message)
+        {
+            help.push(remedy.to_owned());
+        }
+        let mut notes = diagnostic.notes.clone();
+        if diagnostic.message.starts_with("expected `)`")
+            && let Some(opener) = unclosed_opener(source)
+        {
+            let (line, column) = line_column(source, opener.start);
+            notes.push(format!(
+                "the `(` at line {line}, column {column} is not closed"
+            ));
+        }
         error.detail = Some(Box::new(ReplDetail {
             code: diagnostic.code.to_owned(),
             message: diagnostic.message.clone(),
-            span: Some(diagnostic.span.start..diagnostic.span.end),
-            notes: diagnostic.notes.clone(),
-            help: diagnostic.help.clone(),
+            span: Some(start..end),
+            notes,
+            help,
         }));
     }
     error
+}
+
+/// The remedy for a parser message the syntax crate leaves without `help`.
+fn parse_remedy(message: &str) -> Option<&'static str> {
+    if message == "expected namespace path" {
+        Some("name the module to import after `use`, for example `use library;`")
+    } else if message == "expected pattern" {
+        Some("name the binding after `let`, for example `let x = 3;`")
+    } else if message.starts_with("expected `)`") {
+        Some("close the parenthesis with `)`")
+    } else {
+        None
+    }
+}
+
+/// The innermost `(` that is still open at the end of `source`.
+fn unclosed_opener(source: &str) -> Option<std::ops::Range<usize>> {
+    let mut open = Vec::new();
+    for token in lex(source).ok()? {
+        match token.kind {
+            TokenKind::Punct("(") => open.push(token.span.start..token.span.end),
+            TokenKind::Punct(")") => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.pop()
+}
+
+/// One-based line and column of byte `offset` in `source`.
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let before = &source[..offset];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    (line, before[line_start..].chars().count() + 1)
 }
 
 fn stage_error(
@@ -1593,6 +1649,66 @@ mod tests {
         assert_eq!(
             session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Some(Value::int(40.into())))
+        );
+    }
+
+    #[test]
+    fn parse_errors_point_past_the_last_character_with_a_remedy() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("use\n").unwrap_err();
+
+        assert_eq!(error.code(), "ORNA-EVAL-PARSE");
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.code, "ORNA-PARSE-001");
+        assert_eq!(detail.message, "expected namespace path");
+        assert_eq!(detail.span, Some(3..3));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("`use library;`")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unclosed_parenthesis_names_its_opener_and_the_missing_close() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("(1 + 2\n").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.message, "expected `)`");
+        assert_eq!(detail.span, Some(6..6));
+        assert_eq!(
+            detail.notes,
+            vec!["the `(` at line 1, column 1 is not closed".to_owned()]
+        );
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "close the parenthesis with `)`"),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn binding_without_a_name_points_at_the_offending_token() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("let = 3;").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.message, "expected pattern");
+        assert_eq!(detail.span, Some(4..5));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("`let x = 3;`")),
+            "{:?}",
+            detail.help
         );
     }
 
