@@ -1432,6 +1432,7 @@ dependencies = [
  "fuser",
  "getrandom 0.3.4",
  "libc",
+ "libsql",
  "orna-application-v1",
  "orna-client",
  "orna-conformance-v1",
