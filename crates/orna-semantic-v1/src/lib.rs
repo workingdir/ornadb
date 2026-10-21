@@ -1913,7 +1913,7 @@ pub fn admit_row_unit_with_owner_fields(
         {
             result
                 .diagnostics
-                .push(diag(DIAG_TYPE, "project row omits a required stored field"));
+                .push(diag(DIAG_MISSING_REQUIRED_FIELD, "project row omits a required stored field"));
         }
     }
     result
