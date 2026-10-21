@@ -215,7 +215,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
         "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let row_source = format!(
-        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
@@ -239,7 +239,9 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 4194304)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -268,7 +270,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
     let revised_row = format!(
-        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     std::fs::write(
         repository_directory.path().join("Music/london.orna"),
@@ -1076,8 +1078,9 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     std::fs::write(&source_file, original).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let row_source =
-        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let row_source = format!(
+        "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
+    );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
             source,
@@ -1100,7 +1103,9 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -1231,8 +1236,9 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     std::fs::write(&source_file, expected).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let row_source =
-        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let row_source = format!(
+        "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
+    );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
             source,
@@ -1255,7 +1261,9 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",

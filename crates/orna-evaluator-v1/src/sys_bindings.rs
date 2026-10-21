@@ -1,9 +1,6 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
@@ -996,13 +993,11 @@ impl SysHostBindingRegistry {
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let (media_type, suffix) = mime1_for_path(path);
-        let blob = Blob::from_bytes_with_annotation(
-            source.into_captured_bytes(),
-            media_type,
-            suffix.as_deref(),
-        )
-        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        // Capture is one of the old constructors: it supplies the
+        // octet-stream/null annotation whatever the file is called, and an
+        // importer declares the media type afterwards with `sys.blob.annotate`
+        // (ORNA-MIME-001).
+        let blob = Blob::from_bytes(source.into_captured_bytes());
         let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
             .map(Some)
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
@@ -1011,8 +1006,8 @@ impl SysHostBindingRegistry {
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
             .push(CapturedBlobForRow {
                 candidate,
-                media_type: media_type.to_owned(),
-                suffix,
+                media_type: blob.media_type().to_owned(),
+                suffix: blob.suffix().map(str::to_owned),
             });
         Ok(value)
     }
@@ -1297,37 +1292,6 @@ fn capture_file_failure(failure: CaptureFileError) -> EvaluationError {
     redacted_error(failure.failure_code())
 }
 
-fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "json" => ("application/json", None),
-        "pdf" => ("application/pdf", None),
-        "wasm" => ("application/wasm", None),
-        "zip" => ("application/zip", None),
-        "gz" | "tgz" => ("application/gzip", (extension != "gz").then_some(extension)),
-        "flac" => ("audio/flac", None),
-        "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
-        "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
-        "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
-        "wav" => ("audio/wav", None),
-        "gif" => ("image/gif", None),
-        "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
-        "png" => ("image/png", None),
-        "svg" => ("image/svg+xml", None),
-        "webp" => ("image/webp", None),
-        "css" => ("text/css", None),
-        "mjs" | "js" => ("text/javascript", (extension != "js").then_some(extension)),
-        "text" | "txt" => ("text/plain", (extension != "txt").then_some(extension)),
-        "m4v" | "mp4" => ("video/mp4", (extension != "mp4").then_some(extension)),
-        "webm" => ("video/webm", None),
-        _ => ("application/octet-stream", None),
-    }
-}
-
 fn redacted_error(code: &'static str) -> EvaluationError {
     EvaluationError::redacted(SafeText::new(code).expect("static evaluator error code is safe"))
 }
@@ -1413,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_file_selects_only_mime1_annotations() {
+    fn capture_file_declares_only_its_generated_failures() {
         let operation = system_host_operation_registry()
             .operation("sys.blob.capture_file")
             .expect("capture_file is present in the generated host ABI");
@@ -1447,18 +1411,6 @@ mod tests {
             );
             assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
         }
-        assert_eq!(
-            mime1_for_path("records/data.json"),
-            ("application/json", None)
-        );
-        assert_eq!(
-            mime1_for_path("records/photo.jpeg"),
-            ("image/jpeg", Some("jpeg".to_owned()))
-        );
-        assert_eq!(
-            mime1_for_path("records/unknown.custom"),
-            ("application/octet-stream", None)
-        );
     }
 
     #[test]
