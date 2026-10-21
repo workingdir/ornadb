@@ -10,7 +10,8 @@ use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
     CallReuse, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
-    PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    NominalDefinitions, PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    validate_nominal_definitions,
 };
 
 /// A bounded ephemeral module for one interactive Orna session.
@@ -33,6 +34,8 @@ pub struct ReplSession {
     table_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
     last_status: Option<CanonicalValue>,
+    /// Declaration-owned construction plans shared by every evaluation.
+    nominal_definitions: NominalDefinitions,
 }
 
 /// Parses one REPL input after applying source bounds. Callers which also
@@ -65,6 +68,7 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
         }
     }
 
@@ -103,6 +107,7 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
         })
     }
 
@@ -117,6 +122,17 @@ impl ReplSession {
             }
         }
         self.check_retained()?;
+        Ok(self)
+    }
+
+    /// Admits the project's nominal construction plans, such as source
+    /// enums, for every later evaluation in this session.
+    pub fn with_nominal_definitions(
+        mut self,
+        definitions: NominalDefinitions,
+    ) -> Result<Self, EvaluationError> {
+        validate_nominal_definitions(&definitions, self.limits)?;
+        self.nominal_definitions = definitions;
         Ok(self)
     }
 
@@ -329,6 +345,7 @@ impl ReplSession {
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
@@ -460,6 +477,7 @@ impl ReplSession {
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
+        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
