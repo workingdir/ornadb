@@ -1214,9 +1214,11 @@ impl<'a> DescriptorBuilder<'a> {
 
     /// Resolves a declared spelling in `namespace` to its defining module and
     /// declaration through the module's own declarations and imports
-    /// (ORNA-IMPORT-001..005). A qualified spelling starts at an imported
-    /// namespace binding and names a public declaration. Analysis already
-    /// rejected ambiguity, so any remaining doubt fails instead of choosing.
+    /// (ORNA-IMPORT-001..005). A qualified spelling is either the canonical
+    /// module-qualified identity semantic analysis gives a nominal
+    /// declaration (`shop.Price`), or starts at an imported namespace binding
+    /// and names a public declaration. Analysis already rejected ambiguity,
+    /// so any remaining doubt fails instead of choosing.
     fn resolve(
         &self,
         namespace: &Namespace,
@@ -1230,6 +1232,17 @@ impl<'a> DescriptorBuilder<'a> {
                 .is_some_and(|header| header.symbols.contains_key(name))
         };
         if let Some((binding, member)) = spelling.split_once('.') {
+            if let Some((qualifier, name)) = spelling.rsplit_once('.') {
+                let target = Namespace(qualifier.split('.').map(str::to_owned).collect());
+                if analysis
+                    .modules
+                    .get(&target)
+                    .and_then(|header| header.symbols.get(name))
+                    .is_some_and(|symbol| symbol.ty == Type::Named(spelling.to_owned()))
+                {
+                    return Ok((target, name.to_owned()));
+                }
+            }
             let mut target = self.module_binding(namespace, binding)?;
             let name = match member.rsplit_once('.') {
                 Some((nested, name)) => {
@@ -2658,6 +2671,37 @@ pub table Contact(
             panic!("unit definition is an array");
         };
         assert_eq!(definition[1], Raw::Int(3.into()));
+    }
+
+    #[test]
+    fn canonical_nominal_identities_resolve_in_declaring_and_importing_modules() {
+        // Semantic analysis canonicalizes a nominal field type to its
+        // module-qualified identity, so `price: Price` declared in module
+        // `shop` and a named import of it both reach the builder as
+        // `shop.Price`.
+        let modules = [
+            ModuleInput::new(
+                "shop.orna",
+                "pub type Price {\n    pub amount: Int,\n}\n\npub table Order(id: Str) {\n    price: Price,\n}\n",
+            ),
+            ModuleInput::new(
+                "main.orna",
+                "use shop.{Price};\n\npub table Quote(id: Str) {\n    price: Price,\n}\n",
+            ),
+        ];
+        for (source_path, table) in [("shop.orna", "Order"), ("main.orna", "Quote")] {
+            let (manifest, schema) = source_descriptor(&modules, None, source_path, table);
+            let schema = schema.unwrap_or_else(|error| panic!("{table}: {error:?}"));
+            let price = *manifest.id(ObjectKind::Type, "shop.Price").unwrap();
+            assert_eq!(
+                descriptor_field(schema.descriptor(), "price")[2],
+                Raw::Array(vec![Raw::Int(5.into()), uuid_raw(&price)])
+            );
+            let Raw::Array(definition) = descriptor_definition(schema.descriptor(), &price) else {
+                panic!("nominal definition is an array");
+            };
+            assert_eq!(definition[1], Raw::Int(0.into()));
+        }
     }
 
     #[test]
