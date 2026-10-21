@@ -75,8 +75,8 @@ pub use publication_transaction::{
 };
 pub use crash_barrier::publication_crash_barrier;
 pub use row_store::{
-    AdmittedRow, KeyRange, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity, RowDependency,
-    RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
+    AdmittedRow, KeyRange, KeyValue, RepositoryVfsFieldIdentity, RepositoryVfsRowIdentity,
+    RowDependency, RowMapSnapshot, RowMapVersion, RowValue, SchemaGeneration, TypedKey,
 };
 pub use transport::{FetchError, FetchReport, FetchRequest, FetchedRef, PushRequest, RequestedRef};
 

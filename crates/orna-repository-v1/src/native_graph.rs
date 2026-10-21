@@ -752,7 +752,7 @@ impl NativeGraphContext {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
             let root_node = read_node(&root)?;
             validate_ordered_root_node(&root_node, &domain, expected_count)?;
-            find_ordered_entry_with(&mut read_node, root_node, &domain, None, None, key)?
+            find_ordered_entry_with(&mut read_node, root_node, &domain, key)?
         };
         let Some(entry) = entry else {
             return Ok(None);
@@ -855,8 +855,6 @@ impl NativeGraphContext {
                 &mut read_node,
                 relation_node,
                 &relations_domain,
-                None,
-                None,
                 &relation_key,
             )?
         }
@@ -1789,7 +1787,14 @@ impl NativeGraphContext {
                 }
                 Ok(CborValue::Map(transformed))
             }
-            CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+            // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+            CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+            // Other typed values keep their tag; only nested Blob and
+            // overflow references change between ROV-3 and SOV-3.
+            CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
+                tag,
+                Box::new(self.to_sov_value(*payload, scope, objects, active)?),
+            )),
             scalar => Ok(scalar),
         }
     }
@@ -2845,15 +2850,8 @@ impl NativeGraphContext {
         let key = crate::row_store::TypedKey::Bytes(version.relation_id().to_vec());
         let relation = {
             let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            find_ordered_entry_with(
-                &mut read_node,
-                relation_node.clone(),
-                &domain,
-                None,
-                None,
-                &key,
-            )?
-            .ok_or(GraphError::ContextMismatch)?
+            find_ordered_entry_with(&mut read_node, relation_node.clone(), &domain, &key)?
+                .ok_or(GraphError::ContextMismatch)?
         };
         let (schema_oid, old_primary, secondary, old_count) =
             decode_relation_value(&relation.value, self.algorithm)?;
@@ -3043,7 +3041,7 @@ impl NativeGraphContext {
         let node = self.read_native_node(&candidate.primary_root, scope, &mut objects)?;
         validate_ordered_root_node(&node, &domain, candidate.row_count)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-        let entry = find_ordered_entry_with(&mut read_node, node, &domain, None, None, key)?;
+        let entry = find_ordered_entry_with(&mut read_node, node, &domain, key)?;
         entry
             .map(|entry| {
                 decode_candidate_blob_metadata(
@@ -6489,7 +6487,7 @@ impl PinnedNativeGraphReader {
     ) -> Result<Option<OrderedLeafEntry>, GraphError> {
         let node = self.read_native_node(root)?;
         let mut read_node = |oid: &NativeOid| self.read_native_node(oid);
-        find_ordered_entry_with(&mut read_node, node, expected_domain, None, None, key)
+        find_ordered_entry_with(&mut read_node, node, expected_domain, key)
     }
 
     fn read_native_node(&mut self, oid: &NativeObjectId) -> Result<NodeData, GraphError> {
@@ -6786,115 +6784,122 @@ fn find_ordered_entry_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
     expected_domain: &[u8],
-    expected_height: Option<u8>,
-    lower_exclusive: Option<&crate::row_store::TypedKey>,
     key: &crate::row_store::TypedKey,
 ) -> Result<Option<OrderedLeafEntry>, GraphError> {
-    match node {
-        NodeData::OrderedLeaf { domain, entries } => {
-            if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
-                return Err(GraphError::InvalidDomain);
-            }
-            let mut decoded: Vec<(crate::row_store::TypedKey, &OrderedLeafEntry)> =
-                Vec::with_capacity(entries.len());
-            for entry in &entries {
-                let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                if decoded.last().is_some_and(|(last, _)| last >= &entry_key) {
-                    return Err(GraphError::NonCanonicalData);
+    // ORP-1 child ranges are nonoverlapping and exhaustive in fence order
+    // (store-format-3 section 2), so the first child whose inclusive maximum
+    // fence is at or above the key is the only child that can hold it. A
+    // point lookup therefore reads exactly one node per level, and a miss
+    // returns after that single path instead of probing later siblings.
+    //
+    // Every node on the path is checked against what its parent's entry
+    // claims for it: domain, height, exact row count, an inclusive maximum
+    // equal to the fence, and a minimum above the previous fence. Those checks
+    // use only the node itself, so they add no reads. A malformed range on
+    // the path is rejected; overlap between children off the path is left to
+    // full admission and to range reads, which read those children anyway.
+    let mut node = node;
+    // The root's height is whatever it records, and it has no lower bound.
+    let mut expected_height: Option<u8> = None;
+    let mut lower_exclusive: Option<crate::row_store::TypedKey> = None;
+    // The parent's claim for `node`: its exact row count and inclusive
+    // maximum key. The root has no parent entry and so no claim.
+    let mut claim: Option<(u64, crate::row_store::TypedKey)> = None;
+    loop {
+        match node {
+            NodeData::OrderedLeaf { domain, entries } => {
+                if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
+                    return Err(GraphError::InvalidDomain);
                 }
-                decoded.push((entry_key, entry));
+                let mut decoded: Vec<(crate::row_store::TypedKey, &OrderedLeafEntry)> =
+                    Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    let entry_key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map_err(|_| GraphError::NonCanonicalData)?;
+                    if decoded.last().is_some_and(|(last, _)| last >= &entry_key) {
+                        return Err(GraphError::NonCanonicalData);
+                    }
+                    decoded.push((entry_key, entry));
+                }
+                let breaks_claim = claim.as_ref().is_some_and(|(row_count, fence)| {
+                    entries.len() as u64 != *row_count
+                        || decoded.last().is_none_or(|(maximum, _)| maximum != fence)
+                });
+                let breaks_lower = lower_exclusive.as_ref().is_some_and(|lower| {
+                    decoded.first().is_some_and(|(minimum, _)| minimum <= lower)
+                });
+                if breaks_claim || breaks_lower {
+                    return Err(GraphError::InvalidCount(entries.len()));
+                }
+                return Ok(decoded
+                    .binary_search_by(|(candidate, _)| candidate.cmp(key))
+                    .ok()
+                    .map(|index| decoded[index].1.clone()));
             }
-            if lower_exclusive
-                .is_some_and(|lower| decoded.first().is_some_and(|(minimum, _)| minimum <= lower))
-            {
-                return Err(GraphError::NonCanonicalData);
-            }
-            Ok(decoded
-                .binary_search_by(|(candidate, _)| candidate.cmp(key))
-                .ok()
-                .map(|index| decoded[index].1.clone()))
-        }
-        NodeData::OrderedBranch {
-            domain,
-            height,
-            entries,
-        } => {
-            if domain != expected_domain
-                || height == 0
-                || expected_height.is_some_and(|expected| expected != height)
-                || entries.is_empty()
-            {
-                return Err(GraphError::InvalidDomain);
-            }
-            // The caller proved this node's minimum sorts above the lower
-            // exclusive bound when it descended here, so a point lookup does
-            // not recompute whole-branch bounds: it validates each child it
-            // probes and stops at the first child that answers. Recomputing
-            // them would read the first and last descendant of every level,
-            // which is what made a lookup on a deep index cost the whole
-            // index rather than the path to the key.
-            let mut previous_fence = None;
-            for entry in &entries {
-                let fence = crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                if previous_fence
-                    .as_ref()
-                    .is_some_and(|previous| previous >= &fence)
+            NodeData::OrderedBranch {
+                domain,
+                height,
+                entries,
+            } => {
+                if domain != expected_domain
+                    || height == 0
+                    || expected_height.is_some_and(|expected| expected != height)
+                    || entries.is_empty()
                 {
-                    return Err(GraphError::NonCanonicalData);
+                    return Err(GraphError::InvalidDomain);
                 }
-                // A fence is the child's own inclusive maximum key, so a child
-                // whose fence sorts below the search key holds no key at or
-                // above it and is left unread: a point lookup reads the path to
-                // the key plus the pages it probes, not the whole index. The
-                // probe is not cut short, so a miss in the child that covers
-                // the key continues into later children while their fences
-                // still reach it, and every child the probe descends into is
-                // validated before it is used. ORP-1 fixes the child ranges as
-                // nonoverlapping, so a fence that lies about its child is a
-                // malformed node, and probing the children the key reaches is
-                // what detects it.
-                if key <= &fence {
-                    // A fence is only a pruning hint after its child proves
-                    // it: validate the child this search descends into, and
-                    // reject a range that overlaps the previous child.
-                    let child = read_node(&entry.child)?;
-                    let child_bounds = ordered_node_bounds_with(
-                        read_node,
-                        child.clone(),
-                        expected_domain,
-                        Some(height - 1),
-                    )?;
-                    if child_bounds.0 != entry.row_count
-                        || child_bounds.2 != fence
-                        || previous_fence
-                            .as_ref()
-                            .is_some_and(|previous| child_bounds.1 <= *previous)
-                    {
-                        return Err(GraphError::InvalidCount(
-                            usize::try_from(child_bounds.0).unwrap_or(usize::MAX),
-                        ));
+                let total_count = entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.row_count)
+                        .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                        .ok_or(GraphError::InvalidCount(usize::MAX))
+                })?;
+                let mut fences: Vec<crate::row_store::TypedKey> = Vec::with_capacity(entries.len());
+                for entry in &entries {
+                    let fence =
+                        crate::row_store::TypedKey::decode_canonical(&entry.inclusive_max_key)
+                            .map_err(|_| GraphError::NonCanonicalData)?;
+                    if fences.last().is_some_and(|previous| previous >= &fence) {
+                        return Err(GraphError::NonCanonicalData);
                     }
-                    if let Some(found) = find_ordered_entry_with(
-                        read_node,
-                        child,
-                        expected_domain,
-                        Some(height - 1),
-                        previous_fence.as_ref(),
-                        key,
-                    )? {
-                        return Ok(Some(found));
-                    }
+                    fences.push(fence);
                 }
-                previous_fence = Some(fence);
+                // This branch's maximum is its last child's fence and its
+                // minimum is no greater than its first child's fence, so both
+                // halves of the parent's claim are checked without reading
+                // any child other than the one the key selects.
+                let breaks_claim = claim.as_ref().is_some_and(|(row_count, maximum)| {
+                    total_count != *row_count || fences.last() != Some(maximum)
+                });
+                let breaks_lower = lower_exclusive
+                    .as_ref()
+                    .is_some_and(|lower| fences.first().is_some_and(|first| first <= lower));
+                if breaks_claim || breaks_lower {
+                    return Err(GraphError::InvalidCount(
+                        usize::try_from(total_count).unwrap_or(usize::MAX),
+                    ));
+                }
+                let index = fences.partition_point(|fence| fence < key);
+                let Some(entry) = entries.get(index) else {
+                    // The key sorts above this node's maximum: no row holds it.
+                    return Ok(None);
+                };
+                // The first child inherits this node's own lower bound; any
+                // later child must sort above its predecessor's fence.
+                if let Some(index) = index.checked_sub(1) {
+                    lower_exclusive = Some(fences[index].clone());
+                }
+                let child = read_node(&entry.child)?;
+                expected_height = Some(height - 1);
+                claim = Some((entry.row_count, fences.swap_remove(index)));
+                node = child;
             }
-            Ok(None)
+            other => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: other.kind(),
+                });
+            }
         }
-        other => Err(GraphError::WrongNodeKind {
-            expected: NodeKind::OrderedLeaf,
-            actual: other.kind(),
-        }),
     }
 }
 
@@ -7650,6 +7655,14 @@ mod persisted_orp_tests {
             (Raw::Int(4.into()), Raw::Array(Vec::new())),
         ]))
         .expect("valid fixture schema descriptor");
+        fixture_descriptor_node(directory, &descriptor)
+    }
+
+    /// Writes `descriptor` as a kind-6 schema node over a one-chunk byte index.
+    fn fixture_descriptor_node(
+        directory: &Path,
+        descriptor: &SchemaDescriptor,
+    ) -> (NativeOid, [u8; 32]) {
         let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
         let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
         let chunk = fixture_git_object(directory, "blob", &schema_bytes);
@@ -7700,20 +7713,34 @@ mod persisted_orp_tests {
         root: &Path,
         include_blob_field: bool,
     ) -> NativeGraphContext {
+        init_fixture_repository(root);
+        let relation_id = [0x32; 16];
+        // The schema descriptor binds relation identity and its complete field layout
+        // (Orna 1.1.0 Section 29).
+        let (schema_oid, schema_digest) =
+            fixture_schema_node(root, relation_id, include_blob_field);
+        fixture_relation_context(root, relation_id, schema_oid, schema_digest)
+    }
+
+    fn init_fixture_repository(root: &Path) {
         let init = Command::new("git")
             .current_dir(root)
             .args(["init", "--quiet", "--template="])
             .status()
             .expect("initialize capture repository");
         assert!(init.success());
+    }
 
+    /// Issues the graph context of a fixture store whose one relation has an
+    /// empty row map under the given schema node.
+    fn fixture_relation_context(
+        root: &Path,
+        relation_id: [u8; 16],
+        schema_oid: NativeOid,
+        schema_digest: [u8; 32],
+    ) -> NativeGraphContext {
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
-        let relation_id = [0x32; 16];
-        // The schema descriptor binds relation identity and its complete field layout
-        // (Orna 1.1.0 Section 29).
-        let (schema_oid, schema_digest) =
-            fixture_schema_node(root, relation_id, include_blob_field);
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -10552,6 +10579,554 @@ mod persisted_orp_tests {
         drop(directory);
     }
 
+    /// The registered-tag rule of store-format-3 §2 and `final_model.decode`:
+    /// node data admits bignums 2 and 3, UUID 37, the value tags
+    /// 60000..=60025 and the profile tags 60110..=60113, and every negative
+    /// 64-bit head.
+    #[test]
+    fn canonical_reader_admits_exactly_the_format3_registered_tags() {
+        let tagged = |tag: u64, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            cbor_head(&mut bytes, 6, tag);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        for tag in [
+            37, 60_000, 60_001, 60_002, 60_005, 60_008, 60_009, 60_015, 60_025, 60_110, 60_113,
+        ] {
+            assert!(
+                decode_canonical_cbor(&tagged(tag, &[0x80])).is_ok(),
+                "tag {tag} is registered for format-3 nodes"
+            );
+        }
+        for tag in [0, 1, 4, 36, 38, 59_999, 60_026, 60_027, 60_109, 60_114] {
+            assert!(
+                matches!(
+                    decode_canonical_cbor(&tagged(tag, &[0x80])),
+                    Err(GraphError::NonCanonicalData)
+                ),
+                "tag {tag} is not registered for format-3 nodes"
+            );
+        }
+
+        // A bignum spells only an Int beyond the 64-bit heads.
+        let mut two_to_the_64 = vec![0x49, 0x01];
+        two_to_the_64.extend_from_slice(&[0; 8]);
+        let mut leading_zero = vec![0x49, 0x00];
+        leading_zero.extend_from_slice(&[0xff; 8]);
+        let mut narrow = vec![0x48];
+        narrow.extend_from_slice(&[0xff; 8]);
+        for tag in [2, 3] {
+            assert!(decode_canonical_cbor(&tagged(tag, &two_to_the_64)).is_ok());
+            for payload in [&leading_zero[..], &narrow[..], &[0x61, b'x'][..]] {
+                assert!(matches!(
+                    decode_canonical_cbor(&tagged(tag, payload)),
+                    Err(GraphError::NonCanonicalData)
+                ));
+            }
+        }
+        // -2^64 is the last Int a negative head spells.
+        let mut most_negative = vec![0x3b];
+        most_negative.extend_from_slice(&[0xff; 8]);
+        assert_eq!(
+            decode_canonical_cbor(&most_negative),
+            Ok(CborValue::Negative(u64::MAX))
+        );
+    }
+
+    /// Blob and overflow references nested in records, enum payloads, tuples
+    /// and options are row dependencies (`final_model.blob_references`);
+    /// other typed values add none, and OVB-2 or SOV-3 Blob tags are refused.
+    #[test]
+    fn row_dependencies_recurse_into_typed_value_payloads() {
+        let algorithm = GitHashAlgorithm::Sha1;
+        let descriptor = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
+        let overflow = NativeObjectId::new(algorithm, &[0x55; 20]).unwrap();
+        let uuid = |byte: u8| CborValue::Tag(37, Box::new(CborValue::Bytes(vec![byte; 16])));
+        let blob = CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(1),
+                CborValue::Bytes(vec![0x66; 32]),
+                CborValue::Text("text/plain".to_owned()),
+                CborValue::Null,
+                CborValue::Bytes(descriptor.as_bytes().to_vec()),
+            ])),
+        );
+        let record = CborValue::Tag(
+            60009,
+            Box::new(CborValue::Array(vec![
+                uuid(0x10),
+                CborValue::Array(vec![CborValue::Array(vec![uuid(0x11), blob])]),
+            ])),
+        );
+        let decimal = CborValue::Tag(
+            60000,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(15),
+                CborValue::Negative(0),
+            ])),
+        );
+        let overflow_value = CborValue::Tag(
+            60113,
+            Box::new(CborValue::Array(vec![CborValue::Bytes(
+                overflow.as_bytes().to_vec(),
+            )])),
+        );
+        let fields = CborValue::Array(vec![
+            decimal.clone(),
+            CborValue::Tag(
+                60008,
+                Box::new(CborValue::Array(vec![uuid(0x20), uuid(0x21), record])),
+            ),
+            CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![
+                    decimal,
+                    CborValue::Tag(
+                        60013,
+                        Box::new(CborValue::Array(vec![
+                            CborValue::Unsigned(1),
+                            overflow_value,
+                        ])),
+                    ),
+                ])),
+            ),
+        ]);
+        let dependencies = row_fields_dependencies(&canonical_value_bytes(&fields))
+            .expect("typed values are admitted in a stored row");
+        assert_eq!(
+            dependencies,
+            vec![
+                NativeDependency::new(descriptor, NativeObjectKind::Tree),
+                NativeDependency::new(overflow, NativeObjectKind::Tree),
+            ]
+        );
+        // The nested kind-3 value is charged to its own inline threshold.
+        assert_eq!(direct_blob_reference_count(&fields), Ok(1));
+
+        for refused in [60110, 60112] {
+            let nested = CborValue::Array(vec![CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![CborValue::Tag(
+                    refused,
+                    Box::new(CborValue::Array(Vec::new())),
+                )])),
+            )]);
+            assert!(matches!(
+                row_fields_dependencies(&canonical_value_bytes(&nested)),
+                Err(GraphError::NonCanonicalData)
+            ));
+        }
+    }
+
+    fn uuid_raw(id: [u8; 16]) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+    }
+
+    fn primitive_type(name: &str) -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.to_owned())])
+    }
+
+    fn field_descriptor(id: [u8; 16], name: &str, ty: Raw, role: u64) -> Raw {
+        Raw::Array(vec![
+            uuid_raw(id),
+            Raw::Text(name.to_owned()),
+            ty,
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    }
+
+    /// A closed table descriptor; `fields` are sorted by id and key fields
+    /// have role 0.
+    fn typed_schema(
+        relation_id: [u8; 16],
+        key_ids: &[[u8; 16]],
+        fields: Vec<Raw>,
+        definitions: Vec<Raw>,
+    ) -> SchemaDescriptor {
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw(relation_id)),
+            (
+                Raw::Int(2.into()),
+                Raw::Array(key_ids.iter().copied().map(uuid_raw).collect()),
+            ),
+            (Raw::Int(3.into()), Raw::Array(fields)),
+            (Raw::Int(4.into()), Raw::Array(definitions)),
+        ]))
+        .expect("valid typed table descriptor")
+    }
+
+    fn canonical_raw(raw: Raw) -> Vec<u8> {
+        orna_value_v1::Value::new(raw)
+            .expect("registered canonical value")
+            .encode()
+            .expect("canonical value bytes")
+    }
+
+    /// Stores rows of canonical key and stored-field bytes in a fresh store
+    /// whose one relation uses `descriptor`, through the mutation and
+    /// relation-swap path publication uses, then reopens the published root.
+    fn store_typed_rows(
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        rows: &[(Vec<u8>, Vec<u8>)],
+    ) -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create typed row repository");
+        init_fixture_repository(directory.path());
+        let (schema_oid, schema_digest) = fixture_descriptor_node(directory.path(), descriptor);
+        let mut graph =
+            fixture_relation_context(directory.path(), relation_id, schema_oid, schema_digest);
+        let mutations = rows
+            .iter()
+            .map(|(key, fields)| {
+                RowIndexMutation::insert_canonical(key, fields).expect("typed row is admitted")
+            })
+            .collect::<Vec<_>>();
+        let scope = graph.open_read_scope().expect("owner write scope");
+        let maintained = graph
+            .maintain_row_index(&mutations, &scope)
+            .expect("maintain the typed row map");
+        let version = graph.row_snapshot.version();
+        let store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                maintained.primary_root(),
+                maintained.row_count(),
+                &scope,
+            )
+            .expect("publish typed rows into the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            relation_id,
+        )
+        .expect("reload the published typed row map");
+        graph.store_root = store_root;
+        drop(scope);
+        (directory, graph)
+    }
+
+    /// Reads every row back in key order, by range and by point lookup, and
+    /// checks each against `expected` and the table descriptor.
+    fn assert_typed_rows(
+        graph: &NativeGraphContext,
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        expected: &[(TypedKey, Vec<u8>)],
+    ) {
+        let scope = graph.open_read_scope().expect("typed read scope");
+        let all = crate::row_store::KeyRange::new(None, None, 64).expect("full typed range");
+        let rows = graph
+            .range_rows(&all, &scope)
+            .expect("range the typed rows");
+        assert_eq!(rows.len(), expected.len());
+        for (row, (key, fields)) in rows.iter().zip(expected) {
+            assert_eq!(row.key(), key, "rows come back in logical key order");
+            assert_eq!(row.value().encoded_fields(), Some(fields.as_slice()));
+            let canonical_key = row.key().canonical_bytes().expect("canonical typed key");
+            descriptor
+                .validate_stored_row(relation_id, &canonical_key, fields)
+                .expect("the stored row keeps its schema types");
+            let found = graph
+                .lookup_row(key, &scope)
+                .expect("look up a typed key")
+                .expect("the typed key is present");
+            assert_eq!(found.value().encoded_fields(), Some(fields.as_slice()));
+        }
+        let last = expected.len() - 1;
+        let inner = crate::row_store::KeyRange::new(
+            Some(expected[1].0.clone()),
+            Some(expected[last].0.clone()),
+            64,
+        )
+        .expect("bounded typed range");
+        assert_eq!(
+            graph
+                .range_row_keys(&inner, &scope)
+                .expect("range the inner typed keys"),
+            expected[1..last]
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-001: rows holding Decimal, Date, Instant,
+    /// Duration, Uuid, enum, record, tuple, Option and wide Int values are
+    /// stored, published and read back unchanged from a Uuid-keyed table.
+    #[test]
+    fn typed_row_values_round_trip_through_a_published_row_map() {
+        const MOOD: [u8; 16] = [0xe0; 16];
+        const CALM: [u8; 16] = [0xe1; 16];
+        const WILD: [u8; 16] = [0xe2; 16];
+        const POINT: [u8; 16] = [0xf0; 16];
+        let relation_id = [0x52; 16];
+        let stored = |byte: u8, name: &str, ty: Raw| field_descriptor([byte; 16], name, ty, 1);
+        let nominal = |id: [u8; 16]| Raw::Array(vec![Raw::Int(5.into()), uuid_raw(id)]);
+        let descriptor = typed_schema(
+            relation_id,
+            &[[0x01; 16]],
+            vec![
+                field_descriptor([0x01; 16], "id", primitive_type("Uuid"), 0),
+                stored(0x02, "amount", primitive_type("Decimal")),
+                stored(0x03, "day", primitive_type("Date")),
+                stored(0x04, "at", primitive_type("Instant")),
+                stored(0x05, "span", primitive_type("Duration")),
+                stored(0x06, "owner", primitive_type("Uuid")),
+                stored(0x07, "mood", nominal(MOOD)),
+                stored(0x08, "point", nominal(POINT)),
+                stored(
+                    0x09,
+                    "pair",
+                    Raw::Array(vec![
+                        Raw::Int(3.into()),
+                        Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+                    ]),
+                ),
+                stored(
+                    0x0a,
+                    "discount",
+                    Raw::Array(vec![Raw::Int(2.into()), primitive_type("Decimal")]),
+                ),
+                stored(0x0b, "count", primitive_type("Int")),
+            ],
+            vec![
+                Raw::Array(vec![
+                    uuid_raw(MOOD),
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw(CALM),
+                            Raw::Text("calm".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw(WILD),
+                            Raw::Text("wild".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ]),
+                ]),
+                Raw::Array(vec![
+                    uuid_raw(POINT),
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![
+                        field_descriptor([0xf1; 16], "x", primitive_type("Int"), 1),
+                        field_descriptor([0xf2; 16], "label", primitive_type("Str"), 1),
+                    ]),
+                ]),
+            ],
+        );
+        let decimal = |coefficient: i64, exponent: i64| {
+            Raw::Tag(
+                60_000,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient.into()),
+                    Raw::Int(exponent.into()),
+                ])),
+            )
+        };
+        let time = |tag: u64, seconds: i64, nanos: u32| {
+            Raw::Tag(
+                tag,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds.into()),
+                    Raw::Int(nanos.into()),
+                ])),
+            )
+        };
+        let fields = |index: u8, mood: [u8; 16]| {
+            let ordinal = i64::from(index);
+            let discount = if index == 0 {
+                Raw::Array(vec![Raw::Int(0.into())])
+            } else {
+                Raw::Array(vec![Raw::Int(1.into()), decimal(5, -2)])
+            };
+            canonical_raw(Raw::Array(vec![
+                decimal(1_999 + 2 * ordinal, -2),
+                Raw::Tag(
+                    60_001,
+                    Box::new(Raw::Text(format!("2026-10-{}", 20 + index))),
+                ),
+                time(60_002, -86_400 * ordinal - 1, 500),
+                time(60_005, 90 + ordinal, 250_000_000),
+                uuid_raw([0x60 + index; 16]),
+                Raw::Tag(
+                    60_008,
+                    Box::new(Raw::Array(vec![uuid_raw(MOOD), uuid_raw(mood), Raw::Null])),
+                ),
+                Raw::Tag(
+                    60_009,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(POINT),
+                        Raw::Array(vec![
+                            Raw::Array(vec![uuid_raw([0xf1; 16]), Raw::Int((-3 - ordinal).into())]),
+                            Raw::Array(vec![
+                                uuid_raw([0xf2; 16]),
+                                Raw::Text(format!("north-{index}")),
+                            ]),
+                        ]),
+                    ])),
+                ),
+                Raw::Tag(
+                    60_015,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(ordinal.into()),
+                        Raw::Text("pair".to_owned()),
+                    ])),
+                ),
+                Raw::Tag(60_013, Box::new(discount)),
+                // Beyond u64: a tag-2 bignum.
+                Raw::Int(num_bigint::BigInt::from(u128::MAX) - ordinal),
+            ]))
+        };
+        let rows = [
+            (canonical_raw(uuid_raw([0x9a; 16])), fields(0, CALM)),
+            (canonical_raw(uuid_raw([0x15; 16])), fields(1, WILD)),
+            (canonical_raw(uuid_raw([0x47; 16])), fields(2, CALM)),
+        ];
+        let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+        let expected = [1, 2, 0].map(|index| {
+            let (key, fields) = &rows[index];
+            (
+                TypedKey::decode_canonical(key).expect("Uuid key decodes"),
+                fields.clone(),
+            )
+        });
+        assert!(matches!(&expected[0].0, TypedKey::Value(_)));
+        assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-002: tables keyed by Date, Instant,
+    /// Decimal, a tuple value and a composite (Date, Int) key keep their rows
+    /// in logical key order, which differs from CBOR byte order.
+    #[test]
+    fn tables_keyed_by_tagged_values_round_trip_in_logical_key_order() {
+        let relation_id = [0x53; 16];
+        let date = |text: &str| Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned())));
+        let pair = |tag: u64, first: Raw, second: Raw| {
+            Raw::Tag(tag, Box::new(Raw::Array(vec![first, second])))
+        };
+        let instant = |seconds: i64, nanos: u32| {
+            pair(60_002, Raw::Int(seconds.into()), Raw::Int(nanos.into()))
+        };
+        let decimal = |coefficient: i64, exponent: i64| {
+            pair(
+                60_000,
+                Raw::Int(coefficient.into()),
+                Raw::Int(exponent.into()),
+            )
+        };
+        let tuple = |number: i64, text: &str| {
+            pair(60_015, Raw::Int(number.into()), Raw::Text(text.to_owned()))
+        };
+        let composite =
+            |day: &str, number: i64| Raw::Array(vec![date(day), Raw::Int(number.into())]);
+        let tuple_type = Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+        ]);
+        // Key field types, keys in insertion order, the same keys in logical
+        // order, and one absent key of the same type.
+        let cases = [
+            (
+                vec![primitive_type("Date")],
+                vec![date("2026-10-20"), date("1999-12-31"), date("2026-01-05")],
+                vec![date("1999-12-31"), date("2026-01-05"), date("2026-10-20")],
+                date("2000-01-01"),
+            ),
+            (
+                vec![primitive_type("Instant")],
+                vec![instant(5, 0), instant(-3, 500), instant(0, 1)],
+                vec![instant(-3, 500), instant(0, 1), instant(5, 0)],
+                instant(1, 0),
+            ),
+            (
+                vec![primitive_type("Decimal")],
+                vec![decimal(1, 1), decimal(2, 0), decimal(-5, -1), decimal(0, 0)],
+                vec![decimal(-5, -1), decimal(0, 0), decimal(2, 0), decimal(1, 1)],
+                decimal(3, 0),
+            ),
+            (
+                vec![tuple_type],
+                vec![tuple(1, "b"), tuple(-2, "z"), tuple(1, "a"), tuple(10, "a")],
+                vec![tuple(-2, "z"), tuple(1, "a"), tuple(1, "b"), tuple(10, "a")],
+                tuple(2, "a"),
+            ),
+            (
+                vec![primitive_type("Date"), primitive_type("Int")],
+                vec![
+                    composite("2026-01-01", 5),
+                    composite("2026-01-01", -1),
+                    composite("2025-12-31", 7),
+                ],
+                vec![
+                    composite("2025-12-31", 7),
+                    composite("2026-01-01", -1),
+                    composite("2026-01-01", 5),
+                ],
+                composite("2026-01-01", 0),
+            ),
+        ];
+        for (key_types, inserted, ordered, absent) in cases {
+            let key_ids = (1..=key_types.len() as u8)
+                .map(|byte| [byte; 16])
+                .collect::<Vec<_>>();
+            let mut fields = key_ids
+                .iter()
+                .zip(key_types)
+                .map(|(id, ty)| field_descriptor(*id, &format!("key-{}", id[0]), ty, 0))
+                .collect::<Vec<_>>();
+            fields.push(field_descriptor(
+                [0x09; 16],
+                "note",
+                primitive_type("Str"),
+                1,
+            ));
+            let descriptor = typed_schema(relation_id, &key_ids, fields, Vec::new());
+            let rows = inserted
+                .into_iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    let note = canonical_raw(Raw::Array(vec![Raw::Text(format!("row-{index}"))]));
+                    (canonical_raw(key), note)
+                })
+                .collect::<Vec<_>>();
+            let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+            let expected = ordered
+                .into_iter()
+                .map(|key| {
+                    let key = canonical_raw(key);
+                    let (_, note) = rows
+                        .iter()
+                        .find(|(inserted, _)| inserted == &key)
+                        .expect("every ordered key was inserted");
+                    (
+                        TypedKey::decode_canonical(&key).expect("typed key decodes"),
+                        note.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+            let scope = graph.open_read_scope().expect("absent key scope");
+            let absent =
+                TypedKey::decode_canonical(&canonical_raw(absent)).expect("absent key decodes");
+            assert!(
+                graph
+                    .lookup_row(&absent, &scope)
+                    .expect("look up an absent typed key")
+                    .is_none()
+            );
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11002,7 +11577,7 @@ fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
     decode_canonical_cbor(bytes).map(|_| ())
 }
 
-fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+pub(crate) fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
     let mut bytes = Vec::new();
     value.encode(&mut bytes);
     bytes
@@ -11224,7 +11799,10 @@ fn collect_blob_value_fields(
         // A canonical overflow value cannot appear here: `to_sov_value`
         // dereferences it before this walk sees the value.
         CborValue::Tag(60113, _) => Err(GraphError::UnsupportedRowValueForm),
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        // A semantic value carries only SOV-3 Blob tags.
+        CborValue::Tag(60110 | 60111, _) => Err(GraphError::NonCanonicalData),
+        // Records, enum payloads, tuples and other typed values can hold Blobs.
+        CborValue::Tag(_, payload) => collect_blob_value_fields(payload, output),
         _ => Ok(()),
     }
 }
@@ -11344,7 +11922,9 @@ fn collect_overflow_oids(
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
         CborValue::Tag(60111 | 60021, _) => {}
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+        CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => collect_overflow_oids(payload, algorithm, output)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_overflow_oids(value, algorithm, output)?;
@@ -11493,8 +12073,11 @@ fn collect_row_dependencies(
             crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
                 .map_err(|_| GraphError::NonCanonicalData)?;
         }
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
         CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // Every other admitted tag is a typed value; its references, if any,
+        // are nested in its payload (store-format-3 §2, final_model.py).
+        CborValue::Tag(_, payload) => collect_row_dependencies(payload, dependencies)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_row_dependencies(value, dependencies)?;
@@ -11533,7 +12116,8 @@ fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
                 _ => Err(GraphError::NonCanonicalData),
             }
         },
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => direct_blob_reference_count(payload),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
             count
                 .checked_add(direct_blob_reference_count(value)?)
@@ -11677,7 +12261,8 @@ impl<'a> CborReader<'a> {
         let length = self.argument(additional)?;
         match major {
             0 => Ok(CborValue::Unsigned(length)),
-            1 if length <= i64::MAX as u64 => Ok(CborValue::Negative(length)),
+            // Every negative head is an Orna Int; values below -2^64 use tag 3.
+            1 => Ok(CborValue::Negative(length)),
             2 => {
                 let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
                 let end = self
@@ -11742,10 +12327,18 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 37 | 60013 | 60021 | 60110..=60113) {
+                if !orna_value_v1::is_format3_node_tag(length) {
                     return Err(GraphError::NonCanonicalData);
                 }
-                Ok(CborValue::Tag(length, Box::new(self.value()?)))
+                let payload = self.value()?;
+                // A bignum spells only an Int beyond the 64-bit heads: at least
+                // nine big-endian bytes without a leading zero.
+                if matches!(length, 2 | 3)
+                    && !matches!(&payload, CborValue::Bytes(bytes) if bytes.len() >= 9 && bytes[0] != 0)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(length, Box::new(payload)))
             }
             _ => Err(GraphError::NonCanonicalData),
         }
