@@ -3932,17 +3932,41 @@ impl Repository {
             return Err(RepositoryError::InvalidFormatMigration);
         }
         let mut diff = self.command();
-        diff.args(["diff", "--no-renames", "--name-only", "-z"]).arg(old_head.as_str()).arg(candidate.commit().as_str());
+        diff.args(["diff", "--no-renames", "--name-status", "-z"]).arg(old_head.as_str()).arg(candidate.commit().as_str());
         let changed_paths = self.run(diff)?.stdout;
+        let mut fields = changed_paths
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
         let mut entries = Vec::new();
-        for raw_path in changed_paths.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-            let path = std::str::from_utf8(raw_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
+        while let Some(status) = fields.next() {
+            let raw_path = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let path =
+                std::str::from_utf8(raw_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
+            // The staged store is bound and reconciled as the one
+            // `.orna/store` tree entry, like a publication's store root: its
+            // node files are not managed files, and payload chunks are never
+            // materialized in the worktree. A path the candidate deletes is
+            // already absent from the reviewed index, and the worktree keeps
+            // its unstaged state. Neither is a journal entry.
+            if path.starts_with(".orna/store/") || status == b"D" {
+                continue;
+            }
             let path = ManagedPath::new(path)?;
             let target = self.managed_target(&path)?;
             let current = self.read_managed_file(&target)?;
             entries.push(PublicationJournalEntry::new(path, current.clone(), current));
         }
-        if entries.is_empty() { return Err(RepositoryError::SysGitNothingToCommit); }
+        if entries.is_empty() {
+            // A candidate that only changes the store or deletes paths keeps
+            // the unchanged metadata file as its durable journal anchor.
+            let marker = ManagedPath::new(".orna/database.orna")?;
+            let current = self.read_managed_file(&self.managed_target(&marker)?)?;
+            entries.push(PublicationJournalEntry::new(
+                marker,
+                current.clone(),
+                current,
+            ));
+        }
         let mut journal = PublicationJournal::new_with_runtime_intent(
             old_head, candidate.commit().clone(), review.index_tree.clone(), runtime_intent_id, entries,
         )?;
