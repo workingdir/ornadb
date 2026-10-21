@@ -4754,25 +4754,15 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GraphError> {
 
 /// Persists the named objects before a ref may name them: each loose object
 /// file and its shard directory, the whole pack set when an object is not
-/// loose, then the object directory. A non-empty `objects/info/alternates` is
-/// refused rather than half-synced, because those objects may live in
-/// another repository. `before_each` runs ahead of every object.
+/// loose, then the object directory. An object that is not loose may live in
+/// another repository's store, so a non-empty `objects/info/alternates` is
+/// then refused rather than half-synced. `before_each` runs ahead of every
+/// object.
 pub(crate) fn sync_object_files<'a>(
     objects_dir: &Path,
     objects: impl IntoIterator<Item = &'a NativeOid>,
     mut before_each: impl FnMut() -> Result<(), GraphError>,
 ) -> Result<(), GraphError> {
-    let pack_dir = objects_dir.join("pack");
-    let alternates = objects_dir.join("info").join("alternates");
-    match fs::symlink_metadata(&alternates) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() || metadata.len() != 0 {
-                return Err(GraphError::ObjectDurabilityUnavailable);
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
-    }
     let mut needs_pack_sync = false;
     for oid in objects {
         before_each()?;
@@ -4795,16 +4785,41 @@ pub(crate) fn sync_object_files<'a>(
         }
     }
     if needs_pack_sync {
-        sync_all_pack_files(&pack_dir)?;
+        let alternates = objects_dir.join("info").join("alternates");
+        match fs::symlink_metadata(&alternates) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() || metadata.len() != 0 {
+                    return Err(GraphError::ObjectDurabilityUnavailable);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
+        }
+        sync_all_pack_files(&objects_dir.join("pack"))?;
     }
     sync_directory(objects_dir)
 }
 
+/// Refuses a ref backend whose refs cannot be flushed as loose files or
+/// through `packed-refs`. Only Git's `files` backend stores refs that way.
+pub(crate) fn require_files_ref_backend(repository: &crate::Repository) -> Result<(), GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let format = owner.git_output(&["rev-parse", "--show-ref-format"])?;
+    if format.trim_ascii() == b"files" {
+        Ok(())
+    } else {
+        Err(GraphError::DurabilityFailed)
+    }
+}
+
 /// Persists `reference` after a ref transaction wrote it: the loose ref
 /// file, each directory from it up to the common Git directory, and
-/// `packed-refs`. A ref that `git pack-refs` has since moved has no loose
-/// file and is persisted through `packed-refs`, so recovery after a `git gc`
-/// is not refused.
+/// `packed-refs`. Under the `files` backend, a ref that `git pack-refs` has
+/// since moved has no loose file and is persisted through `packed-refs`, so
+/// recovery after a `git gc` is not refused. Any other missing ref file is
+/// refused.
 pub(crate) fn sync_git_ref_durably(
     repository: &crate::Repository,
     reference: &str,
@@ -4818,7 +4833,14 @@ pub(crate) fn sync_git_ref_durably(
         Ok(metadata) if metadata.file_type().is_file() => File::open(&path)
             .and_then(|file| file.sync_all())
             .map_err(|_| GraphError::DurabilityFailed)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            require_files_ref_backend(repository)?;
+            let packed = owner.git_output(&["rev-parse", "--git-path", "packed-refs"])?;
+            let packed = resolve_git_path(repository.worktree(), &packed)?;
+            if !fs::symlink_metadata(&packed).is_ok_and(|metadata| metadata.file_type().is_file()) {
+                return Err(GraphError::DurabilityFailed);
+            }
+        }
         _ => return Err(GraphError::DurabilityFailed),
     }
     owner.sync_ref_directories(reference)
