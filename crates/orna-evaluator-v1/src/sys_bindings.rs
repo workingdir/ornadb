@@ -966,14 +966,18 @@ impl SysHostBindingRegistry {
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
+        // A host without a filesystem provider authorises no root, so the
+        // selected source is not permitted (ORNA-INGEST-002).
         let filesystem = self
             .filesystem
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::UnauthorizedRoot))?;
+        // Without a repository Blob writer the host does not offer capture, and
+        // the call fails before any write (ORNA-SYS-008).
         let repository = self
             .repository_capture
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| redacted_error("sys.version.incompatible"))?;
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
             .map_err(capture_file_failure)?;
@@ -1411,6 +1415,34 @@ mod tests {
             );
             assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
         }
+    }
+
+    /// ORNA-INGEST-002 and ORNA-SYS-008: a host that lacks part of the capture
+    /// capability reports a portable code, never an evaluator code.
+    #[test]
+    fn capture_file_without_host_capability_reports_portable_codes() {
+        let arguments = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int(16.into())).unwrap(),
+        ];
+        let without_filesystem = SysHostBindingRegistry::default();
+        assert_eq!(
+            without_filesystem
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a filesystem provider authorises no root")
+                .code(),
+            "sys.blob.source_denied"
+        );
+        let without_writer =
+            SysHostBindingRegistry::default().with_filesystem_provider(FilesystemProvider::new());
+        assert_eq!(
+            without_writer
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a repository Blob writer cannot capture")
+                .code(),
+            "sys.version.incompatible"
+        );
     }
 
     #[test]

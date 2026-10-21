@@ -26,9 +26,11 @@ been published.
     `sys.blob.source_denied`; `ORNA-INGEST-004` becomes `sys.blob.limit`; and
     `ORNA-INGEST-005` becomes `sys.blob.source_changed`. A negative or
     unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
-    quota is `sys.blob.limit`. The host operation declares these codes instead
-    of `sys.blob.capture.*`. `orna annotate` source errors cite the portable
-    code.
+    quota is `sys.blob.limit`. A host without a filesystem provider reports
+    `sys.blob.source_denied`, and one without a repository Blob writer reports
+    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The host
+    operation declares these codes instead of `sys.blob.capture.*`.
+    `orna annotate` source errors cite the portable code.
   - `sys.blob.annotate`: an OVB-1 value is
     `sys.codec.unsupported_value_profile`; arguments that are not annotated
     Blobs are `ORNA-EVAL-TYPE`; a host without the generated provider is
