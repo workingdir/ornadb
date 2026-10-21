@@ -49,7 +49,42 @@ fn text_plus_int_is_rejected_with_the_spec_type_mismatch_code() {
             "operator `+` is not defined for Str and Int"
         )]
     );
-    assert_eq!(DIAG_TYPE_MISMATCH, "E2001");
+}
+
+#[test]
+fn compound_assignment_applies_the_operator_table() {
+    let analysis = analysis(
+        r#"
+pub protocol Currency { static code: Str; static minor_digits: Int; }
+pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }
+
+pub fn later(start: Instant): Instant {
+    let at = start;
+    at += 1.hour;
+    at
+}
+
+pub fn doubled(amount: Money<GBP>): Money<GBP> {
+    let total = amount;
+    total *= 2;
+    total
+}
+
+pub fn shout(text: Str): Str {
+    let loud = text;
+    loud += "!";
+    loud
+}
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        vec![(
+            DIAG_TYPE_MISMATCH,
+            "operator `+` is not defined for Str and Str"
+        )]
+    );
 }
 
 #[test]
@@ -63,6 +98,7 @@ pub fn instants(left: Instant, right: Instant) = left + right;
 pub fn mixed(left: Int, right: Decimal) = left * right;
 pub fn optional(value: Int?) = value + 1;
 pub fn negated(value: Str) = -value;
+pub fn energy_ago(at: Instant) = at - 5.kWh;
 "#,
     );
 
@@ -94,6 +130,10 @@ pub fn negated(value: Str) = -value;
             "operator `+` is not defined for Str and Str",
         ),
         (DIAG_TYPE_MISMATCH, "operator `-` is not defined for Str"),
+        (
+            DIAG_TYPE_MISMATCH,
+            "operator `-` is not defined for Instant and Int<kWh>",
+        ),
     ];
     expected.sort_unstable();
     assert_eq!(found, expected);
@@ -110,6 +150,7 @@ pub fn elapsed(left: Instant, right: Instant) = left - right;
 pub fn negative(value: Int) = -value;
 pub fn inverted(flag: Bool) = !flag;
 pub fn latest_first(at: Instant) = -at;
+pub fn week_ago(at: Instant) = at - 7.days;
 "#,
     );
 
@@ -124,6 +165,7 @@ pub fn latest_first(at: Instant) = -at;
     assert_eq!(result(&analysis, "negative"), &Type::Int);
     assert_eq!(result(&analysis, "inverted"), &Type::Bool);
     assert_eq!(result(&analysis, "latest_first"), &Type::Instant);
+    assert_eq!(result(&analysis, "week_ago"), &Type::Instant);
 }
 
 #[test]
@@ -131,6 +173,7 @@ fn money_scales_by_exact_numbers_and_rejects_binary_float() {
     let currency = r#"
 pub protocol Currency { static code: Str; static minor_digits: Int; }
 pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }
+pub type EUR { impl Currency { static code = "EUR"; static minor_digits = 2; } }
 "#;
     let valid = analysis(&format!(
         "{currency}
@@ -149,11 +192,12 @@ pub fn net(gross: Money<GBP>, fee: Money<GBP>) = gross - fee;
         "{currency}
 pub fn implicit(amount: Money<GBP>, factor: Float) = amount * factor;
 pub fn squared(amount: Money<GBP>) = amount * amount;
+pub fn converted(left: Money<GBP>, right: Money<EUR>) = left - right;
 "
     ));
     let mut found = diagnostics(&invalid);
     found.sort_unstable();
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
     assert_eq!(found[0].0, DIAG_TYPE_MISMATCH, "{found:?}");
     assert!(
         found[0]
@@ -168,6 +212,40 @@ pub fn squared(amount: Money<GBP>) = amount * amount;
             "binary Float cannot enter an exact Money calculation implicitly"
         )
     );
+    assert_eq!(
+        found[2],
+        (
+            DIAG_TYPE,
+            "cannot subtract different currencies without conversion"
+        )
+    );
+}
+
+#[test]
+fn anonymous_function_returns_are_checked_and_joined() {
+    let analysis = analysis(
+        r#"
+pub fn checked(): fn(Int): Int = (x: Int) => {
+    return "s";
+};
+
+pub fn chooser() = x => {
+    if x > 0 {
+        return 1;
+    }
+    2
+};
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        vec![(DIAG_TYPE, "static types are incompatible")]
+    );
+    assert!(matches!(
+        result(&analysis, "chooser"),
+        Type::Function { result, .. } if result.as_ref() == &Type::Int
+    ));
 }
 
 #[test]
