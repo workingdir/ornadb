@@ -98,3 +98,26 @@ fn use_alias_and_import_names_are_identifiers() {
         assert!(!parsed.is_ok(), "{source} must be rejected");
     }
 }
+
+// W27-08 (grammar lambda_parameters: identifier | "_" | parenthesised list): the
+// keyword `self` is not a lambda parameter.
+#[test]
+fn self_is_not_a_bare_lambda_parameter() {
+    expression_is_rejected("self => 1");
+    expression_is_accepted("(a) => a");
+}
+
+// W27-09 (ORNA-PARSE-002, ORNA-CFLOW-010): a braced control-flow expression
+// followed by another block item is a statement; the final unsemicolonated
+// expression is the block tail. The implementation follows the normative
+// prose, which overrides the grammar's looser statement production.
+#[test]
+fn braced_control_flow_statement_precedes_block_tail() {
+    for source in [
+        "fn f(): Int { if c { g() } 3 }",
+        "fn f(): Int { case x { true: 1, false: 2 } 3 }",
+    ] {
+        let parsed = parse_module(source);
+        assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
+    }
+}
