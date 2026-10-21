@@ -2233,6 +2233,7 @@ mod tests {
     const ENUM_READY: [u8; 16] = [0x31; 16];
     const ENUM_WITH_VALUE: [u8; 16] = [0x32; 16];
     const ENUM_VALUE_FIELD: [u8; 16] = [0x33; 16];
+    const UNIT_TYPE: [u8; 16] = [0x34; 16];
     const REF_DATABASE: [u8; 16] = [0x40; 16];
     const REF_TABLE: [u8; 16] = [0x41; 16];
     const COMPACT_FOLD_DATA: &str = include_str!("../tests/fixtures/compact-fold-data.orna");
@@ -2391,11 +2392,23 @@ mod tests {
             OvbRaw::Int(4.into()),
             OvbRaw::Array(vec![OvbRaw::Text("USD".into()), OvbRaw::Int(0.into())]),
         ]);
+        let unit = OvbRaw::Array(vec![
+            uuid_raw(UNIT_TYPE),
+            OvbRaw::Int(3.into()),
+            OvbRaw::Array(vec![
+                OvbRaw::Array(vec![OvbRaw::Int(1.into())]),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Int(0.into()),
+                OvbRaw::Bool(false),
+            ]),
+        ]);
         let schema = SchemaDescriptor::new(schema_raw_for_table(
             TABLE,
             vec![field(KEY_A, "id", ty)],
             vec![uuid_raw(KEY_A)],
-            vec![currency],
+            vec![currency, unit],
         ))
         .map_err(|_| CompactKeyError::InvalidProfile)?;
         CompactOvbProfile::new(schema)
@@ -3139,7 +3152,7 @@ mod tests {
             OvbRaw::Array(vec![
                 OvbRaw::Int(7.into()),
                 primitive("Int"),
-                uuid_raw(TABLE),
+                uuid_raw(UNIT_TYPE),
             ]),
             OvbRaw::Array(vec![OvbRaw::Int(8.into()), uuid_raw(ENUM_TYPE)]),
             primitive("Duration"),
