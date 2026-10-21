@@ -1546,17 +1546,9 @@ const MAX_AST_DEPTH: usize = 64;
 #[derive(Clone, Copy)]
 enum NominalBraceMode {
     Ordinary,
-    ControlRoot,
-    ControlNested,
-}
-
-impl NominalBraceMode {
-    fn nested(self) -> Self {
-        match self {
-            Self::Ordinary => Self::Ordinary,
-            Self::ControlRoot | Self::ControlNested => Self::ControlNested,
-        }
-    }
+    /// An `if`, `while`, `for` or `case` header outside any delimiters, where
+    /// an unparenthesised `{` always begins the control body.
+    Control,
 }
 
 #[derive(Clone)]
@@ -1757,7 +1749,6 @@ impl Parser {
                 continue;
             }
             let next = tokens.get(i + 1);
-            let next2 = tokens.get(i + 2);
             let diagnostic = if braces == 0
                 && matches!(token.kind, TokenKind::Keyword(Keyword::Impl))
                 && (i == 0
@@ -1768,14 +1759,6 @@ impl Parser {
                 Some((
                     "ORNA091-E-IMPL-FOR",
                     "move the implementation inside its nominal target and omit `for Type`",
-                ))
-            } else if matches!(token.kind, TokenKind::Punct("<"))
-                && matches!(next.map(|t| &t.kind), Some(TokenKind::Identifier { .. }))
-                && matches!(next2.map(|t| &t.kind), Some(TokenKind::Punct(":")))
-            {
-                Some((
-                    "ORNA091-E-BOUND-COLON",
-                    "protocol bounds use `<T impl Protocol>`",
                 ))
             } else if matches!(token.kind, TokenKind::Punct("||"))
                 && matches!(
@@ -1803,15 +1786,6 @@ impl Parser {
             }
         }
         for i in 0..tokens.len().saturating_sub(1) {
-            if matches!(tokens[i].kind, TokenKind::Keyword(Keyword::Assert))
-                && matches!(tokens[i + 1].kind, TokenKind::Punct(";"))
-            {
-                self.errors.push(Diagnostic::error(
-                    "ORNA-A091-011",
-                    "assertion requires a proposition before `;`",
-                    tokens[i + 1].span.clone(),
-                ));
-            }
             if matches!(tokens[i].kind, TokenKind::Punct("|"))
                 && matches!(
                     tokens.get(i + 1).map(|x| &x.kind),
@@ -1826,63 +1800,6 @@ impl Parser {
                     "E1204",
                     "anonymous function must be parenthesized as a pipeline stage",
                     tokens[i + 1].span.clone(),
-                ));
-            }
-        }
-        for i in 0..tokens.len().saturating_sub(2) {
-            if matches!(tokens[i].kind, TokenKind::Punct("("))
-                && matches!(tokens[i + 1].kind, TokenKind::Identifier { .. })
-                && matches!(tokens[i + 2].kind, TokenKind::Punct("="))
-            {
-                let parameter_list =
-                    i >= 2 && matches!(tokens[i - 2].kind, TokenKind::Keyword(Keyword::Fn));
-                if !parameter_list {
-                    self.errors.push(Diagnostic::error(
-                        "E1301",
-                        "assignment is a statement, not an expression",
-                        tokens[i + 2].span.clone(),
-                    ));
-                }
-            }
-        }
-        for i in 0..tokens.len().saturating_sub(1) {
-            if !matches!(tokens[i].kind, TokenKind::Keyword(Keyword::Assert)) {
-                continue;
-            }
-            let mut nesting = 0usize;
-            let mut terminated = false;
-            let mut legacy_else = false;
-            for token in &tokens[i + 1..] {
-                if matches!(token.kind, TokenKind::Punct("(" | "[" | "{")) {
-                    nesting += 1
-                }
-                if matches!(token.kind, TokenKind::Punct(")" | "]" | "}")) {
-                    if nesting == 0 {
-                        break;
-                    }
-                    nesting -= 1
-                }
-                if nesting == 0 && matches!(token.kind, TokenKind::Punct(";")) {
-                    terminated = true;
-                    break;
-                }
-                if nesting == 0 && matches!(token.kind, TokenKind::Keyword(Keyword::Else)) {
-                    legacy_else = true
-                }
-            }
-            if !terminated || legacy_else {
-                self.errors.push(Diagnostic::error(
-                    if legacy_else {
-                        "ORNA-A091-006"
-                    } else {
-                        "ORNA-A091-005"
-                    },
-                    if legacy_else {
-                        "assert has no assertion-specific `else` arm"
-                    } else {
-                        "assertion clause must end with `;`"
-                    },
-                    tokens[i].span.clone(),
                 ));
             }
         }
@@ -2606,9 +2523,12 @@ impl Parser {
                 }
             }
             ItemKind::Assert => {
-                let value = self.parse_assertion_expression();
-                self.require_semicolon("assertion statements require `;`");
-                Declaration::Assertion { value }
+                let keyword = self.previous().span.clone();
+                let (value, _) =
+                    self.parse_assertion_clause(keyword, true, "assertion statements require `;`");
+                Declaration::Assertion {
+                    value: value.unwrap_or_else(|| self.error_expr()),
+                }
             }
             ItemKind::Let => {
                 let pattern = self.parse_pattern();
@@ -3168,14 +3088,16 @@ impl Parser {
             span: start.join(self.previous().span.clone()),
         }
     }
-    #[allow(dead_code)]
-    fn consume_statement(&mut self) {
+    /// Skips the rest of a malformed statement through its `;`. When a
+    /// closing delimiter or the end of input comes first it reports the
+    /// missing terminator and returns false.
+    fn consume_statement(&mut self) -> bool {
         let start = self.at;
         let mut depth = 0;
         while !self.eof() {
             if self.is_punct(";") && depth == 0 {
                 self.bump();
-                return;
+                return true;
             }
             if self.is_punct("{") || self.is_punct("(") || self.is_punct("[") {
                 depth += 1
@@ -3196,7 +3118,8 @@ impl Parser {
             "ORNA-PARSE-002",
             "expected `;` before end of statement",
             span,
-        ))
+        ));
+        false
     }
     fn parse_block(&mut self) -> Expr {
         let start = self.current().span.clone();
@@ -3260,23 +3183,19 @@ impl Parser {
                 Some(Keyword::Assert) => {
                     let statement_start = self.current().span.clone();
                     self.bump();
-                    if self.is_punct(";") {
-                        self.error_here("ORNA-PARSE-001", "assert requires an expression")
-                    } else {
-                        let value = self.expr().unwrap_or(Expr::Tuple {
-                            elements: Vec::new(),
-                            span: statement_start.clone(),
-                        });
+                    let (value, terminated) = self.parse_assertion_clause(
+                        statement_start.clone(),
+                        false,
+                        "assertion statements require `;`",
+                    );
+                    if let Some(value) = value {
                         let end = value.span();
                         statements.push(Statement::Assert {
                             value,
                             span: statement_start.join(end),
                         });
                     }
-                    if self.is_punct(";") {
-                        self.bump()
-                    } else {
-                        self.error_here("ORNA-PARSE-002", "assertion statements require `;`");
+                    if !terminated {
                         break;
                     }
                 }
@@ -3316,13 +3235,7 @@ impl Parser {
                 Some(
                     Keyword::For | Keyword::While | Keyword::Loop | Keyword::If | Keyword::Case,
                 ) => {
-                    // Parse the complete expression spine before deciding
-                    // whether this control form is a statement or the block
-                    // tail. This preserves postfix/infix continuations and
-                    // lets a final unsemicolonated control expression produce
-                    // its value; a following block item is an unambiguous
-                    // statement boundary under ORNA-PARSE-002.
-                    let value = self.expr().unwrap_or_else(|| self.error_expr());
+                    let value = self.parse_control_block_item();
                     let span = value.span();
                     if self.is_punct(";") {
                         if matches!(&value, Expr::Control { .. }) {
@@ -3412,6 +3325,56 @@ impl Parser {
             self.error_expr()
         }
     }
+    /// Parses a block item that begins with `if`, `case`, `for`, `while` or
+    /// `loop`. Under ORNA-PARSE-002 the braced control expression is a whole
+    /// item when another block item follows, so a following `(`, `[`, `-`,
+    /// `+`, `!`, `..` or `{` begins the next item. Only `.`, `?` or a
+    /// binary-only operator, none of which can begin a block item, continues
+    /// it as the left operand of a larger expression.
+    fn parse_control_block_item(&mut self) -> Expr {
+        let value = self.recurse(|parser| {
+            let control = parser.parse_control_expression();
+            Some(if parser.continues_control_expression() {
+                parser.pratt_from(control, 0, NominalBraceMode::Ordinary)
+            } else {
+                control
+            })
+        });
+        match value {
+            Some(value) if self.within_depth(expr_depth(&value)) => value,
+            Some(_) => self.error_expr(),
+            None => {
+                // The nesting limit is already reported and nothing was
+                // consumed; skip the keyword so the block loop progresses.
+                let error = self.error_expr();
+                self.bump();
+                error
+            }
+        }
+    }
+    fn continues_control_expression(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Punct(
+                "." | "?"
+                    | "||"
+                    | "&&"
+                    | "=="
+                    | "!="
+                    | "<"
+                    | "<="
+                    | ">"
+                    | ">="
+                    | "??"
+                    | "|"
+                    | "|?"
+                    | "*"
+                    | "/"
+                    | "%"
+                    | "^"
+            ) | TokenKind::Keyword(Keyword::In)
+        )
+    }
     fn skip_limited_block(&mut self) {
         if !self.is_punct("{") {
             return;
@@ -3438,23 +3401,17 @@ impl Parser {
             if self.keyword() == Some(Keyword::Assert) {
                 let start = self.current().span.clone();
                 self.bump();
-                if matches!(
-                    self.current().kind,
-                    TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=")
-                        | TokenKind::Keyword(Keyword::In)
-                ) {
-                    self.bump();
+                let (value, _) = self.parse_assertion_clause(
+                    start.clone(),
+                    true,
+                    "expected `;` after table assertion",
+                );
+                if let Some(value) = value {
+                    members.push(TableMember::Assertion {
+                        value,
+                        span: start.join(self.previous().span.clone()),
+                    });
                 }
-                let value = self.parse_assertion_expression();
-                if self.is_punct(";") {
-                    self.bump()
-                } else {
-                    self.error_here("ORNA-PARSE-002", "expected `;` after table assertion")
-                };
-                members.push(TableMember::Assertion {
-                    value,
-                    span: start.join(self.previous().span.clone()),
-                });
                 continue;
             }
             if self.keyword() == Some(Keyword::Impl) {
@@ -3657,16 +3614,17 @@ impl Parser {
             let start = self.current().span.clone();
             if self.keyword() == Some(Keyword::Assert) {
                 self.bump();
-                let value = self.parse_assertion_expression();
-                if self.is_punct(";") {
-                    self.bump()
-                } else {
-                    self.error_here("ORNA-PARSE-002", "expected `;` after type assertion")
+                let (value, _) = self.parse_assertion_clause(
+                    start.clone(),
+                    true,
+                    "expected `;` after type assertion",
+                );
+                if let Some(value) = value {
+                    members.push(TypeMember::Assertion {
+                        value,
+                        span: start.join(self.previous().span.clone()),
+                    });
                 }
-                members.push(TypeMember::Assertion {
-                    value,
-                    span: start.join(self.previous().span.clone()),
-                });
             } else if self.keyword() == Some(Keyword::Impl) {
                 self.bump();
                 let implementation = self.parse_implementation(start.clone());
@@ -3778,7 +3736,16 @@ impl Parser {
             let start = self.current().span.clone();
             let name = self.require_name_text();
             let mut bounds = Vec::new();
-            if self.keyword() == Some(Keyword::Impl) {
+            // ORNA-GENERIC-006: the removed `<T: Protocol>` spelling is
+            // reported here and its bounds are read as if `impl` were used.
+            let legacy_colon = self.is_punct(":");
+            if legacy_colon {
+                self.error_here(
+                    "ORNA091-E-BOUND-COLON",
+                    "protocol bounds use `<T impl Protocol>`",
+                );
+            }
+            if legacy_colon || self.keyword() == Some(Keyword::Impl) {
                 self.bump();
                 while let Some(bound) = self.parse_type_expr() {
                     bounds.push(bound);
@@ -3995,7 +3962,49 @@ impl Parser {
         if self.is_punct("{") {
             self.error_here("ORNA-PARSE-001", "record conditions must be parenthesized");
         }
-        self.expr_with_nominal_braces(NominalBraceMode::ControlRoot)
+        self.expr_with_nominal_braces(NominalBraceMode::Control)
+    }
+
+    /// Parses the header of `if`, `while` or `for`, whose body is a block. A
+    /// record-shaped brace group after a qualified name and directly before
+    /// another `{` is an unparenthesised nominal constructor, which the
+    /// lexical construction rule forbids in a control header; report it and
+    /// skip its fields so the real body still parses.
+    fn block_control_header(&mut self) -> Option<Expr> {
+        let condition = self.control_condition();
+        if self.is_direct_record_body()
+            && condition.as_ref().is_some_and(ends_with_nominal_path)
+            && self.brace_group_precedes_brace()
+        {
+            self.error_here(
+                "ORNA-PARSE-001",
+                "nominal constructors before a control body must be parenthesized",
+            );
+            self.parse_record();
+        }
+        condition
+    }
+
+    /// True when the `{ .. }` group at the cursor is directly followed by
+    /// another `{`. Interpolation braces are separate tokens.
+    fn brace_group_precedes_brace(&self) -> bool {
+        let mut depth = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.at) {
+            match token.kind {
+                TokenKind::Punct("{") => depth += 1,
+                TokenKind::Punct("}") => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|next| &next.kind),
+                            Some(TokenKind::Punct("{"))
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn expr_with_nominal_braces(&mut self, mode: NominalBraceMode) -> Option<Expr> {
@@ -4003,33 +4012,64 @@ impl Parser {
         self.within_depth(expr_depth(&expr)).then_some(expr)
     }
 
+    /// Cheap pre-filter for a generic call: a `<` whose matching `>` is
+    /// immediately followed by `(`. Tokens that cannot occur inside type
+    /// arguments, or a closer of an enclosing delimiter, end the scan.
     fn generic_call_ahead(&self) -> bool {
         if !self.is_punct("<") {
             return false;
         }
-        let mut depth = 0usize;
-        let mut index = self.at;
-        while let Some(token) = self.tokens.get(index) {
+        let mut angles = 0usize;
+        let mut delimiters = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.at) {
             match token.kind {
-                TokenKind::Punct("<") => depth += 1,
-                TokenKind::Punct(">") if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
+                TokenKind::Punct("<") => angles += 1,
+                TokenKind::Punct(">") if angles > 0 => {
+                    angles -= 1;
+                    if angles == 0 {
                         return matches!(
                             self.tokens.get(index + 1).map(|next| &next.kind),
                             Some(TokenKind::Punct("("))
                         );
                     }
                 }
-                TokenKind::Punct(";" | "=" | "=>") => return false,
-                TokenKind::Eof => return false,
+                TokenKind::Punct("(" | "[" | "{") => delimiters += 1,
+                TokenKind::Punct(")" | "]" | "}") => match delimiters.checked_sub(1) {
+                    Some(depth) => delimiters = depth,
+                    None => return false,
+                },
+                TokenKind::Punct(";" | "=" | "=>" | "&&" | "||") | TokenKind::Eof => return false,
                 _ => {}
             }
-            index += 1;
         }
         false
     }
 
+    /// Tentatively parses the type arguments of a generic call. A declined
+    /// attempt rewinds every parser side effect, so a comparison such as
+    /// `a < b { .. } else if a > (b + 1)` keeps all of its tokens
+    /// (ORNA-OP-001) instead of silently losing `< b`.
+    fn generic_call_type_arguments(&mut self) -> Option<Vec<TypeExpr>> {
+        if !self.generic_call_ahead() {
+            return None;
+        }
+        let at = self.at;
+        let errors = self.errors.len();
+        let incomplete_errors = self.incomplete_errors;
+        let syntax_limit_reported = self.syntax_limit_reported;
+        let arguments = self.parse_generic_type_arguments();
+        if arguments.is_none() {
+            self.at = at;
+            self.errors.truncate(errors);
+            self.incomplete_errors = incomplete_errors;
+            self.syntax_limit_reported = syntax_limit_reported;
+        }
+        arguments
+    }
+
+    /// Parses `<type_arguments>` before a generic call's `(`. An empty list
+    /// or a trailing comma still commits to the call with a targeted
+    /// diagnostic; `None` means the tokens are not type arguments at all.
     fn parse_generic_type_arguments(&mut self) -> Option<Vec<TypeExpr>> {
         if !self.is_punct("<") {
             return None;
@@ -4041,7 +4081,7 @@ impl Parser {
                 "generic calls require at least one type argument",
             );
             self.bump();
-            return None;
+            return Some(Vec::new());
         }
         let mut arguments = Vec::new();
         while !self.eof() && !self.is_punct(">") {
@@ -4054,7 +4094,7 @@ impl Parser {
                         "trailing commas are not allowed in generic type arguments",
                     );
                     self.bump();
-                    return None;
+                    return Some(arguments);
                 }
             } else {
                 break;
@@ -4068,14 +4108,14 @@ impl Parser {
     }
 
     fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
-        let mut lhs = self.prefix(mode)?;
+        let lhs = self.prefix(mode)?;
+        Some(self.pratt_from(lhs, min, mode))
+    }
+
+    /// Applies postfix and infix operators to an already parsed left operand.
+    fn pratt_from(&mut self, mut lhs: Expr, min: u8, mode: NominalBraceMode) -> Expr {
         loop {
-            let nominal_braces = match mode {
-                NominalBraceMode::Ordinary => true,
-                NominalBraceMode::ControlRoot => false,
-                NominalBraceMode::ControlNested => self.nominal_brace_is_expression_continuation(),
-            };
-            if nominal_braces
+            if matches!(mode, NominalBraceMode::Ordinary)
                 && self.is_punct("{")
                 && let Some(path) = nominal_path(&lhs)
             {
@@ -4101,7 +4141,7 @@ impl Parser {
                     self.error_here("ORNA-PARSE-001", "expected `]` after index")
                 }
                 if !self.within_depth(expr_depth(&lhs).max(expr_depth(&index)) + 1) {
-                    return Some(lhs);
+                    return lhs;
                 }
                 lhs = Expr::Index {
                     base: Box::new(lhs),
@@ -4119,7 +4159,7 @@ impl Parser {
                             .chain(arguments.iter().map(|argument| expr_depth(&argument.value))),
                     ),
                 ) {
-                    return Some(lhs);
+                    return lhs;
                 }
                 lhs = Expr::Call {
                     span: SourceSpan::new(start, self.previous().span.end),
@@ -4135,7 +4175,7 @@ impl Parser {
                 if self.contextual() {
                     self.bump();
                     if !self.within_depth(expr_depth(&lhs) + 1) {
-                        return Some(lhs);
+                        return lhs;
                     }
                     lhs = Expr::Field {
                         base: Box::new(lhs),
@@ -4143,8 +4183,7 @@ impl Parser {
                         span: SourceSpan::new(start, t.span.end),
                     };
                     if nominal_path(&lhs).is_some()
-                        && self.generic_call_ahead()
-                        && let Some(type_arguments) = self.parse_generic_type_arguments()
+                        && let Some(type_arguments) = self.generic_call_type_arguments()
                     {
                         let arguments = self.parse_arguments();
                         let end = self.previous().span.end;
@@ -4197,18 +4236,18 @@ impl Parser {
                         span,
                     ));
                     if self.can_start_expression() {
-                        let _ = self.recurse(|parser| parser.pratt(prec + 1, mode.nested()));
+                        let _ = self.recurse(|parser| parser.pratt(prec + 1, mode));
                     }
                     break;
                 }
                 let rhs = if self.can_start_expression() {
-                    self.recurse(|parser| parser.pratt(prec + 1, mode.nested()))
+                    self.recurse(|parser| parser.pratt(prec + 1, mode))
                 } else {
                     None
                 };
                 if !self.within_depth(expr_depth(&lhs).max(rhs.as_ref().map_or(0, expr_depth)) + 1)
                 {
-                    return Some(lhs);
+                    return lhs;
                 }
                 let start = lhs.span().start;
                 let end = rhs
@@ -4236,8 +4275,8 @@ impl Parser {
                 );
                 break;
             }
-            let rhs = self
-                .recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode.nested()));
+            let rhs =
+                self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode));
             let Some(rhs) = rhs else { break };
             if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
                 self.errors.push(Diagnostic::error(
@@ -4247,7 +4286,7 @@ impl Parser {
                 ));
             }
             if !self.within_depth(expr_depth(&lhs).max(expr_depth(&rhs)) + 1) {
-                return Some(lhs);
+                return lhs;
             }
             let span = lhs.span().join(rhs.span());
             lhs = Expr::Binary {
@@ -4257,7 +4296,7 @@ impl Parser {
                 span,
             }
         }
-        Some(lhs)
+        lhs
     }
     fn prefix(&mut self, mode: NominalBraceMode) -> Option<Expr> {
         let t = self.current().clone();
@@ -4272,7 +4311,7 @@ impl Parser {
                     span: t.span,
                 });
             }
-            let upper = self.recurse(|parser| parser.pratt(7, mode.nested()))?;
+            let upper = self.recurse(|parser| parser.pratt(7, mode))?;
             let span = t.span.join(upper.span());
             return Some(Expr::Range {
                 lower: None,
@@ -4289,7 +4328,7 @@ impl Parser {
             // Unary operators bind below the complete postfix spine. This
             // keeps `-value.field`, `-value.call()`, and `-value[index]`
             // equivalent to applying the operator to the selected value.
-            let rhs = self.recurse(|parser| parser.pratt(10, mode.nested()))?;
+            let rhs = self.recurse(|parser| parser.pratt(10, mode))?;
             if !self.within_depth(expr_depth(&rhs) + 1) {
                 return None;
             }
@@ -4326,9 +4365,7 @@ impl Parser {
                         body: Box::new(body),
                     });
                 }
-                if self.generic_call_ahead()
-                    && let Some(type_arguments) = self.parse_generic_type_arguments()
-                {
+                if let Some(type_arguments) = self.generic_call_type_arguments() {
                     let arguments = self.parse_arguments();
                     let end = self.previous().span.end;
                     return Some(Expr::GenericCall {
@@ -4391,6 +4428,7 @@ impl Parser {
                     });
                 }
                 let inner = self.expr()?;
+                self.reject_assignment_expression();
                 if self.is_punct(",") {
                     let mut elements = vec![inner];
                     while self.is_punct(",") {
@@ -4399,7 +4437,8 @@ impl Parser {
                             break;
                         }
                         if let Some(value) = self.expr() {
-                            elements.push(value)
+                            elements.push(value);
+                            self.reject_assignment_expression();
                         } else {
                             break;
                         }
@@ -4511,6 +4550,7 @@ impl Parser {
                 elements: Vec::new(),
                 span: start.clone(),
             });
+            self.reject_assignment_expression();
             let span = start.join(value.span());
             arguments.push(Argument { name, value, span });
             if self.is_punct(",") {
@@ -4555,7 +4595,7 @@ impl Parser {
                     .map(Box::new)
             }
             Some(Keyword::If) => {
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self.parse_required_block("expected if block").map(Box::new);
                 if self.keyword() == Some(Keyword::Else) {
                     self.bump();
@@ -4569,7 +4609,7 @@ impl Parser {
                 }
             }
             Some(Keyword::While) => {
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self
                     .parse_required_block("expected while block")
                     .map(Box::new);
@@ -4582,7 +4622,7 @@ impl Parser {
                 } else {
                     self.bump()
                 }
-                condition = self.control_condition().map(Box::new);
+                condition = self.block_control_header().map(Box::new);
                 body = self
                     .parse_required_block("expected for block")
                     .map(Box::new);
@@ -4756,57 +4796,6 @@ impl Parser {
                 self.tokens.get(self.at + 2).map(|t| &t.kind),
                 Some(TokenKind::Punct(":"))
             )
-    }
-    fn nominal_brace_is_expression_continuation(&self) -> bool {
-        if !self.is_punct("{") {
-            return false;
-        }
-        let mut depth = 0usize;
-        for index in self.at..self.tokens.len() {
-            match self.tokens[index].kind {
-                TokenKind::Punct("{") => depth += 1,
-                TokenKind::Punct("}") if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(
-                            self.tokens.get(index + 1).map(|token| &token.kind),
-                            Some(TokenKind::Keyword(Keyword::In))
-                                | Some(TokenKind::Punct(
-                                    "{" | "("
-                                        | ")"
-                                        | "["
-                                        | "]"
-                                        | "."
-                                        | ","
-                                        | "?"
-                                        | "||"
-                                        | "&&"
-                                        | "=="
-                                        | "!="
-                                        | "<"
-                                        | "<="
-                                        | ">"
-                                        | ">="
-                                        | "in"
-                                        | "??"
-                                        | "|"
-                                        | "|?"
-                                        | ".."
-                                        | "..="
-                                        | "+"
-                                        | "-"
-                                        | "*"
-                                        | "/"
-                                        | "%"
-                                        | "^"
-                                ))
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
     }
     fn parse_list(&mut self) -> Vec<Expr> {
         let mut elements = Vec::new();
@@ -5006,6 +4995,68 @@ impl Parser {
         TypeExpr::Tuple {
             elements: Vec::new(),
             span: self.current().span.clone(),
+        }
+    }
+    /// Parses `assertion_expression ";"` after the `assert` keyword at
+    /// `keyword`, reporting each removed assertion form where this
+    /// production fails: an empty proposition (ORNA-A091-011), an
+    /// assertion-specific `else` arm (ORNA-A091-006) and a missing `;`
+    /// (ORNA-A091-005, then the owner's `missing_semicolon` diagnostic).
+    /// `subjectless` admits a leading comparison operator. Returns the
+    /// proposition, `None` when it is empty, and whether the clause reached
+    /// its terminating `;`.
+    fn parse_assertion_clause(
+        &mut self,
+        keyword: SourceSpan,
+        subjectless: bool,
+        missing_semicolon: &str,
+    ) -> (Option<Expr>, bool) {
+        if self.is_punct(";") {
+            self.error_here(
+                "ORNA-A091-011",
+                "assertion requires a proposition before `;`",
+            );
+            self.bump();
+            return (None, true);
+        }
+        let value = if subjectless {
+            self.parse_assertion_expression()
+        } else {
+            self.expr().unwrap_or_else(|| self.error_expr())
+        };
+        let terminated = if self.keyword() == Some(Keyword::Else) {
+            self.errors.push(Diagnostic::error(
+                "ORNA-A091-006",
+                "assert has no assertion-specific `else` arm",
+                keyword,
+            ));
+            self.consume_statement()
+        } else if self.is_punct(";") {
+            self.bump();
+            true
+        } else {
+            // More input can still supply the terminator at the end of input.
+            if self.eof() {
+                self.incomplete_errors += 1;
+            }
+            self.errors.push(Diagnostic::error(
+                "ORNA-A091-005",
+                "assertion clause must end with `;`",
+                keyword,
+            ));
+            self.error_here("ORNA-PARSE-002", missing_semicolon);
+            false
+        };
+        (Some(value), terminated)
+    }
+    /// ORNA-CFLOW-006: assignment is a statement, so `=` after a grouped
+    /// expression, tuple element or call argument is reported as E1301 and
+    /// its right-hand side is skipped.
+    fn reject_assignment_expression(&mut self) {
+        if self.is_punct("=") {
+            self.error_here("E1301", "assignment is a statement, not an expression");
+            self.bump();
+            let _ = self.expr();
         }
     }
     fn parse_assertion_expression(&mut self) -> Expr {
@@ -5298,6 +5349,18 @@ fn nominal_path(expr: &Expr) -> Option<Vec<NameSegment>> {
             Some(path)
         }
         _ => None,
+    }
+}
+
+/// True when the rightmost operand of an expression is a qualified name, the
+/// only operand that a following constructor brace could have extended.
+fn ends_with_nominal_path(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { rhs, .. } | Expr::Unary { rhs, .. } => ends_with_nominal_path(rhs),
+        Expr::Range {
+            upper: Some(upper), ..
+        } => ends_with_nominal_path(upper),
+        _ => nominal_path(expr).is_some(),
     }
 }
 
