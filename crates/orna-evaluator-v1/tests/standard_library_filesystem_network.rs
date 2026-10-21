@@ -28,10 +28,15 @@ fn fixture_root(source: &str, root: &Path) -> String {
 
 #[test]
 fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("input.txt"), "native-file-value").unwrap();
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    // The traversal target exists beside the root, so only confinement can
+    // refuse it: a provider that resolved `..` would return this text.
+    std::fs::write(base.path().join("outside.txt"), "outside-secret").unwrap();
+    std::fs::write(root.join("input.txt"), "native-file-value").unwrap();
     let mut filesystem = FilesystemProvider::new();
-    filesystem.allow_root(root.path()).unwrap();
+    filesystem.allow_root(&root).unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem);
     let mut session = pinned_io_std::session();
@@ -41,22 +46,19 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
 
     assert_eq!(
         session.submit_with_sys_host_bindings(
-            &fixture_root(
-                include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna"),
-                root.path()
-            ),
+            &fixture_root(include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna"), &root),
             &mut bindings,
         ),
         Ok(Some(text_value("native-file-value")))
     );
-    std::fs::write(root.path().join("lines.txt"), "alpha\n\nomega\n").unwrap();
+    std::fs::write(root.join("lines.txt"), "alpha\n\nomega\n").unwrap();
     assert_eq!(
         session.submit_with_sys_host_bindings(
             &fixture_root(
                 &include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna")
                     .replace("read_text", "read_lines")
                     .replace("input.txt", "lines.txt"),
-                root.path()
+                &root
             ),
             &mut bindings,
         ),
@@ -72,10 +74,7 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
     );
     assert_eq!(
         session.submit_with_sys_host_bindings(
-            &fixture_root(
-                include_str!("fixtures/stdlib-io-fs-list-mpk0d.orna"),
-                root.path()
-            ),
+            &fixture_root(include_str!("fixtures/stdlib-io-fs-list-mpk0d.orna"), &root),
             &mut bindings,
         ),
         Ok(Some(
@@ -90,7 +89,7 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
         .submit_with_sys_host_bindings(
             &fixture_root(
                 include_str!("fixtures/stdlib-io-fs-metadata-mpk0d.orna"),
-                root.path(),
+                &root,
             ),
             &mut bindings,
         )
@@ -109,14 +108,14 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
         session.submit_with_sys_host_bindings(
             &fixture_root(
                 include_str!("fixtures/stdlib-io-fs-write-mpk0d.orna"),
-                root.path()
+                &root
             ),
             &mut bindings,
         ),
         Ok(Some(CanonicalValue::new(Raw::Null).unwrap()))
     );
     assert_eq!(
-        std::fs::read_to_string(root.path().join("output.txt")).unwrap(),
+        std::fs::read_to_string(root.join("output.txt")).unwrap(),
         "native-write"
     );
     assert_eq!(
@@ -124,7 +123,7 @@ fn sys_filesystem_registry_dispatches_real_reads_writes_lists_and_denials() {
             .submit_with_sys_host_bindings(
                 &fixture_root(
                     include_str!("fixtures/stdlib-io-fs-traversal-mpk0d.orna"),
-                    root.path()
+                    &root
                 ),
                 &mut bindings,
             )
@@ -507,8 +506,9 @@ fn sys_filesystem_provider_enforces_host_selected_text_and_entry_limits() {
         .unwrap();
 
     for source in [
+        // a.txt holds nine bytes, one more than the provider allows.
         fixture_root(
-            include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna"),
+            &include_str!("fixtures/stdlib-io-fs-read-mpk0d.orna").replace("input.txt", "a.txt"),
             root.path(),
         ),
         fixture_root(
