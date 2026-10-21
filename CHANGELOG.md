@@ -88,6 +88,15 @@ been published.
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
 
+- Semantic checking types `+ - * / % ^`, unary signs and compound
+  assignment through one operator table: Int, Decimal and Float never mix,
+  Money scales only by exact numbers in one currency, declared-unit
+  quantities follow dimension and affine algebra, and other operand pairs
+  report `E2001` (`E5001` for incompatible dimensions). Every reachable
+  `return`, including inside anonymous functions, is checked against the
+  declared result or joined into the inferred one. Blocks without a final
+  expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
