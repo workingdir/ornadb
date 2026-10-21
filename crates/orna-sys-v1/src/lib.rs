@@ -93,8 +93,6 @@ pub use provider_linkage::{
     system_provider_linkage,
 };
 
-mod explain_provider;
-pub use explain_provider::*;
 mod host_registry_model;
 pub use host_registry_model::{
     HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
