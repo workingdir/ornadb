@@ -192,7 +192,7 @@ async fn publish_refuses_a_format_two_head_without_writing() {
 /// The destination of `orna migrate copy` keeps the legacy commit as `HEAD`
 /// and journals the format-3 candidate. Publishing there is still refused,
 /// but the remedy names the prepared candidate rather than another copy, and
-/// the journal, Git state and absent runtime state are left as they were.
+/// the journal, Git state and runtime state files are left as they were.
 #[test]
 fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
     let parent = TempDir::new().expect("temporary parent");
@@ -224,6 +224,7 @@ fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
         .expect("the migration copy journals its candidate");
     assert!(journal.migration_continuity().is_some());
     let git_before = git_state(&destination);
+    let runtime_before = runtime_state_files(&repository);
 
     let output = run(&destination, &["publish"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -246,5 +247,5 @@ fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
         repository.read_publication_journal().unwrap(),
         Some(journal)
     );
-    assert!(!repository.runtime_paths().state_db().exists());
+    assert_eq!(runtime_state_files(&repository), runtime_before);
 }
