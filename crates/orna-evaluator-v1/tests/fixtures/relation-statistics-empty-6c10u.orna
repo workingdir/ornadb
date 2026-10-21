@@ -10,6 +10,6 @@
     std.stats.variance(rows),
     std.stats.standard_deviation(rows),
     std.stats.histogram(rows, [(0, 2)]),
-    std.query.count(rows),
-    std.query.sum(rows),
+    count(rows),
+    sum(rows),
 ]
