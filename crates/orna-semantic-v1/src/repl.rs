@@ -11,7 +11,8 @@ use orna_syntax_v1::{Declaration, EntryPoint, Item, ReplInput, SyntaxSpan, Synta
 
 use crate::{
     Analysis, Catalogue, DIAG_DUPLICATE, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, Namespace,
-    Scope, Symbol, SymbolKind, Type, check_item, declared_symbol, diag, infer, resolve_imports,
+    Scope, Symbol, SymbolKind, SystemProviders, Type, check_item, declared_symbol, diag, infer,
+    report_unlinked_system_members, resolve_imports,
 };
 
 /// Semantic state for one ephemeral REPL module.
@@ -28,6 +29,7 @@ pub struct ReplContext {
     symbols: BTreeMap<String, Symbol>,
     imports: Vec<Item>,
     last_result: Option<Type>,
+    system_providers: SystemProviders,
 }
 
 /// A staged semantic transition.  Its successor state is intentionally opaque
@@ -51,7 +53,8 @@ pub enum ReplCommitError {
 }
 
 impl ReplContext {
-    /// Builds a context from a fully admitted project analysis.
+    /// Builds a context from a fully admitted project analysis. It admits
+    /// `sys` members against the same provider linkage as `analysis`.
     pub fn from_analysis(analysis: &Analysis) -> Result<Self, Vec<Diagnostic>> {
         if !analysis.is_ok() {
             return Err(analysis.diagnostics.clone());
@@ -74,10 +77,13 @@ impl ReplContext {
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
+            system_providers: analysis.system_providers(),
         })
     }
 
     /// Starts an empty REPL with the authoritative core declaration catalogue.
+    /// It checks `sys` members against the declared surface only; a REPL that
+    /// evaluates its inputs starts with [`ReplContext::with_providers`].
     #[must_use]
     pub fn empty() -> Self {
         Self {
@@ -87,6 +93,47 @@ impl ReplContext {
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
+            system_providers: SystemProviders::DeclaredSurface,
+        }
+    }
+
+    /// Starts an empty REPL that admits `sys` members against `providers`.
+    #[must_use]
+    pub fn with_providers(providers: SystemProviders) -> Self {
+        Self {
+            system_providers: providers,
+            ..Self::empty()
+        }
+    }
+
+    /// Suggests session names resembling `name` and modules exporting it.
+    ///
+    /// Used only to explain an unresolved name; it never changes the session.
+    #[must_use]
+    pub fn name_hints(&self, name: &str) -> NameHints {
+        let similar = self
+            .symbols
+            .keys()
+            .filter(|candidate| !candidate.starts_with('$') && candidate.as_str() != name)
+            .filter(|candidate| names_are_similar(name, candidate))
+            .cloned()
+            .collect();
+        let modules = self
+            .modules
+            .iter()
+            .filter(|(_, header)| header.exports.contains_key(name))
+            .map(|(namespace, _)| namespace.display())
+            .collect();
+        let namespaces = self
+            .modules
+            .keys()
+            .map(|namespace| namespace.display())
+            .filter(|namespace| namespace == name)
+            .collect();
+        NameHints {
+            similar,
+            modules,
+            namespaces,
         }
     }
 
@@ -105,6 +152,9 @@ impl ReplContext {
             ReplInput::Expression(expression) | ReplInput::ExpressionStatement(expression) => {
                 let scope = self.scope(&self.imports, &self.symbols, &mut diagnostics);
                 let inferred = infer(expression, &scope, &BTreeMap::new(), &mut diagnostics);
+                if let Some(record) = &scope.unlinked_system_members {
+                    report_unlinked_system_members(record, &mut diagnostics);
+                }
                 if matches!(input, ReplInput::Expression(_)) {
                     next.last_result = Some(inferred.ty.clone());
                 }
@@ -134,6 +184,9 @@ impl ReplContext {
                         &mut plans,
                         &mut diagnostics,
                     );
+                    if let Some(record) = &scope.unlinked_system_members {
+                        report_unlinked_system_members(record, &mut diagnostics);
+                    }
                     next.symbols = symbols;
                     let declaration_effects =
                         if matches!(item.declaration, Declaration::Function { .. }) {
@@ -264,7 +317,7 @@ impl ReplContext {
             items: imports.to_vec(),
             span: SyntaxSpan::new(0, 0),
         };
-        resolve_imports(
+        let mut scope = resolve_imports(
             &Namespace(Vec::new()),
             &tree,
             &header,
@@ -272,8 +325,52 @@ impl ReplContext {
             &BTreeMap::new(),
             &BTreeMap::new(),
             diagnostics,
-        )
+        );
+        scope.unlinked_system_members = self.system_providers.admission_record();
+        scope
     }
+}
+
+/// Explanations for an unresolved REPL name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameHints {
+    /// Session names close to the unresolved identifier, in sorted order.
+    pub similar: Vec<String>,
+    /// Modules exporting the identifier, by dotted namespace, in sorted order.
+    pub modules: Vec<String>,
+    /// Loaded module namespaces spelled exactly like the unresolved identifier,
+    /// so `use NAME;` brings the module itself into scope.
+    pub namespaces: Vec<String>,
+}
+
+fn names_are_similar(name: &str, candidate: &str) -> bool {
+    let name = name.to_lowercase();
+    let candidate = candidate.to_lowercase();
+    if name == candidate {
+        return true;
+    }
+    let limit = if name.chars().count().max(candidate.chars().count()) <= 4 {
+        1
+    } else {
+        2
+    };
+    edit_distance(&name, &candidate) <= limit
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (row, left_char) in left.chars().enumerate() {
+        let mut current = vec![row + 1; right.len() + 1];
+        for (column, right_char) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_char != *right_char);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 #[cfg(test)]

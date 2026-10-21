@@ -8,11 +8,12 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
-use orna_value_v1::{Decimal, Raw, SchemaDescriptor, path_decode_key_components};
+use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
     FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan,
@@ -26,10 +27,7 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
-mod object_identity;
 mod source_row;
-
-pub use object_identity::{ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind};
 
 pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
 
@@ -40,7 +38,7 @@ pub use semantic_payload::{
     analyze_semantic_payloads,
 };
 
-pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
+pub use repl::{NameHints, ReplAdmission, ReplCommitError, ReplContext};
 
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
@@ -48,6 +46,29 @@ pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
 pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
 pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";
+/// Note prefix carrying the identifier of an `ORNA-S012-UNRESOLVED` diagnostic.
+pub const UNRESOLVED_NAME_NOTE: &str = "unresolved name: ";
+
+/// Returns the unresolved identifier recorded on an unresolved-name diagnostic.
+pub fn unresolved_name(diagnostic: &Diagnostic) -> Option<&str> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_NAME_NOTE))
+}
+
+/// Note prefix carrying `module.member` for an unresolved module member.
+pub const UNRESOLVED_MEMBER_NOTE: &str = "unresolved member: ";
+
+/// Returns the `(module, member)` pair recorded on an unresolved module member diagnostic.
+pub fn unresolved_member(diagnostic: &Diagnostic) -> Option<(&str, &str)> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_MEMBER_NOTE))
+        .and_then(|path| path.rsplit_once('.'))
+}
+
 pub const DIAG_DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
@@ -59,6 +80,15 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Published typecheck classification for an operand whose static type does
+/// not fit its operator (the spec's "expected X, found Y" type mismatch).
+pub const DIAG_TYPE_MISMATCH: &str = "E2001";
+/// Published classification for adding or subtracting quantities whose
+/// reduced dimensions differ (ORNA-UNIT-004).
+pub const DIAG_INCOMPATIBLE_DIMENSIONS: &str = "E5001";
+/// Portable failure code for a required `sys` member that has no linked
+/// production provider (ORNA-SYS-008, `api/sys.json` `failure_codes`).
+pub const DIAG_SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -1560,496 +1590,48 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Whether `sys` members were admitted against production providers.
+    production_sys_providers: bool,
 }
 impl Analysis {
     pub fn is_ok(&self) -> bool {
         self.diagnostics.is_empty()
     }
+
+    /// The provider linkage this analysis admitted `sys` members against.
+    pub(crate) fn system_providers(&self) -> SystemProviders {
+        if self.production_sys_providers {
+            SystemProviders::Production
+        } else {
+            SystemProviders::DeclaredSurface
+        }
+    }
 }
 
-/// Failures while producing a source-owned table descriptor from checked
-/// semantics and already-issued identities.
+/// The provider linkage that analysis admits portable `sys` members against.
+///
+/// A member's static type comes from the declared `api/sys.json` surface;
+/// whether it can execute depends on the providers of the host that evaluates
+/// the program. Every caller that evaluates analysed source passes
+/// [`SystemProviders::Production`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SourceTableSchemaError {
-    AnalysisFailed,
-    ModuleNotFound,
-    AmbiguousModule,
-    DeclarationNotFound,
-    NotTable,
-    MissingTableSchema,
-    MissingTableAdmission,
-    MissingIdentity,
-    IdentityMapMismatch,
-    DuplicateIdentity,
-    UnsupportedDefault,
-    UnsupportedComputed,
-    UnsupportedType,
-    InvalidSourceSchema,
-    InvalidDescriptor,
+pub enum SystemProviders {
+    /// Every member of the declared surface counts as linked, so analysis
+    /// checks typing only. For source that is not admitted for evaluation.
+    DeclaredSurface,
+    /// Only members a production host links a provider for are admitted;
+    /// every other member is rejected with `sys.version.incompatible`
+    /// (ORNA-SYS-008).
+    Production,
 }
 
-/// A table schema artifact owned by source semantic analysis.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceTableSchemaArtifact {
-    declaration_name: String,
-    table_id: [u8; 16],
-    descriptor: SchemaDescriptor,
-}
-
-impl SourceTableSchemaArtifact {
-    pub fn declaration_name(&self) -> &str {
-        &self.declaration_name
-    }
-
-    pub fn table_id(&self) -> &[u8; 16] {
-        &self.table_id
-    }
-
-    pub fn descriptor(&self) -> &SchemaDescriptor {
-        &self.descriptor
-    }
-}
-
-/// Builds a storage descriptor from one exact source declaration and its
-/// already-persisted object identities. This is a read-only operation: it
-/// never reconciles or creates identities.
-pub fn source_table_schema(
-    analysis: &Analysis,
-    manifest: &ObjectIdentityManifest,
-    module_name: &str,
-    declaration_name: &str,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    let (table_schema, admission) =
-        source_table_schema_parts(analysis, module_name, declaration_name)?;
-    let table_name = source_table_qualified_name(module_name, declaration_name);
-    let table_id = *manifest
-        .id(ObjectKind::Table, &table_name)
-        .ok_or(SourceTableSchemaError::MissingIdentity)?;
-    let mut field_ids = BTreeMap::new();
-    for name in table_schema.fields.keys() {
-        let qualified_name = format!("{table_name}.{name}");
-        let id = *manifest
-            .id(ObjectKind::Column, &qualified_name)
-            .ok_or(SourceTableSchemaError::MissingIdentity)?;
-        field_ids.insert(name.clone(), id);
-    }
-    build_source_table_schema(
-        declaration_name,
-        table_id,
-        &field_ids,
-        table_schema,
-        admission,
-    )
-}
-
-/// Builds a storage descriptor from exact source semantics and IDs extracted
-/// from a pinned repository binding. The map must contain exactly one active
-/// committed field ID for every source schema field, including key fields.
-pub fn source_table_schema_with_ids(
-    analysis: &Analysis,
-    module_name: &str,
-    declaration_name: &str,
-    table_id: [u8; 16],
-    field_ids: &BTreeMap<String, [u8; 16]>,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    let (table_schema, admission) =
-        source_table_schema_parts(analysis, module_name, declaration_name)?;
-    build_source_table_schema(
-        declaration_name,
-        table_id,
-        field_ids,
-        table_schema,
-        admission,
-    )
-}
-
-fn source_table_schema_parts<'a>(
-    analysis: &'a Analysis,
-    module_name: &str,
-    declaration_name: &str,
-) -> Result<(&'a TableSchema, &'a TableAdmission), SourceTableSchemaError> {
-    if !analysis.is_ok() {
-        return Err(SourceTableSchemaError::AnalysisFailed);
-    }
-    let mut module = None;
-    for (namespace, candidate) in &analysis.modules {
-        if namespace.display() == module_name && analysis.assertions.contains_key(namespace) {
-            if module.is_some() {
-                return Err(SourceTableSchemaError::AmbiguousModule);
-            }
-            module = Some(candidate);
+impl SystemProviders {
+    /// A fresh admission record, or `None` when only typing is checked.
+    fn admission_record(self) -> Option<Rc<RefCell<BTreeSet<String>>>> {
+        match self {
+            Self::DeclaredSurface => None,
+            Self::Production => Some(Rc::default()),
         }
-    }
-    let module = module.ok_or(SourceTableSchemaError::ModuleNotFound)?;
-    let symbol = module
-        .symbols
-        .get(declaration_name)
-        .ok_or(SourceTableSchemaError::DeclarationNotFound)?;
-    if symbol.kind != SymbolKind::Table {
-        return Err(SourceTableSchemaError::NotTable);
-    }
-    let table_schema = symbol
-        .table_schema
-        .as_ref()
-        .ok_or(SourceTableSchemaError::MissingTableSchema)?;
-    let admission = table_schema
-        .admission
-        .as_ref()
-        .ok_or(SourceTableSchemaError::MissingTableAdmission)?;
-    Ok((table_schema, admission))
-}
-
-fn source_table_qualified_name(module_name: &str, declaration_name: &str) -> String {
-    if module_name.is_empty() {
-        declaration_name.to_owned()
-    } else {
-        format!("{module_name}.{declaration_name}")
-    }
-}
-
-fn build_source_table_schema(
-    declaration_name: &str,
-    table_id: [u8; 16],
-    field_ids: &BTreeMap<String, [u8; 16]>,
-    table_schema: &TableSchema,
-    admission: &TableAdmission,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    if !table_schema.conversions.is_empty() {
-        return Err(SourceTableSchemaError::UnsupportedType);
-    }
-    if !admission.computed.is_empty() {
-        return Err(SourceTableSchemaError::UnsupportedComputed);
-    }
-    if admission.private_required
-        || admission.keys.is_empty()
-        || admission.required.iter().any(|name| !table_schema.fields.contains_key(name))
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-    if field_ids.len() != table_schema.fields.len()
-        || table_schema
-            .fields
-            .keys()
-            .any(|name| !field_ids.contains_key(name))
-    {
-        return Err(SourceTableSchemaError::IdentityMapMismatch);
-    }
-
-    let mut identities = BTreeSet::from([table_id]);
-    for id in field_ids.values() {
-        if !identities.insert(*id) {
-            return Err(SourceTableSchemaError::DuplicateIdentity);
-        }
-    }
-
-    let mut key_names = BTreeSet::new();
-    let mut key_ids = Vec::with_capacity(admission.keys.len());
-    for (name, key_type) in &admission.keys {
-        if !key_names.insert(name.as_str()) {
-            return Err(SourceTableSchemaError::InvalidSourceSchema);
-        }
-        let field_type = table_schema
-            .fields
-            .get(name)
-            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
-        if field_type != key_type {
-            return Err(SourceTableSchemaError::InvalidSourceSchema);
-        }
-        key_ids.push(
-            *field_ids
-                .get(name)
-                .ok_or(SourceTableSchemaError::IdentityMapMismatch)?,
-        );
-    }
-    if admission.automatic_key
-        && (admission.keys.len() != 1
-            || admission.keys[0].0 != "id"
-            || admission.keys[0].1 != Type::Int)
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-
-    let mut fields = Vec::with_capacity(table_schema.fields.len());
-    for (name, ty) in &table_schema.fields {
-        let is_automatic_id = admission.automatic_key && name == "id";
-        if !admission.required.contains(name) && !is_automatic_id {
-            return Err(SourceTableSchemaError::UnsupportedDefault);
-        }
-        let id = *field_ids
-            .get(name)
-            .ok_or(SourceTableSchemaError::IdentityMapMismatch)?;
-        let role = if key_names.contains(name.as_str()) { 0 } else { 1 };
-        fields.push((
-            id,
-            Raw::Array(vec![
-                source_schema_uuid(&id),
-                Raw::Text(name.clone()),
-                source_schema_type_node(ty)?,
-                Raw::Int(role.into()),
-                Raw::Array(vec![Raw::Int(0.into())]),
-            ]),
-        ));
-    }
-    fields.sort_by_key(|(id, _)| *id);
-    let field_descriptors = fields
-        .into_iter()
-        .map(|(_, descriptor)| descriptor)
-        .collect();
-    let raw = Raw::Map(vec![
-        (Raw::Int(0.into()), Raw::Int(1.into())),
-        (Raw::Int(1.into()), source_schema_uuid(&table_id)),
-        (
-            Raw::Int(2.into()),
-            Raw::Array(key_ids.into_iter().map(|id| source_schema_uuid(&id)).collect()),
-        ),
-        (Raw::Int(3.into()), Raw::Array(field_descriptors)),
-        (Raw::Int(4.into()), Raw::Array(Vec::new())),
-    ]);
-    let descriptor =
-        SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)?;
-    Ok(SourceTableSchemaArtifact {
-        declaration_name: declaration_name.to_owned(),
-        table_id,
-        descriptor,
-    })
-}
-
-fn source_schema_uuid(id: &[u8; 16]) -> Raw {
-    Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
-}
-
-fn source_schema_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
-    let primitive = match ty {
-        Type::Int => Some("Int"),
-        Type::Decimal => Some("Decimal"),
-        Type::Float => Some("Float"),
-        Type::Date => Some("Date"),
-        Type::Instant => Some("Instant"),
-        Type::Text => Some("Str"),
-        Type::Bool => Some("Bool"),
-        Type::Unit => Some("Unit"),
-        _ => None,
-    };
-    if let Some(name) = primitive {
-        return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
-    }
-    match ty {
-        Type::List(element) => Ok(Raw::Array(vec![
-            Raw::Int(1.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Optional(element) => Ok(Raw::Array(vec![
-            Raw::Int(2.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Tuple(elements) => Ok(Raw::Array(vec![
-            Raw::Int(3.into()),
-            Raw::Array(
-                elements
-                    .iter()
-                    .map(source_schema_type_node)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ])),
-        Type::Record(fields) => Ok(Raw::Array(vec![
-            Raw::Int(4.into()),
-            Raw::Array(
-                fields
-                    .iter()
-                    .map(|(name, ty)| {
-                        Ok(Raw::Array(vec![
-                            Raw::Text(name.clone()),
-                            source_schema_type_node(ty)?,
-                        ]))
-                    })
-                    .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
-            ),
-        ])),
-        Type::Range(element) => Ok(Raw::Array(vec![
-            Raw::Int(9.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Named(name) => {
-            let primitive = match name.as_str() {
-                "Blob" | "std.BINARY_LARGE_OBJECT" => "Blob",
-                "std.UUID" => "Uuid",
-                "std.TIME" => "TimeOfDay",
-                "std.DURATION" => "Duration",
-                _ => return Err(SourceTableSchemaError::UnsupportedType),
-            };
-            Ok(Raw::Array(vec![
-                Raw::Int(0.into()),
-                Raw::Text(primitive.into()),
-            ]))
-        }
-        _ => Err(SourceTableSchemaError::UnsupportedType),
-    }
-}
-
-#[cfg(test)]
-mod source_table_schema_tests {
-    use super::*;
-
-    fn descriptor_value(raw: &Raw, key: u64) -> &Raw {
-        let Raw::Map(entries) = raw else {
-            panic!("descriptor is not a map");
-        };
-        entries
-            .iter()
-            .find_map(|(candidate, value)| match candidate {
-                Raw::Int(candidate_key) if candidate_key.to_string() == key.to_string() => Some(value),
-                _ => None,
-            })
-            .expect("descriptor contains the requested key")
-    }
-
-    fn descriptor_field<'a>(raw: &'a Raw, name: &str) -> &'a [Raw] {
-        let Raw::Array(fields) = raw else {
-            panic!("descriptor field list is not an array");
-        };
-        fields
-            .iter()
-            .find_map(|field| match field {
-                Raw::Array(parts)
-                    if matches!(parts.get(1), Some(Raw::Text(field_name)) if field_name == name) =>
-                {
-                    Some(parts.as_slice())
-                }
-                _ => None,
-            })
-            .expect("descriptor contains the requested field")
-    }
-
-    #[test]
-    fn primitive_table_descriptor_uses_committed_manifest_ids() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { name: Str, active: Bool, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
-            .expect("writer-issued manifest");
-
-        let artifact = source_table_schema(&analysis, &manifest, "", "Contact")
-            .expect("source table descriptor");
-        assert_eq!(artifact.declaration_name(), "Contact");
-        assert_eq!(
-            artifact.table_id(),
-            manifest.id(ObjectKind::Table, "Contact").expect("table identity"),
-        );
-        assert_eq!(
-            descriptor_value(artifact.descriptor().raw(), 1),
-            &Raw::Tag(37, Box::new(Raw::Bytes(artifact.table_id().to_vec()))),
-        );
-        assert_eq!(
-            descriptor_value(artifact.descriptor().raw(), 2),
-            &Raw::Array(vec![Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.id")
-                        .expect("key identity")
-                        .to_vec(),
-                )),
-            )]),
-        );
-        let fields = descriptor_value(artifact.descriptor().raw(), 3);
-        let key = descriptor_field(fields, "id");
-        assert_eq!(
-            key[0],
-            Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.id")
-                        .expect("key identity")
-                        .to_vec(),
-                )),
-            ),
-        );
-        assert_eq!(key[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]));
-        assert_eq!(key[3], Raw::Int(0.into()));
-        let name = descriptor_field(fields, "name");
-        assert_eq!(
-            name[0],
-            Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.name")
-                        .expect("field identity")
-                        .to_vec(),
-                )),
-            ),
-        );
-        assert_eq!(name[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]));
-        assert_eq!(name[3], Raw::Int(1.into()));
-    }
-
-    #[test]
-    fn source_table_descriptor_maps_declared_portable_scalar_aliases() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Media(id: Int) { blob: Blob, uuid: UUID, time: TIME, duration: DURATION, bytes: BYTES, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
-            .expect("writer-issued manifest");
-        let artifact = source_table_schema(&analysis, &manifest, "", "Media")
-            .expect("portable scalar table descriptor");
-        let fields = descriptor_value(artifact.descriptor().raw(), 3);
-
-        for (field_name, primitive) in [
-            ("blob", "Blob"),
-            ("uuid", "Uuid"),
-            ("time", "TimeOfDay"),
-            ("duration", "Duration"),
-            ("bytes", "Blob"),
-        ] {
-            assert_eq!(
-                descriptor_field(fields, field_name)[2],
-                Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.into())]),
-            );
-        }
-    }
-
-    #[test]
-    fn source_table_descriptor_rejects_missing_ids_and_unsupported_types() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { name: Str, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        assert_eq!(
-            source_table_schema(&analysis, &ObjectIdentityManifest::default(), "", "Contact"),
-            Err(SourceTableSchemaError::MissingIdentity),
-        );
-        assert_eq!(
-            source_table_schema_with_ids(
-                &analysis,
-                "",
-                "Contact",
-                [1; 16],
-                &BTreeMap::new(),
-            ),
-            Err(SourceTableSchemaError::IdentityMapMismatch),
-        );
-
-        let unsupported = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { relation: Relation<Int>, }",
-        );
-        let unsupported_analysis = analyze(std::slice::from_ref(&unsupported));
-        assert!(unsupported_analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&unsupported), None)
-            .expect("writer-issued manifest");
-        assert_eq!(
-            source_table_schema(&unsupported_analysis, &manifest, "", "Contact"),
-            Err(SourceTableSchemaError::UnsupportedType),
-        );
     }
 }
 
@@ -2272,14 +1854,21 @@ pub fn admit_row_unit_with_owner_fields(
         }
     }
     let mut inferred = Vec::new();
+    let scope = Scope {
+        unlinked_system_members: analysis.system_providers().admission_record(),
+        ..Scope::default()
+    };
     let input_type = infer_table_row_input(
         &parsed.value,
         &source_schema_fields,
-        &Scope::default(),
+        &scope,
         &BTreeMap::new(),
         &mut inferred,
         true,
     );
+    if let Some(record) = &scope.unlinked_system_members {
+        report_unlinked_system_members(record, &mut inferred);
+    }
     result.diagnostics.extend(inferred);
     if let Type::Record(fields) = input_type.ty {
         result.fields = fields;
@@ -2300,26 +1889,58 @@ pub fn admit_row_unit_with_owner_fields(
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
-/// modules may not define either reserved root.
+/// modules may not define either reserved root. Portable `sys` members are
+/// checked against the declared surface only; see [`analyze_with_providers`].
 pub fn analyze(inputs: &[ModuleInput]) -> Analysis {
     analyze_with_catalogue(inputs, &Catalogue::empty())
 }
 
 /// Load source modules with an explicit declaration catalogue.  Names not in
 /// source or this catalogue remain unresolved; no profile is installed by
-/// default.
+/// default. Portable `sys` members are checked against the declared surface
+/// only; see [`analyze_with_providers`].
 pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> Analysis {
-    analyze_retaining_context(inputs, catalogue, false).0
+    analyze_with_providers(inputs, catalogue, SystemProviders::DeclaredSurface)
 }
 
+/// Load source modules with an explicit declaration catalogue and admit each
+/// portable `sys` member against `providers`. A host that evaluates the
+/// analysed program passes [`SystemProviders::Production`], so a member with
+/// no linked provider fails here with `sys.version.incompatible` rather than
+/// mid-evaluation.
+pub fn analyze_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    providers: SystemProviders,
+) -> Analysis {
+    analyze_retaining_context_with_providers(inputs, catalogue, false, providers).0
+}
+
+/// Semantic payload derivation describes declarations rather than admitting
+/// a program for evaluation, so it checks the declared `sys` surface only.
 fn analyze_retaining_context(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
     retain_context: bool,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    analyze_retaining_context_with_providers(
+        inputs,
+        catalogue,
+        retain_context,
+        SystemProviders::DeclaredSurface,
+    )
+}
+
+fn analyze_retaining_context_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+    providers: SystemProviders,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
+        production_sys_providers: providers == SystemProviders::Production,
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
@@ -2393,6 +2014,9 @@ fn analyze_retaining_context(
         &catalogue.attached_symbols,
         &mut dependency_summaries,
     );
+    // Every module of one analysis belongs to a single admission, so each
+    // unlinked `sys` member is reported once.
+    let unlinked_system_members = providers.admission_record();
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -2408,6 +2032,7 @@ fn analyze_retaining_context(
             &mut result.diagnostics,
         );
         scope.current_namespace = Some(namespace.clone());
+        scope.unlinked_system_members = unlinked_system_members.clone();
         let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
         visible_unit_namespaces.extend(scope.modules.values().cloned());
         scope.source_units = result
@@ -2462,6 +2087,9 @@ fn analyze_retaining_context(
         if retain_context {
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
+    }
+    if let Some(record) = &unlinked_system_members {
+        report_unlinked_system_members(record, &mut result.diagnostics);
     }
     result
         .diagnostics
@@ -3110,6 +2738,13 @@ fn declared_enum_variants(item: &Item) -> BTreeSet<String> {
         .map(|variant| variant.name.clone())
         .collect()
 }
+/// Converts one declared source type expression to the unresolved semantic
+/// type recorded by table and nominal declarations. Named types keep their
+/// source spelling; callers resolve them against the analysed module scope.
+pub fn declared_type(ty: &TypeExpr) -> Type {
+    type_of(ty)
+}
+
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
         TypeExpr::Name {
@@ -3723,6 +3358,13 @@ struct Scope {
     /// pure helper calls. This remains semantic-loader state rather than a
     /// public Symbol field so existing catalogue/value contracts stay stable.
     function_dependencies: RefCell<BTreeMap<String, BTreeSet<String>>>,
+    /// Diagnostic messages for the portable `sys` members a production
+    /// admission requires without a linked provider; `None` when only the
+    /// declared surface is checked. Inference only records them and the
+    /// admission boundary reports them after checking, so provider linkage
+    /// never alters inferred types or other diagnostics. Clones share the
+    /// record: nested scopes belong to the same admission.
+    unlinked_system_members: Option<Rc<RefCell<BTreeSet<String>>>>,
     ambiguous: BTreeSet<String>,
     /// Source spellings mapped to compiler-local nominal identities. The
     /// values are qualified by defining module and are never a substitute for
@@ -3799,6 +3441,9 @@ struct Scope {
     nominal_conversions: BTreeMap<String, Vec<Type>>,
     /// Effects/failure summaries of each conversion body.
     nominal_conversion_effects: BTreeMap<String, Vec<(Type, EffectSummary)>>,
+    /// Function bodies being inferred, innermost last. Each frame checks or
+    /// joins the `return` statements that it owns.
+    return_frames: RefCell<Vec<ReturnFrame>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -3835,6 +3480,7 @@ fn resolve_imports_with_dependencies(
         current_namespace: None,
         source_units: BTreeMap::new(),
         function_dependencies: RefCell::new(BTreeMap::new()),
+        unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
@@ -3945,6 +3591,7 @@ fn resolve_imports_with_dependencies(
         protocol_implementations: BTreeMap::new(),
         nominal_conversions: BTreeMap::new(),
         nominal_conversion_effects: BTreeMap::new(),
+        return_frames: RefCell::new(Vec::new()),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -4984,6 +4631,33 @@ fn is_builtin_protocol_without_local_surface(name: &str) -> bool {
     matches!(name, "Display" | "Present")
 }
 
+/// `Currency` is a core protocol so `Money<C>` stays meaningful without `std`
+/// (09-standard-library.md). Its member surface is fixed by ORNA-MONEY-004:
+/// the stable static properties `code: Str` and `minor_digits: Int`
+/// (05-types.md, "Money and currencies"). A module may implement it without
+/// declaring it.
+const CORE_CURRENCY_PROTOCOL: &str =
+    "pub protocol Currency {\n    static code: Str;\n    static minor_digits: Int;\n}\n";
+
+static CORE_CURRENCY_SURFACE: std::sync::LazyLock<Vec<ProtocolMember>> =
+    std::sync::LazyLock::new(|| {
+        parse_module_with_file(CORE_CURRENCY_PROTOCOL, "core/Currency.orna".to_owned())
+            .value
+            .items
+            .into_iter()
+            .find_map(|item| match item.declaration {
+                Declaration::Protocol { members, .. } => Some(members),
+                _ => None,
+            })
+            .expect("the core Currency protocol surface parses")
+    });
+
+/// The specified member surface of a core protocol that source need not
+/// declare.
+fn core_protocol_surface(name: &str) -> Option<&'static [ProtocolMember]> {
+    (name == "Currency").then(|| CORE_CURRENCY_SURFACE.as_slice())
+}
+
 /// Resolve a transparent local type alias to a locally declared, non-generic
 /// protocol.  This intentionally does not cross imported module boundaries
 /// or substitute generic protocol parameters: those identities remain the
@@ -5010,7 +4684,8 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 /// imported-member conformance, complete callable semantics, and full runtime
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
-/// Only the builtin Display/Present names retain a missing-member-surface
+/// The core `Currency` protocol is checked against its specified surface;
+/// only the builtin Display/Present names retain a missing-member-surface
 /// residual. Mixed protocols check generic and non-generic members alike.
 /// `From<Source>` checks the closed source/member shape below, but does not
 /// implement conversion selection or runtime dispatch.
@@ -5152,39 +4827,48 @@ fn validate_nested_implementation_members(
         ));
         return;
     }
-    let Some(protocol_name) = resolve_local_protocol_name(&path[0], scope) else {
-        match scope.names.get(&path[0]) {
+    let required_members = match resolve_local_protocol_name(&path[0], scope) {
+        Some(protocol_name) => {
+            let Some(required_members) = local_protocols.get(&protocol_name) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity cannot be resolved",
+                ));
+                return;
+            };
+            required_members.as_slice()
+        }
+        None => match scope.names.get(&path[0]) {
             Some(symbol) if symbol.kind == SymbolKind::Protocol => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "imported protocol identity cannot be resolved",
                 ));
+                return;
             }
             Some(_) => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "protocol implementation identity is not a protocol",
                 ));
+                return;
             }
             None if is_builtin_protocol_without_local_surface(&path[0]) => {
                 // Display and Present are the two presentation protocol names
                 // supplied by the frozen surface without a local member AST.
+                return;
             }
-            None => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "unresolved protocol implementation identity",
-                ));
-            }
-        }
-        return;
-    };
-    let Some(required_members) = local_protocols.get(&protocol_name) else {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "protocol implementation identity cannot be resolved",
-        ));
-        return;
+            None => match core_protocol_surface(&path[0]) {
+                Some(surface) => surface,
+                None => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "unresolved protocol implementation identity",
+                    ));
+                    return;
+                }
+            },
+        },
     };
 
     let mut implemented_names = BTreeSet::new();
@@ -5518,11 +5202,8 @@ fn validate_nested_implementation_function(
         });
     if let Some(expected) = effective_result {
         let before = diagnostics.len();
-        let FunctionBodyInference {
-            inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
-        if !direct_return && diagnostics.len() == before {
+        let inferred = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
+        if diagnostics.len() == before {
             require_same(&expected, &inferred.ty, diagnostics);
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
@@ -6714,117 +6395,245 @@ fn annotation_type_name_is_declared(
         })
 }
 
-struct FunctionBodyInference {
-    inferred: Inferred,
-    direct_return: bool,
+/// One function body whose `return` statements are being typed. Ownership is
+/// lexical: a `return` inside a nested anonymous function exits that
+/// function, not the enclosing declaration (ORNA-CFLOW-008).
+#[derive(Clone)]
+struct ReturnFrame {
+    /// Addresses of the `return` statements that this body owns.
+    owned: Vec<usize>,
+    /// The declared result type, when the signature has one.
+    expected: Option<Type>,
+    /// Types of the owned `return` values, in source order.
+    returned: Vec<Type>,
 }
 
+/// Infers a function or anonymous-function body (ORNA-FN-009). With a known
+/// result, each owned `return` value is checked where it occurs; a body that
+/// completes only through `return` produces that result. Without one, the
+/// result joins the tail with every reachable return path.
 fn infer_function_body(
     body: &Expr,
     expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> FunctionBodyInference {
-    let Expr::Block { statements, .. } = body else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
+) -> Inferred {
+    let mut owned = Vec::new();
+    collect_owned_returns(body, &mut owned);
+    if owned.is_empty() {
+        return match expected {
+            Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+            None => infer(body, scope, local, diagnostics),
         };
+    }
+    scope.return_frames.borrow_mut().push(ReturnFrame {
+        owned,
+        expected: expected.cloned(),
+        returned: Vec::new(),
+    });
+    let inferred = match expected {
+        Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+        None => infer(body, scope, local, diagnostics),
     };
-    let Some(return_index) = statements
-        .iter()
-        .position(|statement| matches!(statement, Statement::Return { .. }))
-    else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
-        };
-    };
+    let frame = scope
+        .return_frames
+        .borrow_mut()
+        .pop()
+        .expect("function return frames are pushed and popped in pairs");
+    if let Some(expected) = expected {
+        if inferred.ty == Type::Bottom && !frame.returned.is_empty() {
+            return Inferred {
+                ty: expected.clone(),
+                effects: inferred.effects,
+            };
+        }
+        return inferred;
+    }
+    Inferred {
+        ty: join_return_paths(inferred.ty, frame.returned, diagnostics),
+        effects: inferred.effects,
+    }
+}
 
-    let mut locals = local.clone();
-    let mut effects = EffectSummary::default();
-    for statement in &statements[..return_index] {
-        match statement {
-            Statement::Let {
-                pattern,
-                annotation,
-                value,
-                ..
-            } => {
-                let inferred = if let Some(annotation) = annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                    let expected = resolved_type_of(annotation, scope);
-                    let inferred = infer_contextual(value, &expected, scope, &locals, diagnostics);
-                    require_same(&expected, &inferred.ty, diagnostics);
-                    inferred
-                } else {
-                    infer(value, scope, &locals, diagnostics)
-                };
-                effects.join(&inferred.effects);
-                bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
-            }
-            Statement::Assert { value, .. } => {
-                let inferred = infer(value, scope, &locals, diagnostics);
-                effects.join(&inferred.effects);
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-            }
-            Statement::Expression { value, .. } | Statement::Control { value, .. } => {
-                effects.join(&infer(value, scope, &locals, diagnostics).effects);
-            }
-            Statement::Assignment {
-                target,
-                operator,
-                value,
-                ..
-            } => effects.join(&infer_assignment(
-                target,
-                operator,
-                value,
-                scope,
-                &mut locals,
-                diagnostics,
-            )),
-            Statement::Break { value, .. } => {
-                if let Some(value) = value {
-                    effects.join(&infer(value, scope, &locals, diagnostics).effects);
+/// Records the `return` statements whose nearest enclosing function is the
+/// body being walked. Anonymous-function bodies own their own returns.
+fn collect_owned_returns(expression: &Expr, owned: &mut Vec<usize>) {
+    match expression {
+        Expr::Name { .. }
+        | Expr::Literal { .. }
+        | Expr::ReplBinding { .. }
+        | Expr::Lambda { .. } => {}
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    collect_owned_returns(value, owned);
                 }
             }
-            Statement::Continue { .. } => {}
-            Statement::Return { .. } => unreachable!("return is outside the function-body prefix"),
+        }
+        Expr::Unary { rhs: inner, .. }
+        | Expr::Group { inner, .. }
+        | Expr::Field { base: inner, .. } => collect_owned_returns(inner, owned),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Index {
+            base: lhs,
+            index: rhs,
+            ..
+        } => {
+            collect_owned_returns(lhs, owned);
+            collect_owned_returns(rhs, owned);
+        }
+        Expr::Range { lower, upper, .. } => {
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_owned_returns(bound, owned);
+            }
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            collect_owned_returns(callee, owned);
+            for argument in arguments {
+                collect_owned_returns(&argument.value, owned);
+            }
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                collect_owned_returns(element, owned);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_owned_returns(&field.value, owned);
+            }
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                match statement {
+                    Statement::Return { value, .. } => {
+                        owned.push(std::ptr::from_ref(statement).addr());
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Break { value, .. } => {
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Let { value, .. }
+                    | Statement::Assert { value, .. }
+                    | Statement::Assignment { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. } => collect_owned_returns(value, owned),
+                    Statement::Continue { .. } => {}
+                }
+            }
+            if let Some(tail) = tail {
+                collect_owned_returns(tail, owned);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            for part in [condition, body, alternate].into_iter().flatten() {
+                collect_owned_returns(part, owned);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_owned_returns(guard, owned);
+                }
+                collect_owned_returns(&arm.body, owned);
+            }
         }
     }
+}
 
-    let Statement::Return { value, .. } = &statements[return_index] else {
-        unreachable!("function-body return index must identify a return statement");
-    };
-    let returned = match (value, expected) {
-        (Some(value), Some(expected)) => {
-            infer_contextual(value, expected, scope, &locals, diagnostics)
+/// Types one `return` statement against the function body that owns it. A
+/// bare `return;` completes with `Unit` (ORNA-CFLOW-001). A `return` outside
+/// every inferred body, such as one in a nested `From` conversion, has no
+/// result to check and is only inferred.
+fn infer_return_statement(
+    statement: &Statement,
+    value: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let address = std::ptr::from_ref(statement).addr();
+    let (owner, expected) = {
+        let frames = scope.return_frames.borrow();
+        match frames
+            .iter()
+            .rposition(|frame| frame.owned.contains(&address))
+        {
+            Some(index) => (Some(index), frames[index].expected.clone()),
+            None => (None, None),
         }
-        (Some(value), None) => infer(value, scope, &locals, diagnostics),
+    };
+    let returned = match (value, &expected) {
+        (Some(value), Some(expected)) => {
+            infer_contextual(value, expected, scope, local, diagnostics)
+        }
+        (Some(value), None) => infer(value, scope, local, diagnostics),
         (None, _) => Inferred {
-            ty: Type::Null,
+            ty: Type::Unit,
             effects: EffectSummary::default(),
         },
     };
-    if let Some(expected) = expected {
-        require_same(expected, &returned.ty, diagnostics);
+    if let Some(index) = owner {
+        if let Some(expected) = &expected {
+            require_same(expected, &returned.ty, diagnostics);
+        }
+        scope.return_frames.borrow_mut()[index]
+            .returned
+            .push(returned.ty.clone());
     }
-    effects.join(&returned.effects);
-    FunctionBodyInference {
-        inferred: Inferred {
-            ty: returned.ty,
-            effects,
-        },
-        direct_return: true,
+    returned
+}
+
+/// Joins an unannotated function's tail with its return paths (ORNA-FN-009).
+/// `Bottom` contributes nothing and `null` joins an ordinary value as its
+/// optional; any other disagreement has no single static result type.
+fn join_return_paths(tail: Type, returned: Vec<Type>, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    let mut joined = tail;
+    for path in returned {
+        joined = match (joined, path) {
+            (Type::Error, _) | (_, Type::Error) => Type::Error,
+            (Type::Bottom, path) => path,
+            (joined, Type::Bottom) => joined,
+            (joined, path) if joined == path => joined,
+            (Type::Null, Type::Optional(inner)) | (Type::Optional(inner), Type::Null) => {
+                Type::Optional(inner)
+            }
+            (Type::Optional(inner), path) if types_match(&inner, &path) => Type::Optional(inner),
+            (joined, Type::Optional(inner)) if types_match(&inner, &joined) => {
+                Type::Optional(inner)
+            }
+            (Type::Null, path) if path != Type::Unit => Type::Optional(Box::new(path)),
+            (joined, Type::Null) if joined != Type::Unit => Type::Optional(Box::new(joined)),
+            (joined, path) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!(
+                        "return paths have incompatible static types: {} and {}",
+                        diagnostic_type_name(&joined),
+                        diagnostic_type_name(&path),
+                    ),
+                ));
+                Type::Error
+            }
+        };
     }
+    joined
 }
 
 fn check_function(
@@ -6897,22 +6706,15 @@ fn check_function(
         .as_ref()
         .map(|result| resolved_type_of(result, &function_scope))
     {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
+        let mut inferred =
+            infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        if !direct_return {
-            require_same(&expected, &inferred.ty, diagnostics);
-        }
+        require_same(&expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return: _,
-        } = infer_function_body(body, None, &function_scope, &local, diagnostics);
+        let mut inferred = infer_function_body(body, None, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
@@ -7674,7 +7476,7 @@ fn validate_loop_transfers(
                     }
                     Statement::Break { value, .. } => match loops.last() {
                         Some(LoopTransferContext::Typed(expected)) => {
-                            let actual = value.as_ref().map_or(Type::Null, |value| {
+                            let actual = value.as_ref().map_or(Type::Unit, |value| {
                                 infer(value, scope, &block_locals, &mut Vec::new()).ty
                             });
                             require_same(expected, &actual, diagnostics);
@@ -7734,7 +7536,7 @@ fn validate_loop_transfers(
             }
             let loop_context = match kind {
                 ControlKind::For | ControlKind::While => {
-                    Some(LoopTransferContext::Typed(Type::Null))
+                    Some(LoopTransferContext::Typed(Type::Unit))
                 }
                 ControlKind::Loop => Some(LoopTransferContext::Unsupported),
                 ControlKind::If | ControlKind::Case => None,
@@ -8282,11 +8084,13 @@ fn infer_contextual_lambda(
         );
         types.push(ty);
     }
-    let inferred = if matches!(expected_result, Type::Error) {
-        infer(body, scope, &callback_locals, diagnostics)
-    } else {
-        infer_contextual(body, expected_result, scope, &callback_locals, diagnostics)
-    };
+    let inferred = infer_function_body(
+        body,
+        (!matches!(expected_result, Type::Error)).then_some(expected_result),
+        scope,
+        &callback_locals,
+        diagnostics,
+    );
     require_same(expected_result, &inferred.ty, diagnostics);
     Inferred {
         ty: Type::Function {
@@ -8388,7 +8192,7 @@ fn infer_node(
                         effects: EffectSummary::default(),
                     },
                     None => {
-                        diagnostics.push(diag(
+                        let mut diagnostic = diag(
                             if matches!(text.as_str(), "Ok" | "Err") {
                                 DIAG_LEGACY_RESULT
                             } else {
@@ -8399,7 +8203,14 @@ fn infer_node(
                             } else {
                                 "name cannot be resolved"
                             },
-                        ));
+                        );
+                        if !matches!(text.as_str(), "Ok" | "Err") {
+                            diagnostic = diagnostic.with_note(
+                                SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
+                                    .expect("identifier text is safe"),
+                            );
+                        }
+                        diagnostics.push(diagnostic);
                         Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -8639,7 +8450,7 @@ fn infer_node(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
-                && let Some(inferred) = infer_system_path(&path, diagnostics)
+                && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
             {
                 return inferred;
             }
@@ -8857,7 +8668,7 @@ fn infer_node(
                     effects: EffectSummary::default(),
                 }
             } else {
-                infer(body, scope, &locals, diagnostics)
+                infer_function_body(body, None, scope, &locals, diagnostics)
             };
             Inferred {
                 ty: Type::Function {
@@ -9229,18 +9040,9 @@ fn infer_node(
         }
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
-            if op == "!" {
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-                Inferred {
-                    ty: if inferred.ty == Type::Bool {
-                        Type::Bool
-                    } else {
-                        Type::Error
-                    },
-                    effects: inferred.effects,
-                }
-            } else {
-                inferred
+            Inferred {
+                ty: infer_unary_operator(op, &inferred.ty, diagnostics),
+                effects: inferred.effects,
             }
         }
         Expr::Range { lower, upper, .. } => {
@@ -9387,99 +9189,17 @@ fn infer_node(
                     effects,
                 };
             }
-            // Elapsed Duration arithmetic is distinct from calendar periods:
-            // it can shift an Instant or combine with another Duration.
-            let duration = Type::Named("std.DURATION".into());
-            let elapsed_result = match (op.as_str(), &left.ty, &right.ty) {
-                ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
-                ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("-", Type::Instant, Type::Instant) => Some(duration.clone()),
-                ("+" | "-", left, right) if left == &duration && right == &duration => {
-                    Some(duration)
-                }
-                // Duration scaling accepts exact numeric factors only; the
-                // runtime rejects results finer than its nanosecond grid.
-                ("*", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", Type::Int, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                ("*", Type::Decimal, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                _ => None,
-            };
-            if let Some(ty) = elapsed_result {
-                return Inferred { ty, effects };
-            }
-            if op == "-"
-                && left.ty == Type::Instant
-                && matches!(
-                    &right.ty,
-                    Type::Applied { base, arguments }
-                        if matches!(base.as_str(), "Int" | "Decimal" | "Float")
-                            && arguments.len() == 1
-                )
-            {
-                return Inferred {
-                    ty: Type::Instant,
-                    effects,
-                };
-            }
-            if op == "*" {
-                if (is_binary_float(&left.ty) && is_money_rate(&right.ty))
-                    || (is_money_rate(&left.ty) && is_binary_float(&right.ty))
-                {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "binary Float cannot enter an exact Money calculation implicitly",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-                if let Some(ty) = reduce_exact_money_rate(&left.ty, &right.ty) {
-                    return Inferred { ty, effects };
-                }
-                if matches!(left.ty, Type::MoneyPerUnit { .. })
-                    || matches!(right.ty, Type::MoneyPerUnit { .. })
-                {
-                    diagnostics.push(diag(
-                        DIAG_UNSUPPORTED,
-                        "dimensional algebra is outside this semantic slice",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-            }
-            if op == "+"
-                && let Some(message) = incompatible_addition_message(&left.ty, &right.ty)
-            {
-                diagnostics.push(diag(DIAG_TYPE, message));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            if op == "+" && left.ty == right.ty && is_absolute_affine_temperature(&left.ty) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "cannot add two absolute affine temperatures",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
             let ty = if matches!(op.as_str(), "==" | "!=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if !types_match(&left.ty, &right.ty)
                     && !types_match(&right.ty, &left.ty)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -9488,14 +9208,17 @@ fn infer_node(
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
                 }
             } else {
-                require_same(&left.ty, &right.ty, diagnostics);
-                left.ty
+                binary_arithmetic_type(op, &left.ty, &right.ty, diagnostics)
             };
             Inferred { ty, effects }
         }
@@ -9585,13 +9308,13 @@ fn infer_node(
                     }
                     Statement::Continue { .. } => {}
                     Statement::Return { value, .. } => {
-                        let returned = value
-                            .as_ref()
-                            .map(|value| infer(value, scope, &locals, diagnostics))
-                            .unwrap_or(Inferred {
-                                ty: Type::Null,
-                                effects: EffectSummary::default(),
-                            });
+                        let returned = infer_return_statement(
+                            statement,
+                            value.as_ref(),
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
                         effects.join(&returned.effects);
                         final_control = Some(Inferred {
                             ty: Type::Bottom,
@@ -9601,10 +9324,12 @@ fn infer_node(
                     }
                 }
             }
+            // A block without a final expression completes with `Unit`
+            // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
             let tail = final_control
                 .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
                 .unwrap_or(Inferred {
-                    ty: Type::Null,
+                    ty: Type::Unit,
                     effects: EffectSummary::default(),
                 });
             effects.join(&tail.effects);
@@ -9695,6 +9420,437 @@ fn infer_node(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+/// Types a prefix operator. `!` requires `Bool` because Orna has no implicit
+/// truthiness (ORNA-CFLOW-009); a numeric sign keeps its operand's type.
+fn infer_unary_operator(op: &str, operand: &Type, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    if matches!(operand, Type::Error | Type::Bottom) {
+        return operand.clone();
+    }
+    if op == "!" {
+        require_same(&Type::Bool, operand, diagnostics);
+        return if *operand == Type::Bool {
+            Type::Bool
+        } else {
+            Type::Error
+        };
+    }
+    let signed = matches!(op, "-" | "+")
+        && (matches!(
+            operand,
+            Type::Int | Type::Decimal | Type::Float | Type::Quantity { affine: false, .. }
+        ) || money_currency(operand).is_some()
+            || unit_suffix_scalar(operand).is_some()
+            // Negated elapsed time, and a negated instant used as a descending
+            // sort key (`examples/valid/sys-run-history.orna`).
+            || (op == "-"
+                && (matches!(operand, Type::Instant)
+                    || matches!(operand, Type::Named(name) if name == "std.DURATION"))));
+    if signed {
+        return operand.clone();
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {}",
+            diagnostic_type_name(operand)
+        ),
+    ));
+    Type::Error
+}
+
+/// Types `+ - * / % ^` once both operands are inferred (ORNA-INFER-001,
+/// ORNA-TYPE-008). Compound assignment applies the same table, because
+/// `count += 1` means `count = count + 1` (ORNA-CFLOW-006). Orna has no
+/// implicit numeric promotion and no string or calendar-date arithmetic, so
+/// every pair the table does not admit is reported.
+fn binary_arithmetic_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    if matches!(left, Type::Error) || matches!(right, Type::Error) {
+        return Type::Error;
+    }
+    // A diverging operand means the operation itself never completes.
+    if matches!(left, Type::Bottom) || matches!(right, Type::Bottom) {
+        return Type::Bottom;
+    }
+    if let Some(ty) = elapsed_time_operator_type(op, left, right) {
+        return ty;
+    }
+    if op == "*" {
+        if (is_binary_float(left) && is_money_rate(right))
+            || (is_money_rate(left) && is_binary_float(right))
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "binary Float cannot enter an exact Money calculation implicitly",
+            ));
+            return Type::Error;
+        }
+        if let Some(ty) = reduce_exact_money_rate(left, right) {
+            return ty;
+        }
+        if matches!(left, Type::MoneyPerUnit { .. }) || matches!(right, Type::MoneyPerUnit { .. }) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            return Type::Error;
+        }
+    }
+    if op == "+"
+        && let Some(message) = incompatible_addition_message(left, right)
+    {
+        diagnostics.push(diag(DIAG_TYPE, message));
+        return Type::Error;
+    }
+    // Subtracting is adding the negation, so it needs the same conversion
+    // (ORNA-MONEY-002).
+    if op == "-"
+        && let (Some(left_currency), Some(right_currency)) =
+            (money_currency(left), money_currency(right))
+        && left_currency != right_currency
+        && !matches!(left_currency, Type::Error)
+        && !matches!(right_currency, Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "cannot subtract different currencies without conversion",
+        ));
+        return Type::Error;
+    }
+    if op == "+" && left == right && is_absolute_affine_temperature(left) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "cannot add two absolute affine temperatures",
+        ));
+        return Type::Error;
+    }
+    if let Some(ty) = arithmetic_operator_type(op, left, right, diagnostics) {
+        return ty;
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {} and {}",
+            diagnostic_type_name(left),
+            diagnostic_type_name(right),
+        ),
+    ));
+    Type::Error
+}
+
+/// Elapsed `Duration` arithmetic is distinct from calendar periods: it can
+/// shift an `Instant` or combine with another `Duration` (ORNA-TIME-004).
+fn elapsed_time_operator_type(op: &str, left: &Type, right: &Type) -> Option<Type> {
+    let duration = Type::Named("std.DURATION".into());
+    match (op, left, right) {
+        ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
+        ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("-", Type::Instant, Type::Instant) => Some(duration),
+        ("+" | "-", left, right) if left == &duration && right == &duration => Some(duration),
+        // Duration scaling accepts exact numeric factors only; the runtime
+        // rejects results finer than its nanosecond grid.
+        ("*" | "/", left, Type::Int | Type::Decimal) if left == &duration => Some(duration),
+        ("*", Type::Int | Type::Decimal, right) if right == &duration => Some(duration),
+        // A look-back window such as `now() - 7.days`; only a Time-dimension
+        // unit can move an Instant.
+        ("-", Type::Instant, unit)
+            if numeric_unit(unit).and_then(unit_dimension) == Some("Time") =>
+        {
+            Some(Type::Instant)
+        }
+        _ => None,
+    }
+}
+
+/// The admitted arithmetic table. `None` is an undefined operand pair; a rule
+/// with its own published diagnostic reports it and returns `Error`.
+fn arithmetic_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (left, right) {
+        // Int, Decimal and Float never mix implicitly (ORNA-NUM-001..003).
+        (Type::Int, Type::Int) | (Type::Decimal, Type::Decimal) | (Type::Float, Type::Float) => {
+            Some(left.clone())
+        }
+        _ if money_currency(left).is_some() || money_currency(right).is_some() => {
+            money_operator_type(op, left, right, diagnostics)
+        }
+        (Type::MoneyPerUnit { .. }, Type::MoneyPerUnit { .. }) => {
+            (matches!(op, "+" | "-") && left == right).then(|| left.clone())
+        }
+        (Type::Quantity { .. }, _) | (_, Type::Quantity { .. }) => {
+            quantity_operator_type(op, left, right, diagnostics)
+        }
+        _ => unit_suffix_operator_type(op, left, right, diagnostics),
+    }
+}
+
+/// Money keeps its currency and exact decimal semantics: same-currency
+/// addition and exact scaling only (ORNA-MONEY-001..003).
+fn money_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let binary_float = |ty: &Type| {
+        is_binary_float(ty)
+            || matches!(ty, Type::Quantity { numeric, .. } if **numeric == Type::Float)
+    };
+    if binary_float(left) || binary_float(right) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "binary Float cannot enter an exact Money calculation implicitly",
+        ));
+        return Some(Type::Error);
+    }
+    let money = |ty: &Type| money_currency(ty).is_some();
+    let exact = |ty: &Type| matches!(ty, Type::Int | Type::Decimal);
+    match op {
+        "+" | "-"
+            if money(left)
+                && money(right)
+                && (types_match(left, right) || types_match(right, left)) =>
+        {
+            Some(left.clone())
+        }
+        "*" | "/" if money(left) && exact(right) => Some(left.clone()),
+        "*" if exact(left) && money(right) => Some(right.clone()),
+        _ => None,
+    }
+}
+
+/// Declared-unit quantities follow dimension-basis algebra (ORNA-UNIT-001,
+/// ORNA-UNIT-004) and the affine point/vector rules (ORNA-UNIT-005).
+fn quantity_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (op, left, right) {
+        ("+" | "-", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_sum_type(op, left, right, diagnostics)
+        }
+        ("*" | "/", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_product_type(op == "/", left, right)
+        }
+        ("%", Type::Quantity { affine: false, .. }, _) if left == right => Some(left.clone()),
+        (
+            "*" | "/",
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+            scalar,
+        ) if numeric.as_ref() == scalar => Some(left.clone()),
+        (
+            "*",
+            scalar,
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+        ) if numeric.as_ref() == scalar => Some(right.clone()),
+        ("/", scalar, Type::Quantity { numeric, .. }) if numeric.as_ref() == scalar => {
+            let dimensionless = Type::Quantity {
+                numeric: numeric.clone(),
+                dimension_basis: BTreeMap::new(),
+                scale: UnitFraction::one().public(),
+                offset: UnitFraction::zero().public(),
+                affine: false,
+            };
+            quantity_product_type(true, &dimensionless, right)
+        }
+        _ => None,
+    }
+}
+
+fn quantity_sum_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            offset: right_offset,
+            affine: right_affine,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if dimension_basis != right_basis {
+        diagnostics.push(diag(
+            DIAG_INCOMPATIBLE_DIMENSIONS,
+            if op == "+" {
+                "cannot add quantities with incompatible dimensions"
+            } else {
+                "cannot subtract quantities with incompatible dimensions"
+            },
+        ));
+        return Some(Type::Error);
+    }
+    // Different scales need an explicit unit conversion first.
+    if numeric != right_numeric || scale != right_scale {
+        return None;
+    }
+    let zero = UnitFraction::zero().public();
+    match (op, *affine, *right_affine) {
+        ("+", true, true) => {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "cannot add two absolute affine temperatures",
+            ));
+            Some(Type::Error)
+        }
+        // Absolute<U> - Absolute<U> -> Delta<U>
+        ("-", true, true) if offset == right_offset => Some(Type::Quantity {
+            numeric: numeric.clone(),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: zero,
+            affine: false,
+        }),
+        // Absolute<U> + Delta<U> and Absolute<U> - Delta<U> -> Absolute<U>
+        (_, true, false) if *right_offset == zero => Some(left.clone()),
+        // Delta<U> + Absolute<U> -> Absolute<U>
+        ("+", false, true) if *offset == zero => Some(right.clone()),
+        (_, false, false) if offset == right_offset => Some(left.clone()),
+        _ => None,
+    }
+}
+
+/// `*` and `/` over non-affine quantities add or subtract dimension exponents
+/// and multiply or divide the exact unit scales.
+fn quantity_product_type(divide: bool, left: &Type, right: &Type) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            affine: false,
+            ..
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            affine: false,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if numeric != right_numeric {
+        return None;
+    }
+    let mut basis = dimension_basis.clone();
+    for (dimension, exponent) in right_basis {
+        let current = basis.entry(dimension.clone()).or_insert(0);
+        *current = if divide {
+            current.checked_sub(*exponent)?
+        } else {
+            current.checked_add(*exponent)?
+        };
+    }
+    basis.retain(|_, exponent| *exponent != 0);
+    let left_scale = unit_fraction(scale)?;
+    let right_scale = unit_fraction(right_scale)?;
+    let scale = if divide {
+        left_scale.divide(&right_scale)?
+    } else {
+        left_scale.multiply(&right_scale)?
+    };
+    if basis.is_empty() && scale == UnitFraction::one() {
+        return Some(numeric.as_ref().clone());
+    }
+    Some(Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis: basis,
+        scale: scale.public(),
+        offset: UnitFraction::zero().public(),
+        affine: false,
+    })
+}
+
+fn unit_fraction(rational: &SourceUnitRational) -> Option<UnitFraction> {
+    UnitFraction::new(
+        rational.numerator.parse().ok()?,
+        rational.denominator.parse().ok()?,
+    )
+}
+
+/// Unit-suffixed numerics such as `Int<kWh>` keep their unit through
+/// same-unit addition and exact scalar scaling. Their dimensions are not
+/// resolved here, so products of two such quantities are unsupported.
+fn unit_suffix_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let left_scalar = unit_suffix_scalar(left);
+    let right_scalar = unit_suffix_scalar(right);
+    let same_unit = types_match(left, right) || types_match(right, left);
+    match (op, left_scalar, right_scalar) {
+        ("+" | "-" | "%", Some(_), Some(_)) if same_unit => Some(left.clone()),
+        ("/", Some(scalar), Some(_)) if left == right => Some(scalar),
+        ("*" | "/", Some(scalar), None) if &scalar == right => Some(left.clone()),
+        ("*", None, Some(scalar)) if &scalar == left => Some(right.clone()),
+        ("*" | "/", Some(_), Some(_)) | ("^", Some(_), None) => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        ("/", None, Some(scalar)) if &scalar == left => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        _ => None,
+    }
+}
+
+/// The scalar of a unit-suffixed numeric such as `Int<kWh>`.
+fn unit_suffix_scalar(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Applied { base, arguments } if arguments.len() == 1 => match base.as_str() {
+            "Int" => Some(Type::Int),
+            "Decimal" => Some(Type::Decimal),
+            "Float" => Some(Type::Float),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -10306,7 +10462,18 @@ fn infer_assignment(
             }
         }
         (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
-            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
+            Some(symbol) => {
+                // `count += 1` is `count = count + 1` (ORNA-CFLOW-006).
+                let op = match operator {
+                    AssignmentOperator::Add => "+",
+                    AssignmentOperator::Subtract => "-",
+                    AssignmentOperator::Multiply => "*",
+                    AssignmentOperator::Divide => "/",
+                    AssignmentOperator::Set => unreachable!("`=` has its own assignment arm"),
+                };
+                let result = binary_arithmetic_type(op, &symbol.ty, &value.ty, diagnostics);
+                require_same(&symbol.ty, &result, diagnostics);
+            }
             None => diagnostics.push(diag(
                 DIAG_UNRESOLVED,
                 "assignment target cannot be resolved",
@@ -10447,9 +10614,10 @@ fn infer_if(
     let Some(alternate) = alternate else {
         let mut effects = condition.effects;
         effects.join(&body.effects);
+        // The untaken branch completes without a value (ORNA-CFLOW-001).
         if body.ty == Type::Bottom {
             return Inferred {
-                ty: Type::Null,
+                ty: Type::Unit,
                 effects,
             };
         }
@@ -13128,7 +13296,7 @@ fn infer_finite_list_predicate(
         };
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-        let inferred = infer(body, scope, &callback_locals, diagnostics);
+        let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
         require_same(&Type::Bool, &inferred.ty, diagnostics);
         return Inferred {
             ty: inferred.ty,
@@ -15445,7 +15613,7 @@ fn infer_recovery_pipeline(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
-    let recovered = infer(body, scope, &callback_locals, diagnostics);
+    let recovered = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
     effects
         .effects
@@ -15619,7 +15787,7 @@ fn infer_lambda_pipeline_stage(
     require_same(&parameter_type, &input.ty, diagnostics);
     let mut lambda_locals = local.clone();
     insert_local_binding(name, parameter_type, &mut lambda_locals, diagnostics);
-    let body = infer(body, scope, &lambda_locals, diagnostics);
+    let body = infer_function_body(body, None, scope, &lambda_locals, diagnostics);
     let mut effects = input.effects;
     effects.join(&body.effects);
     Inferred {
@@ -15957,7 +16125,7 @@ fn infer_callback(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-    let inferred = infer(body, scope, &callback_locals, diagnostics);
+    let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
 }
@@ -16164,7 +16332,7 @@ fn infer_table_operation(
     let (parameters, result, effect) = match name.as_str() {
         "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
         "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
-        "delete" => (1, Type::Null, Some("database write")),
+        "delete" => (1, Type::Unit, Some("database write")),
         "count" => (0, Type::Int, Some("database read")),
         "first" => (
             0,
@@ -16413,6 +16581,7 @@ fn diagnostic_type_name(ty: &Type) -> String {
         Type::Text => "Str".into(),
         Type::Bool => "Bool".into(),
         Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
         Type::List(element) => format!("[{}]", diagnostic_type_name(element)),
         Type::Optional(element) => format!("{}?", diagnostic_type_name(element)),
         Type::Named(name) if diagnostic_identifier(name) => name.clone(),
@@ -16553,7 +16722,16 @@ fn resolve_qualified_module_member(
             effects: symbol.effects.clone(),
         },
         None => {
-            diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
+            diagnostics.push(
+                diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
+                    SafeText::new(format!(
+                        "{UNRESOLVED_MEMBER_NOTE}{}.{}",
+                        namespace.display(),
+                        path[path.len() - 1]
+                    ))
+                    .expect("identifier text is safe"),
+                ),
+            );
             Inferred {
                 ty: Type::Error,
                 effects: EffectSummary::default(),
@@ -16572,7 +16750,60 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
             }
             _ => "static types are incompatible",
         };
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(type_mismatch(message, expected, actual));
+    }
+}
+
+/// A static type mismatch that names both types, so the person can see which
+/// side has which type. The message stays stable; the types ride in a note.
+fn type_mismatch(message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(DIAG_TYPE, message).with_note(
+        SafeText::new(format!(
+            "expected {}, found {}",
+            type_label(expected),
+            type_label(actual)
+        ))
+        .expect("valid diagnostic note"),
+    )
+}
+
+/// Spells a static type the way source writes it.
+fn type_label(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Decimal => "Decimal".into(),
+        Type::Float => "Float".into(),
+        Type::Date => "Date".into(),
+        Type::Instant => "Instant".into(),
+        Type::Text => "Text".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
+        Type::List(element) => format!("List<{}>", type_label(element)),
+        Type::Range(element) => format!("Range<{}>", type_label(element)),
+        Type::Relation(element) => format!("Relation<{}>", type_label(element)),
+        Type::Stream(element) => format!("Stream<{}>", type_label(element)),
+        Type::Optional(inner) => format!("Optional<{}>", type_label(inner)),
+        Type::Tuple(items) => format!(
+            "({})",
+            items.iter().map(type_label).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Record(_) => "record".into(),
+        Type::Applied { base, arguments } if arguments.is_empty() => base.clone(),
+        Type::Applied { base, arguments } => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Quantity { .. } => "quantity".into(),
+        Type::MoneyPerUnit { .. } => "money rate".into(),
+        Type::Function { .. } => "function".into(),
+        Type::Named(name) => name.clone(),
+        Type::Bottom => "no value".into(),
+        Type::Error => "unknown type".into(),
     }
 }
 
@@ -17008,16 +17239,20 @@ enum DescriptorPathInference {
 /// Resolves only the JSON-described, read-only descriptor surface. The
 /// descriptor is metadata, not a runtime-value factory: a schema-known member
 /// that has no implementation route fails explicitly instead of acquiring a
-/// guessed type or effect.
+/// guessed type or effect, and a resolved member without a linked production
+/// provider is rejected with `sys.version.incompatible`.
 fn infer_descriptor_system_path(
     path: &[&str],
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DescriptorPathInference {
-    use system_api::PathResolution;
+    use system_api::{PathResolution, SystemMember};
 
     let api = system_api::embedded_system_api();
     let name = path.join(".");
     if let Some(relation) = api.historical_relation(path) {
+        let view = name.strip_suffix(".as_of").unwrap_or(&name);
+        require_linked_system_member(SystemMember::HistoricalView(view), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17027,6 +17262,7 @@ fn infer_descriptor_system_path(
         });
     }
     if path == ["sys", "database", "as_of"] {
+        require_linked_system_member(SystemMember::HistoricalView("sys.database"), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17036,6 +17272,7 @@ fn infer_descriptor_system_path(
         });
     }
     if let Some(singleton) = api.historical_singleton(path) {
+        require_linked_system_member(SystemMember::HistoricalView(&singleton.name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17050,12 +17287,14 @@ fn infer_descriptor_system_path(
             .find(|function| descriptor_function_is_staticly_supported(function))
     }) && let Some(ty) = descriptor_function_type(function)
     {
+        require_linked_system_member(SystemMember::Callable(&function.label), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty,
             effects: descriptor_effects(function.effect),
         });
     }
     if let Some(relation) = api.relation(&name) {
+        require_linked_system_member(SystemMember::Relation(&name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: Type::Relation(Box::new(Type::Named(relation.name.clone()))),
             effects: descriptor_effects(system_api::SystemEffect::Read),
@@ -17068,10 +17307,15 @@ fn infer_descriptor_system_path(
         });
     }
     match api.resolve(path) {
-        PathResolution::ReadOnly(ty) => DescriptorPathInference::Resolved(Inferred {
-            ty: descriptor_type(ty),
-            effects: EffectSummary::default(),
-        }),
+        PathResolution::ReadOnly(ty) => {
+            if let Some(singleton) = api.singleton_view(path) {
+                require_linked_system_member(SystemMember::Singleton(singleton), scope);
+            }
+            DescriptorPathInference::Resolved(Inferred {
+                ty: descriptor_type(ty),
+                effects: EffectSummary::default(),
+            })
+        }
         PathResolution::Removed(removed) => {
             diagnostics.push(diag(
                 if removed.diagnostic == DIAG_LEGACY_SYS_RUNTIME {
@@ -17097,10 +17341,41 @@ fn infer_descriptor_system_path(
     }
 }
 
+/// Admission requires a linked production provider for every portable member
+/// a program uses. The member keeps its descriptor type and inference carries
+/// on unchanged; the record only feeds `report_unlinked_system_members`.
+fn require_linked_system_member(member: system_api::SystemMember<'_>, scope: &Scope) {
+    if let Some(record) = &scope.unlinked_system_members
+        && !system_api::embedded_system_api().provider_linked(member)
+    {
+        record
+            .borrow_mut()
+            .insert(format!("{member} has no provider linked in this implementation"));
+    }
+}
+
+/// Reports each member in an admission record that has no linked production
+/// provider once, as `sys.version.incompatible`. The program is rejected
+/// before evaluation can perform writes (ORNA-SYS-008) instead of failing
+/// mid-evaluation.
+pub(crate) fn report_unlinked_system_members(
+    record: &RefCell<BTreeSet<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    diagnostics.extend(
+        record
+            .take()
+            .into_iter()
+            .map(|message| diag(DIAG_SYS_VERSION_INCOMPATIBLE, message)),
+    );
+}
+
 fn descriptor_function_is_staticly_supported(function: &system_api::FunctionDescriptor) -> bool {
-    // Semantic admission can model every concrete portable signature and its
+    // Semantic admission can type every concrete portable signature and its
     // declared effect. Generic functions remain explicitly unsupported unless
     // a dedicated descriptor-driven admission path handles their type args.
+    // Typing is not execution: each selected overload must still pass
+    // `require_linked_system_member`.
     function.type_parameters.is_empty()
 }
 
@@ -17283,6 +17558,7 @@ fn infer_descriptor_system_call(
             effects,
         });
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     effects.join(&descriptor_effects(function.effect));
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
@@ -17352,6 +17628,7 @@ fn infer_invoke_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = invoke_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.invoke overload");
 
@@ -17558,6 +17835,7 @@ fn infer_start_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = start_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.start overload");
 
@@ -17963,6 +18241,10 @@ fn infer_query_explain_system_call(
     let wants_query = query_shape && (query_named || is_query || generic_requested);
 
     if wants_query {
+        require_linked_system_member(
+            system_api::SystemMember::Callable(&query_descriptor.label),
+            scope,
+        );
         effects.join(&descriptor_effects(query_descriptor.effect));
         if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
             return Some(Inferred {
@@ -18054,6 +18336,10 @@ fn infer_query_explain_system_call(
                     && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
             })
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -18069,6 +18355,10 @@ fn infer_query_explain_system_call(
             })
             .find(|function| descriptor_arguments_match(function, arguments, &values))
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -18135,6 +18425,7 @@ fn infer_meta_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if !valid_shape {
         diagnostics.push(diag(
             DIAG_TYPE,
@@ -18312,6 +18603,7 @@ fn infer_cancel_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -18471,6 +18763,7 @@ fn infer_await_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -18750,11 +19043,15 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
     }
 }
 
-fn infer_system_path(path: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Option<Inferred> {
+fn infer_system_path(
+    path: &[&str],
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if path.first() != Some(&"sys") {
         return None;
     }
-    match infer_descriptor_system_path(path, diagnostics) {
+    match infer_descriptor_system_path(path, scope, diagnostics) {
         DescriptorPathInference::Resolved(inferred) => Some(inferred),
         DescriptorPathInference::Rejected => Some(Inferred {
             ty: Type::Error,
@@ -23383,19 +23680,27 @@ fn infer_historical_member(
 
     // The portable system surface is descriptor-backed rather than a source
     // ModuleHeader.  Project only relations explicitly present in api/sys.json
-    // and keep unknown historical system members unresolved.
-    if namespace == "sys"
-        && system_api::embedded_system_api()
-            .relation(&format!("sys.{name}"))
+    // and keep unknown historical system members unresolved. Reading one
+    // through a database snapshot is its historical view, which needs its own
+    // linked provider.
+    if namespace == "sys" {
+        let relation = format!("sys.{name}");
+        if system_api::embedded_system_api()
+            .relation(&relation)
             .is_some()
-    {
-        return Some(Inferred {
-            ty: historical_table_type(snapshot, &format!("sys.{name}")),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        });
+        {
+            require_linked_system_member(
+                system_api::SystemMember::HistoricalView(&relation),
+                scope,
+            );
+            return Some(Inferred {
+                ty: historical_table_type(snapshot, &relation),
+                effects: EffectSummary {
+                    effects: BTreeSet::from(["database read".into()]),
+                    may_fail: true,
+                },
+            });
+        }
     }
 
     let module = scope.historical_modules.get(&Namespace(
@@ -26304,8 +26609,27 @@ mod tests {
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }
+    /// Analysis as an evaluating host admits it: against production providers.
+    fn admitted(inputs: &[ModuleInput]) -> Analysis {
+        analyze_with_providers(inputs, &Catalogue::empty(), SystemProviders::Production)
+    }
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
+    }
+    /// Every diagnostic as `code: message`. Diagnostic `Debug` output is
+    /// redacted, so tests compare these texts instead.
+    fn diagnostic_texts(diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect()
+    }
+    /// The admission diagnostic for a portable member without a linked
+    /// production provider.
+    fn unlinked(member: &str) -> String {
+        format!(
+            "{DIAG_SYS_VERSION_INCOMPATIBLE}: {member} has no provider linked in this implementation"
+        )
     }
     #[test]
     fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
@@ -26674,6 +26998,18 @@ mod tests {
                 ),
             )]);
             assert!(valid.is_ok(), "{operation}: {:#?}", valid.diagnostics);
+            // The call types, but no production provider is linked for the
+            // failure administration callables (ORNA-SYS-008).
+            let admitted_call = admitted(&[ModuleInput::new(
+                "failure-cas.orna",
+                format!(
+                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
+                ),
+            )]);
+            assert_eq!(
+                diagnostic_texts(&admitted_call.diagnostics),
+                [unlinked(&format!("portable system callable `sys.admin.{operation}`"))],
+            );
 
             let missing_version = checked(&[ModuleInput::new(
                 "failure-cas.orna",
@@ -26687,6 +27023,129 @@ mod tests {
                 missing_version.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn unlinked_sys_members_are_rejected_with_version_incompatible() {
+        for (source, member) in [
+            (
+                "pub fn info() = sys.rt.info();",
+                "portable system callable `sys.rt.info`",
+            ),
+            (
+                "pub fn head() = sys.snapshot(\"HEAD~1\");",
+                "portable system callable `sys.snapshot(Str)`",
+            ),
+            (
+                "pub fn metadata() = sys.meta(1);",
+                "portable system callable `sys.meta`",
+            ),
+            (
+                "pub fn plan(function: sys.FunctionRef) = sys.explain(function);",
+                "portable system callable `sys.explain(FunctionRef)`",
+            ),
+            ("pub fn plans() = sys.Plan;", "portable system relation `sys.Plan`"),
+            ("pub fn runs() = sys.Run;", "portable system relation `sys.Run`"),
+            (
+                "pub fn objects() = sys.storage.objects;",
+                "portable system relation `sys.storage.objects`",
+            ),
+            ("pub fn owner() = sys.rt.id;", "portable system singleton `sys.rt`"),
+            (
+                "pub fn published() = sys.Storage.as_of(HEAD);",
+                "historical view `sys.Storage.as_of`",
+            ),
+            (
+                "pub fn old() = sys.database.as_of(HEAD);",
+                "historical view `sys.database.as_of`",
+            ),
+        ] {
+            let declared = checked(&[ModuleInput::new("main.orna", source)]);
+            assert!(declared.is_ok(), "{source}: {:#?}", diagnostic_texts(&declared.diagnostics));
+            let analysis = admitted(&[ModuleInput::new("main.orna", source)]);
+            assert_eq!(
+                diagnostic_texts(&analysis.diagnostics),
+                [unlinked(member)],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_sys_members_are_admitted() {
+        let analysis = admitted(&[ModuleInput::new(
+            "linked.orna",
+            "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");
+            pub fn capture(): Blob = sys.blob.capture_file(\"data\", \"input.bin\", 1024);
+            pub fn pause(stream: sys.StreamRef): Bool = sys.admin.pause_stream(stream);
+            pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
+            pub fn storage() = sys.Storage;
+            pub fn maintenance() = sys.MaintenanceJob;
+            pub fn plan() = sys.Storage | sys.explain();",
+        )]);
+        assert!(
+            analysis.is_ok(),
+            "{:#?}",
+            diagnostic_texts(&analysis.diagnostics)
+        );
+    }
+
+    #[test]
+    fn each_unlinked_sys_member_is_reported_once_per_analysis() {
+        let analysis = admitted(&[
+            ModuleInput::new(
+                "a.orna",
+                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+            ),
+            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+        ]);
+        assert_eq!(
+            diagnostic_texts(&analysis.diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+    }
+
+    #[test]
+    fn provider_linkage_leaves_type_checking_unchanged() {
+        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let declared = diagnostic_texts(&checked(&source).diagnostics);
+        let mut production = diagnostic_texts(&admitted(&source).diagnostics);
+        assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
+        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        assert!(production.contains(&unlinked_member), "{production:#?}");
+        production.retain(|text| *text != unlinked_member);
+        assert_eq!(production, declared);
+    }
+
+    #[test]
+    fn repl_admission_rejects_unlinked_sys_members() {
+        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        assert!(rejected.is_ok());
+        let diagnostics = ReplContext::with_providers(SystemProviders::Production)
+            .stage(&rejected.value)
+            .expect_err("no production provider is linked for sys.rt.info");
+        assert_eq!(
+            diagnostic_texts(&diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+
+        assert!(ReplContext::empty().stage(&rejected.value).is_ok());
+        let project = admitted(&[ModuleInput::new("main.orna", "pub fn one(): Int = 1;")]);
+        assert!(
+            ReplContext::from_analysis(&project)
+                .unwrap()
+                .stage(&rejected.value)
+                .is_err(),
+            "a REPL built from a production analysis keeps its provider linkage"
+        );
+
+        let admitted_input = orna_syntax_v1::parse_repl("sys.Storage");
+        assert!(admitted_input.is_ok());
+        assert!(
+            ReplContext::with_providers(SystemProviders::Production)
+                .stage(&admitted_input.value)
+                .is_ok()
+        );
     }
 
     #[test]
