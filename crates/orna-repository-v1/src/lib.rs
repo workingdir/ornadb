@@ -3031,6 +3031,31 @@ impl Repository {
         }
     }
 
+    /// Whether a local branch names `commit` or descends from it. A commit
+    /// that is not in the object database is contained by no branch.
+    fn branch_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
+        if self
+            .commit_optional(&format!("{}^{{commit}}", commit.as_str()))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let mut command = self.command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            commit.as_str(),
+            "refs/heads/",
+        ]);
+        Ok(self
+            .run(command)?
+            .stdout
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace()))
+    }
+
     /// Installs the ordinary index image for a published candidate. Only the
     /// supplied managed paths are replaced from the candidate tree; unrelated
     /// staged entries remain in the captured index. The worktree is not
@@ -4290,11 +4315,15 @@ impl Repository {
                 self.advance_current_ref_bound(journal.old_head(), candidate, selected_ref)
             });
         if let Err(error) = advanced {
-            // After a refused or lost CAS, a HEAD that lacks the candidate
-            // shows that the journal this attempt wrote names nothing that was
-            // published: discard it and keep the batch pending. A journal
-            // retained from an earlier attempt stays with recovery.
-            if !resumes_retained_journal && !self.head_contains_commit(candidate.commit())? {
+            // After a refused or lost CAS, a candidate that neither HEAD nor
+            // any branch contains shows that the journal this attempt wrote
+            // names nothing that was published: discard it and keep the batch
+            // pending. A journal retained from an earlier attempt stays with
+            // recovery.
+            if !resumes_retained_journal
+                && !self.head_contains_commit(candidate.commit())?
+                && !self.branch_contains_commit(candidate.commit())?
+            {
                 self.clear_publication_journal_locked()?;
             }
             return Err(error);
@@ -4376,18 +4405,24 @@ impl Repository {
             tree: Some(base_tree),
         };
         // Recovery row "Ref still at H": Orna changes the ordinary index and
-        // worktree only after RefAdvanced is durable. While HEAD lacks the
-        // candidate, a Prepared publication journal therefore records nothing
-        // that was published. Drop it and keep the batch pending in the
-        // runtime, whether or not the unreferenced candidate still exists and
-        // whatever the user staged since (ORNA-PUB-006, ORNA-PUB-012). Compact
-        // and legacy-migration journals carry evidence their publishers resume
+        // worktree only after RefAdvanced is durable. While neither HEAD nor
+        // any branch contains the candidate, a Prepared publication journal
+        // therefore records nothing that was published. Drop it and keep the
+        // batch pending in the runtime, whether or not the unreferenced
+        // candidate still exists and whatever the user staged since
+        // (ORNA-PUB-006, ORNA-PUB-012). A candidate that a branch holds while
+        // HEAD does not may already be published there, so the journal stays
+        // as a recovery conflict (row "Ref no longer H or N"). Compact and
+        // legacy-migration journals carry evidence their publishers resume
         // from, so they keep their own boundaries below.
         if journal.stage() == PublicationJournalStage::Prepared
             && journal.compact_manifest().is_none()
             && journal.migration_continuity().is_none()
             && !self.head_contains_commit(journal.new_head())?
         {
+            if self.branch_contains_commit(journal.new_head())? {
+                return Err(RepositoryError::StaleHead);
+            }
             self.clear_publication_journal_locked()?;
             return Ok(Some(self.index_generation()?));
         }

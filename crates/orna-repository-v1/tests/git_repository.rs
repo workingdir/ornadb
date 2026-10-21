@@ -6351,6 +6351,36 @@ fn recovery_discards_a_prepared_journal_only_while_head_lacks_the_candidate() {
     assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
 }
 
+/// Recovery row "Ref no longer H or N": a CAS that landed before the
+/// publisher died leaves the batch published on its branch. After the user
+/// switches to another branch, recovery must keep the journal as a conflict
+/// rather than discard it and publish the batch a second time (ORNA-PUB-008).
+#[test]
+fn recovery_keeps_a_prepared_journal_whose_candidate_another_branch_holds() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [20; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    git(
+        root.path(),
+        &["switch", "--quiet", "-c", "other", head.as_str()],
+    );
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        candidate.commit().as_str()
+    );
+}
+
 #[test]
 fn recovery_rejects_a_post_ref_journal_whose_bytes_differ_from_the_candidate() {
     let root = repository();
