@@ -8,7 +8,10 @@
 //! one HTTP session request, one WebSocket handshake phase, or the admission
 //! or completion of one frame. It is never held across socket I/O or
 //! evaluation, so an open WebSocket cannot stall other sockets or session
-//! requests.
+//! requests. Ending a session is the exception: DELETE and the expiry sweep
+//! cancel the session's application work and keep the lock until that work
+//! has stopped, because the transport drains a session in one step. The
+//! session's socket workers are joined after the lock is released.
 
 use super::*;
 use orna_application_v1::ApplicationLiveAdapter;
@@ -33,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH},
@@ -58,14 +61,34 @@ const CLOSE_IDLE: u16 = 1001;
 /// attachment, for example because a resume replaced it (1008, policy
 /// violation).
 const CLOSE_RETIRED: u16 = 1008;
+/// Interval at which the owner sweep looks for sessions whose lease has
+/// elapsed.
+const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
+/// Bound on how long DELETE waits for the socket workers it cancelled to
+/// exit before it reports orderly termination. A cancelled worker finishes
+/// its in-flight step, sends a Close frame and exits.
+const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
 
 /// Operator choices for one `orna serve` process.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ServeOptions {
     /// Smart-HTTP push (`git-receive-pack`) changes refs in the served clone,
     /// so it is refused unless the operator passes `serve --allow-push`.
     allow_push: bool,
     keepalive: WebSocketKeepalive,
+    /// Lifetime of a live session, which is also its reconnection lease. The
+    /// owner sweep terminates a session once it has elapsed.
+    session_lease_ms: u64,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            allow_push: false,
+            keepalive: WebSocketKeepalive::default(),
+            session_lease_ms: SESSION_LEASE_MS,
+        }
+    }
 }
 
 /// Liveness bounds for one attached WebSocket.
@@ -176,24 +199,37 @@ struct SessionState {
 
 impl ServeState {
     /// Runs one transport step under the session lock, then hands each
-    /// attachment the transport retired (by resume, replacement, close or an
-    /// abandoned handshake) to the socket worker that owns it for
-    /// cancellation. A retirement whose worker has already exited is
-    /// acknowledged here. A running worker acknowledges its own retirement
+    /// attachment the transport retired (by resume, replacement, close,
+    /// deletion, expiry or an abandoned handshake) to the socket worker that
+    /// owns it for cancellation. A retirement whose worker has already exited
+    /// is acknowledged here. A running worker acknowledges its own retirement
     /// as its last step, so the transport keeps the session fenced until no
     /// worker can act for the retired attachment.
     fn with_sessions<T>(&self, step: impl FnOnce(&mut SessionState) -> T) -> io::Result<T> {
+        self.with_sessions_retiring(step).map(|(result, _)| result)
+    }
+
+    /// [`Self::with_sessions`], also returning the attachments whose running
+    /// workers the step cancelled, so that the caller can wait for them to
+    /// exit (see [`WebSocketWorkers::join`]).
+    fn with_sessions_retiring<T>(
+        &self,
+        step: impl FnOnce(&mut SessionState) -> T,
+    ) -> io::Result<(T, Vec<[u8; 16]>)> {
         let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| io::Error::other("live session state is unavailable"))?;
         let result = step(&mut sessions);
+        let mut cancelled = Vec::new();
         for attachment in sessions.live.take_retired_attachments() {
-            if !self.workers.cancel(attachment) {
+            if self.workers.cancel(attachment) {
+                cancelled.push(attachment);
+            } else {
                 sessions.live.acknowledge_retired_attachment(attachment);
             }
         }
-        Ok(result)
+        Ok((result, cancelled))
     }
 }
 
@@ -202,6 +238,9 @@ impl ServeState {
 #[derive(Default)]
 struct WebSocketWorkers {
     workers: Mutex<BTreeMap<[u8; 16], RegisteredWorker>>,
+    /// Signalled each time a worker exits, for requests that wait for the
+    /// workers they cancelled.
+    exited: Condvar,
 }
 
 struct RegisteredWorker {
@@ -249,9 +288,35 @@ impl WebSocketWorkers {
     /// Removes an exiting worker and reports whether it still owes the
     /// transport an acknowledgement for its retirement.
     fn finish(&self, attachment: [u8; 16]) -> bool {
-        self.lock()
+        let retired = self
+            .lock()
             .remove(&attachment)
-            .is_some_and(|worker| worker.retired)
+            .is_some_and(|worker| worker.retired);
+        self.exited.notify_all();
+        retired
+    }
+
+    /// Waits until no worker owns any of `attachments`, or until `deadline`.
+    /// Returns whether they have all exited.
+    fn join(&self, attachments: &[[u8; 16]], deadline: Instant) -> bool {
+        let mut workers = self.lock();
+        loop {
+            if !attachments
+                .iter()
+                .any(|attachment| workers.contains_key(attachment))
+            {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            workers = self
+                .exited
+                .wait_timeout(workers, remaining)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<[u8; 16], RegisteredWorker>> {
@@ -263,6 +328,7 @@ impl WebSocketWorkers {
 
 struct LocalSessionAuthority {
     identity: RuntimeIdentity,
+    lease_ms: u64,
 }
 
 impl LiveSessionAuthority for LocalSessionAuthority {
@@ -297,7 +363,7 @@ impl LiveSessionAuthority for LocalSessionAuthority {
             session,
             database,
             runtime: self.identity.repository_id,
-            expires_at: now.saturating_add(SESSION_LEASE_MS),
+            expires_at: now.saturating_add(self.lease_ms),
             subscribe: subscription,
         })
     }
@@ -419,7 +485,7 @@ fn new_serve_state(
             "retry `serve` with a supported local listener",
         )
     })?;
-    let boundary = SessionBoundary::new(OriginPolicy::new(origins, []), SESSION_LEASE_MS);
+    let boundary = SessionBoundary::new(OriginPolicy::new(origins, []), options.session_lease_ms);
     let host = LiveHost::new(
         orna_live_v1::Limits::default(),
         boundary,
@@ -461,7 +527,10 @@ fn new_serve_state(
         transport_limits,
         sessions: Mutex::new(SessionState {
             live,
-            authority: LocalSessionAuthority { identity },
+            authority: LocalSessionAuthority {
+                identity,
+                lease_ms: options.session_lease_ms,
+            },
             issuer: SystemCredentialIssuer::default(),
             deletion: LocalSessionDeletion,
         }),
@@ -471,6 +540,7 @@ fn new_serve_state(
 }
 
 fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
+    start_session_sweep(state)?;
     for accepted in listener.incoming() {
         let stream = accepted?;
         let connection_state = Arc::clone(state);
@@ -481,6 +551,37 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
             })?;
     }
     Ok(())
+}
+
+/// Starts the owner sweep (30-protocol, Session creation and ownership:
+/// expiry terminates the owner and cancels its children). Every
+/// [`SESSION_SWEEP_INTERVAL`] it ends each session whose lease has elapsed
+/// through the same child-aware drain as DELETE, together with abandoned
+/// handshakes, and [`ServeState::with_sessions`] cancels their socket
+/// workers. The sweep stops once the serving state has been dropped.
+fn start_session_sweep(state: &Arc<ServeState>) -> io::Result<()> {
+    let state = Arc::downgrade(state);
+    let executor = current_thread_executor()?;
+    std::thread::Builder::new()
+        .name("orna-serve-session-sweep".into())
+        .spawn(move || sweep_sessions(&state, &executor))
+        .map(drop)
+}
+
+fn sweep_sessions(state: &Weak<ServeState>, executor: &tokio::runtime::Runtime) {
+    loop {
+        std::thread::sleep(SESSION_SWEEP_INTERVAL);
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        // A session whose drain fails stays in place, and the next pass
+        // retries it.
+        let _ = state.with_sessions(|sessions| {
+            let SessionState { live, deletion, .. } = sessions;
+            let mut children = live.application_work_supervisor();
+            executor.block_on(live.expire_sessions_with_children(now_ms(), deletion, &mut children))
+        });
+    }
 }
 
 fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
@@ -522,6 +623,11 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
     write_response(&mut stream, response)
 }
 
+/// Answers one `/orna/session` request through the transport's child-aware
+/// entry, so DELETE cancels and joins the session's application work
+/// through the work supervisor. DELETE answers 204 only once the socket
+/// workers it cancelled have exited too (30-protocol, Session creation and
+/// ownership: 204 after orderly termination).
 fn serve_session_http_request(
     stream: &mut TcpStream,
     request: Request,
@@ -534,15 +640,36 @@ fn serve_session_http_request(
         body: request.body,
     };
     let executor = current_thread_executor()?;
-    let response = state.with_sessions(|sessions| {
+    let (mut response, cancelled) = state.with_sessions_retiring(|sessions| {
         let SessionState {
             live,
             authority,
             issuer,
             deletion,
         } = sessions;
-        executor.block_on(live.handle(wire, now_ms(), authority, issuer, deletion))
+        let mut children = live.application_work_supervisor();
+        executor.block_on(live.handle_with_children(
+            wire,
+            now_ms(),
+            authority,
+            issuer,
+            deletion,
+            &mut children,
+        ))
     })?;
+    if response.status == 204
+        && !state
+            .workers
+            .join(&cancelled, Instant::now() + SESSION_TERMINATION_TIMEOUT)
+    {
+        // The session is gone, but a socket worker of it is still running,
+        // so termination is not yet orderly.
+        response = WireResponse {
+            status: 503,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: br#"{"code":"live.unavailable","message":"request rejected"}"#.to_vec(),
+        };
+    }
     stream.write_all(&encode_http_response(&response, state.transport_limits)?)?;
     stream.flush()
 }
@@ -596,9 +723,10 @@ fn serve_websocket(
 /// The worker thread for one WebSocket. It drives the transport's actor path
 /// one step at a time: a frame is admitted under the session lock,
 /// application work runs under the application lock only, and output is
-/// written with neither lock held. Dropping the worker unregisters it,
-/// closes its attachment (which starts the session's reconnection lease)
-/// and acknowledges a retirement the transport handed it while it ran.
+/// written with neither lock held. Dropping the worker ends its connection,
+/// unregisters it, closes its attachment (which starts the session's
+/// reconnection lease) and acknowledges a retirement the transport handed
+/// it while it ran.
 struct WebSocketWorker<'a> {
     state: &'a ServeState,
     executor: &'a tokio::runtime::Runtime,
@@ -818,6 +946,9 @@ impl WebSocketWorker<'_> {
 
 impl Drop for WebSocketWorker<'_> {
     fn drop(&mut self) {
+        // The peer sees the connection end before anyone waiting for this
+        // worker to exit, such as a DELETE of its session, is released.
+        let _ = self.stream.shutdown(Shutdown::Both);
         let retired = self.state.workers.finish(self.attachment);
         let _ = self.state.with_sessions(|sessions| {
             // A retired, refused or never-committed attachment is already
@@ -2925,6 +3056,66 @@ mod tests {
         assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [52; 16]));
     }
 
+    /// 30-protocol §Session creation and ownership, A13-live-serving-15:
+    /// DELETE ends a session whose socket is still attached and which owns
+    /// application work. It cancels the socket's worker, which sends its
+    /// closing handshake and disconnects, and answers 204 only after that
+    /// worker has exited. Before, DELETE answered 503 while a socket was
+    /// attached and 400 once the session had run an evaluation.
+    #[test]
+    fn delete_ends_an_attached_session_after_its_socket_worker_exits() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=delete"],
+        );
+        let (address, state) =
+            start_shared_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        // The result also shows that the attachment has been committed.
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [61; 16]));
+
+        let deleted = delete_session(address, &session);
+        assert_eq!(deleted.status, 204, "{}", deleted.body);
+        assert!(
+            state.workers.lock().is_empty(),
+            "the socket's worker exits before the 204 is written"
+        );
+        expect_server_close(&mut socket, CLOSE_RETIRED);
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
+    /// 30-protocol §Session creation and ownership, A13-live-serving-15:
+    /// expiry terminates the owner and cancels its children. Once a session's
+    /// lease elapses, the owner sweep ends it without any client request, so
+    /// its attached socket is closed and its token can no longer resume it.
+    #[test]
+    fn expired_sessions_are_ended_by_the_owner_sweep() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=expiry"],
+        );
+        // Keepalive pings start only after 15 s and the client waits at most
+        // LIVE_TEST_TIMEOUT for the Close frame, so only the sweep can close
+        // the socket in time. The lease leaves the evaluation four seconds.
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                session_lease_ms: 4_000,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [71; 16]));
+
+        expect_server_close(&mut socket, CLOSE_RETIRED);
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
     const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
     const TEST_IDENTITY: RuntimeIdentity = RuntimeIdentity {
         database_id: [31; 16],
@@ -3051,9 +3242,9 @@ mod tests {
         live_session(&reply)
     }
 
-    fn resume_session(address: SocketAddr, session: &LiveSession) -> LiveSession {
+    fn resume_reply(address: SocketAddr, session: &LiveSession) -> Reply {
         let host = address.to_string();
-        let reply = post_json(
+        post_json(
             address,
             &host,
             Some(&format!("http://{host}")),
@@ -3062,25 +3253,32 @@ mod tests {
                 r#"{{"resume_token":"{}","protocol":"orna.present.v1"}}"#,
                 session.token
             ),
-        );
+        )
+    }
+
+    fn resume_session(address: SocketAddr, session: &LiveSession) -> LiveSession {
+        let reply = resume_reply(address, session);
         assert_eq!(reply.status, 200, "{}", reply.body);
         live_session(&reply)
+    }
+
+    fn delete_session(address: SocketAddr, session: &LiveSession) -> Reply {
+        let host = address.to_string();
+        exchange(
+            address,
+            &format!(
+                "DELETE /orna/session/{} HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nAuthorization: Bearer {}\r\n\r\n",
+                session.id, session.token
+            ),
+        )
     }
 
     /// Deletion answers 503 while a retired socket worker of the session has
     /// not yet acknowledged its retirement, so retry until it settles.
     fn delete_session_once_released(address: SocketAddr, session: &LiveSession) -> u16 {
-        let host = address.to_string();
         let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
         loop {
-            let status = exchange(
-                address,
-                &format!(
-                    "DELETE /orna/session/{} HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nAuthorization: Bearer {}\r\n\r\n",
-                    session.id, session.token
-                ),
-            )
-            .status;
+            let status = delete_session(address, session).status;
             if status != 503 || Instant::now() >= deadline {
                 return status;
             }
