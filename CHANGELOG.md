@@ -88,6 +88,18 @@ been published.
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
 
+- The parser no longer changes valid source silently: a comparison followed
+  later by `> (` keeps all of its tokens; a braced control statement (`if`,
+  `case`, `for`, `while` or `loop`) ends before a following `(`, `[`, `-`, `+`
+  or `..` item; control headers never read `Name {` as a constructor (an
+  unparenthesised one before the body is reported); table subjectless
+  predicates keep their operator; and spaceless arithmetic such as
+  `1+10-20-30` is not a date.
+- Case guards such as `x if x < limit:`, `assert` as a variant, label, field or
+  member name, and default parameters of generic functions parse in modules as
+  in the REPL. Legacy assertion, colon-bound and assignment-expression
+  diagnostics now come from the failing production in every entry point.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
