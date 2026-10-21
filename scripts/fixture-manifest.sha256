@@ -3480,6 +3480,8 @@ e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-re
 abe8d8d34d5b65d1556e2e286cc6d6649b29b7fd9f5fb78d028f6853e364371c  crates/orna-repository-v1/tests/fixtures/git-repository-nested-tool.orna
 c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891  crates/orna-repository-v1/tests/fixtures/media/tone.wav
 f4343261af4a130f83991fab9b5cce452b00734918b536fbeef0ead2850511c1  crates/orna-repository-v1/tests/fixtures/offline-complete-copy/dependency.orna
+4a72402858b5cee6372db5bd81f83a1db64a8a9deed997113835393f30d7f32b  crates/orna-repository-v1/tests/fixtures/orp1-vectors/README.md
+b46e6cff6c5641a8b47483c732df6a0dc7e7f02fff540fb74342cfcd5ac5b1f0  crates/orna-repository-v1/tests/fixtures/orp1-vectors/orp1-vectors.json
 9662403d4258a1075344fce92e27c27b4975046f1056b89f176eec84133497e0  crates/orna-repository-v1/tests/fixtures/pin-roundtrip.orna
 c60afad93513466ccb681cdc6839ebed60847bf5e26d888743c2b0b338b348e9  crates/orna-repository-v1/tests/fixtures/row-edit-v2.orna
 2e88c870800727fb7dbf4dbe95619ab9cfa1b675b896b9985f15ec78e9fca510  crates/orna-repository-v1/tests/fixtures/snapshot-round-trip.orna

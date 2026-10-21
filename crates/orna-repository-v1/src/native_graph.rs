@@ -1276,43 +1276,20 @@ impl NativeGraphContext {
     }
 
     /// Builds one canonical ORP-1 ordered map over `entries`, which must be in
-    /// strictly ascending logical key order (store-format-3 §3). Leaf pages
-    /// are cut by the boundary anchor and the 64 KiB, 256-entry and 256-ref
-    /// bounds; each branch level repeats the rule over its children's
-    /// inclusive maximum keys until one root remains; an empty map is one
-    /// empty leaf. Every node is written through `write_node`, leaves first,
-    /// and the root is returned. This is the one ORP-1 builder: row
-    /// maintenance and relation admission both build through it.
+    /// strictly ascending logical key order (store-format-3 §3), writing every
+    /// node through `write_node` and returning the root. This is the one
+    /// ORP-1 builder: row maintenance and relation admission both build
+    /// through `crate::orp`, which cuts pages by exact node bytes and distinct
+    /// native refs.
     pub(crate) fn build_canonical_ordered_map(
         domain: &[u8],
         entries: &[crate::row_store::RowEntry],
         write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
     ) -> Result<NativeOid, GraphError> {
-        if entries
-            .windows(2)
-            .any(|pair| pair[0].key() >= pair[1].key())
-        {
-            return Err(GraphError::NonCanonicalData);
-        }
-        let leaf_pages = crate::row_store::partition_pages(entries, 0)
-            .map_err(|_| GraphError::NonCanonicalData)?;
-        let mut level: Vec<BranchCandidate> = Vec::new();
-        if leaf_pages.is_empty() {
-            // The empty table is one empty leaf, not zero pages.
-            let oid = write_node(&NodeData::OrderedLeaf {
-                domain: domain.to_vec(),
-                entries: Vec::new(),
-            })?;
-            level.push(BranchCandidate {
-                max_key: Vec::new(),
-                oid,
-                row_count: 0,
-            });
-        }
-        for page in &leaf_pages {
-            let mut page_entries = Vec::with_capacity(page.entries().len());
-            for entry in page.entries() {
-                page_entries.push(OrderedLeafEntry {
+        let entries = entries
+            .iter()
+            .map(|entry| {
+                Ok(OrderedLeafEntry {
                     key: entry
                         .key()
                         .canonical_bytes()
@@ -1321,69 +1298,10 @@ impl NativeGraphContext {
                         .value()
                         .canonical_page_bytes()
                         .map_err(|_| GraphError::NonCanonicalData)?,
-                });
-            }
-            // The fence is the canonical encoding of the page's inclusive
-            // maximum key. `entry.key` is already that encoding, so it is kept
-            // as bytes: decoding it to a typed key and re-encoding it would be
-            // the same bytes, and the branch encoder and every fence comparison
-            // consume the canonical spelling rather than a typed key (ORP-1).
-            let max_key = page_entries
-                .last()
-                .map_or(Vec::new(), |entry| entry.key.clone());
-            let row_count = page_entries.len() as u64;
-            let oid = write_node(&NodeData::OrderedLeaf {
-                domain: domain.to_vec(),
-                entries: page_entries,
-            })?;
-            level.push(BranchCandidate {
-                max_key,
-                oid,
-                row_count,
-            });
-        }
-
-        let mut height = 1u8;
-        while level.len() > 1 {
-            if height > MAX_GRAPH_HEIGHT {
-                return Err(GraphError::HeightExceeded(height));
-            }
-            let groups = partition_branch_candidates(domain, height, &level)?;
-            if groups.len() >= level.len() {
-                return Err(GraphError::FanoutExceeded(level.len()));
-            }
-            let mut next = Vec::with_capacity(groups.len());
-            for group in groups {
-                let oid = write_node(&NodeData::OrderedBranch {
-                    domain: domain.to_vec(),
-                    height,
-                    entries: group
-                        .iter()
-                        .map(|candidate| OrderedBranchEntry {
-                            inclusive_max_key: candidate.max_key.clone(),
-                            child: candidate.oid.clone(),
-                            row_count: candidate.row_count,
-                        })
-                        .collect(),
-                })?;
-                next.push(BranchCandidate {
-                    max_key: group
-                        .last()
-                        .ok_or(GraphError::InvalidCount(0))?
-                        .max_key
-                        .clone(),
-                    oid,
-                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
-                });
-            }
-            level = next;
-            height += 1;
-        }
-        Ok(level
-            .first()
-            .ok_or(GraphError::InvalidCount(0))?
-            .oid
-            .clone())
+                })
+            })
+            .collect::<Result<Vec<_>, GraphError>>()?;
+        crate::orp::build_ordered_map(domain, entries, write_node)
     }
 
     /// Reads every relation entry of one `.orna/store` root in ascending
@@ -7172,14 +7090,6 @@ fn replace_ordered_entry_with(
     }
 }
 
-/// One child of a branch level under construction: the exact fence and count
-/// its parent entry will name, plus the object its envelope was written as.
-struct BranchCandidate {
-    max_key: Vec<u8>,
-    oid: NativeOid,
-    row_count: u64,
-}
-
 /// Applies one maintenance pass in the canonical order: deletes, then rekeys,
 /// then inserts. Every mutation is checked against the row set the pinned root
 /// actually held, so an absent delete/rekey source or a colliding insert is
@@ -7243,88 +7153,6 @@ fn locate_insertion(
 ) -> usize {
     rows.binary_search_by(|(existing, _)| existing.cmp(key))
         .unwrap_or_else(|index| index)
-}
-
-/// Groups branch children into canonical ORP-1 branch pages: accumulate until
-/// the next entry would exceed the 64 KiB node data bound, 256 entries or 256
-/// distinct native refs; close a group at an anchor once it holds at least 16
-/// entries, or at exactly 256; and emit the final short tail.
-fn partition_branch_candidates<'a>(
-    domain: &[u8],
-    height: u8,
-    candidates: &'a [BranchCandidate],
-) -> Result<Vec<&'a [BranchCandidate]>, GraphError> {
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    let mut size = 16usize + domain.len();
-    let mut refs = 0usize;
-    for (index, candidate) in candidates.iter().enumerate() {
-        let entry_size = branch_entry_encoded_size(candidate)?;
-        if entry_size + 16 + domain.len() > NODE_DATA_LIMIT {
-            return Err(GraphError::NodeDataTooLarge(entry_size));
-        }
-        let held = index - start;
-        let would_overflow = held != 0
-            && (held == crate::row_store::MAX_PAGE_ENTRIES
-                || refs + 1 > MAX_REFS
-                || size + entry_size > NODE_DATA_LIMIT);
-        if would_overflow {
-            groups.push(&candidates[start..index]);
-            start = index;
-            size = 16 + domain.len();
-            refs = 0;
-        }
-        size += entry_size;
-        refs += 1;
-        let held = index - start + 1;
-        let anchor = ordered_token_anchor(height, &candidate.max_key)?;
-        if held >= crate::row_store::MIN_PAGE_ENTRIES
-            && (anchor || held == crate::row_store::MAX_PAGE_ENTRIES)
-        {
-            groups.push(&candidates[start..=index]);
-            start = index + 1;
-            size = 16 + domain.len();
-            refs = 0;
-        }
-    }
-    if start < candidates.len() {
-        groups.push(&candidates[start..]);
-    }
-    Ok(groups)
-}
-
-/// Conservative encoded size of one `[inclusive_max_key, child_oid, count]`
-/// entry: the entry array head is one byte, the child is a byte string header
-/// plus the native width, and the count is a shortest definite head.
-fn branch_entry_encoded_size(candidate: &BranchCandidate) -> Result<usize, GraphError> {
-    let oid = candidate.oid.as_bytes().len();
-    Ok(1 + 1 + candidate.max_key.len() + 1 + oid + cbor_unsigned_len(candidate.row_count))
-}
-
-const fn cbor_unsigned_len(value: u64) -> usize {
-    if value < 24 {
-        1
-    } else if value <= u8::MAX as u64 {
-        2
-    } else if value <= u16::MAX as u64 {
-        3
-    } else if value <= u32::MAX as u64 {
-        5
-    } else {
-        9
-    }
-}
-
-/// The ORP-1 anchor test over an arbitrary canonical token. A leaf token is the
-/// key's own canonical bytes, so this agrees with `row_store::boundary_anchor`;
-/// a branch token is the child's inclusive maximum key.
-fn ordered_token_anchor(height: u8, token: &[u8]) -> Result<bool, GraphError> {
-    let mut hasher = Sha256::new();
-    hasher.update(crate::row_store::ORP_DOMAIN);
-    hasher.update(u32::from(height).to_be_bytes());
-    hasher.update(token);
-    let digest = hasher.finalize();
-    Ok(digest[31] & ((1 << crate::row_store::ORP_ANCHOR_BITS) - 1) == 0)
 }
 
 /// Collects every node object of one ordered index (root, branches and leaves)
@@ -11901,7 +11729,7 @@ fn oid_from_width(bytes: &[u8]) -> Result<NativeObjectId, GraphError> {
     NativeObjectId::new(algorithm, bytes)
 }
 
-fn leaf_value_dependencies(
+pub(crate) fn leaf_value_dependencies(
     domain: &[u8],
     value: &[u8],
 ) -> Result<Vec<NativeDependency>, GraphError> {
@@ -12093,18 +11921,6 @@ fn rows_domain_for_version(version: &crate::row_store::RowMapVersion) -> Vec<u8>
 
 fn rows_domain_for_parts(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
     rows_domain(relation_id, schema_digest)
-}
-
-fn row_page_anchor(height: u8, key: &crate::row_store::TypedKey) -> Result<bool, GraphError> {
-    let canonical = key
-        .canonical_bytes()
-        .map_err(|_| GraphError::NonCanonicalData)?;
-    let mut hasher = Sha256::new();
-    hasher.update(crate::row_store::ORP_DOMAIN);
-    hasher.update(u32::from(height).to_be_bytes());
-    hasher.update(canonical);
-    let digest = hasher.finalize();
-    Ok(digest[31] & ((1 << crate::row_store::ORP_ANCHOR_BITS) - 1) == 0)
 }
 
 fn decode_candidate_blob_metadata(

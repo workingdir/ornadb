@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Format-3 row maps and the relation map cut pages by the exact ORP-1 rule:
+  the encoded node bytes, including the domain and entry-count heads, and the
+  page's distinct native refs. The same rows now give the same root as the
+  Orna 1.1.0 reference model. Earlier builds estimated sizes and summed refs,
+  so they cut pages early for large rows and for rows sharing Blob
+  descriptors.
 - A format-3 project whose `main.orna` is larger than 64 KiB can query,
   publish, show history and mount its rows. Opening a row map pins the
   committed `main.orna` by its blob OID instead of reading the source under a
