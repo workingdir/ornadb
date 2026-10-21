@@ -87,7 +87,13 @@ pub fn reference_standard_profile() -> StandardDependencyProfile {
 }
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
-const DEFAULT_STEPS: u64 = 10_000;
+// Budget for one full-size collection operation at the item limit. Per-element
+// pipeline cost (about 72 steps per `std.collection.map` item, measured) is
+// covered by the linear term. `rank` uses a stable insertion sort whose worst
+// case is n(n-1)/2 comparisons, so the quadratic term covers that bound.
+const DEFAULT_STEPS: u64 = (DEFAULT_ITEMS as u64 * DEFAULT_ITEMS as u64) / 2
+    + DEFAULT_ITEMS as u64 * 200
+    + 10_000;
 const DEFAULT_DEPTH: usize = 64;
 const DEFAULT_ITEMS: usize = 2_048;
 const DEFAULT_STRING_BYTES: usize = 16_384;
