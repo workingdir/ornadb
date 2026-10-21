@@ -87,6 +87,14 @@ pub use abi_version::AbiVersion;
 mod provider;
 pub use provider::*;
 
+mod provider_linkage;
+pub use provider_linkage::{
+    SystemProviderHost, SystemProviderLink, SystemProviderLinkage, SystemSurfaceMember,
+    system_provider_linkage,
+};
+
+mod explain_provider;
+pub use explain_provider::*;
 mod host_registry_model;
 pub use host_registry_model::{
     HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
