@@ -712,10 +712,25 @@ fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
     .expect("library source");
     initialize_project(directory.path());
 
-    let output = invoke(directory.path(), "run", "library.answer");
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+            "library.answer",
+        ])
+        .output()
+        .expect("CLI process");
 
     assert!(!output.status.success());
     assert_ne!(output.stdout, b"invocation completed\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failure code: ORNA-EVAL-DIVIDE-BY-ZERO"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
