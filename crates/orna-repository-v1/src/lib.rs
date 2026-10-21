@@ -2926,7 +2926,9 @@ impl Repository {
         let reference = self.advance_target_ref(expected_head, expected_ref)?;
         // ORNA-PUB-005: every object the candidate adds is durable before the
         // ref names it, and the ref is durable before a journal stage or the
-        // runtime's tail consumption relies on it.
+        // runtime's tail consumption relies on it. A ref backend whose refs
+        // cannot be flushed is refused before the ref moves.
+        native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
         self.sync_candidate_objects(expected_head, candidate.commit())?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
         native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
