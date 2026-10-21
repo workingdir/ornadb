@@ -1387,9 +1387,11 @@ fn nominal_from_requires_a_nominal_constructor_result() {
     )));
 
     // Tables retain their current row construction form: the AST has no
-    // nominal table constructor, so a structural row remains supported.
+    // nominal table constructor, so a structural row remains supported. A
+    // key-less table's row would also carry its automatic `id`
+    // (ORNA-AUTOID-001, ORNA-KEY-002), so the fixture declares the key.
     expect_accepted(&analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/26c303bb06d5.orna"
+        "fixtures/inline-v1_review_regressions/d85cd086d28f.orna"
     )));
 }
 
