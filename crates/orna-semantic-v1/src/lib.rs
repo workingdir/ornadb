@@ -80,6 +80,12 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Published typecheck classifications for construction fields
+/// (`tests/invalid-metadata.json`: wrong-field-type, missing-required-field
+/// and unknown-field). Enum payload construction emits them at the source.
+pub const DIAG_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_FIELD: &str = "E2002";
+pub const DIAG_UNKNOWN_FIELD: &str = "E2003";
 pub const DIAG_ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
 /// Spec diagnostic codes (`33-diagnostics.md`) emitted directly at the rule
 /// that detects the violation; the message text never selects the code.
@@ -2056,9 +2062,9 @@ fn analyze_retaining_context_with_providers(
     }
     result.source_units = analyze_source_units(&source_unit_items);
     let mut dependency_summaries = BTreeMap::new();
-    let source_payload_enums = parsed
+    let source_enums = parsed
         .iter()
-        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .map(|(namespace, tree)| (namespace.clone(), source_enum_variant_rows(namespace, tree)))
         .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
@@ -2094,13 +2100,14 @@ fn analyze_retaining_context_with_providers(
             .filter(|(identity, _)| visible_unit_namespaces.contains(&identity.namespace))
             .map(|(identity, metadata)| (identity.clone(), metadata.clone()))
             .collect();
-        scope
-            .payload_enum_types
-            .extend(imported_payload_enum_bindings(
-                tree,
-                &source_payload_enums,
-                &result.modules,
-            ));
+        let imported_enums = imported_enum_bindings(tree, &source_enums, &result.modules);
+        scope.payload_enum_types.extend(
+            imported_enums
+                .iter()
+                .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
+                .map(|(spelling, _)| spelling.clone()),
+        );
+        scope.imported_enum_variants = imported_enums;
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
@@ -3471,6 +3478,10 @@ struct Scope {
     /// Local or explicitly imported enum types whose variants carry payloads.
     /// This compact admission metadata is kept separately from public Symbols.
     payload_enum_types: BTreeSet<String>,
+    /// Payload rows of explicitly imported source enums, keyed by the
+    /// spelling that names the enum here (`Level`, or `alias.Level` through a
+    /// module binding). Construction checks qualified variants against them.
+    imported_enum_variants: BTreeMap<String, EnumVariantRows>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -3594,6 +3605,7 @@ fn resolve_imports_with_dependencies(
         currency_types: BTreeSet::new(),
         enum_variants: enum_variant_types(tree, diagnostics),
         payload_enum_types: payload_enum_names(tree),
+        imported_enum_variants: BTreeMap::new(),
         type_aliases: tree
             .items
             .iter()
@@ -8566,6 +8578,9 @@ fn infer_node(
             if let Some(projection) = infer_table_projection(expr, scope, local) {
                 return projection;
             }
+            if let Some(variant) = infer_enum_variant_reference(expr, scope, local, diagnostics) {
+                return variant;
+            }
             if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
                 && !local.contains_key(path[0])
@@ -11686,6 +11701,10 @@ fn infer_nominal(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Some(variant) = infer_enum_payload_construction(path, fields, scope, local, diagnostics)
+    {
+        return variant;
+    }
     let mut actual = BTreeMap::new();
     let mut supplied = Vec::with_capacity(fields.len());
     let mut effects = EffectSummary::default();
@@ -11824,6 +11843,184 @@ fn infer_nominal(
         // unrelated modules.
         ty: constructor_type,
         effects,
+    }
+}
+
+/// Declared payload rows of one enum, by variant name. A payload-free
+/// variant has an empty row.
+type EnumVariantRows = BTreeMap<String, BTreeMap<String, Type>>;
+
+/// A closed source enum named by a value path, with the static type its
+/// constructed values carry.
+struct EnumConstructor<'a> {
+    ty: Type,
+    variants: &'a EnumVariantRows,
+}
+
+/// Resolves the owner of `Enum.variant` or `module.Enum.variant`. An
+/// unqualified and a qualified name follow the same construction rule, and
+/// resolution must identify a constructible enum (lexical construction
+/// rule; ORNA-ENUM-002/003). A local binding shadows an enum of the same
+/// name, so field access on that value keeps ordinary record semantics.
+fn enum_constructor<'a>(
+    owner: &[&str],
+    scope: &'a Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<EnumConstructor<'a>> {
+    if local.contains_key(*owner.first()?) {
+        return None;
+    }
+    let symbol = match owner {
+        [name] => scope.names.get(*name),
+        _ => qualified_module_symbol(owner, scope),
+    }
+    .filter(|symbol| symbol.kind == SymbolKind::Enum)?;
+    let variants = match owner {
+        [name] => scope.enum_variants.get(*name),
+        _ => None,
+    }
+    .or_else(|| scope.imported_enum_variants.get(&owner.join(".")))?;
+    Some(EnumConstructor {
+        ty: symbol.ty.clone(),
+        variants,
+    })
+}
+
+/// ORNA-ENUM-002: `Enum.variant` references a payload-free variant. A
+/// payload variant has no bare reference form (ORNA-ENUM-003 constructs it
+/// with its named fields), so each omitted payload field is missing.
+fn infer_enum_variant_reference(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(expr)?;
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let ty = match constructor.variants.get(*variant) {
+        Some(payload) if payload.is_empty() => constructor.ty,
+        Some(payload) => {
+            for name in payload.keys() {
+                diagnostics.push(missing_payload_field(name));
+            }
+            Type::Error
+        }
+        None => {
+            diagnostics.push(unknown_enum_variant(owner, variant));
+            Type::Error
+        }
+    };
+    Some(Inferred {
+        ty,
+        effects: EffectSummary::default(),
+    })
+}
+
+/// ORNA-ENUM-003 and ORNA-SYNTAX-001: `Enum.variant { field: value }` checks
+/// each supplied field once, in written order, against the declared payload
+/// row. Unknown, duplicated, missing and mistyped fields are rejected, and a
+/// payload-free variant accepts no field. Returns `None` when the path does
+/// not name an enum, leaving nominal record construction unchanged.
+fn infer_enum_payload_construction(
+    path: &[orna_syntax_v1::NameSegment],
+    fields: &[orna_syntax_v1::RecordField],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>();
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let payload = constructor.variants.get(*variant);
+    let mut valid = payload.is_some();
+    if !valid {
+        diagnostics.push(unknown_enum_variant(owner, variant));
+    }
+    let mut effects = EffectSummary::default();
+    let mut supplied = BTreeSet::new();
+    for field in fields {
+        let expected = payload.and_then(|payload| payload.get(&field.name));
+        let value = match expected {
+            Some(expected) => infer_contextual(&field.value, expected, scope, local, diagnostics),
+            None => infer(&field.value, scope, local, diagnostics),
+        };
+        effects.join(&value.effects);
+        if !supplied.insert(field.name.as_str()) {
+            diagnostics.push(diag(
+                DIAG_DUPLICATE,
+                format!(
+                    "duplicate payload field `{}`",
+                    diagnostic_field_name(&field.name)
+                ),
+            ));
+            valid = false;
+            continue;
+        }
+        match expected {
+            Some(expected) if !types_match(expected, &value.ty) => {
+                diagnostics.push(diag(
+                    DIAG_FIELD_TYPE,
+                    format!(
+                        "expected {}, found {}",
+                        diagnostic_type_name(expected),
+                        diagnostic_type_name(&value.ty),
+                    ),
+                ));
+                valid = false;
+            }
+            None if payload.is_some() => {
+                diagnostics.push(diag(
+                    DIAG_UNKNOWN_FIELD,
+                    format!("unknown field `{}`", diagnostic_field_name(&field.name)),
+                ));
+                valid = false;
+            }
+            _ => {}
+        }
+    }
+    for name in payload
+        .into_iter()
+        .flat_map(BTreeMap::keys)
+        .filter(|name| !supplied.contains(name.as_str()))
+    {
+        diagnostics.push(missing_payload_field(name));
+        valid = false;
+    }
+    Some(Inferred {
+        ty: if valid { constructor.ty } else { Type::Error },
+        effects,
+    })
+}
+
+fn missing_payload_field(name: &str) -> Diagnostic {
+    diag(
+        DIAG_MISSING_FIELD,
+        format!("missing required field `{}`", diagnostic_field_name(name)),
+    )
+}
+
+/// ORNA-ENUM-001: an enum is closed to the variants declared in its body.
+fn unknown_enum_variant(owner: &[&str], variant: &str) -> Diagnostic {
+    let owner = owner.join(".");
+    diag(
+        DIAG_UNRESOLVED,
+        if diagnostic_identifier(&owner) && diagnostic_identifier(variant) {
+            format!("enum `{owner}` has no variant `{variant}`")
+        } else {
+            "enum variant cannot be resolved".to_owned()
+        },
+    )
+}
+
+fn diagnostic_field_name(name: &str) -> &str {
+    if diagnostic_identifier(name) {
+        name
+    } else {
+        "<field>"
     }
 }
 
@@ -25475,12 +25672,46 @@ fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
         .collect()
 }
 
-fn imported_payload_enum_bindings(
+/// Declared payload rows of every enum in one source module. Payload field
+/// types name that module's own nominal records by their module identity, so
+/// an importer checks construction against the same types the declaring
+/// module uses. Duplicate declarations are reported by the declaring module.
+fn source_enum_variant_rows(
+    namespace: &Namespace,
     tree: &SyntaxTree,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+) -> BTreeMap<String, EnumVariantRows> {
+    let identities = tree
+        .items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            } => Some((name.clone(), nominal_identity(namespace, name))),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut enums = enum_variant_types(tree, &mut Vec::new());
+    for field in enums
+        .values_mut()
+        .flat_map(BTreeMap::values_mut)
+        .flat_map(BTreeMap::values_mut)
+    {
+        *field = canonicalize_type_with_identities(field, &identities);
+    }
+    enums
+}
+
+/// Payload rows of the source enums each `use` declaration makes visible,
+/// keyed by the spelling that names the enum in this module: `Level` for a
+/// named, glob or prelude import, and `alias.Level` through a module binding.
+fn imported_enum_bindings(
+    tree: &SyntaxTree,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
-) -> BTreeSet<String> {
-    let mut bindings = BTreeSet::new();
+) -> BTreeMap<String, EnumVariantRows> {
+    let mut bindings = BTreeMap::new();
     for item in &tree.items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
@@ -25489,70 +25720,52 @@ fn imported_payload_enum_bindings(
         let Some(module) = modules.get(&target) else {
             continue;
         };
+        let enums = source_enums.get(&target).into_iter().flatten();
         match tail {
             UseTail::None => {
                 if let Some(binding) = target.0.last() {
-                    add_qualified_payload_enum_bindings(
+                    add_qualified_enum_bindings(
                         &mut bindings,
                         binding,
                         &target,
-                        payload_enums,
+                        source_enums,
                         modules,
                     );
                 }
             }
             UseTail::Alias { name, .. } if name != "_" => {
-                add_qualified_payload_enum_bindings(
-                    &mut bindings,
-                    name,
-                    &target,
-                    payload_enums,
-                    modules,
-                );
+                add_qualified_enum_bindings(&mut bindings, name, &target, source_enums, modules);
             }
-            UseTail::Alias { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    for name in names {
-                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
-                            bindings.insert(name.clone());
-                        }
-                    }
-                }
-            }
-            UseTail::Glob { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        names
-                            .iter()
-                            .filter(|name| is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
-            UseTail::Names(imports) => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        imports
-                            .iter()
-                            .map(|import| &import.name)
-                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
+            UseTail::Alias { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| {
+                        module.prelude_exports.contains(*name) && is_exported_enum(module, name)
+                    })
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Glob { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| is_exported_enum(module, name))
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Names(imports) => bindings.extend(imports.iter().filter_map(|import| {
+                let variants = source_enums.get(&target)?.get(&import.name)?;
+                is_exported_enum(module, &import.name)
+                    .then(|| (import.name.clone(), variants.clone()))
+            })),
         }
     }
     bindings
 }
 
-fn add_qualified_payload_enum_bindings(
-    bindings: &mut BTreeSet<String>,
+fn add_qualified_enum_bindings(
+    bindings: &mut BTreeMap<String, EnumVariantRows>,
     binding: &str,
     target: &Namespace,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
 ) {
-    for (namespace, names) in payload_enums {
+    for (namespace, enums) in source_enums {
         if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
             continue;
         }
@@ -25561,11 +25774,11 @@ fn add_qualified_payload_enum_bindings(
         };
         let mut prefix = vec![binding.to_owned()];
         prefix.extend(namespace.0[target.0.len()..].iter().cloned());
-        for name in names {
+        for (name, variants) in enums {
             if is_exported_enum(module, name) {
                 let mut qualified = prefix.clone();
                 qualified.push(name.clone());
-                bindings.insert(qualified.join("."));
+                bindings.insert(qualified.join("."), variants.clone());
             }
         }
     }
