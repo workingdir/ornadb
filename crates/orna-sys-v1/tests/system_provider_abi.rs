@@ -4436,7 +4436,9 @@ fn provider_error_contracts_preserve_variadic_argument_map_edges() {
         map_cases,
         VARIADIC_ERROR_OPERATIONS.len() * EDGE_CARDINALITIES.len()
     );
-    assert_eq!(selected_failure_codes, 6);
+    // Each operation routes the shared provider code and one portable failure
+    // it declares; every `sys.invoke` and `sys.start` overload declares some.
+    assert_eq!(selected_failure_codes, 2 * VARIADIC_ERROR_OPERATIONS.len());
     assert_eq!(
         declared_direct_routes,
         selected_failure_codes * EDGE_CARDINALITIES.len()
