@@ -12,7 +12,10 @@
 //! with its header, domain and entry-count head, and every ref count is the
 //! page's set of distinct native refs. The pages are therefore the canonical
 //! ones `tools/final_model.py` computes, and one builder serves leaves,
-//! branches, the relation map and row maps.
+//! branches, the relation map and row maps. [`maintenance`] rewrites an
+//! existing map around its changes to the same pages.
+
+pub(crate) mod maintenance;
 
 use std::collections::BTreeSet;
 
@@ -127,6 +130,12 @@ impl<E: PageEntry> Partition<E> {
             entry_bytes: 0,
             refs: BTreeSet::new(),
         }
+    }
+
+    /// Whether the page under construction holds no entry: the last entry
+    /// closed a page, so the next one starts a new page.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     fn node_len(&self, entries: usize, entry_bytes: usize) -> usize {

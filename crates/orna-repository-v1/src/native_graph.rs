@@ -7,7 +7,8 @@
 //! authority.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     fs::{self, File},
     io::{Read, Write},
@@ -1023,128 +1024,217 @@ impl NativeGraphContext {
     /// of the old key plus an insert of the new one), then inserts. Each
     /// mutation is checked against the pinned root, so a delete of an absent
     /// key or an insert of a present one is rejected instead of silently
-    /// changing the row set.
+    /// changing the row set. A row whose final stored value is the exact
+    /// value the pinned root holds is no change at all (ORNA-ROW-010): the
+    /// writer's encoding is canonical and names overflow values and Blob
+    /// descriptors by content address, so equal bytes are the same row.
     ///
-    /// The pass rebuilds the canonical complete ORP-1 pages for the domain.
-    /// The boundary rule is position-independent, so every page the mutation
-    /// did not touch keeps its previous object id and is reported as an index
-    /// object that was reused: `index_objects_created` counts the new index
-    /// nodes (the measured index churn) while `payload_objects_reused` counts
-    /// the stored value and Blob-descriptor objects the rewrite kept, which no
-    /// maintenance pass rewrites. The new root stays unreachable until the
-    /// caller names it from a row-map version or publication candidate.
-
+    /// The pass is incremental (store-format-3 §3): it reads the paths to the
+    /// touched keys and the pages around them, rewrites only those pages and
+    /// the branches above them, and keeps every other page by object ID
+    /// without reading it. The new root is the canonical complete build of
+    /// the new row set. `index_objects_created` counts the new index nodes
+    /// (the measured index churn), `index_objects_reused` names the old nodes
+    /// the new root still names unchanged at the edge of the rewritten region,
+    /// and `payload_objects_reused` the stored value and Blob-descriptor
+    /// objects the rewritten pages name without this pass writing them. The
+    /// new root stays unreachable until the caller names it from a row-map
+    /// version or publication candidate.
     pub fn maintain_row_index(
         &self,
         mutations: &[RowIndexMutation],
         scope: &RepositoryReadScope,
     ) -> Result<IndexMaintenance, GraphError> {
+        use crate::orp::maintenance::{
+            RowChange, RowChanges, lookup_ordered_entries, maintain_ordered_map,
+        };
+        use crate::row_store::TypedKey;
+
         scope.authorize(self)?;
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
         let root = version.primary_root().clone();
         let domain = rows_domain_for_version(version);
-
-        let (previous_nodes, previous_payload, mut rows) = {
-            let mut objects = ObjectBudget::new(
-                scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
-                scope.max_objects,
-                Arc::clone(&scope.objects_used),
-                scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
-                Arc::clone(&scope.metadata_used),
-            );
-            let mut read_node = |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects);
-            let root_node = read_node(&root)?;
-            validate_ordered_root_node(&root_node, &domain, expected_count)?;
-            let mut nodes = BTreeSet::new();
-            nodes.insert(root.clone());
-            let mut payload = BTreeSet::new();
-            let mut validated_contexts = BTreeSet::new();
-            collect_ordered_index_objects_with(
-                &mut read_node,
-                &root_node,
-                &root,
-                &domain,
-                None,
-                &mut nodes,
-                &mut payload,
-                &mut validated_contexts,
-            )?;
-            let limit = usize::try_from(expected_count).unwrap_or(usize::MAX);
-            let mut raw = Vec::new();
-            collect_ordered_range_with(
-                &mut read_node,
-                root_node,
-                &domain,
-                None,
-                None,
-                None,
-                None,
-                limit,
-                &mut raw,
-            )?;
-            let mut rows = Vec::with_capacity(raw.len());
-            for entry in raw {
-                let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
-                rows.push((key, value));
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        // A pass revisits nodes (the lookup of the touched keys, then the
+        // rewrite around them), so each old node is read once.
+        let mut old_nodes = HashMap::<NativeOid, NodeData>::new();
+        let mut read_node = |oid: &NativeOid| -> Result<NodeData, GraphError> {
+            if let Some(data) = old_nodes.get(oid) {
+                return Ok(data.clone());
             }
-            (nodes, payload, rows)
+            let data = self.read_native_node(oid, scope, &mut objects)?;
+            old_nodes.insert(oid.clone(), data.clone());
+            Ok(data)
         };
+        let root_node = read_node(&root)?;
+        validate_ordered_root_node(&root_node, &domain, expected_count)?;
 
-        let logical_rekeys = apply_row_index_mutations(&mut rows, mutations)?;
-        if rows.len() as u64 > MAX_SIGNED_LENGTH {
-            return Err(GraphError::InvalidCount(rows.len()));
-        }
-        let row_count = rows.len() as u64;
-
-        let entries: Vec<crate::row_store::RowEntry> = rows
-            .into_iter()
-            .map(|(key, value)| crate::row_store::RowEntry::new(key, value))
-            .collect();
-        let mut written = BTreeSet::new();
-        // Envelope object ids only. A data blob carries the same value bytes
-        // whenever a page is rebuilt with unchanged stored values, so counting
-        // it as churn would report media as an index object.
-        let mut written_nodes = BTreeSet::new();
-        let mut new_payload = BTreeSet::new();
-        let primary_root = Self::build_canonical_ordered_map(&domain, &entries, &mut |node| {
-            if matches!(node, NodeData::OrderedLeaf { .. }) {
-                for dependency in node.dependencies()? {
-                    new_payload.insert(dependency.oid);
+        // The pinned value of every key a mutation names, from one descent
+        // over the touched pages.
+        let touched: Vec<TypedKey> = mutations
+            .iter()
+            .flat_map(|mutation| match mutation {
+                RowIndexMutation::Delete { key } | RowIndexMutation::Insert { key, .. } => {
+                    [Some(key), None]
                 }
+                RowIndexMutation::Rekey { from, to } => [Some(from), Some(to)],
+            })
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let pinned = lookup_ordered_entries(&domain, &root_node, &touched, &mut read_node)?;
+        let mut rows: BTreeMap<TypedKey, Option<Cow<'_, [u8]>>> = touched
+            .into_iter()
+            .map(|key| {
+                let value = pinned
+                    .get(&key)
+                    .map(|value| Cow::Borrowed(value.as_slice()));
+                (key, value)
+            })
+            .collect();
+
+        for mutation in mutations {
+            let RowIndexMutation::Delete { key } = mutation else {
+                continue;
+            };
+            let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+            if slot.take().is_none() {
+                return Err(GraphError::RowKeyAbsent);
             }
-            let oid = self.write_capture_node(node, &mut written, scope.max_objects)?;
-            written_nodes.insert(oid.clone());
-            Ok(oid)
-        })?;
+        }
+        let mut logical_rekeys = Vec::new();
+        for mutation in mutations {
+            let RowIndexMutation::Rekey { from, to } = mutation else {
+                continue;
+            };
+            if rows.get(from).is_none_or(Option::is_none) {
+                return Err(GraphError::RowKeyAbsent);
+            }
+            if rows.get(to).is_some_and(Option::is_some) {
+                return Err(GraphError::DuplicateRowKey);
+            }
+            let value = rows.get_mut(from).and_then(Option::take);
+            rows.insert(to.clone(), value);
+            logical_rekeys.push(LogicalRowRekey {
+                old_address: from.clone(),
+                new_address: to.clone(),
+            });
+        }
+        // Inserted rows are lowered to the shared overflow graph first, so a
+        // row or value over 8 KiB or 32 direct Blob references is stored
+        // through tag 60113 (store-format-3 section 5).
+        let mut written = BTreeSet::new();
+        {
+            let mut overflow = crate::overflow::OverflowWriter::new(
+                self,
+                scope,
+                &mut written,
+                scope.max_objects,
+            );
+            for mutation in mutations {
+                let RowIndexMutation::Insert { key, fields } = mutation else {
+                    continue;
+                };
+                let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+                if slot.is_some() {
+                    return Err(GraphError::DuplicateRowKey);
+                }
+                let value = overflow
+                    .lower_row(fields)?
+                    .canonical_page_bytes()
+                    .map_err(|_| GraphError::NonCanonicalData)?;
+                *slot = Some(Cow::Owned(value));
+            }
+        }
+
+        let mut changes = RowChanges::new();
+        let mut row_count = expected_count;
+        for (key, value) in rows {
+            let before = pinned.get(&key).map(Vec::as_slice);
+            let change = match (value, before) {
+                (None, None) => continue,
+                (Some(value), Some(before)) if *value == *before => continue,
+                (None, Some(_)) => {
+                    row_count = row_count
+                        .checked_sub(1)
+                        .ok_or(GraphError::InvalidCount(0))?;
+                    RowChange::Remove
+                }
+                (Some(value), before) => {
+                    if before.is_none() {
+                        row_count += 1;
+                    }
+                    RowChange::Put(value.into_owned())
+                }
+            };
+            let key_bytes = key
+                .canonical_bytes()
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            changes.insert(key, (key_bytes, change));
+        }
+        if row_count > MAX_SIGNED_LENGTH {
+            return Err(GraphError::InvalidCount(
+                usize::try_from(row_count).unwrap_or(usize::MAX),
+            ));
+        }
+
+        let maintained = maintain_ordered_map(
+            &domain,
+            root.clone(),
+            root_node,
+            &changes,
+            &mut read_node,
+            &mut |node| self.write_capture_node(node, &mut written, scope.max_objects),
+        )?;
+        if maintained.row_count != row_count {
+            return Err(GraphError::InvalidCount(
+                usize::try_from(maintained.row_count).unwrap_or(usize::MAX),
+            ));
+        }
+        // Every object the overflow writer and the page rewrite wrote joins
+        // one closure for the durability barrier.
         self.sync_object_closure(&written, scope)?;
 
-        let index_objects_created: Vec<NativeOid> = written_nodes
+        let index_objects_created: Vec<NativeOid> = maintained
+            .written
             .iter()
-            .filter(|oid| !previous_nodes.contains(*oid))
+            .filter(|oid| !old_nodes.contains_key(*oid))
             .cloned()
             .collect();
-        let index_objects_reused: Vec<NativeOid> = written_nodes
-            .iter()
-            .filter(|oid| previous_nodes.contains(*oid))
-            .cloned()
-            .collect();
-        let payload_objects_reused: Vec<NativeOid> = previous_payload
-            .iter()
-            .filter(|oid| new_payload.contains(*oid))
-            .cloned()
-            .collect();
+        let mut index_objects_reused = maintained.reused;
+        index_objects_reused.extend(
+            maintained
+                .written
+                .iter()
+                .filter(|oid| old_nodes.contains_key(*oid))
+                .cloned(),
+        );
+        let mut payload_objects_reused = BTreeSet::new();
+        for leaf in &maintained.written_leaves {
+            for dependency in leaf.dependencies()? {
+                if !written.contains(&dependency.oid) {
+                    payload_objects_reused.insert(dependency.oid);
+                }
+            }
+        }
         Ok(IndexMaintenance {
             previous_root: root,
-            primary_root,
+            primary_root: maintained.root,
             row_count,
             logical_rekeys,
             objects_written: written.into_iter().collect(),
             index_objects_created,
-            index_objects_reused,
-            payload_objects_reused,
+            index_objects_reused: index_objects_reused.into_iter().collect(),
+            payload_objects_reused: payload_objects_reused.into_iter().collect(),
         })
     }
 
@@ -1277,10 +1367,10 @@ impl NativeGraphContext {
 
     /// Builds one canonical ORP-1 ordered map over `entries`, which must be in
     /// strictly ascending logical key order (store-format-3 §3), writing every
-    /// node through `write_node` and returning the root. This is the one
-    /// ORP-1 builder: row maintenance and relation admission both build
-    /// through `crate::orp`, which cuts pages by exact node bytes and distinct
-    /// native refs.
+    /// node through `write_node` and returning the root. Relation admission
+    /// builds complete maps here; row maintenance rewrites the pages around
+    /// its changes through `crate::orp::maintenance` to the same pages. Both
+    /// cut pages by exact node bytes and distinct native refs.
     pub(crate) fn build_canonical_ordered_map(
         domain: &[u8],
         entries: &[crate::row_store::RowEntry],
@@ -1410,17 +1500,15 @@ impl NativeGraphContext {
     /// Projects the payload-free Blob metadata of one admitted row field.
     ///
     /// This is the measured metadata-only read path a query over media rows
-    /// takes. The row itself is the only object the lookup reads, and its own
-    /// field tuple carries the length, SHA-256 and MIME-1 annotation of the
-    /// Blob reference, so the projection returns without entering a descriptor
-    /// or content read. `scope.payload_bytes_read()` therefore stays at zero
-    /// for the whole projection, while `scope.objects_read()` still counts the
-    /// row pages the lookup genuinely walked.
+    /// takes. The row's own field tuple carries the length, SHA-256 and
+    /// MIME-1 annotation of each Blob reference, so the projection returns
+    /// without entering a descriptor or content read.
+    /// `scope.payload_bytes_read()` therefore stays at zero for the whole
+    /// projection, while `scope.objects_read()` counts the row pages the
+    /// lookup walked and any overflow graph the row's fields live in.
     ///
-    /// `field` is the index of the Blob field in the stored tuple; a tuple
-    /// without that field yields `None`. A row whose fields overflowed to the
-    /// shared graph has no local tuple and is rejected, because reporting the
-    /// bounded overflow metadata as the row's fields would be a lie.
+    /// `field` is the index of the Blob field in the stored tuple; a field
+    /// that is absent or not a Blob is an error.
     pub fn project_blob_metadata(
         &self,
         key: &crate::row_store::TypedKey,
@@ -1430,9 +1518,10 @@ impl NativeGraphContext {
         let Some(row) = self.lookup_row(key, scope)? else {
             return Ok(None);
         };
-        let metadata = row
-            .blob_metadata(field)
-            .map_err(|_| GraphError::NonCanonicalData)?
+        let metadata = self
+            .row_blob_fields(&row, scope)?
+            .into_iter()
+            .find_map(|(index, metadata)| (index == field).then_some(metadata))
             .ok_or(GraphError::NonCanonicalData)?;
         Ok(Some((row.key().clone(), metadata)))
     }
@@ -1443,8 +1532,8 @@ impl NativeGraphContext {
     /// [`Self::range_rows`] orders them, but only the interval's own field
     /// tuples are decoded: no descriptor, byte index or payload chunk is read.
     /// A field that is absent from a row's tuple is skipped rather than
-    /// fabricated, and an overflowed row is rejected by the same rule as
-    /// [`Self::project_blob_metadata`].
+    /// fabricated; a row stored through the overflow graph is expanded as
+    /// [`Self::project_blob_metadata`] expands it.
     pub fn project_blob_metadata_range(
         &self,
         range: &crate::row_store::KeyRange,
@@ -1494,9 +1583,10 @@ impl NativeGraphContext {
                 .map_err(|_| GraphError::NonCanonicalData)?;
             let value = self.decode_persisted_row_value(entry.value, scope, &mut objects)?;
             let row = crate::row_store::AdmittedRow::issue(version, key, value);
-            let Some(metadata) = row
-                .blob_metadata(field)
-                .map_err(|_| GraphError::NonCanonicalData)?
+            let Some(metadata) = self
+                .row_blob_fields(&row, scope)?
+                .into_iter()
+                .find_map(|(index, metadata)| (index == field).then_some(metadata))
             else {
                 continue;
             };
@@ -1533,33 +1623,13 @@ impl NativeGraphContext {
             .key()
             .canonical_bytes()
             .map_err(|_| GraphError::NonCanonicalData)?;
-        let canonical_fields = match row.value() {
-            crate::row_store::RowValue::Inline { encoded, .. } => {
-                scope.charge_structured_metadata_read(encoded.len() as u64)?;
-                encoded.clone()
-            }
-            crate::row_store::RowValue::Overflow(reference) => {
-                let root = reference
-                    .native_root()
-                    .ok_or(GraphError::UnsupportedRowValueForm)?;
-                let mut objects = ObjectBudget::new(
-                    scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
-                    scope.max_objects,
-                    Arc::clone(&scope.objects_used),
-                    scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
-                    Arc::clone(&scope.metadata_used),
-                );
-                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
-                    .encoded_value
-                    .ok_or(GraphError::ContextMismatch)?
-            }
-        };
+        let canonical_fields = self.stored_row_fields(row.value(), scope)?;
 
         binding
             .descriptor()
             .validate_stored_row(*version.relation_id(), &canonical_key, &canonical_fields)
             .map_err(|_| GraphError::NonCanonicalData)?;
-        let CborValue::Array(values) = decode_canonical_cbor(&canonical_fields)? else {
+        let CborValue::Array(values) = decode_canonical_content(&canonical_fields)? else {
             return Err(GraphError::NonCanonicalData);
         };
         let field_ids = stored_field_object_ids(binding.descriptor())?;
@@ -1583,6 +1653,131 @@ impl NativeGraphContext {
             canonical_fields,
             fields,
         })
+    }
+
+    /// Projects every Blob field of an admitted row of this graph to
+    /// payload-free metadata, in field order. The fields come from the row's
+    /// own tuple; a row or a field stored through the overflow graph is
+    /// expanded from its value graph first. Neither path reads Blob payload.
+    pub fn row_blob_fields(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<(usize, BlobMetadata)>, GraphError> {
+        scope.authorize(self)?;
+        if row.version() != self.row_snapshot.version() {
+            return Err(GraphError::ContextMismatch);
+        }
+        let fields = self.stored_row_fields(row.value(), scope)?;
+        let CborValue::Array(values) = decode_canonical_content(&fields)? else {
+            return Err(GraphError::NonCanonicalData);
+        };
+        let mut projected = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            if let Some(metadata) = crate::row_store::blob_field_metadata(value)
+                .map_err(|_| GraphError::NonCanonicalData)?
+            {
+                projected.push((index, metadata));
+            }
+        }
+        Ok(projected)
+    }
+
+    /// The complete logical ROV-3 field tuple of one stored row value. An
+    /// inline tuple is the row's own bytes and an overflowed row is read from
+    /// its value graph; each nested overflow reference is then replaced by
+    /// the value it stores, so the tuple has the shape its schema describes
+    /// (store-format-3 section 5). The bytes read are charged as structured
+    /// metadata; no Blob payload is read.
+    fn stored_row_fields(
+        &self,
+        value: &crate::row_store::RowValue,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<u8>, GraphError> {
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let encoded = match value {
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                encoded.clone()
+            }
+            crate::row_store::RowValue::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(GraphError::UnsupportedRowValueForm)?;
+                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)?
+            }
+        };
+        let tuple = decode_canonical_content(&encoded)?;
+        let mut nested = BTreeSet::new();
+        collect_overflow_oids(&tuple, self.algorithm, &mut nested)?;
+        if nested.is_empty() {
+            return Ok(encoded);
+        }
+        let expanded = self.expand_overflow(tuple, scope, &mut objects, &mut BTreeSet::new())?;
+        Ok(canonical_value_bytes(&expanded))
+    }
+
+    /// Replaces each overflow reference in `value` by the ROV-3 value its
+    /// verified kind-3 node stores, recursively.
+    fn expand_overflow(
+        &self,
+        value: CborValue,
+        scope: &RepositoryReadScope,
+        objects: &mut ObjectBudget,
+        active: &mut BTreeSet<NativeOid>,
+    ) -> Result<CborValue, GraphError> {
+        match value {
+            CborValue::Tag(60113, payload) => {
+                let oid = overflow_tag_oid(&payload, self.algorithm)?;
+                if !active.insert(oid.clone()) {
+                    return Err(GraphError::ContextMismatch);
+                }
+                let encoded = self
+                    .verify_value_overflow(&oid, scope, objects, &mut BTreeSet::new(), true)?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)?;
+                let stored = self.expand_overflow(
+                    decode_canonical_content(&encoded)?,
+                    scope,
+                    objects,
+                    active,
+                )?;
+                active.remove(&oid);
+                Ok(stored)
+            }
+            CborValue::Array(values) => Ok(CborValue::Array(
+                values
+                    .into_iter()
+                    .map(|value| self.expand_overflow(value, scope, objects, active))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            CborValue::Map(entries) => Ok(CborValue::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            self.expand_overflow(key, scope, objects, active)?,
+                            self.expand_overflow(value, scope, objects, active)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, GraphError>>()?,
+            )),
+            // A stored Blob reference and a table reference hold no overflow.
+            tagged @ CborValue::Tag(60111 | 60021, _) => Ok(tagged),
+            CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
+                tag,
+                Box::new(self.expand_overflow(*payload, scope, objects, active)?),
+            )),
+            scalar => Ok(scalar),
+        }
     }
 
     fn decode_persisted_row_value(
@@ -1703,7 +1898,7 @@ impl NativeGraphContext {
                 return Err(GraphError::ContextMismatch);
             }
             if encoded_length <= crate::row_store::ROW_INLINE_LIMIT as u64
-                && direct_blob_reference_count(&rov_value)? <= 32
+                && direct_blob_reference_count(&rov_value)? <= crate::row_store::ROW_INLINE_REF_LIMIT
             {
                 return Err(GraphError::NonCanonicalData);
             }
@@ -1747,97 +1942,12 @@ impl NativeGraphContext {
         objects: &mut ObjectBudget,
         active: &mut BTreeSet<NativeOid>,
     ) -> Result<CborValue, GraphError> {
-        match value {
-            CborValue::Tag(60013, payload) => {
-                let CborValue::Array(mut fields) = *payload else {
-                    return Err(GraphError::NonCanonicalData);
-                };
-                match fields.as_slice() {
-                    [CborValue::Unsigned(0)] => {
-                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
-                    }
-                    [CborValue::Unsigned(1), _] => {
-                        let value = fields.pop().ok_or(GraphError::NonCanonicalData)?;
-                        let value = self.to_sov_value(value, scope, objects, active)?;
-                        fields.push(value);
-                        Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
-                    }
-                    _ => Err(GraphError::NonCanonicalData),
-                }
-            }
-            CborValue::Tag(60111, payload) => {
-                let CborValue::Array(fields) = *payload else {
-                    return Err(GraphError::NonCanonicalData);
-                };
-                if fields.len() != 5
-                    || !matches!(fields.first(), Some(CborValue::Unsigned(length)) if *length <= MAX_SIGNED_LENGTH)
-                    || !matches!(fields.get(1), Some(CborValue::Bytes(digest)) if digest.len() == 32)
-                    || !matches!(fields.get(2), Some(CborValue::Text(_)))
-                    || !matches!(fields.get(3), Some(CborValue::Null | CborValue::Text(_)))
-                    || !matches!(fields.get(4), Some(CborValue::Bytes(oid)) if oid.len() == self.algorithm.width())
-                {
-                    return Err(GraphError::NonCanonicalData);
-                }
-                let Some(CborValue::Text(media_type)) = fields.get(2) else {
-                    return Err(GraphError::NonCanonicalData);
-                };
-                let suffix = match fields.get(3) {
-                    Some(CborValue::Null) => None,
-                    Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
-                    _ => return Err(GraphError::NonCanonicalData),
-                };
-                validate_canonical_mime1_annotation(media_type, suffix)?;
-                Ok(CborValue::Tag(
-                    60112,
-                    Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
-                ))
-            }
-            CborValue::Tag(60021, payload) => {
-                if !matches!(payload.as_ref(), CborValue::Array(fields) if fields.len() == 3) {
-                    return Err(GraphError::NonCanonicalData);
-                }
-                Ok(CborValue::Tag(60021, payload))
-            }
-            CborValue::Tag(60113, payload) => {
-                let oid = overflow_tag_oid(&payload, self.algorithm)?;
-                Ok(self
-                    .verify_value_overflow(&oid, scope, objects, active, false)?
-                    .semantic_value)
-            }
-            CborValue::Array(values) => Ok(CborValue::Array(
-                values
-                    .into_iter()
-                    .map(|value| self.to_sov_value(value, scope, objects, active))
-                    .collect::<Result<Vec<_>, _>>()?,
-            )),
-            CborValue::Map(entries) => {
-                let mut transformed = entries
-                    .into_iter()
-                    .map(|(key, value)| {
-                        Ok((
-                            self.to_sov_value(key, scope, objects, active)?,
-                            self.to_sov_value(value, scope, objects, active)?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, GraphError>>()?;
-                transformed.sort_by_cached_key(|(key, _)| canonical_value_bytes(key));
-                if transformed.windows(2).any(|pair| {
-                    canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0)
-                }) {
-                    return Err(GraphError::NonCanonicalData);
-                }
-                Ok(CborValue::Map(transformed))
-            }
-            // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
-            CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
-            // Other typed values keep their tag; only nested Blob and
-            // overflow references change between ROV-3 and SOV-3.
-            CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
-                tag,
-                Box::new(self.to_sov_value(*payload, scope, objects, active)?),
-            )),
-            scalar => Ok(scalar),
-        }
+        sov3_value(value, self.algorithm.width(), &mut |payload| {
+            let oid = overflow_tag_oid(&payload, self.algorithm)?;
+            Ok(self
+                .verify_value_overflow(&oid, scope, objects, active, false)?
+                .semantic_value)
+        })
     }
 
     fn read_dependency_index(
@@ -2965,13 +3075,11 @@ impl NativeGraphContext {
             let mut encoded_row = Vec::new();
             array(&mut encoded_row, 1);
             encoded_row.extend_from_slice(binding.encoded_value());
-            let value = crate::row_store::RowValue::decode_canonical_fields(encoded_row)
-                .map_err(|_| GraphError::NonCanonicalData)?;
             let candidate = self.maintain_relation_row_candidate(
                 version,
                 &[RowIndexMutation::Insert {
                     key: key.clone(),
-                    value,
+                    fields: encoded_row,
                 }],
                 &scope,
             )?;
@@ -4206,7 +4314,7 @@ impl StreamingGearChunker {
     }
 }
 
-struct CaptureIndexBuilder<'a> {
+pub(crate) struct CaptureIndexBuilder<'a> {
     graph: &'a NativeGraphContext,
     written: &'a mut BTreeSet<NativeOid>,
     object_limit: u64,
@@ -4215,7 +4323,7 @@ struct CaptureIndexBuilder<'a> {
 }
 
 impl<'a> CaptureIndexBuilder<'a> {
-    fn new(
+    pub(crate) fn new(
         graph: &'a NativeGraphContext,
         written: &'a mut BTreeSet<NativeOid>,
         object_limit: u64,
@@ -4230,7 +4338,7 @@ impl<'a> CaptureIndexBuilder<'a> {
         }
     }
 
-    fn push_chunk(
+    pub(crate) fn push_chunk(
         &mut self,
         length: u64,
         target: NativeOid,
@@ -4315,7 +4423,7 @@ impl<'a> CaptureIndexBuilder<'a> {
         )
     }
 
-    fn finish(mut self) -> Result<Option<NativeOid>, GraphError> {
+    pub(crate) fn finish(mut self) -> Result<Option<NativeOid>, GraphError> {
         loop {
             let Some(level) = self.levels.iter().position(|entries| !entries.is_empty()) else {
                 return Ok(None);
@@ -5053,10 +5161,13 @@ pub enum RowIndexMutation {
         from: crate::row_store::TypedKey,
         to: crate::row_store::TypedKey,
     },
-    /// Inserts one logical key. The key must be absent from the pinned root.
+    /// Inserts one logical key with its canonical ROV-3 stored-field tuple.
+    /// The key must be absent from the pinned root. The writer stores the
+    /// tuple inline or lowers it, and any of its values, to the shared
+    /// overflow graph (store-format-3 section 5).
     Insert {
         key: crate::row_store::TypedKey,
-        value: crate::row_store::RowValue,
+        fields: Vec<u8>,
     },
 }
 
@@ -5070,13 +5181,19 @@ impl RowIndexMutation {
     }
 
     /// Inserts a row from its canonical key and schema-independent field tuple.
-    /// The key must be absent from the pinned row map when the mutation is applied.
+    /// The key must be absent from the pinned row map when the mutation is
+    /// applied. The tuple is a canonical CBOR array of at most 1 GiB that
+    /// holds no overflow reference; how it is stored is the writer's choice.
     pub fn insert_canonical(key: &[u8], value: &[u8]) -> Result<Self, GraphError> {
         let key = crate::row_store::TypedKey::decode_canonical(key)
             .map_err(|_| GraphError::NonCanonicalData)?;
-        let value = crate::row_store::RowValue::decode_canonical_fields(value.to_vec())
-            .map_err(|_| GraphError::NonCanonicalData)?;
-        Ok(Self::Insert { key, value })
+        if !matches!(decode_canonical_content(value)?, CborValue::Array(_)) {
+            return Err(GraphError::NonCanonicalData);
+        }
+        Ok(Self::Insert {
+            key,
+            fields: value.to_vec(),
+        })
     }
 }
 /// One explicit logical address change emitted by an ordered row-index apply.
@@ -6159,10 +6276,18 @@ impl NodeData {
             Self::DependencyIndex { height, children } => {
                 check_height(*height)?;
                 check_count(children.len())?;
-                if children
-                    .windows(2)
-                    .any(|pair| pair[0].as_bytes() >= pair[1].as_bytes())
-                {
+                // The inventory is sorted by native OID bytes (store-format-3
+                // section 5), so a height-0 node's dependencies ascend. A node
+                // above names its child indices in inventory order, which is
+                // not the order of their own object IDs; it names each once.
+                let canonical = if *height == 0 {
+                    children
+                        .windows(2)
+                        .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+                } else {
+                    children.iter().collect::<BTreeSet<_>>().len() == children.len()
+                };
+                if !canonical {
                     return Err(GraphError::NonCanonicalData);
                 }
                 array(&mut output, 4);
@@ -7090,74 +7215,9 @@ fn replace_ordered_entry_with(
     }
 }
 
-/// Applies one maintenance pass in the canonical order: deletes, then rekeys,
-/// then inserts. Every mutation is checked against the row set the pinned root
-/// actually held, so an absent delete/rekey source or a colliding insert is
-/// rejected rather than silently changing which rows exist.
-fn apply_row_index_mutations(
-    rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
-    mutations: &[RowIndexMutation],
-) -> Result<Vec<LogicalRowRekey>, GraphError> {
-    let mut logical_rekeys = Vec::new();
-    for mutation in mutations {
-        let RowIndexMutation::Delete { key } = mutation else {
-            continue;
-        };
-        let index = locate_row(rows, key)?.ok_or(GraphError::RowKeyAbsent)?;
-        rows.remove(index);
-    }
-    for mutation in mutations {
-        let RowIndexMutation::Rekey { from, to } = mutation else {
-            continue;
-        };
-        let index = locate_row(rows, from)?.ok_or(GraphError::RowKeyAbsent)?;
-        if locate_row(rows, to)?.is_some() {
-            return Err(GraphError::DuplicateRowKey);
-        }
-        let (_, value) = rows.remove(index);
-        let insertion = locate_insertion(rows, to);
-        rows.insert(insertion, (to.clone(), value));
-        logical_rekeys.push(LogicalRowRekey {
-            old_address: from.clone(),
-            new_address: to.clone(),
-        });
-    }
-    for mutation in mutations {
-        let RowIndexMutation::Insert { key, value } = mutation else {
-            continue;
-        };
-        let insertion = locate_insertion(rows, key);
-        if rows
-            .get(insertion)
-            .is_some_and(|(existing, _)| existing == key)
-        {
-            return Err(GraphError::DuplicateRowKey);
-        }
-        rows.insert(insertion, (key.clone(), value.clone()));
-    }
-    Ok(logical_rekeys)
-}
-
-fn locate_row(
-    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
-    key: &crate::row_store::TypedKey,
-) -> Result<Option<usize>, GraphError> {
-    Ok(rows
-        .binary_search_by(|(existing, _)| existing.cmp(key))
-        .ok())
-}
-
-fn locate_insertion(
-    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
-    key: &crate::row_store::TypedKey,
-) -> usize {
-    rows.binary_search_by(|(existing, _)| existing.cmp(key))
-        .unwrap_or_else(|index| index)
-}
-
 /// Collects every node object of one ordered index (root, branches and leaves)
-/// plus every stored-value payload object its entries reference, so a
-/// maintenance pass can separate index churn from media reuse by object id.
+/// plus every stored-value payload object its entries reference, validating
+/// each node against its parent's claims on the way down.
 fn collect_ordered_index_objects_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: &NodeData,
@@ -8671,15 +8731,14 @@ mod persisted_orp_tests {
         )
         .expect("internally consistent substituted relation binding");
         let key = TypedKey::Text("must-not-be-written".to_owned());
-        let value = RowValue::decode_canonical_fields(vec![0x80])
-            .expect("canonical empty row");
+        let fields = vec![0x80];
 
         assert!(matches!(
             graph.maintain_relation_rows(
                 &substituted,
                 &[RowIndexMutation::Insert {
                     key: key.clone(),
-                    value: value.clone(),
+                    fields: fields.clone(),
                 }],
                 &scope,
             ),
@@ -8709,7 +8768,7 @@ mod persisted_orp_tests {
         let candidate_store_root = graph
             .maintain_relation_rows(
                 &original,
-                &[RowIndexMutation::Insert { key, value }],
+                &[RowIndexMutation::Insert { key, fields }],
                 &scope,
             )
             .expect("admit rows against the exact pinned relation version");
@@ -8813,7 +8872,7 @@ mod persisted_orp_tests {
 
         let first_mutation = [RowIndexMutation::Insert {
             key: TypedKey::Text("first".to_owned()),
-            value: RowValue::decode_canonical_fields(vec![0x80]).expect("canonical empty row"),
+            fields: vec![0x80],
         }];
         let first = graph
             .maintain_row_index(&first_mutation, &scope)
@@ -8854,7 +8913,7 @@ mod persisted_orp_tests {
         graph.row_snapshot = second_snapshot;
         let second_mutation = [RowIndexMutation::Insert {
             key: TypedKey::Text("second".to_owned()),
-            value: RowValue::decode_canonical_fields(vec![0x80]).expect("canonical empty row"),
+            fields: vec![0x80],
         }];
         let second = graph
             .maintain_row_index(&second_mutation, &scope)
@@ -8953,13 +9012,13 @@ mod persisted_orp_tests {
     #[test]
     fn maintain_row_index_writes_pinned_page_bytes() {
         let (_directory, mut graph) = capture_test_context();
-        let empty = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
-        let flagged = RowValue::decode_canonical_fields(vec![0x81, 0xf5]).expect("one-field tuple");
+        let empty = vec![0x80];
+        let flagged = vec![0x81, 0xf5];
         let key = |index: usize| TypedKey::Text(format!("row-{index:04}"));
         let seed = (0..300)
             .map(|index| RowIndexMutation::Insert {
                 key: key(index),
-                value: empty.clone(),
+                fields: empty.clone(),
             })
             .collect::<Vec<_>>();
         let edit = vec![
@@ -8971,7 +9030,7 @@ mod persisted_orp_tests {
             },
             RowIndexMutation::Insert {
                 key: TypedKey::Text("row-0150-b".to_owned()),
-                value: flagged,
+                fields: flagged,
             },
         ];
         let mut remaining = (1..299)
@@ -9018,12 +9077,11 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
         let (directory, mut graph) = capture_test_context();
         let seed_scope = graph.open_read_scope().expect("owner seed scope");
-        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
-            .expect("empty canonical fixture row");
+        let seed_value = vec![0x80];
         let mutations: Vec<_> = (0..300)
             .map(|index| RowIndexMutation::Insert {
                 key: TypedKey::Text(format!("row-{index:04}")),
-                value: seed_value.clone(),
+                fields: seed_value.clone(),
             })
             .collect();
         let seeded = graph
@@ -9773,12 +9831,11 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
     fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
         let (_directory, mut graph) = capture_test_context();
         let seed_scope = graph.open_read_scope().expect("owner seed scope");
-        let seed_value = RowValue::decode_canonical_fields(vec![0x80])
-            .expect("empty canonical fixture row");
+        let seed_value = vec![0x80];
         let mutations: Vec<_> = (0..700)
             .map(|index| RowIndexMutation::Insert {
                 key: TypedKey::Text(format!("row-{index:04}")),
-                value: seed_value.clone(),
+                fields: seed_value.clone(),
             })
             .collect();
         let seeded = graph
@@ -9990,8 +10047,7 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         let descriptor_oid = binding.descriptor_oid().clone();
         let mut encoded_fields = vec![0x81];
         encoded_fields.extend_from_slice(binding.encoded_value());
-        let blob_value = RowValue::decode_canonical_fields(encoded_fields)
-            .expect("decode canonical captured Blob value");
+        let blob_fields = encoded_fields;
 
         let source_version = graph.row_snapshot.version().clone();
         let source_snapshot_id = [0x39; 32];
@@ -10001,7 +10057,7 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
                 &source_version,
                 &[RowIndexMutation::Insert {
                     key: row_key.clone(),
-                    value: blob_value.clone(),
+                    fields: blob_fields.clone(),
                 }],
                 &capture_scope,
             )
@@ -10086,7 +10142,7 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
                 source_graph.row_snapshot.version(),
                 &[RowIndexMutation::Insert {
                     key: TypedKey::Text("later".to_owned()),
-                    value: blob_value,
+                    fields: blob_fields,
                 }],
                 &source_scope,
             )
@@ -10308,17 +10364,14 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
             .expect("admit protected Blob for a row");
         let mut blob_row = vec![0x81];
         blob_row.extend_from_slice(binding.encoded_value());
-        let blob_value = RowValue::decode_canonical_fields(blob_row)
-            .expect("canonical row with one Blob value");
-        let empty_value = RowValue::decode_canonical_fields(vec![0x80])
-            .expect("empty canonical fixture row");
+        let empty_row = vec![0x80];
         let mutations: Vec<_> = (0..300)
             .map(|index| RowIndexMutation::Insert {
                 key: TypedKey::Text(format!("row-{index:04}")),
-                value: if index == 150 {
-                    blob_value.clone()
+                fields: if index == 150 {
+                    blob_row.clone()
                 } else {
-                    empty_value.clone()
+                    empty_row.clone()
                 },
             })
             .collect();
@@ -10361,19 +10414,259 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         assert_eq!(blob_rows[0].key(), &TypedKey::Text("row-0150".to_owned()));
         assert_eq!(query_scope.payload_bytes_read(), 0);
 
+        // The new row sorts next to the Blob row, so the rewritten page names
+        // the descriptor again without the pass writing or reading it.
         let rewrite_scope = graph.open_read_scope().expect("rewrite scope");
         let rewrite = graph
             .maintain_row_index(
                 &[RowIndexMutation::Insert {
-                    key: TypedKey::Text("row-0300".to_owned()),
-                    value: empty_value,
+                    key: TypedKey::Text("row-0150-a".to_owned()),
+                    fields: empty_row,
                 }],
                 &rewrite_scope,
             )
             .expect("rewrite the index while preserving the Blob row");
-        assert_eq!(rewrite.payload_objects_reused().len(), 1);
+        assert_eq!(
+            rewrite.payload_objects_reused(),
+            std::slice::from_ref(binding.descriptor_oid())
+        );
         assert_eq!(rewrite.row_count(), 301);
         assert_eq!(rewrite_scope.payload_bytes_read(), 0);
+    }
+
+    /// Publishes a maintenance result into the test graph so later lookups
+    /// read the new root.
+    fn adopt_maintenance(graph: &mut NativeGraphContext, maintenance: &IndexMaintenance) {
+        let scope = graph.open_read_scope().expect("adoption scope");
+        let version = graph.row_snapshot.version().clone();
+        let store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                &version,
+                maintenance.primary_root(),
+                maintenance.row_count(),
+                &scope,
+            )
+            .expect("name the maintained root from the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("load the maintained row map");
+        graph.store_root = store_root;
+    }
+
+    /// store-format-3 section 5 and ORNA-ROW-005 (A07-storage-rows-05): the
+    /// writer lowers values bottom-up. A field over 8 KiB, alone or inside a
+    /// List, is lowered on its own and leaves its row inline; a row still over
+    /// 8 KiB after that, or holding more than 32 direct Blob references, is
+    /// stored through tag 60113 as a whole. Every lookup re-verifies the
+    /// writer's lengths, SOV-3 digests and dependency indexes, and the stored
+    /// fields expand back to exactly the tuples that were inserted.
+    #[test]
+    fn maintenance_lowers_large_values_and_rows_to_the_overflow_graph() {
+        let (_directory, mut graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner scope");
+        let payload = b"one descriptor shared by many Blob fields";
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture payload candidate");
+        let pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect descriptor and payload closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit protected Blob for rows");
+        let blob = decode_canonical_cbor(binding.encoded_value()).expect("stored Blob reference");
+        let text = |length: usize| CborValue::Text("x".repeat(length));
+        let tuple = |fields: Vec<CborValue>| canonical_value_bytes(&CborValue::Array(fields));
+        let rows = [
+            ("blobs", tuple(vec![blob.clone(); 40])),
+            ("list", tuple(vec![CborValue::Array(vec![text(10_000), text(3)])])),
+            ("long", tuple(vec![text(20_000), CborValue::Unsigned(7)])),
+            ("small", tuple(vec![text(10)])),
+            ("wide", tuple(vec![text(5_000), text(5_000), text(5_000)])),
+        ];
+        let maintenance = graph
+            .maintain_row_index(
+                &rows
+                    .iter()
+                    .map(|(key, fields)| RowIndexMutation::Insert {
+                        key: TypedKey::Text((*key).to_owned()),
+                        fields: fields.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("lower and store large rows");
+        adopt_maintenance(&mut graph, &maintenance);
+
+        let read_scope = graph.open_read_scope().expect("read scope");
+        for (key, fields) in &rows {
+            let row = graph
+                .lookup_row(&TypedKey::Text((*key).to_owned()), &read_scope)
+                .expect("the reader verifies the stored row")
+                .expect("the row is stored");
+            let whole_row_lowered = matches!(row.value(), RowValue::Overflow(_));
+            assert_eq!(
+                whole_row_lowered,
+                matches!(*key, "blobs" | "wide"),
+                "{key}: whole-row overflow"
+            );
+            if let RowValue::Inline { encoded, .. } = row.value() {
+                assert!(encoded.len() <= crate::row_store::ROW_INLINE_LIMIT, "{key}");
+                let mut nested = BTreeSet::new();
+                collect_overflow_oids(
+                    &decode_canonical_cbor(encoded).expect("inline tuple"),
+                    graph.algorithm,
+                    &mut nested,
+                )
+                .expect("overflow references");
+                assert_eq!(
+                    nested.len(),
+                    usize::from(matches!(*key, "list" | "long")),
+                    "{key}: lowered fields"
+                );
+            }
+            assert_eq!(
+                &graph
+                    .stored_row_fields(row.value(), &read_scope)
+                    .expect("expand the stored fields"),
+                fields,
+                "{key}: stored fields expand to the inserted tuple"
+            );
+        }
+        let blob_row = graph
+            .lookup_row(&TypedKey::Text("blobs".to_owned()), &read_scope)
+            .expect("lookup")
+            .expect("row");
+        assert_eq!(
+            graph
+                .row_blob_fields(&blob_row, &read_scope)
+                .expect("project the overflowed row's Blob fields")
+                .len(),
+            40
+        );
+        assert_eq!(read_scope.payload_bytes_read(), 0, "no Blob payload is read");
+
+        // A tuple that already names an overflow node is not a logical value.
+        let RowValue::Overflow(stored) = blob_row.value() else {
+            panic!("the Blob row is an overflow value");
+        };
+        let forged = tuple(vec![crate::overflow::overflow_reference(
+            stored.native_root().expect("resolved overflow root"),
+        )]);
+        assert_eq!(
+            graph.maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::Text("forged".to_owned()),
+                    fields: forged,
+                }],
+                &read_scope,
+            ),
+            Err(GraphError::NonCanonicalData)
+        );
+    }
+
+    /// store-format-3 §3 ("Writers may rebuild incrementally but must match
+    /// the canonical complete build"), ORNA-ROW-006 and ORNA-ROW-010
+    /// (A07-storage-rows-04): one update reads the path to its row and the
+    /// pages beside it, never the table; its root is the complete build of
+    /// the same rows; and rewriting a row to the value it already holds is no
+    /// change at all.
+    #[test]
+    fn maintenance_rewrites_only_the_pages_around_a_change() {
+        let (_directory, mut graph) = capture_test_context();
+        let key = |index: usize| TypedKey::Text(format!("row-{index:05}"));
+        let fields = |index: usize, label: &str| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Text(format!(
+                "{label} {index}"
+            ))]))
+        };
+        let scope = graph.open_read_scope().expect("seed scope");
+        let seeded = graph
+            .maintain_row_index(
+                &(0..6_000)
+                    .map(|index| RowIndexMutation::Insert {
+                        key: key(index),
+                        fields: fields(index, "seed"),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("seed rows");
+        let nodes = seeded.index_objects_created().len();
+        adopt_maintenance(&mut graph, &seeded);
+
+        let scope = graph.open_read_scope().expect("same-value scope");
+        let same = graph
+            .maintain_row_index(
+                &[
+                    RowIndexMutation::Delete { key: key(1_234) },
+                    RowIndexMutation::Insert {
+                        key: key(1_234),
+                        fields: fields(1_234, "seed"),
+                    },
+                ],
+                &scope,
+            )
+            .expect("rewrite a row to its stored value");
+        assert_eq!(same.primary_root(), same.previous_root());
+        assert!(same.objects_written().is_empty(), "{same:?}");
+        assert_eq!(same.row_count(), 6_000);
+
+        let scope = graph.open_read_scope().expect("lookup scope");
+        graph
+            .lookup_row(&key(4_321), &scope)
+            .expect("point lookup")
+            .expect("row");
+        let path_reads = scope.objects_read();
+        let scope = graph.open_read_scope().expect("update scope");
+        let update = graph
+            .maintain_row_index(
+                &[
+                    RowIndexMutation::Delete { key: key(4_321) },
+                    RowIndexMutation::Insert {
+                        key: key(4_321),
+                        fields: fields(4_321, "updated"),
+                    },
+                ],
+                &scope,
+            )
+            .expect("one update");
+        let update_reads = scope.objects_read();
+        assert!(
+            update_reads <= 3 * path_reads && (update_reads as usize) < nodes,
+            "one update read {update_reads} objects; a lookup reads {path_reads}, the map has {nodes} nodes"
+        );
+        assert!(
+            update.index_objects_created().len() <= 6,
+            "one update wrote {} index nodes",
+            update.index_objects_created().len()
+        );
+        assert!(!update.index_objects_reused().is_empty());
+
+        let entries: Vec<_> = (0..6_000)
+            .map(|index| {
+                let label = if index == 4_321 { "updated" } else { "seed" };
+                crate::row_store::RowEntry::new(
+                    key(index),
+                    RowValue::decode_canonical_fields(fields(index, label)).expect("inline row"),
+                )
+            })
+            .collect();
+        let mut sink = BTreeSet::new();
+        let complete = NativeGraphContext::build_canonical_ordered_map(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &entries,
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        )
+        .expect("complete build");
+        assert_eq!(update.primary_root(), &complete);
     }
 
     fn fixture_git_stdout(directory: &Path, args: &[&str]) -> String {
@@ -10598,18 +10891,14 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         ]));
         row_fields_dependencies(&owner_fields)
             .expect("stored table reference has no native-object dependencies");
-        let owner_value = RowValue::inline(owner_fields, Vec::new())
-            .expect("canonical owner row with a stored table reference");
-        let target_value = RowValue::decode_canonical_fields(vec![0x80])
-            .expect("canonical empty target row");
         let initial = [
             RowIndexMutation::Insert {
                 key: old_key.clone(),
-                value: target_value,
+                fields: vec![0x80],
             },
             RowIndexMutation::Insert {
                 key: owner_key.clone(),
-                value: owner_value,
+                fields: owner_fields,
             },
         ];
         let seeded = graph
@@ -11699,7 +11988,7 @@ pub(crate) fn decode_canonical_cbor(bytes: &[u8]) -> Result<CborValue, GraphErro
     decode_canonical_cbor_limited(bytes, NODE_DATA_LIMIT)
 }
 
-fn decode_canonical_content(bytes: &[u8]) -> Result<CborValue, GraphError> {
+pub(crate) fn decode_canonical_content(bytes: &[u8]) -> Result<CborValue, GraphError> {
     decode_canonical_cbor_limited(bytes, crate::row_store::ROW_CANONICAL_LIMIT)
 }
 
@@ -12037,6 +12326,105 @@ fn collect_overflow_oids(
     Ok(())
 }
 
+/// The SOV-3 form of a stored ROV-3 value (store-format-3 section 5). Each
+/// stored Blob reference (tag 60111) drops its native descriptor and becomes
+/// tag 60112, each overflow reference (tag 60113) is replaced by the semantic
+/// value `resolve_overflow` returns for its payload, and maps are re-sorted by
+/// their converted keys. `oid_width` is the repository's native object width,
+/// which a stored descriptor reference must have. The reader verifying a
+/// kind-3 digest and the writer computing one both convert through here.
+pub(crate) fn sov3_value(
+    value: CborValue,
+    oid_width: usize,
+    resolve_overflow: &mut impl FnMut(CborValue) -> Result<CborValue, GraphError>,
+) -> Result<CborValue, GraphError> {
+    match value {
+        CborValue::Tag(60013, payload) => {
+            let CborValue::Array(mut fields) = *payload else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            match fields.as_slice() {
+                [CborValue::Unsigned(0)] => {
+                    Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                }
+                [CborValue::Unsigned(1), _] => {
+                    let value = fields.pop().ok_or(GraphError::NonCanonicalData)?;
+                    fields.push(sov3_value(value, oid_width, resolve_overflow)?);
+                    Ok(CborValue::Tag(60013, Box::new(CborValue::Array(fields))))
+                }
+                _ => Err(GraphError::NonCanonicalData),
+            }
+        }
+        CborValue::Tag(60111, payload) => {
+            let CborValue::Array(fields) = *payload else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            if fields.len() != 5
+                || !matches!(fields.first(), Some(CborValue::Unsigned(length)) if *length <= MAX_SIGNED_LENGTH)
+                || !matches!(fields.get(1), Some(CborValue::Bytes(digest)) if digest.len() == 32)
+                || !matches!(fields.get(2), Some(CborValue::Text(_)))
+                || !matches!(fields.get(3), Some(CborValue::Null | CborValue::Text(_)))
+                || !matches!(fields.get(4), Some(CborValue::Bytes(oid)) if oid.len() == oid_width)
+            {
+                return Err(GraphError::NonCanonicalData);
+            }
+            let Some(CborValue::Text(media_type)) = fields.get(2) else {
+                return Err(GraphError::NonCanonicalData);
+            };
+            let suffix = match fields.get(3) {
+                Some(CborValue::Null) => None,
+                Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
+                _ => return Err(GraphError::NonCanonicalData),
+            };
+            validate_canonical_mime1_annotation(media_type, suffix)?;
+            Ok(CborValue::Tag(
+                60112,
+                Box::new(CborValue::Array(fields.into_iter().take(4).collect())),
+            ))
+        }
+        CborValue::Tag(60021, payload) => {
+            if !matches!(payload.as_ref(), CborValue::Array(fields) if fields.len() == 3) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            Ok(CborValue::Tag(60021, payload))
+        }
+        CborValue::Tag(60113, payload) => resolve_overflow(*payload),
+        CborValue::Array(values) => Ok(CborValue::Array(
+            values
+                .into_iter()
+                .map(|value| sov3_value(value, oid_width, resolve_overflow))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        CborValue::Map(entries) => {
+            let mut transformed = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok((
+                        sov3_value(key, oid_width, resolve_overflow)?,
+                        sov3_value(value, oid_width, resolve_overflow)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, GraphError>>()?;
+            transformed.sort_by_cached_key(|(key, _)| canonical_value_bytes(key));
+            if transformed.windows(2).any(|pair| {
+                canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0)
+            }) {
+                return Err(GraphError::NonCanonicalData);
+            }
+            Ok(CborValue::Map(transformed))
+        }
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+        CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+        // Other typed values keep their tag; only nested Blob and overflow
+        // references change between ROV-3 and SOV-3.
+        CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
+            tag,
+            Box::new(sov3_value(*payload, oid_width, resolve_overflow)?),
+        )),
+        scalar => Ok(scalar),
+    }
+}
+
 /// `MediaAnnotation::new` admits only the canonical wire pair, so its success
 /// is the whole MIME-1 check.
 fn validate_canonical_mime1_annotation(
@@ -12092,7 +12480,7 @@ pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependen
         .collect())
 }
 
-fn collect_row_dependencies(
+pub(crate) fn collect_row_dependencies(
     value: &CborValue,
     dependencies: &mut BTreeMap<NativeObjectId, NativeObjectKind>,
 ) -> Result<(), GraphError> {
@@ -12197,7 +12585,7 @@ fn collect_row_dependencies(
 /// Counts Blob references belonging directly to this encoded value. A nested
 /// kind-3 reference is a separate bounded value and its dependencies are not
 /// charged to this parent's inline threshold.
-fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
+pub(crate) fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
     match value {
         CborValue::Tag(60111, _) => Ok(1),
         CborValue::Tag(60113, _) => Ok(0),
