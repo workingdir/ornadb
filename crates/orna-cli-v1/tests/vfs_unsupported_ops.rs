@@ -232,7 +232,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let source = "pub table Music(id: Str) { title: Str, content: Blob, }\n";
     let row_source = format!(
-        "{{ title: \"before\", content: sys.blob.capture_file({root}, \"tone.mp3\", 65536), }}\n"
+        "{{ title: \"before\", content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"), }}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
@@ -252,7 +252,9 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     media_commit::commit_source_captures_for_table(
         &repository,
