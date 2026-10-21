@@ -14,17 +14,22 @@ use orna_runtime_v1::{
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
-    decode_rov3_blob_metadata, AvailabilityState, Blob, BlobResolver, ContentIdentity,
-    ContentReference, ContextValue, Error as BlobError, Format3Context, Format3Quota, GitHash,
-    NativeOid, OwnerLifetime, Snapshot, ValueFormat,
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
+    Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    ValueFormat, decode_rov3_blob_metadata,
 };
 use tempfile::TempDir;
 
-#[tokio::test]
 /// Exercises capture through the runtime into a format-3 row reference: raw
 /// identity survives annotated OVB-2/ROV-3 conversion and metadata conversion
 /// performs no payload reads. ORNA-BLOB-004, ORNA-BLOB-007, ORNA-BLOB-009,
-/// ORNA-OGB-001.
+/// ORNA-OGB-001. Removing the source after capture and retrying after a
+/// conflicting activation commits the captured Blob, not a reread
+/// (ORNA-INGEST-001, ORNA-INGEST-004). Unauthorised, unsafe, missing,
+/// non-regular and over-quota sources fail with the portable
+/// `sys.blob.source_denied` and `sys.blob.limit` codes (ORNA-INGEST-002,
+/// ORNA-SYS-097).
+#[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let commit = repository.head().unwrap().unwrap();
@@ -281,8 +286,14 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let committed_blob = decode_rov3_blob_metadata(&committed_value).unwrap();
     assert_eq!(committed_blob.media_type(), "audio/mp4");
     assert_eq!(committed_blob.suffix(), Some("m4b"));
-    assert_eq!(committed_blob.length(), transfer.content_identity().length());
-    assert_eq!(committed_blob.sha256(), transfer.content_identity().sha256());
+    assert_eq!(
+        committed_blob.length(),
+        transfer.content_identity().length()
+    );
+    assert_eq!(
+        committed_blob.sha256(),
+        transfer.content_identity().sha256()
+    );
     assert_eq!(
         committed_blob.descriptor_oid().map(|oid| oid.as_bytes()),
         Some(transfer.descriptor_oid().as_bytes())
@@ -433,24 +444,24 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     std::fs::write(root.join("capture.json"), payload).unwrap();
     assert_eq!(
         capture_failure(&mut bindings, "/not/authorized", "capture.json", 64),
-        "ORNA-INGEST-001"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "../capture.json", 64),
-        "ORNA-INGEST-002"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "missing", 64),
-        "ORNA-INGEST-003"
+        "sys.blob.source_denied"
     );
     std::fs::create_dir(root.join("directory")).unwrap();
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "directory", 64),
-        "ORNA-INGEST-003"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "capture.json", 4),
-        "ORNA-INGEST-004"
+        "sys.blob.limit"
     );
 }
 
