@@ -2696,7 +2696,7 @@ impl Parser {
         }
         let tail = if self.keyword() == Some(Keyword::As) {
             self.bump();
-            if self.contextual() || self.is_punct("_") {
+            if matches!(self.current().kind, TokenKind::Identifier { .. }) || self.is_punct("_") {
                 let alias = ImportSegment {
                     name: self.current().text.clone(),
                     span: self.current().span.clone(),
@@ -2721,7 +2721,7 @@ impl Parser {
                 self.bump();
                 let mut names = Vec::new();
                 while !self.eof() && !self.is_punct("}") {
-                    if !self.contextual() {
+                    if !matches!(self.current().kind, TokenKind::Identifier { .. }) {
                         self.error_here("ORNA-PARSE-001", "expected imported name");
                         break;
                     }
