@@ -1799,6 +1799,21 @@ mod tests {
         (temp, repository)
     }
 
+    /// A committed format-3 snapshot: the canonical `database.orna` record.
+    fn format3_repository() -> (TempDir, Repository) {
+        let (temp, _) = repository();
+        fs::create_dir_all(temp.path().join(".orna")).unwrap();
+        fs::write(
+            temp.path().join(".orna/database.orna"),
+            "{\n    repository_format: 3,\n    database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\",\n}\n",
+        )
+        .unwrap();
+        git(temp.path(), &["add", ".orna"]);
+        git(temp.path(), &["commit", "-m", "format-3 metadata"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
     /// Opens a runtime holding one committed row and freezes it, so a
     /// publication has a real prefix to refuse.
     async fn frozen_runtime(repository: &Repository) -> (RuntimeState, PublicationFreeze) {
@@ -2103,11 +2118,15 @@ mod tests {
         assert_eq!(runtime.pending().await.unwrap(), pending);
     }
 
+    /// Only the retired compact writer recorded a compact witness, and it
+    /// wrote only onto format-1/2 snapshots. Over a readable format-3 base the
+    /// witness is malformed evidence, so recovery refuses the journal.
     #[tokio::test]
     async fn recovery_refuses_a_compact_journal_without_a_legacy_base() {
-        let (temp, repository) = repository();
+        let (temp, repository) = format3_repository();
         let (runtime, freeze) = frozen_runtime(&repository).await;
         let plan = legacy_compact_plan(&repository, &freeze);
+        assert!(writable_snapshot_context(&repository, plan.journal().old_head()).is_ok());
         repository.write_publication_journal(plan.journal()).unwrap();
         let before = publication_state(temp.path(), &repository);
 
