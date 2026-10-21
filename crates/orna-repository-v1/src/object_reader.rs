@@ -1,0 +1,867 @@
+//! One long-lived Git object reader per repository handle.
+//!
+//! Admitting a snapshot needs a few fixed objects: the root tree, the `.orna`
+//! tree, the tracked metadata blobs and the `.orna/store` and `main.orna`
+//! entries (ORNA-META-001, ORNA-META-002). Reading them through ordinary Git
+//! commands costs one or more processes per object, path or tree entry.
+//! [`ObjectReader`] keeps a single `git cat-file --batch-command` process for
+//! the life of a [`Repository`] handle and its clones, and resolves each object
+//! when it is asked for. The work therefore follows the objects read, never
+//! the size of the tree around them (ORNA-ROW-009).
+
+use std::{
+    fmt,
+    io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{Mutex, MutexGuard, OnceLock},
+};
+
+use crate::{
+    CommittedTreeEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath, PrivateCommit,
+    Repository, RepositoryError, init::format_context::STORE_PATH, native_graph::GitHashAlgorithm,
+    scrub_git_routing_environment,
+};
+
+/// Bounds one response header: an echoed object name or a full SHA-256 ID,
+/// followed by the object type and size.
+const MAX_HEADER_BYTES: u64 = 4 * 1024;
+/// Bounds one tree entry name before its bytes are accumulated.
+const MAX_TREE_ENTRY_NAME_BYTES: usize = 4 * 1024;
+/// The longest mode Git writes, `100644`, plus its separating space, with one
+/// byte to spare for a zero-padded mode.
+const MAX_TREE_ENTRY_MODE_BYTES: u64 = 8;
+
+/// A Git object type as `cat-file` reports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectKind {
+    Blob,
+    Tree,
+    Commit,
+    Tag,
+}
+
+impl ObjectKind {
+    fn parse(name: &[u8]) -> Option<Self> {
+        match name {
+            b"blob" => Some(Self::Blob),
+            b"tree" => Some(Self::Tree),
+            b"commit" => Some(Self::Commit),
+            b"tag" => Some(Self::Tag),
+            _ => None,
+        }
+    }
+
+    /// Git's name for this type, as `git cat-file -t` prints it.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Blob => "blob",
+            Self::Tree => "tree",
+            Self::Commit => "commit",
+            Self::Tag => "tag",
+        }
+    }
+}
+
+/// The header `cat-file` reports for one existing object.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectHeader {
+    oid: String,
+    kind: ObjectKind,
+    size: u64,
+}
+
+impl ObjectHeader {
+    /// The object's full native ID in lowercase hexadecimal.
+    pub(crate) fn oid(&self) -> &str {
+        &self.oid
+    }
+
+    pub(crate) const fn kind(&self) -> ObjectKind {
+        self.kind
+    }
+}
+
+/// A tree entry mode after Git's own canonicalisation of recorded modes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TreeEntryMode {
+    File,
+    Executable,
+    Symlink,
+    Tree,
+    Gitlink,
+}
+
+impl TreeEntryMode {
+    /// Mirrors Git's `canon_mode`: a regular file is `100644` or `100755`, and
+    /// a mode that is not a file, symlink or directory is a gitlink.
+    const fn from_recorded(mode: u32) -> Self {
+        match mode & 0o170_000 {
+            0o100_000 if mode & 0o100 != 0 => Self::Executable,
+            0o100_000 => Self::File,
+            0o120_000 => Self::Symlink,
+            0o040_000 => Self::Tree,
+            _ => Self::Gitlink,
+        }
+    }
+}
+
+/// One entry of a Git tree object. Names are raw bytes: Git does not require
+/// UTF-8, and a lookup must not fail because of an unrelated sibling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TreeEntry {
+    mode: TreeEntryMode,
+    name: Vec<u8>,
+    oid: String,
+}
+
+impl TreeEntry {
+    pub(crate) const fn mode(&self) -> TreeEntryMode {
+        self.mode
+    }
+
+    pub(crate) fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    pub(crate) fn oid(&self) -> &str {
+        &self.oid
+    }
+}
+
+/// Reads Git objects through one `git cat-file --batch-command` process,
+/// started on first use and shared by a repository handle and its clones.
+///
+/// Objects are read exactly: a promised partial-clone object is reported
+/// missing instead of fetched, and a local `refs/replace` overlay is ignored.
+/// A failed exchange discards the process, so a later read never resumes from
+/// an unknown position in its output.
+pub(crate) struct ObjectReader {
+    worktree: PathBuf,
+    algorithm: OnceLock<GitHashAlgorithm>,
+    session: Mutex<Option<Session>>,
+}
+
+impl fmt::Debug for ObjectReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObjectReader")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ObjectReader {
+    pub(crate) fn new(worktree: PathBuf) -> Self {
+        Self {
+            worktree,
+            algorithm: OnceLock::new(),
+            session: Mutex::new(None),
+        }
+    }
+
+    /// The repository's object format. It is fixed when the repository is
+    /// created, so it is observed once per handle rather than once per caller.
+    pub(crate) fn algorithm(&self) -> Result<GitHashAlgorithm, RepositoryError> {
+        if let Some(algorithm) = self.algorithm.get() {
+            return Ok(*algorithm);
+        }
+        let mut command = Command::new("git");
+        command.current_dir(&self.worktree);
+        scrub_git_routing_environment(&mut command);
+        command.args(["rev-parse", "--show-object-format"]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !output.status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let algorithm = match output.stdout.trim_ascii_end() {
+            b"sha1" => GitHashAlgorithm::Sha1,
+            b"sha256" => GitHashAlgorithm::Sha256,
+            _ => return Err(RepositoryError::UnsupportedObjectFormat),
+        };
+        Ok(*self.algorithm.get_or_init(|| algorithm))
+    }
+
+    /// Reports the object that `name` resolves to, or `None` when Git has no
+    /// such object. `name` is any object name `cat-file` accepts, such as
+    /// `<commit>^{tree}` or `<commit>:<path>`.
+    pub(crate) fn info(&self, name: &str) -> Result<Option<ObjectHeader>, RepositoryError> {
+        let algorithm = self.algorithm()?;
+        self.with_session(|session| session.request("info", name, algorithm))
+    }
+
+    /// Reads one blob of at most `max_bytes`. A missing object, another object
+    /// type or a larger blob fails before any of its bytes are read.
+    pub(crate) fn read_blob(
+        &self,
+        oid: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let algorithm = self.algorithm()?;
+        self.with_session(|session| {
+            let header = session
+                .request("info", oid, algorithm)?
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            let size =
+                usize::try_from(header.size).map_err(|_| RepositoryError::GitOperationFailed)?;
+            if header.kind != ObjectKind::Blob || size > max_bytes {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            if session.request("contents", oid, algorithm)? != Some(header) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let mut bytes = vec![0; size];
+            session
+                .output()?
+                .read_exact(&mut bytes)
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            session.finish_contents()?;
+            Ok(bytes)
+        })
+    }
+
+    /// Lists every entry of one tree object, in Git's tree order.
+    pub(crate) fn tree_entries(&self, oid: &str) -> Result<Vec<TreeEntry>, RepositoryError> {
+        let mut entries = Vec::new();
+        self.visit_tree(oid, |mode, name, object| {
+            entries.push(TreeEntry {
+                mode,
+                name: name.to_vec(),
+                oid: hex(object),
+            });
+        })?;
+        Ok(entries)
+    }
+
+    /// Finds the entry called `name` in one tree object without keeping its
+    /// siblings.
+    pub(crate) fn find_tree_entry(
+        &self,
+        oid: &str,
+        name: &[u8],
+    ) -> Result<Option<TreeEntry>, RepositoryError> {
+        let mut found = None;
+        self.visit_tree(oid, |mode, entry_name, object| {
+            if entry_name == name {
+                found = Some(TreeEntry {
+                    mode,
+                    name: entry_name.to_vec(),
+                    oid: hex(object),
+                });
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// Streams the entries of one tree object to `visit` as Git stores them.
+    /// A missing object or another object type fails.
+    fn visit_tree(
+        &self,
+        oid: &str,
+        mut visit: impl FnMut(TreeEntryMode, &[u8], &[u8]),
+    ) -> Result<(), RepositoryError> {
+        let algorithm = self.algorithm()?;
+        self.with_session(|session| {
+            let header = session
+                .request("contents", oid, algorithm)?
+                .ok_or(RepositoryError::GitOperationFailed)?;
+            if header.kind != ObjectKind::Tree {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let mut body = session.output()?.take(header.size);
+            let mut mode = Vec::with_capacity(MAX_TREE_ENTRY_MODE_BYTES as usize);
+            let mut name = Vec::new();
+            let mut object = [0u8; GitHashAlgorithm::Sha256.width()];
+            let object = &mut object[..algorithm.width()];
+            loop {
+                mode.clear();
+                let read = (&mut body)
+                    .take(MAX_TREE_ENTRY_MODE_BYTES)
+                    .read_until(b' ', &mut mode)
+                    .map_err(|_| RepositoryError::GitOperationFailed)?;
+                if read == 0 {
+                    break;
+                }
+                let recorded = parse_recorded_mode(&mode)?;
+                name.clear();
+                (&mut body)
+                    .take(MAX_TREE_ENTRY_NAME_BYTES as u64 + 1)
+                    .read_until(0, &mut name)
+                    .map_err(|_| RepositoryError::GitOperationFailed)?;
+                if name.pop() != Some(0) || name.is_empty() || name.contains(&b'/') {
+                    return Err(RepositoryError::GitOperationFailed);
+                }
+                body.read_exact(object)
+                    .map_err(|_| RepositoryError::GitOperationFailed)?;
+                visit(TreeEntryMode::from_recorded(recorded), &name, object);
+            }
+            if body.limit() != 0 {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            session.finish_contents()
+        })
+    }
+
+    /// Runs one complete request/response exchange on the shared process,
+    /// starting it first if needed.
+    fn with_session<T>(
+        &self,
+        exchange: impl FnOnce(&mut Session) -> Result<T, RepositoryError>,
+    ) -> Result<T, RepositoryError> {
+        let mut slot = self.lock_session();
+        if slot.is_none() {
+            *slot = Some(Session::start(&self.worktree)?);
+        }
+        let Some(session) = slot.as_mut() else {
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        let result = exchange(session);
+        if result.is_err() {
+            // The position in the output stream is unknown after a failed
+            // exchange; the next read starts a fresh process.
+            *slot = None;
+        }
+        result
+    }
+
+    fn lock_session(&self) -> MutexGuard<'_, Option<Session>> {
+        match self.session.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => {
+                // A panic interrupted an exchange; its process cannot be trusted.
+                let mut slot = poisoned.into_inner();
+                *slot = None;
+                self.session.clear_poison();
+                slot
+            }
+        }
+    }
+
+    /// The process currently serving reads, for tests that prove reuse.
+    #[cfg(test)]
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.lock_session()
+            .as_ref()
+            .map(|session| session.child.id())
+    }
+}
+
+/// One running `git cat-file --batch-command` process.
+struct Session {
+    child: Child,
+    input: Option<ChildStdin>,
+    output: Option<BufReader<ChildStdout>>,
+}
+
+impl Session {
+    fn start(worktree: &Path) -> Result<Self, RepositoryError> {
+        let mut command = Command::new("git");
+        command.current_dir(worktree);
+        scrub_git_routing_environment(&mut command);
+        // Set after scrubbing, which removes inherited replace-object settings.
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .args(["cat-file", "--batch-command"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        Ok(Self {
+            child,
+            input: Some(input),
+            output: Some(BufReader::new(output)),
+        })
+    }
+
+    fn output(&mut self) -> Result<&mut BufReader<ChildStdout>, RepositoryError> {
+        self.output
+            .as_mut()
+            .ok_or(RepositoryError::GitOperationFailed)
+    }
+
+    /// Sends one `info` or `contents` command and reads its header line.
+    fn request(
+        &mut self,
+        command: &str,
+        name: &str,
+        algorithm: GitHashAlgorithm,
+    ) -> Result<Option<ObjectHeader>, RepositoryError> {
+        // One command per line: a line break in a name would desynchronise
+        // every later response.
+        if name.is_empty() || name.contains(['\n', '\r', '\0']) {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let input = self
+            .input
+            .as_mut()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        input
+            .write_all(format!("{command} {name}\n").as_bytes())
+            .and_then(|()| input.flush())
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        let mut line = Vec::new();
+        self.output()?
+            .take(MAX_HEADER_BYTES)
+            .read_until(b'\n', &mut line)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if line.pop() != Some(b'\n') {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        if line.strip_suffix(b" missing") == Some(name.as_bytes()) {
+            return Ok(None);
+        }
+        let mut fields = line.split(|byte| *byte == b' ');
+        let (Some(oid), Some(kind), Some(size), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(RepositoryError::GitOperationFailed);
+        };
+        if oid.len() != algorithm.width() * 2
+            || !oid
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let kind = ObjectKind::parse(kind).ok_or(RepositoryError::GitOperationFailed)?;
+        let size = std::str::from_utf8(size)
+            .ok()
+            .and_then(|size| size.parse::<u64>().ok())
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid =
+            String::from_utf8(oid.to_vec()).map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(Some(ObjectHeader { oid, kind, size }))
+    }
+
+    /// Consumes the line feed that ends every `contents` response.
+    fn finish_contents(&mut self) -> Result<(), RepositoryError> {
+        let mut terminator = [0u8; 1];
+        self.output()?
+            .read_exact(&mut terminator)
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if terminator == *b"\n" {
+            Ok(())
+        } else {
+            Err(RepositoryError::GitOperationFailed)
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Closing both pipes ends `cat-file` at its next read or write; reap
+        // it so no process outlives the handle.
+        self.input.take();
+        self.output.take();
+        let _ = self.child.wait();
+    }
+}
+
+fn parse_recorded_mode(field: &[u8]) -> Result<u32, RepositoryError> {
+    let digits = field
+        .strip_suffix(b" ")
+        .filter(|digits| !digits.is_empty())
+        .ok_or(RepositoryError::GitOperationFailed)?;
+    digits.iter().try_fold(0u32, |mode, digit| match digit {
+        b'0'..=b'7' => Ok((mode << 3) | u32::from(digit - b'0')),
+        _ => Err(RepositoryError::GitOperationFailed),
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+impl Repository {
+    /// The object reader shared by this handle and its clones.
+    pub(crate) fn objects(&self) -> &ObjectReader {
+        &self.objects
+    }
+
+    /// Lists a committed tree like [`Self::list_committed_tree`], but never
+    /// enters the format-3 native store at `.orna/store`.
+    ///
+    /// The store is database content that grows with the rows it holds; a
+    /// repository keeps it "normally sparsely excluded" (19-repository), and no
+    /// source module, row unit or metadata file lives below it. Trees are read
+    /// through the repository's object reader, one exchange per directory, so
+    /// the cost follows the source tree whatever the store holds.
+    pub fn list_committed_source_tree(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        let resolved = self
+            .objects
+            .info(&format!("{}^{{commit}}", commit.as_str()))?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if resolved.kind() != ObjectKind::Commit || resolved.oid() != commit.as_str() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let root = self
+            .objects
+            .info(&format!("{}^{{tree}}", commit.as_str()))?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if root.kind() != ObjectKind::Tree {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        self.source_tree_entries(root.oid())
+    }
+
+    /// Private-candidate variant of [`Self::list_committed_source_tree`] over
+    /// the candidate's exact immutable tree.
+    pub fn list_private_candidate_source_tree(
+        &self,
+        candidate: &PrivateCommit,
+    ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        self.verify_private_candidate(candidate)?;
+        self.source_tree_entries(candidate.tree().as_str())
+    }
+
+    /// Walks a tree depth first in Git's tree order, as `git ls-tree -r`
+    /// lists it, and skips the subtree at the fixed store position.
+    fn source_tree_entries(&self, root: &str) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        let mut listed = Vec::new();
+        let mut pending = vec![(String::new(), self.objects.tree_entries(root)?.into_iter())];
+        loop {
+            let Some((directory, entries)) = pending.last_mut() else {
+                break;
+            };
+            let Some(entry) = entries.next() else {
+                pending.pop();
+                continue;
+            };
+            let name = std::str::from_utf8(entry.name())
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            let path = if directory.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{directory}/{name}")
+            };
+            let kind = match entry.mode() {
+                TreeEntryMode::Tree => {
+                    if path != STORE_PATH {
+                        let children = self.objects.tree_entries(entry.oid())?;
+                        pending.push((path, children.into_iter()));
+                    }
+                    continue;
+                }
+                TreeEntryMode::File => CommittedTreeEntryKind::File { executable: false },
+                TreeEntryMode::Executable => CommittedTreeEntryKind::File { executable: true },
+                TreeEntryMode::Symlink => CommittedTreeEntryKind::Symlink,
+                TreeEntryMode::Gitlink => CommittedTreeEntryKind::Submodule,
+            };
+            listed.push(CommittedTreeEntry {
+                path: ManagedPath::new(&path)?,
+                kind,
+            });
+        }
+        Ok(listed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        io::Write as _,
+        path::Path,
+        process::{Command, Stdio},
+    };
+
+    use super::{ObjectKind, TreeEntryMode};
+    use crate::{CommittedTreeEntryKind, Repository};
+
+    fn git(directory: &Path, arguments: &[&str]) -> String {
+        git_with_input(directory, arguments, "")
+    }
+
+    fn git_with_input(directory: &Path, arguments: &[&str], input: &str) -> String {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(arguments)
+            .env("GIT_AUTHOR_NAME", "Orna")
+            .env("GIT_AUTHOR_EMAIL", "orna@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Orna")
+            .env("GIT_COMMITTER_EMAIL", "orna@example.invalid")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run git");
+        child
+            .stdin
+            .take()
+            .expect("git stdin")
+            .write_all(input.as_bytes())
+            .expect("write git stdin");
+        let output = child.wait_with_output().expect("wait for git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
+    /// A committed tree with a nested module, an executable, a symlink and a
+    /// gitlink beside the root module.
+    fn repository() -> (tempfile::TempDir, Repository) {
+        let directory = tempfile::tempdir().expect("create repository directory");
+        let root = directory.path();
+        git(
+            root,
+            &["init", "--quiet", "--initial-branch=main", "--template="],
+        );
+        git(root, &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.join("lib")).expect("create module directory");
+        fs::write(root.join("main.orna"), "pub fn main() {}\n").expect("write root module");
+        fs::write(root.join("lib/main.orna"), "pub fn helper() {}\n").expect("write nested module");
+        fs::write(root.join("run.sh"), "#!/bin/sh\n").expect("write script");
+        git(root, &["add", "."]);
+        git(root, &["update-index", "--chmod=+x", "run.sh"]);
+        let target = git_with_input(root, &["hash-object", "-w", "--stdin"], "main.orna");
+        git(
+            root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{target},alias.orna"),
+            ],
+        );
+        git(root, &["commit", "--quiet", "--no-verify", "-m", "fixture"]);
+        let head = git(root, &["rev-parse", "HEAD"]);
+        git(
+            root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},vendor"),
+            ],
+        );
+        git(root, &["commit", "--quiet", "--no-verify", "-m", "gitlink"]);
+        let repository = Repository::discover(root).expect("discover repository");
+        (directory, repository)
+    }
+
+    #[test]
+    fn reads_trees_and_blobs_through_one_long_lived_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let head = git(root, &["rev-parse", "HEAD"]);
+        let tree = objects
+            .info(&format!("{head}^{{tree}}"))
+            .expect("resolve the root tree")
+            .expect("the root tree exists");
+        assert_eq!(tree.kind(), ObjectKind::Tree);
+        assert_eq!(tree.oid(), git(root, &["rev-parse", "HEAD^{tree}"]));
+        let process = objects
+            .process_id()
+            .expect("the first read started the reader");
+
+        let entries = objects
+            .tree_entries(tree.oid())
+            .expect("list the root tree");
+        let listed = entries
+            .iter()
+            .map(|entry| (entry.name(), entry.mode()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                (b"alias.orna".as_slice(), TreeEntryMode::Symlink),
+                (b"lib".as_slice(), TreeEntryMode::Tree),
+                (b"main.orna".as_slice(), TreeEntryMode::File),
+                (b"run.sh".as_slice(), TreeEntryMode::Executable),
+                (b"vendor".as_slice(), TreeEntryMode::Gitlink),
+            ]
+        );
+        let module = objects
+            .find_tree_entry(tree.oid(), b"main.orna")
+            .expect("find the root module")
+            .expect("the root module exists");
+        assert_eq!(module.oid(), git(root, &["rev-parse", "HEAD:main.orna"]));
+        assert_eq!(
+            objects
+                .read_blob(module.oid(), 64)
+                .expect("read the root module"),
+            b"pub fn main() {}\n"
+        );
+        assert!(
+            objects
+                .find_tree_entry(tree.oid(), b"absent.orna")
+                .expect("look up an absent entry")
+                .is_none()
+        );
+        assert!(
+            objects
+                .info(&format!("{head}:absent.orna"))
+                .expect("resolve an absent path")
+                .is_none()
+        );
+        assert_eq!(
+            objects.process_id(),
+            Some(process),
+            "every read reused one process"
+        );
+
+        let clone = repository.clone();
+        assert!(
+            clone
+                .objects()
+                .info("HEAD")
+                .expect("read through a clone")
+                .is_some()
+        );
+        assert_eq!(
+            clone.objects().process_id(),
+            Some(process),
+            "clones share the reader"
+        );
+    }
+
+    #[test]
+    fn a_failed_read_restarts_the_reader_without_desynchronising_it() {
+        let (directory, repository) = repository();
+        let objects = repository.objects();
+        let tree = git(directory.path(), &["rev-parse", "HEAD^{tree}"]);
+        let module = git(directory.path(), &["rev-parse", "HEAD:main.orna"]);
+
+        assert!(
+            objects.read_blob(&tree, 1024).is_err(),
+            "a tree is not a blob"
+        );
+        assert!(
+            objects.read_blob(&module, 4).is_err(),
+            "the blob exceeds the bound"
+        );
+        assert!(
+            objects.tree_entries(&module).is_err(),
+            "a blob is not a tree"
+        );
+        assert!(
+            objects.info("HEAD\nHEAD").is_err(),
+            "one name per command line"
+        );
+        assert_eq!(
+            objects.read_blob(&module, 64).expect("read after failures"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(
+            objects
+                .tree_entries(&tree)
+                .expect("list after failures")
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn reads_objects_written_after_the_reader_started() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        assert!(objects.info("HEAD").expect("start the reader").is_some());
+        let process = objects.process_id();
+
+        fs::write(root.join("added.orna"), "pub fn added() {}\n").expect("write module");
+        git(root, &["add", "added.orna"]);
+        git(
+            root,
+            &["commit", "--quiet", "--no-verify", "-m", "add module"],
+        );
+        let head = git(root, &["rev-parse", "HEAD"]);
+        let added = objects
+            .info(&format!("{head}:added.orna"))
+            .expect("resolve the new module")
+            .expect("a loose object written later is visible");
+        assert_eq!(
+            objects
+                .read_blob(added.oid(), 64)
+                .expect("read the new module"),
+            b"pub fn added() {}\n"
+        );
+
+        git(root, &["gc", "--quiet", "--prune=now"]);
+        assert_eq!(
+            objects
+                .read_blob(added.oid(), 64)
+                .expect("read the module from its pack"),
+            b"pub fn added() {}\n"
+        );
+        assert_eq!(
+            objects.process_id(),
+            process,
+            "no read restarted the reader"
+        );
+    }
+
+    /// The source listing is the recursive listing minus the store subtree,
+    /// in the same order, and never reads a store node.
+    #[test]
+    fn source_listing_skips_only_the_store_and_reads_none_of_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let head = repository.head().expect("read HEAD").expect("HEAD is born");
+        let complete = repository
+            .list_committed_tree(&head, 64)
+            .expect("list recursively");
+        assert_eq!(
+            repository
+                .list_committed_source_tree(&head)
+                .expect("list the source tree"),
+            complete
+        );
+        assert!(complete.iter().any(|entry| {
+            entry.path().as_path() == Path::new("lib/main.orna")
+                && entry.kind() == CommittedTreeEntryKind::File { executable: false }
+        }));
+
+        let absent_node = "1".repeat(head.as_str().len());
+        let store = git_with_input(
+            root,
+            &["mktree", "--missing"],
+            &format!("040000 tree {absent_node}\tnode\n"),
+        );
+        let metadata = git_with_input(root, &["mktree"], &format!("040000 tree {store}\tstore\n"));
+        let mut listing = git(root, &["ls-tree", "HEAD"]);
+        listing.push_str(&format!("\n040000 tree {metadata}\t.orna\n"));
+        let tree = git_with_input(root, &["mktree"], &listing);
+        let commit = git(root, &["commit-tree", &tree, "-p", "HEAD", "-m", "store"]);
+        git(root, &["update-ref", "HEAD", &commit]);
+        let commit = repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the new commit");
+
+        assert!(
+            repository.list_committed_tree(&commit, 64).is_err(),
+            "the recursive listing reads the absent store node"
+        );
+        assert_eq!(
+            repository
+                .list_committed_source_tree(&commit)
+                .expect("the source listing never enters the store"),
+            complete
+        );
+    }
+}
