@@ -37,7 +37,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -68,6 +68,8 @@ const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
 /// exit before it reports orderly termination. A cancelled worker finishes
 /// its in-flight step, sends a Close frame and exits.
 const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+/// Default for [`ServeOptions::max_connections`].
+const MAX_CONNECTIONS: usize = 64;
 
 /// Operator choices for one `orna serve` process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +81,10 @@ struct ServeOptions {
     /// Lifetime of a live session, which is also its reconnection lease. The
     /// owner sweep terminates a session once it has elapsed.
     session_lease_ms: u64,
+    /// Bound on concurrent connections, each served by its own thread. The
+    /// accept loop answers a connection beyond it with 503 without reading
+    /// its request.
+    max_connections: usize,
 }
 
 impl Default for ServeOptions {
@@ -87,6 +93,7 @@ impl Default for ServeOptions {
             allow_push: false,
             keepalive: WebSocketKeepalive::default(),
             session_lease_ms: SESSION_LEASE_MS,
+            max_connections: MAX_CONNECTIONS,
         }
     }
 }
@@ -188,6 +195,9 @@ struct ServeState {
     /// requests or other sockets' frame admission.
     application: Mutex<ApplicationLiveAdapter>,
     workers: WebSocketWorkers,
+    /// Connections being served, bounded by [`ServeOptions::max_connections`]
+    /// (see [`ConnectionSlot`]).
+    connections: AtomicUsize,
 }
 
 struct SessionState {
@@ -536,6 +546,7 @@ fn new_serve_state(
         }),
         application: Mutex::new(application),
         workers: WebSocketWorkers::default(),
+        connections: AtomicUsize::new(0),
     })
 }
 
@@ -543,14 +554,74 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
     start_session_sweep(state)?;
     for accepted in listener.incoming() {
         let stream = accepted?;
-        let connection_state = Arc::clone(state);
+        let Some(slot) = ConnectionSlot::claim(state, &stream) else {
+            refuse_connection(stream);
+            continue;
+        };
         std::thread::Builder::new()
             .name("orna-serve-connection".into())
             .spawn(move || {
-                let _ = serve_connection(stream, &connection_state);
+                let _ = serve_connection(stream, &slot.state);
+                drop(slot);
             })?;
     }
     Ok(())
+}
+
+/// One accepted connection's claim on [`ServeOptions::max_connections`],
+/// held by the thread that serves it. Dropping it releases the claim before
+/// it ends the connection, so a peer that has seen its connection end can
+/// connect again at once.
+struct ConnectionSlot {
+    state: Arc<ServeState>,
+    /// A second handle on the connection's socket, which keeps the socket
+    /// open until the claim has been released.
+    socket: TcpStream,
+}
+
+impl ConnectionSlot {
+    /// Claims a slot for `stream`, or returns `None` when every slot is
+    /// taken.
+    fn claim(state: &Arc<ServeState>, stream: &TcpStream) -> Option<Self> {
+        let limit = state.options.max_connections;
+        state
+            .connections
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < limit).then_some(active + 1)
+            })
+            .ok()?;
+        match stream.try_clone() {
+            Ok(socket) => Some(Self {
+                state: Arc::clone(state),
+                socket,
+            }),
+            Err(_) => {
+                state.connections.fetch_sub(1, Ordering::AcqRel);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.state.connections.fetch_sub(1, Ordering::AcqRel);
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
+}
+
+/// Answers a connection beyond [`ServeOptions::max_connections`] from the
+/// accept loop itself: a 503 written without waiting, which fits in the new
+/// socket's empty send buffer, then the end of the connection. Its request
+/// is never read, so the peer cannot hold up the accept loop.
+fn refuse_connection(mut stream: TcpStream) {
+    let response = unavailable_response();
+    let mut bytes = response_head(&response);
+    bytes.extend_from_slice(&response.body);
+    if stream.set_nonblocking(true).is_ok() {
+        let _ = stream.write_all(&bytes);
+    }
+    let _ = stream.shutdown(Shutdown::Write);
 }
 
 /// Starts the owner sweep (30-protocol, Session creation and ownership:
@@ -1917,6 +1988,15 @@ fn read_head_line(
 }
 
 fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
+    stream.write_all(&response_head(&response))?;
+    stream.write_all(&response.body)?;
+    stream.flush()
+}
+
+/// The status line and headers of `response`, through the blank line that
+/// ends them.
+fn response_head(response: &Response) -> Vec<u8> {
+    use std::fmt::Write as _;
     let reason = match response.status {
         200 => "OK",
         201 => "Created",
@@ -1932,20 +2012,19 @@ fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> 
         503 => "Service Unavailable",
         _ => "Response",
     };
-    write!(stream, "HTTP/1.1 {} {reason}\r\n", response.status)?;
+    let mut head = format!("HTTP/1.1 {} {reason}\r\n", response.status);
     if !response.content_type.is_empty() {
-        write!(stream, "Content-Type: {}\r\n", response.content_type)?;
+        let _ = write!(head, "Content-Type: {}\r\n", response.content_type);
     }
     for (name, value) in &response.headers {
-        write!(stream, "{name}: {value}\r\n")?;
+        let _ = write!(head, "{name}: {value}\r\n");
     }
-    write!(
-        stream,
+    let _ = write!(
+        head,
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.body.len()
-    )?;
-    stream.write_all(&response.body)?;
-    stream.flush()
+    );
+    head.into_bytes()
 }
 
 fn json_string(value: &str) -> String {
@@ -3114,6 +3193,61 @@ mod tests {
 
         expect_server_close(&mut socket, CLOSE_RETIRED);
         assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-13: the connections being served,
+    /// each on its own thread, are bounded. Beyond the cap the accept loop
+    /// answers 503 at once without reading the request, and a connection's
+    /// slot is free again once it has ended.
+    #[test]
+    fn connections_beyond_the_cap_are_refused_until_one_ends() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=cap"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let home = || {
+            exchange(
+                address,
+                &format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n"),
+            )
+        };
+        // A request's slot is released before its peer sees the response end,
+        // so the handshake that follows on a new connection is admitted.
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+
+        let refused = home();
+        assert_eq!(refused.status, 503);
+        assert_eq!(refused.body, r#"{"error":"temporarily_unavailable"}"#);
+
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        assert!(closed_by_server(&mut socket));
+        // The socket's worker ends the connection just before its thread
+        // releases the slot.
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let reply = home();
+            if reply.status != 503 {
+                assert_eq!(reply.status, 200, "{}", reply.body);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the ended connection's slot is released"
+            );
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
     }
 
     const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
