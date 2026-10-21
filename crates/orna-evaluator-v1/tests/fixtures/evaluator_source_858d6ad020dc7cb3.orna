@@ -1,1 +1,1 @@
-std.collection.take([1], -1)
+take([1], -1)
