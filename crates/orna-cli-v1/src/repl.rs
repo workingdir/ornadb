@@ -273,10 +273,33 @@ impl From<ReplError> for ReplFailure {
     }
 }
 
+/// Byte ranges of string literal source, quotes included. Interpolated
+/// strings contribute their whole region, so interpolation code between the
+/// quotes is covered too. Returns `None` when the source does not lex, so no
+/// line can be shown without knowing whether it holds literal text.
+fn string_literal_ranges(source: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let tokens = orna_syntax_v1::lex(source).ok()?;
+    let mut ranges = Vec::new();
+    let mut open = None;
+    for token in &tokens {
+        match token.kind {
+            orna_syntax_v1::TokenKind::String => ranges.push(token.span.start..token.span.end),
+            orna_syntax_v1::TokenKind::StringStart => open = Some(token.span.start),
+            orna_syntax_v1::TokenKind::StringEnd => {
+                if let Some(start) = open.take() {
+                    ranges.push(start..token.span.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(ranges)
+}
+
 /// Locates a span as `line N, column M`, then the source line with carets
-/// under the span. A line containing a string literal is withheld, because
-/// submitted text may be sensitive; the location and carets remain. Returns
-/// `None` when the span is not on character boundaries of `source`.
+/// under the span. A line overlapping string literal source is withheld,
+/// because submitted text may be sensitive; the location and carets remain.
+/// Returns `None` when the span is not on character boundaries of `source`.
 fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
     let start = span.start;
     if start > source.len() || !source.is_char_boundary(start) {
@@ -294,11 +317,14 @@ fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
         .map_or(1, |text| text.chars().count().max(1));
     let gutter = line_number.to_string();
     let pad = " ".repeat(gutter.len());
-    let line = if source[line_start..line_end].contains('"') {
-        "<source withheld: line contains a string literal>"
-    } else {
-        &source[line_start..line_end]
+    let withheld = match string_literal_ranges(source) {
+        None => Some("<source withheld: submission does not tokenize>"),
+        Some(ranges) if ranges.iter().any(|range| range.start < line_end && range.end > line_start) => {
+            Some("<source withheld: line contains a string literal>")
+        }
+        Some(_) => None,
     };
+    let line = withheld.unwrap_or(&source[line_start..line_end]);
     Some(format!(
         "  --> line {line_number}, column {column}\n{pad} |\n{gutter} | {line}\n{pad} | {}{}",
         " ".repeat(column - 1),
@@ -1465,6 +1491,24 @@ mod tests {
         assert!(text.contains("  --> line 1, column 1"), "{text}");
         assert!(text.contains("<source withheld: line contains a string literal>"), "{text}");
         assert!(!text.contains("private"), "{text}");
+    }
+
+    #[test]
+    fn multi_line_string_middle_line_without_a_quote_is_withheld() {
+        let source = "let s = \"first\nsecret middle\nlast\";\n";
+        let start = source.find("secret").expect("middle line fixture");
+        let failure = located(
+            "ORNA-S021-TYPE",
+            "static types are incompatible",
+            start..start + "secret".len(),
+            "change the expression or its declared type",
+        );
+        let text = render_repl_failure(&failure, source);
+
+        assert!(text.contains("  --> line 2, column 1"), "{text}");
+        assert!(text.contains("<source withheld: line contains a string literal>"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("middle"), "{text}");
     }
 
     #[test]
