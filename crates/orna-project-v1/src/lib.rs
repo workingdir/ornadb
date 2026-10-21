@@ -993,8 +993,10 @@ impl ProjectLoader {
         load_reachable_project(
             self.limits,
             standard_profile,
+            vec![String::from("main.orna")],
+            false,
             |logical_path, total_bytes| read_module(&root, logical_path, total_bytes, self.limits),
-            |segments| resolve_import(&root, segments),
+            |_, segments| resolve_import(&root, segments),
             |tables, total_bytes| {
                 discover_worktree_rows(&root, tables, total_bytes, self.limits)
             },
@@ -1022,6 +1024,26 @@ impl ProjectLoader {
         commit: &GitCommitRef,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
+        self.load_committed_project(
+            repository,
+            commit,
+            standard_profile,
+            vec![String::from("main.orna")],
+            false,
+        )
+    }
+
+    /// Loads the project reachable from `roots` at one committed snapshot.
+    /// `std_snapshot` selects attached standard-library import rules, where
+    /// imports inside the library are resolved relative to its own tree.
+    fn load_committed_project(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        standard_profile: Option<StandardDependencyProfile>,
+        roots: Vec<String>,
+        std_snapshot: bool,
+    ) -> Result<LoadedProject, ProjectLoadError> {
         let snapshot = validate_committed_tree(repository, commit, self.limits)?;
         if snapshot.has_standard_gitlink
             && let Some(profile) = &standard_profile
@@ -1043,6 +1065,8 @@ impl ProjectLoader {
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
+            roots,
+            std_snapshot,
             |logical_path, total_bytes| {
                 read_committed_module(
                     repository,
@@ -1053,7 +1077,13 @@ impl ProjectLoader {
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&snapshot.source_paths, segments),
+            |importer, segments| {
+                if std_snapshot {
+                    resolve_std_snapshot_import(&snapshot.source_paths, importer, segments)
+                } else {
+                    resolve_committed_import(&snapshot.source_paths, segments)
+                }
+            },
             |tables, total_bytes| {
                 if has_format3_database {
                     Ok(Vec::new())
@@ -1163,6 +1193,8 @@ impl ProjectLoader {
         let mut project = load_reachable_project(
             self.limits,
             standard_profile,
+            vec![String::from("main.orna")],
+            false,
             |logical_path, total_bytes| {
                 read_private_candidate_module(
                     repository,
@@ -1173,7 +1205,7 @@ impl ProjectLoader {
                     self.limits,
                 )
             },
-            |segments| resolve_committed_import(&snapshot.source_paths, segments),
+            |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
                 if has_format3_database {
                     Ok(Vec::new())
@@ -1262,9 +1294,39 @@ impl ProjectLoader {
         let Ok(module_commit) = module_repository.resolve_snapshot(module_commit.as_str()) else {
             return;
         };
-        let Ok(module_project) =
-            self.load_committed_snapshot_with_standard_profile(&module_repository, &module_commit, None)
+        let Ok(snapshot) = validate_committed_tree(&module_repository, &module_commit, self.limits)
         else {
+            return;
+        };
+        let available = snapshot
+            .source_paths
+            .iter()
+            .map(|path| format!("std/{path}"))
+            .collect::<BTreeSet<_>>();
+        let Some(requested) = project
+            .standard_modules
+            .iter()
+            .map(|module| {
+                canonical_standard_module(module, |candidate| available.contains(candidate))
+            })
+            .collect::<Option<BTreeSet<String>>>()
+        else {
+            return;
+        };
+        let mut roots = requested
+            .iter()
+            .map(|module| module["std/".len()..].to_owned())
+            .collect::<Vec<_>>();
+        if available.contains("std/main.orna") {
+            roots.push(String::from("main.orna"));
+        }
+        let Ok(module_project) = self.load_committed_project(
+            &module_repository,
+            &module_commit,
+            None,
+            roots,
+            true,
+        ) else {
             return;
         };
         let sources = module_project
@@ -1277,14 +1339,13 @@ impl ProjectLoader {
                 )
             })
             .collect::<Vec<_>>();
-        let available = sources
+        let loaded = sources
             .iter()
             .map(|(logical_path, _)| logical_path.as_str())
             .collect::<BTreeSet<_>>();
-        if !project
-            .standard_modules
+        if !requested
             .iter()
-            .all(|logical_path| available.contains(logical_path.as_str()))
+            .all(|logical_path| loaded.contains(logical_path.as_str()))
         {
             return;
         }
@@ -1294,10 +1355,8 @@ impl ProjectLoader {
         ) else {
             return;
         };
-        project.standard_runtime_modules = standard_runtime_closure(
-            &project.standard_modules,
-            &sources,
-        );
+        project.standard_runtime_modules = standard_runtime_closure(&requested, &sources);
+        project.standard_modules = requested;
         project.standard_profile = Some(profile);
         project.standard_sources = sources;
     }
@@ -1559,14 +1618,16 @@ fn committed_uuid(raw: &Raw) -> Option<[u8; 16]> {
 fn load_reachable_project(
     limits: ProjectLimits,
     standard_profile: Option<StandardDependencyProfile>,
+    roots: Vec<String>,
+    std_snapshot: bool,
     mut read_module: impl FnMut(&str, &mut usize) -> Result<String, ProjectLoadError>,
-    mut resolve_import: impl FnMut(&[&str]) -> Result<String, ProjectLoadError>,
+    mut resolve_import: impl FnMut(&str, &[&str]) -> Result<String, ProjectLoadError>,
     mut discover_rows: impl FnMut(
         &BTreeSet<String>,
         &mut usize,
     ) -> Result<Vec<LooseRowCandidate>, ProjectLoadError>,
 ) -> Result<LoadedProject, ProjectLoadError> {
-    let mut pending = VecDeque::from([String::from("main.orna")]);
+    let mut pending = VecDeque::from(roots);
     let mut loaded = BTreeMap::<String, LoadedModule>::new();
     let mut namespaces = BTreeMap::<Vec<String>, String>::new();
     let mut total_bytes = 0usize;
@@ -1605,21 +1666,26 @@ fn load_reachable_project(
             if segments.is_empty() {
                 return Err(ProjectLoadError::UnsupportedImport);
             }
-            if matches!(segments[0], "sys" | "std") {
-                standard_imports |= segments[0] == "std";
-                if segments[0] == "std" {
-                    let mut logical_path = segments.join("/");
-                    if segments.len() == 1 {
-                        logical_path.push_str("/main");
-                    }
-                    if !logical_path.ends_with(".orna") {
-                        logical_path.push_str(".orna");
-                    }
-                    standard_modules.insert(logical_path);
-                }
+            if segments[0] == "sys" {
                 continue;
             }
-            imports.insert(resolve_import(&segments)?);
+            if segments[0] == "std" && std_snapshot {
+                imports.insert(resolve_import(&logical_path, &segments[1..])?);
+                continue;
+            }
+            if segments[0] == "std" {
+                standard_imports = true;
+                let mut requested = segments.join("/");
+                if segments.len() == 1 {
+                    requested.push_str("/main");
+                }
+                if !requested.ends_with(".orna") {
+                    requested.push_str(".orna");
+                }
+                standard_modules.insert(requested);
+                continue;
+            }
+            imports.insert(resolve_import(&logical_path, &segments)?);
         }
         pending.extend(imports);
         for item in &parsed.value.items {
@@ -1642,6 +1708,18 @@ fn load_reachable_project(
         modules.push(ModuleInput::new(logical_path, module.source));
     }
     let loose_rows = discover_rows(&table_paths, &mut total_bytes)?;
+    let standard_modules = match &standard_profile {
+        Some(profile) => standard_modules
+            .into_iter()
+            .map(|requested| {
+                canonical_standard_module(&requested, |candidate| {
+                    profile.module_digests().contains_key(candidate)
+                })
+                .unwrap_or(requested)
+            })
+            .collect(),
+        None => standard_modules,
+    };
     Ok(LoadedProject {
         modules,
         identities,
@@ -1687,17 +1765,29 @@ fn standard_runtime_closure(
             if segments.is_empty() || segments[0] == "sys" {
                 continue;
             }
-            let base = if segments[0] == "std" {
-                segments.join("/")
+            let joined = segments.join("/");
+            let bases = if segments[0] == "std" {
+                vec![joined]
             } else {
-                format!("std/{}", segments.join("/"))
+                let importer_directory = logical_path
+                    .rsplit_once('/')
+                    .map_or("std", |(directory, _)| directory);
+                vec![
+                    format!("std/{joined}"),
+                    format!("{importer_directory}/{joined}"),
+                ]
             };
-            let file = format!("{base}.orna");
-            let directory = format!("{base}/main.orna");
-            if source_by_path.contains_key(file.as_str()) {
-                pending.push_back(file);
-            } else if source_by_path.contains_key(directory.as_str()) {
-                pending.push_back(directory);
+            for base in bases {
+                let file = format!("{base}.orna");
+                let directory = format!("{base}/main.orna");
+                if source_by_path.contains_key(file.as_str()) {
+                    pending.push_back(file);
+                    break;
+                }
+                if source_by_path.contains_key(directory.as_str()) {
+                    pending.push_back(directory);
+                    break;
+                }
             }
         }
     }
@@ -2054,6 +2144,40 @@ fn resolve_committed_import(
         (false, true) => Ok(directory),
     }
 }
+
+fn resolve_std_snapshot_import(
+    source_paths: &BTreeSet<String>,
+    importer: &str,
+    segments: &[&str],
+) -> Result<String, ProjectLoadError> {
+    match resolve_committed_import(source_paths, segments) {
+        Err(ProjectLoadError::ImportUnavailable) => {
+            let Some((directory, _)) = importer.rsplit_once('/') else {
+                return Err(ProjectLoadError::ImportUnavailable);
+            };
+            let mut sibling = directory.split('/').collect::<Vec<_>>();
+            sibling.extend_from_slice(segments);
+            resolve_committed_import(source_paths, &sibling)
+        }
+        result => result,
+    }
+}
+
+/// Maps a requested `std/<path>.orna` onto the module file that exists:
+/// either the file itself or its directory `main.orna`, never both.
+fn canonical_standard_module(
+    requested: &str,
+    available: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let base = requested.strip_suffix(".orna")?;
+    let directory = format!("{base}/main.orna");
+    match (available(requested), available(&directory)) {
+        (true, false) => Some(requested.to_owned()),
+        (false, true) => Some(directory),
+        _ => None,
+    }
+}
+
 fn discover_worktree_rows(
     root: &Path,
     table_paths: &BTreeSet<String>,
