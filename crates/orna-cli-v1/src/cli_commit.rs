@@ -85,6 +85,38 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             "E2300", "local runtime could not be opened", "repair the local Orna runtime state before committing", format!("{error:?}"),
         )
     })?;
+    // An interrupted publication is recovered before the index is reviewed:
+    // recovery restores the exact state the review's intent is derived from,
+    // and a stranded Orna index lock would otherwise block this commit.
+    let pending = repository.read_publication_journal().map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2300", "publication journal could not be read", "repair the local Orna publication state before committing", format!("{error:?}"),
+        )
+    })?;
+    let reviewed = match pending.as_ref() {
+        Some(journal) => repository.publication_journal_is_reviewed(journal).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2300", "publication journal could not be classified", "repair the local Orna publication state before committing", format!("{error:?}"),
+            )
+        })?,
+        None => false,
+    };
+    if reviewed {
+        match repository.recover_publication() {
+            Ok(_) | Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired) => {}
+            Err(error) => {
+                return Err(Diagnostic::target_with_detail(
+                    "E2300", "pending reviewed commit could not be recovered", "repair the local Orna publication state and retry", format!("{error:?}"),
+                ));
+            }
+        }
+    } else {
+        runtime
+            .block_on(orna_storage_v1::RuntimePublicationCoordinator::recover(&repository, &state))
+            .map_err(|error| {
+                super::cli_publish::describe_storage_failure("pending publication could not be recovered", &error)
+            })?;
+    }
     let capture = runtime.block_on(state.capture()).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300", "runtime candidate could not be captured", "retry after the local runtime state is available", format!("{error:?}"),
