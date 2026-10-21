@@ -13951,7 +13951,11 @@ fn registered_standard_binding(
             .find(|registered| *registered == operation)
             .map(|operation| (*module, operation))
     })?;
+    // A bare spelling of a root intrinsic is served natively; only qualified or
+    // aliased `std.collection.<name>` spellings depend on the captured pin.
+    let root_intrinsic_spelling = spelling.as_deref() == Some(operation);
     if module.kind == StandardBindingKind::Collection
+        && !root_intrinsic_spelling
         && LEGACY_ROOT_WRAPPER_OPERATIONS.contains(&operation)
         && !legacy_root_wrapper_is_pinned(module.prefix, operation, functions)
     {
@@ -15246,7 +15250,7 @@ mod tests {
             &collection_functions_for(HISTORICAL_MAP_FROM)
         ));
         // A pin whose map_from is a while loop shadows native map with its Orna body.
-        let looping_map_from = "fn map_from<T, U>(values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]): [U] = while index < end { output };";
+        let looping_map_from = "fn map_from<T, U>(values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]): [U] { let cursor = index; let result = output; while cursor < end { cursor = cursor + 1; }; result }";
         assert!(!captured_collection_binding_is_native(
             "map",
             &collection_functions_for(looping_map_from)

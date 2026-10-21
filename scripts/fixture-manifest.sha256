@@ -912,12 +912,12 @@ d5e629d32809b69dfc28b200e55c22f539de59674c271ba9c09156011ede4b4a  crates/orna-ev
 6ed6c372e591e039492781a187bf6ad23c50ae363377b841b945a371b9a20ed8  crates/orna-evaluator-v1/src/fixtures/repl-inline-recurse-100000-6ed6c372.orna
 3a7494a25ddba0825f3b329bd0f3c370086396e2ede4204819e1d223f85a2468  crates/orna-evaluator-v1/src/fixtures/repl-inline-source-3a7494a2.orna
 ba1da4b707c41430dca7eea600d342d06d02ea979af441d6640844dafbabed89  crates/orna-evaluator-v1/src/fixtures/repl-inline-source-ba1da4b7.orna
-8c28e4e1cf4bc22254b2e0f76cd4bc278ea8234c7d3d4d92e03bdb50936163c6  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-first-1-2-3-07a8406e.orna
+07a8406e20b1d251e7d7b9ba44c678859051fceae866590bf6fadaf3c9de4f5e  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-first-1-2-3-07a8406e.orna
 fc8dbd37577432c4851cdf6e48893f1d6003244ab1bbb2c3cff671bff2f01353  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-first-2165.orna
-eb8907d0ac8c1f44775c4e6180a54e80453e01aae66e4ec7ba9ede4398d02499  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-map-1-2-3-value-value-401a69f4.orna
+401a69f4eaecb1c120f3a827b24cad5852882ac9c27f8064ef263f9b25ba3d8d  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-map-1-2-3-value-value-401a69f4.orna
 4f51241f6488daf6ac5a68ea7aeff6fad400e7d827f49a9bfda89f481cedb923  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-collection-one-2165.orna
 74c176f70152b956a0d29c7d036f13b43cedb0427d606e837b64ed6a1e64a46f  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-net-http-get-https-example-com-74c176f7.orna
-39a2aee13e1d8674932c271b9966d3cfbd0f71a5aa6593c7025c7433d6fc8646  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-query-alias-map-2165.orna
+1c875c657485dd1f55f09abee95d3895d9d7bebf2ef64fc04ccf7b7700fc525a  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-query-alias-map-2165.orna
 62d3c88882fb8962650ff16ed0ba08047b9a96bcdc93060dfab4be85453dd8c1  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-query-every-2165.orna
 4a1c5a339712482a7e86ff9d1dc572910507dc4e3d615a8ebe623b637431097a  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-query-filter-2165.orna
 2928c4b7e6c20f48c0d2c38ab33afa99a3743ccf8d4bdda31dcb19fe452271bf  crates/orna-evaluator-v1/src/fixtures/repl-inline-std-query-map-2165.orna

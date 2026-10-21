@@ -1,1 +1,1 @@
-map([1, 2, 3], value => value)
+std.collection.map([1, 2, 3], value => value)
