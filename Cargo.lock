@@ -1652,7 +1652,6 @@ name = "orna-repository-v1"
 version = "1.0.0"
 dependencies = [
  "bytes",
- "ed25519-dalek",
  "fs2",
  "libc",
  "num-bigint 0.4.8",

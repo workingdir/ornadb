@@ -4469,6 +4469,9 @@ impl fmt::Display for CompactSegmentRole {
 }
 
 #[cfg(test)]
+mod legacy_reader_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;

@@ -31,6 +31,7 @@ const REPLACE_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 const PAYLOAD_PLACEHOLDER: &str = "__PAYLOAD__";
+const MEDIA_TYPE_PLACEHOLDER: &str = "__MEDIA_TYPE__";
 
 /// The payload of the shared media fixture, so every test in this crate names
 /// the same bytes.
@@ -59,19 +60,22 @@ fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
 }
 
 fn fixture_expression(fixture: &str, root: &str) -> String {
-    fixture_expression_for(fixture, root, "")
+    fixture_expression_for(fixture, root, "", "")
 }
 
-/// The replacement capture, retargeted at the payload file it should read.
-fn replacement_expression(root: &str, payload: &str) -> String {
-    fixture_expression_for(REPLACE_FIXTURE, root, payload)
+/// The replacement capture, retargeted at the payload file it should read and
+/// declared with that payload's media type: capture itself supplies only the
+/// octet-stream/null fallback.
+fn replacement_expression(root: &str, payload: &str, media_type: &str) -> String {
+    fixture_expression_for(REPLACE_FIXTURE, root, payload, media_type)
 }
 
-fn fixture_expression_for(fixture: &str, root: &str, payload: &str) -> String {
+fn fixture_expression_for(fixture: &str, root: &str, payload: &str, media_type: &str) -> String {
     std::fs::read_to_string(fixture)
         .unwrap()
         .trim_end()
         .replace(PAYLOAD_PLACEHOLDER, payload)
+        .replace(MEDIA_TYPE_PLACEHOLDER, media_type)
         .replace(MEDIA_ROOT_PLACEHOLDER, root)
 }
 
@@ -132,7 +136,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let original = fixture_expression(REIMPORT_FIXTURE, &root);
-    let replacement = replacement_expression(&root, "pixel2.png");
+    let replacement = replacement_expression(&root, "pixel2.png", "image/png");
 
     commit_capture(
         &repository,
@@ -157,8 +161,8 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     );
     assert_eq!(before_metadata.media_type(), "image/png");
 
-    // Replace the payload with the other real fixture's bytes, under the
-    // capture's own file name so the field's annotation may move with it.
+    // Replace the payload with the other real fixture's bytes, declared with
+    // the original capture's media type.
     commit_capture(
         &repository,
         &state,
@@ -202,7 +206,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
     assert_eq!(
         after_metadata.suffix(),
         before_metadata.suffix(),
-        "replacing under the same file name keeps the field's annotation"
+        "replacing under the same declaration keeps the field's annotation"
     );
 
     // The replacement names a descriptor that only these bytes can produce:
@@ -270,8 +274,10 @@ async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
 
     let root = format!("{:?}", source.path().to_string_lossy().as_ref());
     let image = fixture_expression(REIMPORT_FIXTURE, &root);
-    let clip = format!("sys.blob.capture_file({root}, \"clip.wav\", 65536)");
-    let replacement = replacement_expression(&root, "replacement.wav");
+    let clip = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"clip.wav\", 65536), \"audio/wav\")"
+    );
+    let replacement = replacement_expression(&root, "replacement.wav", "audio/wav");
     commit_capture(
         &repository,
         &state,
