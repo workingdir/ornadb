@@ -4452,7 +4452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_recovery_reports_pre_ref_publication_as_pending() {
+    async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending() {
         let (_temp, repository) = repository();
         let runtime = RuntimeState::open(
             &repository,
@@ -4514,21 +4514,17 @@ mod tests {
             .unwrap();
         let pending = runtime.pending().await.unwrap();
 
-        assert!(matches!(
+        // Recovery row "Ref still at H": the journal names nothing that was
+        // published, so recovery discards it and leaves the frozen batch
+        // pending instead of fencing the next publication (ORNA-PUB-006).
+        assert_eq!(
             RuntimePublicationCoordinator::recover(&repository, &runtime).await,
-            Err(Error::PublicationPending)
-        ));
+            Ok(Some(index.clone()))
+        );
         assert_eq!(repository.head().unwrap(), Some(head));
         assert_eq!(repository.index_generation().unwrap(), index);
         assert_eq!(runtime.pending().await.unwrap(), pending);
-        assert_eq!(
-            repository
-                .read_publication_journal()
-                .unwrap()
-                .unwrap()
-                .stage(),
-            orna_repository_v1::PublicationJournalStage::Prepared
-        );
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[tokio::test]
