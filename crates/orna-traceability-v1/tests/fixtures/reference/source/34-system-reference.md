@@ -1,4 +1,4 @@
-# 34. System API reference {#system-reference}
+# 41. System API reference {#system-reference}
 
 This reference defines system names, field types and callable interfaces. The [system model](#system) explains identity, snapshots, reflection and redaction; [administration](#administration) specifies state-changing preconditions. A machine-readable schema is available in [`api/sys.json`](api/sys.json).
 
@@ -13,7 +13,7 @@ Field types and declared invariants apply together. Source, host-path and payloa
 | `sys.database`, `sys.current`, `sys.rt`, `sys.repl` | Current attachment, activation, runtime and optional REPL observations. |
 | `sys.catalog` | Declarations, types, source and dependencies. |
 | `sys.history`, `sys.git` | Snapshots, semantic changes and Git objects. |
-| `sys.storage`, `sys.build` | Physical placement and build/test metadata. |
+| `sys.storage`, `sys.build` | Single-store physical observations and build/test metadata. |
 | Root functions | Typed resolution, inspection, invocation and execution control. |
 | `sys.admin` | Explicit state transitions; never row setters. |
 
@@ -427,19 +427,7 @@ Values: `cwd_database`, `wal`, `lock`, `socket`, `segment_cache`, `temporary`, `
 
 
 
-Values: `empty`, `editable`, `compact`, `hybrid`.
-
-### `sys.StoragePreference` {#api-type-sys-storagepreference}
-
-
-
-Values: `automatic`, `editable`, `compact`.
-
-### `sys.StorageRewriteTarget` {#api-type-sys-storagerewritetarget}
-
-
-
-Values: `editable`, `compact`.
+Values: `indexed`.
 
 ### `sys.TypeKind` {#api-type-sys-typekind}
 
@@ -758,7 +746,7 @@ Invariant: semantic_changes is zero.
 
 ### `sys.CompactionResult` {#api-type-sys-compactionresult}
 
-Result of an atomic physical segment compaction.
+Physical maintenance result for the one indexed profile; segment-named fields refer to observed bounded storage pages.
 
 | Field | Type |
 |---|---|
@@ -772,24 +760,6 @@ Result of an atomic physical segment compaction.
 | `semantic_changes` | `Int` |
 
 Invariant: semantic_changes is zero.
-
-### `sys.StorageRewriteResult` {#api-type-sys-storagerewriteresult}
-
-Result of a generation-CAS rewrite between editable and compact physical representations.
-
-| Field | Type |
-|---|---|
-| `table` | `sys.TableRef` |
-| `from` | `sys.StorageProfile` |
-| `to` | `sys.StorageProfile` |
-| `rows` | `Int` |
-| `previous_generation` | `Int` |
-| `generation` | `Int` |
-| `semantic_diff` | `Relation<sys.DiffEntry>` |
-
-Invariant: semantic_diff is empty.
-
-Invariant: generation is published only after complete verification.
 
 ### `sys.VerificationReport` {#api-type-sys-verificationreport}
 
@@ -1003,6 +973,41 @@ Invariant: token is a domain-separated digest of all plan inputs in canonical or
 Invariant: the plan performs no mutation.
 
 Invariant: force is not permission to accept a stale token.
+
+### `sys.BlobWriter` {#api-type-sys-blobwriter}
+
+Nonserialisable owner/runtime-bound incremental Blob capture.
+
+This type has no public structural fields; use the operations that explicitly accept it.
+
+Invariant: states are open, finished, aborted.
+
+Invariant: a handle is not a stored Blob or a portable reference.
+
+Invariant: declared total and per-call limits are enforced before mutation.
+
+Invariant: finish protects and returns immutable content; no user row or branch is implicitly created.
+
+### `sys.CommitReview` {#api-type-sys-commitreview}
+
+Non-authorising, state-bound review of the exact staged Git candidate.
+
+| Field | Type |
+|---|---|
+| `token` | `Digest` |
+| `head` | `sys.GitOid?` |
+| `head_ref` | `Str?` |
+| `index_tree` | `sys.GitOid` |
+| `index_digest` | `Digest` |
+| `worktree_digest` | `Digest` |
+| `cwd` | `sys.SnapshotRef` |
+| `pending_generation` | `Int` |
+
+Invariant: all fields and the exact format coordinate enter the review token.
+
+Invariant: supplying the record does not grant administrative authority.
+
+Invariant: an altered or stale review fails before ref visibility.
 
 ## Canonical system relations
 
@@ -2202,7 +2207,7 @@ The grouped handle selects the current-runtime observation. The canonical relati
 
 ### `sys.Storage` {#api-type-sys-storage}
 
-Logical object's physical storage status.
+Observed single indexed row-store root, generation and availability; not a placement policy.
 
 **Grouped handle:** `sys.storage.objects`. **Availability:** local-durable. **Natural key:** `object`. **Reference:** `sys.StorageRef`.
 
@@ -2211,7 +2216,6 @@ Logical object's physical storage status.
 | `reference` | `sys.StorageRef` |
 | `object` | `sys.ObjectRef` |
 | `profile` | `sys.StorageProfile` |
-| `preference` | `sys.StoragePreference` |
 | `rows` | `Int?` |
 | `rows_exact` | `Bool` |
 | `bytes` | `Int?` |
@@ -2224,10 +2228,12 @@ Logical object's physical storage status.
 | `location` | `Path?` |
 | `publication_policy` | `sys.Value` |
 | `verification` | `sys.VerificationStatus` |
+| `root` | `sys.GitOid?` |
+| `schema_digest` | `Digest` |
 
 ### `sys.Segment` {#api-type-sys-segment}
 
-Immutable compact table segment.
+Compatibility-named bounded immutable row/index-page observation; no separate compact storage writer.
 
 **Grouped handle:** `sys.storage.segments`. **Availability:** catalogue. **Natural key:** `id`. **Reference:** `sys.SegmentRef`.
 
@@ -3027,38 +3033,10 @@ State, cancellation, compare-and-set, audit and rollback rules: [administrative 
 
 ### `sys.admin.compact` {#api-call-sys-admin-compact}
 
-Rewrite physical segments atomically.
+Maintain/repack the current indexed profile without logical mutation or selecting a row mode.
 
 ```text
 fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult
-```
-
-**Effect:** admin.
-
-Contract: [Administrative transition contract](#administration).
-
-State, cancellation, compare-and-set, audit and rollback rules: [administrative operations](#administration).
-
-### `sys.admin.set_storage_preference` {#api-call-sys-admin-set-storage-preference}
-
-Set future automatic placement preference without rewriting existing rows.
-
-```text
-fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage
-```
-
-**Effect:** admin.
-
-Contract: [Administrative transition contract](#administration).
-
-State, cancellation, compare-and-set, audit and rollback rules: [administrative operations](#administration).
-
-### `sys.admin.rewrite_storage` {#api-call-sys-admin-rewrite-storage}
-
-Atomically rewrite physical placement while preserving logical rows.
-
-```text
-fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult
 ```
 
 **Effect:** admin.
@@ -3295,6 +3273,226 @@ Contract: [Administrative transition contract](#administration).
 
 State, cancellation, compare-and-set, audit and rollback rules: [administrative operations](#administration).
 
+### `sys.blob.length` {#api-call-sys-blob-length}
+
+Return the exact byte count without hydrating payloads.
+
+```text
+fn sys.blob.length(value: Blob): Int
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.digest` {#api-call-sys-blob-digest}
+
+Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.
+
+```text
+fn sys.blob.digest(value: Blob): Digest
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.read` {#api-call-sys-blob-read}
+
+Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.
+
+```text
+fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.verify` {#api-call-sys-blob-verify}
+
+Incrementally verify the complete content and its native dependency structure.
+
+```text
+fn sys.blob.verify(value: Blob): Unit
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.from_bytes` {#api-call-sys-blob-from-bytes}
+
+Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+
+```text
+fn sys.blob.from_bytes(values: [Int]): Blob
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.to_bytes` {#api-call-sys-blob-to-bytes}
+
+Explicit bounded materialisation of at most 8 MiB.
+
+```text
+fn sys.blob.to_bytes(value: Blob): [Int]
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.begin` {#api-call-sys-blob-begin}
+
+Begin an owned capture with a checked total bound.
+
+```text
+fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter
+```
+
+**Effect:** invoke.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.append` {#api-call-sys-blob-append}
+
+Append at most 8 MiB in order; enforce the total bound before acceptance.
+
+```text
+fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit
+```
+
+**Effect:** invoke.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.finish` {#api-call-sys-blob-finish}
+
+Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+
+```text
+fn sys.blob.finish(writer: sys.BlobWriter): Blob
+```
+
+**Effect:** invoke.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.abort` {#api-call-sys-blob-abort}
+
+Abort unfinished capture; never delete a returned value.
+
+```text
+fn sys.blob.abort(writer: sys.BlobWriter): Unit
+```
+
+**Effect:** invoke.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.capture_file` {#api-call-sys-blob-capture-file}
+
+Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+
+```text
+fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob
+```
+
+**Effect:** invoke.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.resource` {#api-call-sys-blob-resource}
+
+Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.
+
+```text
+fn sys.blob.resource(path: Str): Blob
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.admin.review_commit` {#api-call-sys-admin-review-commit}
+
+Validate and bind the exact staged candidate without changing index, branch or user data.
+
+```text
+fn sys.admin.review_commit(): sys.CommitReview
+```
+
+**Effect:** read.
+
+Contract: [Administrative transition contract](#administration).
+
+State, cancellation, compare-and-set, audit and rollback rules: [administrative operations](#administration).
+
+### `sys.admin.commit_reviewed` {#api-call-sys-admin-commit-reviewed}
+
+Revalidate a reviewed candidate at protected publication and commit exactly that candidate.
+
+```text
+fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef
+```
+
+**Effect:** admin.
+
+Contract: [Administrative transition contract](#administration).
+
+State, cancellation, compare-and-set, audit and rollback rules: [administrative operations](#administration).
+
+### `sys.blob.media_type` {#api-call-sys-blob-media-type}
+
+Read canonical declared MIME without payload hydration.
+
+```text
+fn sys.blob.media_type(value: Blob): Str
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.suffix` {#api-call-sys-blob-suffix}
+
+Read the canonical optional suffix hint without payload hydration.
+
+```text
+fn sys.blob.suffix(value: Blob): Str?
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.annotate` {#api-call-sys-blob-annotate}
+
+Return the same immutable bytes with MIME-1-validated canonical annotations.
+
+```text
+fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
+### `sys.blob.same_content` {#api-call-sys-blob-same-content}
+
+Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.
+
+```text
+fn sys.blob.same_content(left: Blob, right: Blob): Bool
+```
+
+**Effect:** read.
+
+Contract: [Blob value and storage contract](#blob-values).
+
 ## Portable failure codes
 
 A failure code is stable machine-readable classification. The message may be localised; the code must not be replaced by vendor-only wording. Unless a more specific transition is stated, failure before admission performs no requested mutation.
@@ -3333,7 +3531,7 @@ A failure code is stable machine-readable classification. The message may be loc
 | `sys.admin.verification_failed` | Verification could not complete; no clean result is asserted. |
 | `sys.storage.corrupt` | Physical bytes, schema, manifest or digest contradict the profile. |
 | `sys.storage.unavailable` | Required physical data cannot be obtained. |
-| `sys.storage.unrepresentable_key` | An editable rewrite cannot encode a key/path or meet the declared bounds. |
+| `sys.storage.unrepresentable_key` | The selected input/format operation cannot encode the key within its declared bounds; a VFS filename limit alone must not reject a valid stored key. |
 | `sys.storage.rewrite_conflict` | Inputs changed, collide or became stale before rewrite admission. |
 | `sys.redaction.denied` | A generic operation attempted to reveal protected content. |
 | `sys.invoke.snapshot_mismatch` | An explicit snapshot conflicts with the function reference or inherited transaction pin. |
@@ -3347,3 +3545,24 @@ A failure code is stable machine-readable classification. The message may be loc
 | `sys.git.invalid_ref` | The proposed local branch name is invalid under the adopted Git ref rules. |
 | `sys.git.branch_exists` | Branch creation expected nonexistence but the branch is already present. |
 | `sys.git.nothing_to_commit` | No staged change is present for this nonempty-commit operation. |
+| `sys.blob.bounds` | Negative/out-of-range offset, length or octet value. |
+| `sys.blob.limit` | Per-call or total capture/materialisation quota would be exceeded. |
+| `sys.blob.length_mismatch` | Observed bytes do not match the expected complete length. |
+| `sys.blob.unavailable` | A required promised object cannot be obtained under the selected policy. |
+| `sys.blob.corrupt` | Descriptor, tree, chunk bytes, length or content digest contradict the selected profile. |
+| `sys.blob.collision` | Unequal contents would otherwise receive the same content commitment. |
+| `sys.blob.writer_state` | An operation is invalid for an aborted or finished writer. |
+| `sys.blob.source_changed` | Detected change to the external input during capture. |
+| `sys.blob.source_denied` | The selected host source/resource is not permitted or not a regular safe input. |
+| `sys.blob.reference_context` | A repository reference is decoded outside an admitted repository Blob slot. |
+| `sys.git.stale_review` | The supplied review token or candidate state no longer matches at protected publication. |
+| `sys.blob.invalid_media_type` | The declaration is malformed, non-ASCII or exceeds MIME-1 bounds. |
+| `sys.blob.invalid_suffix` | The suffix contains prohibited characters or exceeds the pinned safe suffix bounds. |
+| `sys.blob.incompatible_suffix` | The suffix is not permitted by MIME-1 for the known declared type. |
+| `sys.vfs.name_collision` | The selected portable projection would produce duplicate or ambiguous path names. |
+| `sys.vfs.invalid_document` | The complete editable document fails schema-directed data decoding or row validation. |
+| `sys.vfs.stale_edit` | The write candidate no longer matches its captured row, schema or field baseline. |
+| `sys.vfs.unsupported` | The filesystem operation is outside the explicitly supported EDIT-1 contract. |
+| `sys.vfs.draft_retained` | An edit was not accepted and its candidate is retained in bounded recovery storage. |
+| `sys.format.unsupported` | The repository header selects a format for which no admitted reader/writer is available. |
+| `sys.codec.unsupported_value_profile` | The value profile is not accepted by the selected encoding or wire context. |

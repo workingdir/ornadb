@@ -1,0 +1,10 @@
+:root { color-scheme: light dark; }
+body { max-width: 78rem; margin: 2rem auto; padding: 0 1.5rem; font: 1rem/1.65 system-ui, sans-serif; }
+h1 { margin-top: 3rem; } h1, h2, h3 { line-height: 1.25; scroll-margin-top: 1rem; }
+pre { padding: 1rem; overflow: auto; border: 1px solid #8886; }
+code { font-family: ui-monospace, monospace; font-size: .92em; overflow-wrap: anywhere; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+th, td { border-bottom: 1px solid #8886; padding: .6rem; text-align: start; vertical-align: top; }
+#TOC { border-block: 1px solid #8886; padding: 1rem 0; }
+#TOC ul { padding-left: 1.5rem; }
+@media print { body { max-width: none; font-size: 10pt; } pre, tr { break-inside: avoid; } a { color: inherit; } }
