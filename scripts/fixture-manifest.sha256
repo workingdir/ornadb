@@ -712,8 +712,8 @@ a3156869b8590a602867cce4a27eee8715b19ebc3c4200f8fe595b0c5baa8e6f  crates/orna-co
 408ab213ea859a44a373387b22bd09a70dcc3e6a998ff0939848f91e8707b14d  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-currency-protocol-incomplete.orna
 33b16db52c38509fd0d81670f7d806ee8a880da1186a9678a0f35bd3a4c110be  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-currency-protocol-valid.orna
 bc38141ad24112cf766b8155a522c66638e920bb1f42238ea3cde3c64e5bcc91  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-exact-decimal.orna
-7a3c96487ce03882ad76a4a8c72a8f6a39b5e9c669db9e6fa5ef292f94df434b  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-exact-energy-rate.orna
-bb108f055bee38d007ba71fc75fb176fa3a6f4e8f3d516becb87165f7cac3761  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-float-energy-rate.orna
+575ef1d3de2c7187b1f2c37ff70243df5d3864fbb7e94ec73525314defe817b6  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-exact-energy-rate.orna
+4b8d6b1a876d6b27247b743e6157000dc2ca2ce31106d99dca0994819ff29396  crates/orna-conformance-v1/tests/fixtures/semantic/traceability-money-float-energy-rate.orna
 285f5105f37a555c60976f6afecad2816a08f5591e25585eabf2076aad95000d  crates/orna-conformance-v1/tests/fixtures/semantic/underconstrained-lambda-field.orna
 ec149de0fe0babfb31846005f4b344c1b269e80932ebadf9c698ba01dca1cd4d  crates/orna-conformance-v1/tests/fixtures/snapshot-non-string.orna
 92123c957ab80d6f252965ca47191c089f955ffc39fe70c1f12c3cf3f247abc0  crates/orna-conformance-v1/tests/fixtures/snapshot-valid.orna
@@ -4863,9 +4863,9 @@ a3156869b8590a602867cce4a27eee8715b19ebc3c4200f8fe595b0c5baa8e6f  crates/orna-se
 408ab213ea859a44a373387b22bd09a70dcc3e6a998ff0939848f91e8707b14d  crates/orna-semantic-v1/tests/fixtures/traceability-money-currency-protocol-incomplete.orna
 33b16db52c38509fd0d81670f7d806ee8a880da1186a9678a0f35bd3a4c110be  crates/orna-semantic-v1/tests/fixtures/traceability-money-currency-protocol-valid.orna
 bc38141ad24112cf766b8155a522c66638e920bb1f42238ea3cde3c64e5bcc91  crates/orna-semantic-v1/tests/fixtures/traceability-money-exact-decimal.orna
-7a3c96487ce03882ad76a4a8c72a8f6a39b5e9c669db9e6fa5ef292f94df434b  crates/orna-semantic-v1/tests/fixtures/traceability-money-exact-energy-rate.orna
+575ef1d3de2c7187b1f2c37ff70243df5d3864fbb7e94ec73525314defe817b6  crates/orna-semantic-v1/tests/fixtures/traceability-money-exact-energy-rate.orna
 b4c47ca5558bb7ed06dbb1f842d6e316e895a698afc1686a43517c5d740eddcf  crates/orna-semantic-v1/tests/fixtures/traceability-money-float-constructor.orna
-bb108f055bee38d007ba71fc75fb176fa3a6f4e8f3d516becb87165f7cac3761  crates/orna-semantic-v1/tests/fixtures/traceability-money-float-energy-rate.orna
+4b8d6b1a876d6b27247b743e6157000dc2ca2ce31106d99dca0994819ff29396  crates/orna-semantic-v1/tests/fixtures/traceability-money-float-energy-rate.orna
 2242e2e4022b55962d5d6a16e0cee6c316e0bbf6a1f17b51567a459a14ff218c  crates/orna-semantic-v1/tests/fixtures/traceability-nominal-private-field.orna
 933890f304dcf6bce80609cf63ffd40ec2f007ce18ddbef3346bca0106c2987e  crates/orna-semantic-v1/tests/fixtures/traceability-nominal-public-field.orna
 6eb738054d761c8410e3fddbd6371f514c49594a0aa1364cb255821a73029f56  crates/orna-semantic-v1/tests/fixtures/traceability-nominal-structural-record.orna
