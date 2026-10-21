@@ -1,1 +1,1 @@
-std.collection.count(rows)
+count(rows)
