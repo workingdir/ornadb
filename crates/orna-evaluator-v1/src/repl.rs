@@ -310,6 +310,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
@@ -442,6 +443,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
