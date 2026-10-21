@@ -15,10 +15,24 @@ use orna_repository_v1::{
 };
 use tempfile::TempDir;
 
-const INTERNAL_REF: &str = "refs/orna/ids/0123456789abcdef";
-const ALLOCATOR_REF: &str = "refs/orna/allocator";
+/// A consumer checkpoint ref, synchronised by commit ancestry.
+const INTERNAL_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
+/// One table's automatic-ID allocator watermark (`ORNA-AUTOID-004`).
+const ALLOCATOR_REF: &str = "refs/orna/ids/00112233445566778899aabbccddeeff";
 const MAIN_FIXTURE: &str = include_str!("fixtures/git-repository-main.orna");
 const NESTED_FIXTURE: &str = include_str!("fixtures/git-repository-nested-tool.orna");
+
+/// Writes an allocator watermark blob holding the decimal `value`.
+fn watermark(directory: &Path, value: &str) -> String {
+    let file = directory.join(".git").join("orna-watermark");
+    fs::write(&file, value).unwrap();
+    let object = git(
+        directory,
+        &["hash-object", "-w", "--no-filters", file.to_str().unwrap()],
+    );
+    fs::remove_file(file).unwrap();
+    object
+}
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -55,7 +69,8 @@ impl Fixture {
         git(&source, &["commit", "-m", "initial fixture"]);
         let initial = git(&source, &["rev-parse", "HEAD"]);
         git(&source, &["update-ref", INTERNAL_REF, &initial]);
-        git(&source, &["update-ref", ALLOCATOR_REF, &initial]);
+        let first_watermark = watermark(&source, "1");
+        git(&source, &["update-ref", ALLOCATOR_REF, &first_watermark]);
         git(
             &source,
             &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -85,7 +100,8 @@ impl Fixture {
         git(&self.source, &["commit", "-m", "next fixture"]);
         let next = git(&self.source, &["rev-parse", "HEAD"]);
         git(&self.source, &["update-ref", INTERNAL_REF, &next]);
-        git(&self.source, &["update-ref", ALLOCATOR_REF, &next]);
+        let next_watermark = watermark(&self.source, "2");
+        git(&self.source, &["update-ref", ALLOCATOR_REF, &next_watermark]);
         next
     }
 }
@@ -126,7 +142,7 @@ fn clone_synchronizes_internal_refs_without_checking_out_the_fixture() {
     );
     assert_eq!(
         git(&destination, &["rev-parse", ALLOCATOR_REF]),
-        initial
+        git(&fixture.source, &["rev-parse", ALLOCATOR_REF])
     );
     assert!(!destination.join("main.orna").exists());
 }
@@ -165,7 +181,10 @@ fn fetch_synchronizes_advertised_internal_refs_with_the_requested_branch() {
 
     assert_eq!(git(&destination, &["rev-parse", "refs/remotes/origin/main"]), next);
     assert_eq!(git(&destination, &["rev-parse", INTERNAL_REF]), next);
-    assert_eq!(git(&destination, &["rev-parse", ALLOCATOR_REF]), next);
+    assert_eq!(
+        git(&destination, &["rev-parse", ALLOCATOR_REF]),
+        git(&fixture.source, &["rev-parse", ALLOCATOR_REF])
+    );
     assert!(!destination.join("main.orna").exists());
 }
 
@@ -200,7 +219,10 @@ fn push_advances_allocator_before_making_the_branch_visible() {
     let updates = fs::read_to_string(hook_log).unwrap();
     assert_eq!(updates.lines().next(), Some(ALLOCATOR_REF));
     assert_eq!(git(&fixture.remote, &["rev-parse", "refs/heads/main"]), next);
-    assert_eq!(git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]), next);
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
+        git(&fixture.source, &["rev-parse", ALLOCATOR_REF])
+    );
 }
 
 #[test]

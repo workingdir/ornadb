@@ -1,12 +1,15 @@
-//! Bounded, repository-local Git fetch transport.
+//! Bounded, repository-local Git fetch and push transport.
 //!
-//! This module deliberately stops at fetch.  It downloads the objects named
-//! by ordinary requested refs and continuity-approved `refs/orna/*` refs, then
-//! installs only compare-and-set-safe local refs.  Its exact-object hydration
-//! boundary materializes one already-proven promised object without installing
-//! refs. Neither operation changes HEAD, the index, the worktree, or Orna's
-//! runtime files, and this module does not claim to implement clone, pull, or
-//! push.
+//! Fetch downloads the objects named by ordinary requested refs and by the
+//! remote's continuity refs, then installs only compare-and-set-safe local
+//! refs. Its exact-object hydration boundary materializes one already-proven
+//! promised object without installing refs. Neither operation changes HEAD,
+//! the index, the worktree, or Orna's runtime files.
+//!
+//! Only continuity refs (`is_continuity_ref`) travel between repositories
+//! (`ORNA-GIT-008`). Every other `refs/orna/*` ref is private to the
+//! repository that wrote it and is never pushed, fetched, cloned, or used as
+//! a continuity witness.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -32,10 +35,87 @@ const MAX_FETCH_REFS: usize = 4096;
 /// the process there so a supervising test can kill it deterministically.
 const FAULT_INJECTION_HOLD_ENV: &str = "ORNA_FAULT_INJECTION_FETCH_HOLD_SECONDS";
 
-/// The owner-scoped private edit and capture pins an ordinary push keeps local.
-/// These refs record one owner's in-flight protected content, so publishing
-/// them would expose private pins (`ORNA-GIT-008`).
-const PRIVATE_PIN_REF_PREFIX: &str = "refs/orna/pins/";
+/// Automatic-ID allocator high-water marks, one per table: the hidden ref
+/// `ORNA-AUTOID-004` suggests, outside every rewindable branch tree. Each
+/// names a blob holding the canonical decimal text of the highest automatic
+/// ID reserved for that table, and the value only ever advances.
+const ALLOCATOR_REF_PREFIX: &str = "refs/orna/ids/";
+
+/// Durable consumer checkpoint positions.
+const CHECKPOINT_REF_PREFIX: &str = "refs/orna/checkpoints/";
+
+/// `for-each-ref` patterns that list exactly the continuity refs.
+const CONTINUITY_REF_PATTERNS: [&str; 2] = [ALLOCATOR_REF_PREFIX, CHECKPOINT_REF_PREFIX];
+
+/// `ls-remote` patterns that advertise exactly the continuity refs.
+const CONTINUITY_ADVERTISEMENT_PATTERNS: [&str; 2] = ["refs/orna/ids/*", "refs/orna/checkpoints/*"];
+
+/// The bound on one allocator watermark blob.
+const MAX_ALLOCATOR_WATERMARK_BYTES: u64 = 64;
+
+fn names_under(reference: &str, prefix: &str) -> bool {
+    reference
+        .strip_prefix(prefix)
+        .is_some_and(|name| !name.is_empty())
+}
+
+/// Whether `reference` is an automatic-ID allocator high-water mark.
+fn is_allocator_ref(reference: &str) -> bool {
+    names_under(reference, ALLOCATOR_REF_PREFIX)
+}
+
+/// Whether `reference` is a continuity ref: an allocator high-water mark or a
+/// consumer checkpoint, the refs `ORNA-GIT-008` requires ordinary push and
+/// fetch to synchronise. Every other `refs/orna/*` ref is private local
+/// state: owner-scoped capture and edit pins (`ORNA-CAP-003`), reviewed and
+/// migration candidates and test fixtures. Such a ref is never pushed,
+/// fetched or cloned, and never becomes a witness a remote must hold.
+fn is_continuity_ref(reference: &str) -> bool {
+    is_allocator_ref(reference) || names_under(reference, CHECKPOINT_REF_PREFIX)
+}
+
+/// Reads the allocator watermark one local object holds: a blob whose bytes
+/// are the canonical decimal text of a non-negative integer (digits only, no
+/// sign, whitespace or newline, and no leading zero except `0`). Any other
+/// object is refused; it is never read as zero.
+fn allocator_watermark(repository: &Repository, object_id: &str) -> Result<Vec<u8>, FetchError> {
+    let mut size = repository.observer_command();
+    size.env("GIT_NO_LAZY_FETCH", "1")
+        .args(["cat-file", "-s", object_id]);
+    let size = size
+        .output()
+        .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+    let within_bound = size.status.success()
+        && trim_output(&size.stdout)
+            .parse::<u64>()
+            .is_ok_and(|bytes| bytes <= MAX_ALLOCATOR_WATERMARK_BYTES);
+    if !within_bound {
+        return Err(FetchError::InvalidContinuity);
+    }
+    let mut blob = repository.observer_command();
+    blob.env("GIT_NO_LAZY_FETCH", "1")
+        .args(["cat-file", "blob", object_id]);
+    let blob = blob
+        .output()
+        .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
+    let watermark = blob.stdout;
+    let canonical = blob.status.success()
+        && !watermark.is_empty()
+        && watermark.iter().all(u8::is_ascii_digit)
+        && (watermark.len() == 1 || watermark[0] != b'0');
+    if canonical {
+        Ok(watermark)
+    } else {
+        Err(FetchError::InvalidContinuity)
+    }
+}
+
+/// Orders two canonical watermarks numerically. Without leading zeros a
+/// longer decimal is larger, and equal lengths compare digit by digit, so no
+/// integer width limits the comparison.
+fn watermark_order(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
 
 /// One ordinary branch or tag requested from a configured remote.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,14 +226,21 @@ impl FetchRequest {
 }
 
 impl Repository {
-    /// Fetches requested refs using the repository's current `refs/orna/*`
-    /// object IDs as the exact continuity witnesses.
+    /// Fetches requested refs using the repository's current consumer
+    /// checkpoint refs as the exact continuity witnesses.
     ///
     /// Witness collection and fetch are protected by one repository
-    /// coordination lock so a local allocator/checkpoint ref cannot advance
-    /// between observing its expected ID and checking the remote. A
-    /// repository with no local Orna refs makes no continuity claim; it does
-    /// not synthesize an allocator value or infer one from the remote.
+    /// coordination lock so a local checkpoint ref cannot advance between
+    /// observing its expected ID and checking the remote. A repository with no
+    /// local checkpoint refs makes no continuity claim; it does not infer one
+    /// from the remote. Private refs such as capture pins are never witnesses.
+    /// Allocator watermarks are not witnesses either: they only ever advance,
+    /// so the fetch keeps the larger of the local and remote values.
+    ///
+    /// The continuity verdict is decided before anything is transferred. When
+    /// the remote does not prove every witness, the fetch installs no ref and
+    /// reports the verdict with no fetched refs, so a caller that refuses an
+    /// unproven continuity claim leaves the repository unchanged.
     pub fn fetch_with_local_continuity(
         &self,
         remote: impl Into<String>,
@@ -172,23 +259,28 @@ impl Repository {
         }
 
         let _lock = self.acquire_coordination_lock()?;
-        let continuity = self.local_continuity_witnesses_locked()?;
+        let continuity = self
+            .local_continuity_refs()?
+            .into_iter()
+            .filter(|(reference, _)| !is_allocator_ref(reference.as_str()))
+            .map(|(reference, object_id)| RequiredInternalRef::new(reference, object_id));
         let request = FetchRequest::new(remote, ordinary, continuity)?;
         validate_request(&request)?;
-        self.fetch_locked(&request)
+        self.fetch_locked(&request, UnprovenContinuity::Refuse)
     }
 
-    fn local_continuity_witnesses_locked(
-        &self,
-    ) -> Result<Vec<RequiredInternalRef>, FetchError> {
+    /// The local continuity refs paired with the object ID each names, in
+    /// ref-name order. Private `refs/orna/*` refs are never listed.
+    fn local_continuity_refs(&self) -> Result<Vec<(OrnaInternalRef, NativeObjectId)>, FetchError> {
         let mut command = self.observer_command();
-        command.args([
-            "for-each-ref",
-            "--sort=refname",
-            "--count=4097",
-            "--format=%(objectname)%09%(refname)",
-            "refs/orna/",
-        ]);
+        command
+            .args([
+                "for-each-ref",
+                "--sort=refname",
+                "--count=4097",
+                "--format=%(objectname)%09%(refname)",
+            ])
+            .args(CONTINUITY_REF_PATTERNS);
         let output = command
             .output()
             .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
@@ -198,82 +290,58 @@ impl Repository {
             ));
         }
         let output = String::from_utf8(output.stdout).map_err(|_| FetchError::InvalidContinuity)?;
-        if output.is_empty() {
-            return Ok(Vec::new());
-        }
-        let records = output
-            .strip_suffix('\n')
-            .ok_or(FetchError::InvalidContinuity)?;
-        let mut witnesses = Vec::new();
-        for record in records.split('\n') {
-            if witnesses.len() == MAX_FETCH_REFS {
+        let mut continuity = Vec::new();
+        for record in output.lines() {
+            if continuity.len() == MAX_FETCH_REFS {
                 return Err(FetchError::TooManyRefs);
             }
             let (object_id, reference) = record
                 .split_once('\t')
                 .ok_or(FetchError::InvalidContinuity)?;
+            if !is_continuity_ref(reference) {
+                return Err(FetchError::InvalidContinuity);
+            }
             let reference = OrnaInternalRef::new(reference.to_owned())
                 .map_err(|_| FetchError::InvalidContinuity)?;
             let object_id = NativeObjectId::new(object_id.to_owned())
                 .map_err(|_| FetchError::InvalidContinuity)?;
-            witnesses.push(RequiredInternalRef::new(reference, object_id));
+            continuity.push((reference, object_id));
         }
-        Ok(witnesses)
+        Ok(continuity)
     }
 
-    /// The local `refs/orna/*` references an ordinary push publishes, paired
-    /// with the object ID each currently names.
+    /// The local continuity refs an ordinary push synchronizes, paired with
+    /// the object ID each currently names.
     ///
-    /// Allocator and consumer checkpoint refs are the continuity refs an
-    /// ordinary push synchronizes, while every private edit and capture pin
-    /// under [`PRIVATE_PIN_REF_PREFIX`] MUST NOT be exposed by an ordinary push
-    /// (`ORNA-GIT-008`). A repository with no local Orna refs publishes no
-    /// continuity ref rather than synthesizing one.
+    /// Only allocator and consumer checkpoint refs (`is_continuity_ref`)
+    /// are selected. Capture and edit pins, migration candidates and every
+    /// other private `refs/orna/*` ref MUST NOT be exposed by an ordinary push
+    /// (`ORNA-GIT-008`, `ORNA-CAP-003`). A repository with no local continuity
+    /// refs publishes none rather than synthesizing one.
     pub fn ordinary_push_refs(&self) -> Result<Vec<(OrnaInternalRef, String)>, FetchError> {
-        let mut command = self.observer_command();
-        command.args([
-            "for-each-ref",
-            "--sort=refname",
-            "--count=4097",
-            "--format=%(objectname)%09%(refname)",
-            "refs/orna/",
-        ]);
-        let output = command
-            .output()
-            .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
-        if !output.status.success() {
-            return Err(FetchError::Repository(
-                RepositoryError::GitOperationFailed,
-            ));
-        }
-        let text = String::from_utf8(output.stdout).map_err(|_| FetchError::InvalidContinuity)?;
-        let text = text.strip_suffix('\n').unwrap_or(&text);
-        let mut selected = Vec::new();
-        for record in text.split('\n') {
-            if record.is_empty() {
-                continue;
-            }
-            let (object_id, reference) = record
-                .split_once('\t')
-                .ok_or(FetchError::InvalidContinuity)?;
-            if reference.starts_with(PRIVATE_PIN_REF_PREFIX) {
-                continue;
-            }
-            let reference = OrnaInternalRef::new(reference.to_owned())
-                .map_err(|_| FetchError::InvalidContinuity)?;
-            selected.push((reference, object_id.to_owned()));
-        }
-        Ok(selected)
+        Ok(self
+            .local_continuity_refs()?
+            .into_iter()
+            .map(|(reference, object_id)| (reference, object_id.as_str().to_owned()))
+            .collect())
     }
 
     /// Publishes the continuity refs [`Repository::ordinary_push_refs`] selects
     /// together with one ordinary branch ref.
     ///
-    /// The allocator advances to the published branch only when that branch
-    /// contains its current watermark. Consumer checkpoints retain their own
-    /// independently synchronized positions; ordinary push must not claim
-    /// consumption that did not occur. Missing or divergent continuity refs
-    /// are refused (`ORNA-GIT-008`).
+    /// Each continuity ref follows its own history, never the branch's
+    /// (`ORNA-AUTOID-004`, `ORNA-META-004`), and local refs are never rewritten
+    /// by a push (`ORNA-GIT-008`):
+    ///
+    /// - An allocator watermark the remote lacks is created and a lower one is
+    ///   advanced, before the branch becomes visible. A remote watermark above
+    ///   the local one is refused rather than lowered.
+    /// - A consumer checkpoint the remote already holds at the same or a later
+    ///   position is left as the remote has it, so a push never claims
+    ///   consumption that did not occur. One the remote is missing, or one
+    ///   that diverged, is refused.
+    ///
+    /// Every refusal happens before anything is sent.
     pub fn push_ordinary_with_local_continuity(
         &self,
         remote: impl Into<String>,
@@ -295,60 +363,50 @@ impl Repository {
         let branch_head =
             local_ref_oid(self, &branch_ref)?.ok_or(FetchError::RequestedRefMissing)?;
         let selected = self.ordinary_push_refs()?;
-        let mut continuity = Vec::with_capacity(selected.len());
-        let mut ref_plans = Vec::with_capacity(selected.len());
-        for (reference, local_id) in selected {
-            if local_id.len() != self.native_object_id_length()? {
+        let checkpoints = selected
+            .iter()
+            .filter(|(reference, _)| !is_allocator_ref(reference.as_str()))
+            .collect::<Vec<_>>();
+        let object_id_length = self.native_object_id_length()?;
+        let advertised = if checkpoints.is_empty() {
+            BTreeMap::new()
+        } else {
+            let names = checkpoints
+                .iter()
+                .map(|(reference, _)| reference.as_str().to_owned())
+                .collect::<Vec<_>>();
+            advertise(self, &remote, &names, object_id_length)?
+        };
+        let mut stale_checkpoints = BTreeSet::new();
+        for (reference, local_id) in checkpoints {
+            if local_id.len() != object_id_length {
                 return Err(FetchError::InvalidContinuity);
             }
-            let reference_name = reference.as_str().to_owned();
-            let advertised = advertise(
-                self,
-                &remote,
-                std::slice::from_ref(&reference_name),
-                local_id.len(),
-            )?;
             let remote_id = advertised
-                .get(&reference_name)
+                .get(reference.as_str())
                 .ok_or(FetchError::RefConflict)?;
-            let remote_ahead = is_fast_forward(self, &local_id, remote_id)?;
-            let local_ahead = is_fast_forward(self, remote_id, &local_id)?;
-            if !remote_ahead && !local_ahead {
+            if remote_id == local_id || is_fast_forward(self, local_id, remote_id)? {
+                stale_checkpoints.insert(reference.clone());
+                continue;
+            }
+            if !is_fast_forward(self, remote_id, local_id)? {
                 return Err(FetchError::RefConflict);
             }
-            let mut target_id = if remote_ahead {
-                remote_id.clone()
-            } else {
-                local_id.clone()
-            };
-            if reference_name == ALLOCATOR_REF {
-                if is_fast_forward(self, &target_id, &branch_head)? {
-                    target_id.clone_from(&branch_head);
-                } else if !is_fast_forward(self, &branch_head, &target_id)? {
-                    return Err(FetchError::RefConflict);
-                }
-            }
-            ref_plans.push(RefPlan {
-                source: reference_name.clone(),
-                destination: reference_name,
-                object_id: target_id.clone(),
-                old: Some(local_id.clone()),
-                kind: RefKind::Internal,
-                updated: target_id != local_id,
-            });
-            continuity.push(reference);
         }
-        self.preflight_atomic(&remote, &branch_ref, &branch_head)?;
-        install_refs(self, &ref_plans)?;
-        sync_fetched_ref_directories(self, &ref_plans)?;
+        // Allocator watermarks travel with every push; `push_locked_at`
+        // applies their advance-only rule against the remote's current value.
+        let continuity = selected
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .filter(|reference| !stale_checkpoints.contains(reference));
         let request = PushRequest::new(remote, branch, continuity)?;
         self.push_locked_at(&request, &branch_head)
     }
 }
 
-/// A push request whose Orna continuity refs are sent before the ordinary
-/// branch ref. The allocator ref, when present, is sent first so a later
-/// branch advertisement cannot make an allocator watermark visible too soon.
+/// A push request whose Orna continuity refs are sent with the ordinary
+/// branch ref. Allocator watermarks are sent first, so a later branch
+/// advertisement cannot make rows visible before the watermark they depend on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PushRequest {
     remote: String,
@@ -486,7 +544,9 @@ impl FetchedRef {
 
 /// Evidence returned after Git objects were fetched and local refs were
 /// installed.  `continuity` is `None` when no internal witness was requested;
-/// otherwise it is the exact fail-closed state of those witnesses.
+/// otherwise it is the exact fail-closed state of those witnesses. A fetch
+/// that refused an unproven continuity claim transferred and installed
+/// nothing, so its report lists no fetched refs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchReport {
     ordinary: Vec<FetchedRef>,
@@ -512,7 +572,11 @@ impl FetchReport {
 enum RefKind {
     Branch,
     Tag,
+    /// A consumer checkpoint or other commit-valued internal ref, ordered by
+    /// commit ancestry.
     Internal,
+    /// An allocator watermark, ordered by its decimal value.
+    Allocator,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -523,6 +587,25 @@ struct RefPlan {
     old: Option<String>,
     kind: RefKind,
     updated: bool,
+}
+
+/// One allocator watermark a push creates or advances on the remote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AllocatorUpdate {
+    reference: String,
+    /// The local watermark object the remote ref will name.
+    local: String,
+    /// The remote's current value, or `None` when the remote lacks the ref.
+    remote: Option<String>,
+}
+
+/// What a fetch does when the remote does not prove every continuity witness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnprovenContinuity {
+    /// Install the requested refs and report the verdict to the caller.
+    Report,
+    /// Install nothing: the caller refuses an unproven continuity claim.
+    Refuse,
 }
 
 impl Repository {
@@ -614,17 +697,22 @@ impl Repository {
         }
     }
 
-    /// Fetches requested ordinary refs and continuity-approved `refs/orna/*`
-    /// refs without changing HEAD, the index, the worktree, or runtime files.
+    /// Fetches requested ordinary refs and the remote's continuity refs
+    /// without changing HEAD, the index, the worktree, or runtime files.
     /// Local ref installation is one compare-and-set transaction; a newer or
-    /// divergent local ref is never overwritten.
+    /// divergent local ref is never overwritten. Private `refs/orna/*` refs
+    /// of the remote, such as its capture pins, are never fetched.
     pub fn fetch(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
         validate_request(request)?;
         let _lock = self.acquire_coordination_lock()?;
-        self.fetch_locked(request)
+        self.fetch_locked(request, UnprovenContinuity::Report)
     }
 
-    fn fetch_locked(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
+    fn fetch_locked(
+        &self,
+        request: &FetchRequest,
+        unproven: UnprovenContinuity,
+    ) -> Result<FetchReport, FetchError> {
         let remotes = self.remote_names()?;
         if !remotes.iter().any(|remote| remote == request.remote()) {
             return Err(FetchError::InvalidRemote);
@@ -643,10 +731,10 @@ impl Repository {
             .collect::<Vec<_>>();
         let mut requested_sources = ordinary_sources.clone();
         requested_sources.extend(continuity_sources);
-        // REMOTE-003 applies to ordinary fetch as well as an explicitly
-        // witnessed fetch: every advertised refs/orna/* ref must travel with
-        // the requested branch/tag.  Exact witnesses still gate continuity
-        // claims below; an unrequested internal ref is only synchronized.
+        // ORNA-GIT-008: the remote's continuity refs travel with the requested
+        // branch/tag, and nothing else under refs/orna/ does. Exact witnesses
+        // still gate continuity claims below; an unrequested continuity ref is
+        // only synchronized.
         let advertised =
             advertise_fetch(self, request.remote(), &requested_sources, object_id_length)?;
         let sources = advertised.keys().cloned().collect::<Vec<_>>();
@@ -670,6 +758,17 @@ impl Repository {
         }
 
         let continuity = continuity_state(&request.continuity, &advertised, object_id_length)?;
+        if unproven == UnprovenContinuity::Refuse
+            && continuity.is_some_and(|state| !state.permits_continuity_claim())
+        {
+            // The verdict is final before any object or ref is transferred, so
+            // the refused fetch leaves the repository exactly as it was.
+            return Ok(FetchReport {
+                ordinary: Vec::new(),
+                internal: Vec::new(),
+                continuity,
+            });
+        }
         let mut internal_plans = Vec::new();
         let required = request
             .continuity
@@ -683,11 +782,22 @@ impl Repository {
             .collect::<BTreeMap<_, _>>();
         for (source, object_id) in advertised
             .iter()
-            .filter(|(source, _)| source.starts_with("refs/orna/"))
+            .filter(|(source, _)| is_continuity_ref(source))
         {
+            if is_allocator_ref(source) {
+                // A watermark only ever advances. Whether the remote value is
+                // larger is decided once its object is local, below.
+                internal_plans.push(self.plan_ref(
+                    source.clone(),
+                    source.clone(),
+                    object_id.clone(),
+                    RefKind::Allocator,
+                )?);
+                continue;
+            }
             // An explicitly witnessed ref is installable only when its
             // advertised object matches the expected continuity evidence.
-            // Unwitnessed refs are synchronized for REMOTE-003, but cannot
+            // Unwitnessed continuity refs are synchronized, but cannot
             // establish a continuity claim because `continuity_state` only
             // evaluates caller-supplied witnesses.
             if required
@@ -713,6 +823,9 @@ impl Repository {
         all_plans.extend(internal_plans.clone());
         fetch_objects(self, request.remote(), &all_plans)?;
         verify_fetched_objects(self, &all_plans)?;
+        let internal_plans = retain_advancing_watermarks(self, internal_plans)?;
+        let mut all_plans = ordinary_plans.clone();
+        all_plans.extend(internal_plans.clone());
         validate_fast_forward_plans(self, &all_plans)?;
         verify_remote_snapshot(
             self,
@@ -749,7 +862,9 @@ impl Repository {
         let updated = match &old {
             None => true,
             Some(old) if old == &object_id => false,
-            Some(_) if matches!(kind, RefKind::Branch | RefKind::Internal) => true,
+            Some(_) if matches!(kind, RefKind::Branch | RefKind::Internal | RefKind::Allocator) => {
+                true
+            }
             Some(_) => return Err(FetchError::RefConflict),
         };
         Ok(RefPlan {
@@ -762,10 +877,12 @@ impl Repository {
         })
     }
     /// Creates a partial clone with no checkout, retaining ordinary Git refs
-    /// and synchronizing every advertised `refs/orna/*` ref into the new
-    /// repository. Missing internal refs are tolerated so a repository moved
-    /// with plain Git remains readable; when present, they are available to
-    /// the repository/project checkout boundary before CWD selection.
+    /// and synchronizing every advertised continuity ref into the new
+    /// repository. The source's private refs, such as its capture pins, are
+    /// never cloned (`ORNA-GIT-008`, `ORNA-CAP-003`). Missing continuity refs
+    /// are tolerated so a repository moved with plain Git remains readable;
+    /// when present, they are available to the repository/project checkout
+    /// boundary before CWD selection.
     pub fn clone_from(
         remote: impl AsRef<str>,
         destination: impl AsRef<Path>,
@@ -782,17 +899,12 @@ impl Repository {
             return Err(FetchError::RemoteUnavailable);
         }
         let repository = Repository::discover(destination).map_err(FetchError::Repository)?;
-        let mut advertised = repository.observer_command();
-        advertised
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .args(["ls-remote", "--refs", "origin", "refs/orna/*"]);
-        let output = advertised
-            .output()
-            .map_err(|_| FetchError::RemoteUnavailable)?;
-        if !output.status.success() {
-            return Err(FetchError::RemoteUnavailable);
+        let object_id_length = repository.native_object_id_length()?;
+        let advertised = advertise_fetch(&repository, "origin", &[], object_id_length)?;
+        if advertised.len() > MAX_FETCH_REFS {
+            return Err(FetchError::TooManyRefs);
         }
-        if !output.stdout.is_empty() {
+        if !advertised.is_empty() {
             let mut fetch = repository.observer_command();
             fetch
                 .env("GIT_TERMINAL_PROMPT", "0")
@@ -803,8 +915,12 @@ impl Repository {
                     "--no-write-fetch-head",
                     "--refmap=",
                     "origin",
-                    "+refs/orna/*:refs/orna/*",
-                ]);
+                ])
+                .args(
+                    advertised
+                        .keys()
+                        .map(|reference| format!("+{reference}:{reference}")),
+                );
             if !fetch
                 .status()
                 .map_err(|_| FetchError::RemoteUnavailable)?
@@ -824,9 +940,10 @@ impl Repository {
 
 }
 impl Repository {
-    /// Pushes Orna continuity refs before the ordinary branch ref. The
-    /// allocator ref is isolated in the first push when present, so a later
-    /// branch update cannot become visible before its allocation watermark.
+    /// Pushes Orna continuity refs before the ordinary branch ref. Allocator
+    /// watermarks go first, in their own atomic push, so a branch update can
+    /// never become visible before the watermark its rows depend on; the
+    /// other continuity refs travel atomically with the branch.
     pub fn push(&self, request: &PushRequest) -> Result<(), FetchError> {
         let _lock = self.acquire_coordination_lock()?;
         self.require_no_pending_publication_recovery_locked()?;
@@ -850,30 +967,114 @@ impl Repository {
             return Err(FetchError::InvalidRemote);
         }
         let branch_ref = format!("refs/heads/{}", request.branch());
-        let mut internal = request.internal.clone();
-        internal.sort_by_key(|reference| if reference == ALLOCATOR_REF { 0 } else { 1 });
-        let mut ordered = Vec::with_capacity(internal.len().saturating_add(1));
-        for reference in internal {
+        let (allocators, others): (Vec<&String>, Vec<&String>) = request
+            .internal
+            .iter()
+            .partition(|reference| is_allocator_ref(reference));
+        let allocator_updates = self.plan_allocator_push(request.remote(), &allocators)?;
+        let mut ordered = Vec::with_capacity(others.len().saturating_add(1));
+        for reference in others {
             let object_id =
-                local_ref_oid(self, &reference)?.ok_or(FetchError::InvalidContinuity)?;
+                local_ref_oid(self, reference)?.ok_or(FetchError::InvalidContinuity)?;
             ordered.push(format!("{object_id}:{reference}"));
         }
         ordered.push(format!("{branch_head}:{branch_ref}"));
         self.preflight_atomic(request.remote(), &branch_ref, branch_head)?;
-        let allocator = ordered.iter().position(|refspec| {
-            refspec
-                .split_once(':')
-                .is_some_and(|(_, reference)| reference == ALLOCATOR_REF)
-        });
-        if let Some(index) = allocator {
-            let allocator_ref = ordered.remove(index);
-            self.push_refspecs(
-                request.remote(),
-                std::slice::from_ref(&allocator_ref),
-                false,
-            )?;
+        if !allocator_updates.is_empty() {
+            self.push_allocator_updates(request.remote(), &allocator_updates)?;
         }
         self.push_refspecs(request.remote(), &ordered, true)
+    }
+
+    /// Decides which allocator watermarks a push sends. A watermark the remote
+    /// lacks is created and a lower one is advanced; an equal one is left
+    /// alone. A remote watermark above the local one is refused before
+    /// anything is sent, so a push never lowers a remote allocator
+    /// (`ORNA-AUTOID-002`, `ORNA-GIT-008`).
+    fn plan_allocator_push(
+        &self,
+        remote: &str,
+        references: &[&String],
+    ) -> Result<Vec<AllocatorUpdate>, FetchError> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names = references
+            .iter()
+            .map(|reference| (*reference).clone())
+            .collect::<Vec<_>>();
+        let advertised = advertise(self, remote, &names, self.native_object_id_length()?)?;
+        let mut local_ids = Vec::with_capacity(names.len());
+        for reference in names {
+            let local = local_ref_oid(self, &reference)?.ok_or(FetchError::InvalidContinuity)?;
+            local_ids.push((reference, local));
+        }
+        // The remote values that differ must be local objects before the two
+        // watermarks can be compared; downloading them changes no ref.
+        download_objects(
+            self,
+            remote,
+            local_ids
+                .iter()
+                .filter(|(reference, local)| {
+                    advertised
+                        .get(reference)
+                        .is_some_and(|remote_id| remote_id != local)
+                })
+                .map(|(reference, _)| reference.as_str()),
+        )?;
+        let mut updates = Vec::new();
+        for (reference, local) in local_ids {
+            let remote = advertised.get(&reference).cloned();
+            if remote.as_ref() == Some(&local) {
+                continue;
+            }
+            let local_watermark = allocator_watermark(self, &local)?;
+            if let Some(remote_id) = &remote {
+                match watermark_order(&allocator_watermark(self, remote_id)?, &local_watermark) {
+                    std::cmp::Ordering::Greater => return Err(FetchError::RefConflict),
+                    std::cmp::Ordering::Equal => continue,
+                    std::cmp::Ordering::Less => {}
+                }
+            }
+            updates.push(AllocatorUpdate {
+                reference,
+                local,
+                remote,
+            });
+        }
+        Ok(updates)
+    }
+
+    /// Publishes allocator watermarks in one atomic push. Each update is a
+    /// compare-and-set on the remote value just observed, so a concurrent
+    /// advance is never overwritten. A later branch failure leaves only an
+    /// allocation gap (`ORNA-AUTOID-003`).
+    fn push_allocator_updates(
+        &self,
+        remote: &str,
+        updates: &[AllocatorUpdate],
+    ) -> Result<(), FetchError> {
+        let mut command = self.observer_command();
+        command.args(["push", "--porcelain", "--no-follow-tags", "--atomic"]);
+        for update in updates {
+            command.arg(format!(
+                "--force-with-lease={}:{}",
+                update.reference,
+                update.remote.as_deref().unwrap_or_default()
+            ));
+        }
+        command.arg(remote);
+        for update in updates {
+            command.arg(format!("+{}:{}", update.local, update.reference));
+        }
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .status()
+            .map_err(|_| FetchError::RemoteUnavailable)?
+            .success()
+            .then_some(())
+            .ok_or(FetchError::PushFailed)
     }
 
     fn preflight_atomic(
@@ -927,8 +1128,6 @@ impl Repository {
     }
 }
 
-const ALLOCATOR_REF: &str = "refs/orna/allocator";
-
 impl From<RefPlan> for FetchedRef {
     fn from(plan: RefPlan) -> Self {
         Self {
@@ -945,6 +1144,8 @@ fn validate_fast_forward_plans(
     plans: &[RefPlan],
 ) -> Result<(), FetchError> {
     for plan in plans {
+        // Allocator plans are ordered by watermark value, which
+        // `retain_advancing_watermarks` has already checked.
         if !plan.updated || !matches!(plan.kind, RefKind::Branch | RefKind::Internal) {
             continue;
         }
@@ -955,6 +1156,31 @@ fn validate_fast_forward_plans(
         }
     }
     Ok(())
+}
+
+/// Keeps an allocator plan only when it advances the local watermark: a
+/// remote value no larger than the local one is not installed, so fetch sets
+/// the local watermark to the larger of the two and never rewinds it
+/// (`ORNA-AUTOID-002`). A malformed watermark on either side is refused rather
+/// than read as zero. Other plans pass through unchanged.
+fn retain_advancing_watermarks(
+    repository: &Repository,
+    plans: Vec<RefPlan>,
+) -> Result<Vec<RefPlan>, FetchError> {
+    let mut retained = Vec::with_capacity(plans.len());
+    for plan in plans {
+        if plan.kind == RefKind::Allocator && plan.updated {
+            let remote = allocator_watermark(repository, &plan.object_id)?;
+            if let Some(old) = &plan.old
+                && watermark_order(&remote, &allocator_watermark(repository, old)?)
+                    != std::cmp::Ordering::Greater
+            {
+                continue;
+            }
+        }
+        retained.push(plan);
+    }
+    Ok(retained)
 }
 
 struct RemoteSnapshot<'a> {
@@ -1070,6 +1296,9 @@ fn advertise(
     }
     Ok(advertised)
 }
+/// Lists the requested `sources` plus every continuity ref the remote
+/// advertises. The remote's private `refs/orna/*` refs are not requested, so
+/// they never reach a fetch plan.
 fn advertise_fetch(
     repository: &Repository,
     remote: &str,
@@ -1081,7 +1310,7 @@ fn advertise_fetch(
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["ls-remote", "--refs", remote])
         .args(sources)
-        .arg("refs/orna/*");
+        .args(CONTINUITY_ADVERTISEMENT_PATTERNS);
     let output = command
         .output()
         .map_err(|_| FetchError::RemoteUnavailable)?;
@@ -1103,7 +1332,7 @@ fn advertise_fetch(
             .split_once('\t')
             .ok_or(FetchError::MalformedAdvertisement)?;
         if (!expected.contains(reference)
-            && !reference.starts_with("refs/orna/")
+            && !is_continuity_ref(reference)
             || !valid_fetch_full_ref(reference)
             || object_id.len() != object_id_length
             || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -1195,7 +1424,25 @@ fn fetch_objects(
     remote: &str,
     plans: &[RefPlan],
 ) -> Result<(), FetchError> {
-    if plans.is_empty() {
+    download_objects(repository, remote, plans.iter().map(|plan| plan.source.as_str()))
+}
+
+/// Downloads the objects the remote's `sources` name without changing any
+/// ref.
+fn download_objects<'a>(
+    repository: &Repository,
+    remote: &str,
+    sources: impl IntoIterator<Item = &'a str>,
+) -> Result<(), FetchError> {
+    // An empty destination downloads the source objects without allowing
+    // Git's configured remote refspec to mutate a tracking ref.  Ref updates
+    // are reserved for the validated CAS transaction below.
+    // Configured submodule recursion must not escape this repository's plan.
+    let refspecs = sources
+        .into_iter()
+        .map(|source| format!("{source}:"))
+        .collect::<Vec<_>>();
+    if refspecs.is_empty() {
         return Ok(());
     }
     let mut command = repository.observer_command();
@@ -1207,14 +1454,6 @@ fn fetch_objects(
         "--refmap=",
         remote,
     ]);
-    // An empty destination downloads the source objects without allowing
-    // Git's configured remote refspec to mutate a tracking ref.  Ref updates
-    // are reserved for the validated CAS transaction below.
-    // Configured submodule recursion must not escape this repository's plan.
-    let refspecs = plans
-        .iter()
-        .map(|plan| format!("{}:", plan.source))
-        .collect::<Vec<_>>();
     command
         .args(&refspecs)
         .stdout(Stdio::null())
@@ -1525,6 +1764,34 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
+    /// One table's allocator watermark ref, `refs/orna/ids/<table-object-id>`.
+    const ALLOCATOR_REF: &str = "refs/orna/ids/00112233445566778899aabbccddeeff";
+    /// A second table's allocator watermark ref.
+    const OTHER_ALLOCATOR_REF: &str = "refs/orna/ids/ffeeddccbbaa99887766554433221100";
+    /// A consumer checkpoint ref.
+    const CHECKPOINT_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
+
+    /// Writes one allocator watermark blob, the canonical decimal text of
+    /// `value`, and returns its object ID.
+    fn watermark(directory: &Path, value: &str) -> String {
+        let mut child = Command::new("git")
+            .current_dir(directory)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(value.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
     /// Builds a bare remote holding one commit that `local` has never seen and
     /// points `local` at it, so fetching `main` is a real transfer rather than a
     /// no-op against objects the fixture already had.
@@ -1810,11 +2077,9 @@ mod tests {
         git(&local, &["add", "state.txt"]);
         git(&local, &["commit", "-m", "initial"]);
         let head = git(&local, &["rev-parse", "HEAD"]);
-        git(&local, &["update-ref", ALLOCATOR_REF, &head]);
-        git(
-            &local,
-            &["update-ref", "refs/orna/checkpoints/0123456789abcdef", &head],
-        );
+        let allocator = watermark(&local, "7");
+        git(&local, &["update-ref", ALLOCATOR_REF, &allocator]);
+        git(&local, &["update-ref", CHECKPOINT_REF, &head]);
         git(
             &local,
             &[
@@ -1831,21 +2096,29 @@ mod tests {
                 &head,
             ],
         );
+        // Private refs outside the pin namespace: a reviewed-commit anchor an
+        // earlier version left behind, a migration candidate, a test fixture,
+        // the retired single allocator ref, and a name that only shares the
+        // allocator prefix.
+        for private in [
+            "refs/orna/review-candidates/0123456789abcdef0123456789abcdef",
+            "refs/orna/migration-candidates/0123456789abcdef",
+            "refs/orna/test/baseline-0123456789abcdef",
+            "refs/orna/allocator",
+            "refs/orna/ids-shadow",
+        ] {
+            git(&local, &["update-ref", private, &head]);
+        }
         let repository = Repository::discover(&local).unwrap();
         let selected = repository.ordinary_push_refs().unwrap();
-        let names = selected
-            .iter()
-            .map(|(reference, _)| reference.as_str().to_owned())
-            .collect::<Vec<_>>();
         assert_eq!(
-            names,
+            selected,
             [
-                ALLOCATOR_REF.to_owned(),
-                "refs/orna/checkpoints/0123456789abcdef".to_owned(),
+                (OrnaInternalRef::new(CHECKPOINT_REF).unwrap(), head),
+                (OrnaInternalRef::new(ALLOCATOR_REF).unwrap(), allocator),
             ],
-            "continuity refs are selected and no private pin ref is exposed"
+            "only continuity refs are selected, each with its own object ID"
         );
-        assert_eq!(selected[0].1, head, "each ref keeps its own object ID");
     }
 
     #[test]
@@ -1863,7 +2136,8 @@ mod tests {
         git(&local, &["add", "state.txt"]);
         git(&local, &["commit", "-m", "initial"]);
         let first = git(&local, &["rev-parse", "HEAD"]);
-        git(&local, &["update-ref", ALLOCATOR_REF, &first]);
+        let first_watermark = watermark(&local, "1");
+        git(&local, &["update-ref", ALLOCATOR_REF, &first_watermark]);
         git(
             &local,
             &[
@@ -1951,8 +2225,13 @@ mod tests {
         );
         assert_eq!(
             git(&remote, &["rev-parse", ALLOCATOR_REF]),
-            git(&remote, &["rev-parse", "refs/heads/main"]),
-            "the allocator advances only to the branch it publishes"
+            first_watermark,
+            "the allocator keeps its own watermark; publishing a branch never moves it"
+        );
+        assert_eq!(
+            git(&local, &["rev-parse", ALLOCATOR_REF]),
+            first_watermark,
+            "a push never rewrites a local continuity ref"
         );
         assert_eq!(
             Command::new("git")
@@ -1970,43 +2249,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ordinary_push_refuses_divergent_allocator_without_advancing_branch() {
-        let root = tempfile::tempdir().unwrap();
-        let local = root.path().join("local");
-        let remote = root.path().join("remote.git");
+    /// Publishes `value` as the remote allocator watermark of `reference`.
+    fn set_remote_watermark(local: &Path, reference: &str, value: &str) -> String {
+        let object = watermark(local, value);
+        git(local, &["push", "origin", &format!("+{object}:{reference}")]);
+        object
+    }
+
+    /// A local repository with one commit whose branch and allocator
+    /// watermark `1` are both published to a bare remote.
+    fn published_allocator_fixture(root: &Path) -> (PathBuf, PathBuf, String) {
+        let local = root.join("local");
+        let remote = root.join("remote.git");
         fs::create_dir(&local).unwrap();
-        git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        git(root, &["init", "--bare", remote.to_str().unwrap()]);
         git(&local, &["init", "-b", "main"]);
         git(&local, &["config", "user.name", "kierandrewett"]);
         git(&local, &["config", "user.email", "kieran@drewett.dev"]);
         git(&local, &["config", "commit.gpgsign", "false"]);
-        fs::write(local.join("state.txt"), "initial\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "initial"]);
-        let initial = git(&local, &["rev-parse", "HEAD"]);
-        git(&local, &["update-ref", ALLOCATOR_REF, &initial]);
+        let initial = commit_state(&local, "initial\n");
         git(
             &local,
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(&local, &["push", "origin", "main"]);
-        let allocator_refspec = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
-        git(&local, &["push", "origin", &allocator_refspec]);
+        let published = set_remote_watermark(&local, ALLOCATOR_REF, "1");
+        git(&local, &["update-ref", ALLOCATOR_REF, &published]);
+        (local, remote, initial)
+    }
 
-        git(&local, &["checkout", "-b", "divergent"]);
-        fs::write(local.join("state.txt"), "remote divergence\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "divergent allocator"]);
-        let divergent = git(&local, &["rev-parse", "HEAD"]);
-        let divergent_refspec = format!("{divergent}:{ALLOCATOR_REF}");
-        git(&local, &["push", "origin", &divergent_refspec]);
+    /// Commits `contents` on the checked-out branch and returns the commit.
+    fn commit_state(local: &Path, contents: &str) -> String {
+        fs::write(local.join("state.txt"), contents).unwrap();
+        git(local, &["add", "state.txt"]);
+        git(local, &["commit", "-m", contents]);
+        git(local, &["rev-parse", "HEAD"])
+    }
 
-        git(&local, &["checkout", "main"]);
-        fs::write(local.join("state.txt"), "local branch advance\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "local branch advance"]);
-        let local_head = git(&local, &["rev-parse", "HEAD"]);
+    #[test]
+    fn ordinary_push_refuses_to_lower_a_remote_allocator_without_advancing_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let (local, remote, initial) = published_allocator_fixture(root.path());
+        // Another clone reserved more IDs; this repository's watermark is lower.
+        let remote_allocator = set_remote_watermark(&local, ALLOCATOR_REF, "10");
+        let local_allocator = watermark(&local, "9");
+        git(&local, &["update-ref", ALLOCATOR_REF, &local_allocator]);
+        let local_head = commit_state(&local, "local branch advance\n");
 
         let repository = Repository::discover(&local).unwrap();
         assert!(matches!(
@@ -2014,9 +2302,66 @@ mod tests {
             Err(FetchError::RefConflict)
         ));
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), initial);
-        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), divergent);
+        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), remote_allocator);
         assert_eq!(git(&local, &["rev-parse", "HEAD"]), local_head);
-        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), initial);
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), local_allocator);
+    }
+
+    #[test]
+    fn ordinary_push_advances_and_creates_remote_allocators_before_the_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let (local, remote, _) = published_allocator_fixture(root.path());
+        let advanced = watermark(&local, "12");
+        git(&local, &["update-ref", ALLOCATOR_REF, &advanced]);
+        let created = watermark(&local, "3");
+        git(&local, &["update-ref", OTHER_ALLOCATOR_REF, &created]);
+        let local_head = commit_state(&local, "local branch advance\n");
+
+        let repository = Repository::discover(&local).unwrap();
+        repository
+            .push_ordinary_with_local_continuity("origin", "main")
+            .unwrap();
+        assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), local_head);
+        assert_eq!(
+            git(&remote, &["rev-parse", ALLOCATOR_REF]),
+            advanced,
+            "a lower remote watermark is advanced to the local one"
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", OTHER_ALLOCATOR_REF]),
+            created,
+            "a watermark the remote lacks is created"
+        );
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), advanced);
+    }
+
+    #[test]
+    fn fetch_keeps_the_larger_allocator_watermark_and_refuses_malformed_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let (local, _remote, _) = published_allocator_fixture(root.path());
+        let local_allocator = watermark(&local, "3");
+        git(&local, &["update-ref", ALLOCATOR_REF, &local_allocator]);
+        set_remote_watermark(&local, ALLOCATOR_REF, "2");
+        let created = set_remote_watermark(&local, OTHER_ALLOCATOR_REF, "4");
+        let repository = Repository::discover(&local).unwrap();
+        let fetch = || {
+            repository.fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
+        };
+
+        let report = fetch().unwrap();
+        assert_eq!(report.continuity(), None, "watermarks are not witnesses");
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), local_allocator);
+        assert_eq!(git(&local, &["rev-parse", OTHER_ALLOCATOR_REF]), created);
+
+        // Numeric, not textual: 10 is above 3.
+        let advanced = set_remote_watermark(&local, ALLOCATOR_REF, "10");
+        fetch().unwrap();
+        assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), advanced);
+
+        let head = git(&local, &["rev-parse", "HEAD"]);
+        git(&local, &["push", "origin", &format!("+{head}:{OTHER_ALLOCATOR_REF}")]);
+        assert!(matches!(fetch(), Err(FetchError::InvalidContinuity)));
+        assert_eq!(git(&local, &["rev-parse", OTHER_ALLOCATOR_REF]), created);
     }
 
     #[test]
@@ -2045,7 +2390,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_with_local_continuity_produces_allocator_witness() {
+    fn fetch_with_local_continuity_requires_matching_checkpoint_witnesses() {
         let root = tempfile::tempdir().unwrap();
         let local = root.path().join("local");
         let remote = root.path().join("remote.git");
@@ -2055,11 +2400,8 @@ mod tests {
         git(&local, &["config", "user.name", "kierandrewett"]);
         git(&local, &["config", "user.email", "kieran@drewett.dev"]);
         git(&local, &["config", "commit.gpgsign", "false"]);
-        fs::write(local.join("state.txt"), "allocator state\n").unwrap();
-        git(&local, &["add", "state.txt"]);
-        git(&local, &["commit", "-m", "initial"]);
-        let head = git(&local, &["rev-parse", "HEAD"]);
-        git(&local, &["update-ref", ALLOCATOR_REF, &head]);
+        let head = commit_state(&local, "checkpoint state\n");
+        git(&local, &["update-ref", CHECKPOINT_REF, &head]);
         git(
             &local,
             &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -2077,15 +2419,77 @@ mod tests {
         let missing = request().unwrap();
         assert_eq!(missing.continuity(), Some(RemoteContinuity::Missing));
         assert!(missing.internal().is_empty());
+        assert!(
+            missing.ordinary().is_empty(),
+            "a refused fetch reports no fetched ref"
+        );
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            None,
+            "the verdict is decided before any ref is installed"
+        );
 
         git(
             &local,
-            &["push", "origin", &format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}")],
+            &["push", "origin", &format!("{CHECKPOINT_REF}:{CHECKPOINT_REF}")],
         );
         let continuous = request().unwrap();
         assert_eq!(continuous.continuity(), Some(RemoteContinuity::Continuous));
         assert_eq!(continuous.internal().len(), 1);
-        assert_eq!(continuous.internal()[0].source(), ALLOCATOR_REF);
+        assert_eq!(continuous.internal()[0].source(), CHECKPOINT_REF);
         assert_eq!(continuous.internal()[0].object_id().as_str(), head);
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            Some(head)
+        );
+    }
+
+    /// Capture pins and other private refs are local on both sides of a
+    /// fetch: the local ones are not witnesses the remote must hold, and the
+    /// remote's are never installed (`ORNA-GIT-008`, `ORNA-CAP-003`).
+    #[test]
+    fn fetch_with_local_continuity_neither_requires_nor_imports_private_refs() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("local");
+        let head = remote_with_one_unseen_commit(root.path(), &local);
+        let remote = root.path().join("remote.git");
+        for private in [
+            "refs/orna/pins/0123456789abcdef/pending/peer-row",
+            "refs/orna/review-candidates/0123456789abcdef0123456789abcdef",
+        ] {
+            git(&remote, &["update-ref", private, &head]);
+        }
+        git(&local, &["config", "user.name", "kierandrewett"]);
+        git(&local, &["config", "user.email", "kieran@drewett.dev"]);
+        git(&local, &["config", "commit.gpgsign", "false"]);
+        fs::write(local.join("local.txt"), "local pin target\n").unwrap();
+        git(&local, &["add", "local.txt"]);
+        git(&local, &["commit", "-m", "local"]);
+        let local_head = git(&local, &["rev-parse", "HEAD"]);
+        let local_private = [
+            "refs/orna/pins/fedcba9876543210/pending/local-row",
+            "refs/orna/migration-candidates/fedcba9876543210",
+        ];
+        for private in local_private {
+            git(&local, &["update-ref", private, &local_head]);
+        }
+
+        let repository = Repository::discover(&local).unwrap();
+        let report = repository
+            .fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
+            .unwrap();
+
+        assert_eq!(report.continuity(), None, "private refs make no continuity claim");
+        assert!(report.internal().is_empty());
+        assert_eq!(
+            local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
+            Some(head)
+        );
+        assert_eq!(
+            git(&local, &["for-each-ref", "--format=%(refname)", "refs/orna/"]),
+            "refs/orna/migration-candidates/fedcba9876543210\n\
+             refs/orna/pins/fedcba9876543210/pending/local-row",
+            "only the local private refs remain; none of the remote's is fetched"
+        );
     }
 }
