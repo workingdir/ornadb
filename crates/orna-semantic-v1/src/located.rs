@@ -48,7 +48,13 @@ pub fn analyze_with_catalogue_located(
         enabled: true,
         ..OriginRecorder::disabled()
     };
-    let (analysis, _) = crate::analyze_recording_origins(inputs, catalogue, false, &mut recorder);
+    let (analysis, _) = crate::analyze_recording_origins(
+        inputs,
+        catalogue,
+        false,
+        crate::SystemProviders::DeclaredSurface,
+        &mut recorder,
+    );
     let origins = recorder.align(&analysis.diagnostics);
     LocatedAnalysis { analysis, origins }
 }
