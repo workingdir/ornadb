@@ -1,20 +1,23 @@
 //! The LSP server loop and request dispatch.
 //!
-//! The server is synchronous and single-threaded. Compiler checks for one
-//! document are fast, so no worker pool is needed for the first version.
+//! Requests are answered on the loop thread. Diagnostics run the project
+//! check on a separate worker (`crate::diagnostics`), so edits never wait for
+//! semantic analysis.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufReader};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crate::analysis::{self, EditorParse as Parse};
+use crate::diagnostics::{self, DiagnosticsWorker, OpenFile, Publisher, Snapshot};
 use crate::documents::{Document, PositionMapper};
+use crate::project::{ProjectHome, ProjectLocator};
 use crate::{editor_ranges, inlay, semantic};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
 use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
 use orna_repository_v1::Repository;
-use orna_semantic_v1::ModuleInput;
 use lsp_types::{
     CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
     CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
@@ -30,7 +33,7 @@ use lsp_types::{
     InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
     InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
     LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
-    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceParams,
     RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
     RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken,
     SemanticTokens, SemanticTokensDeltaParams, SemanticTokensFullOptions, SemanticTokensLegend,
@@ -125,6 +128,11 @@ struct PendingIdentityRename {
 /// Shared state across requests and notifications.
 struct ServerState {
     documents: HashMap<Uri, Document>,
+    /// The project of each open document, or `None` when it is detached.
+    homes: HashMap<Uri, Option<ProjectHome>>,
+    projects: ProjectLocator,
+    /// Publishes diagnostics; absent when no client is attached.
+    diagnostics: Option<DiagnosticsWorker>,
     semantic_tokens: HashMap<Uri, SemanticTokenSnapshot>,
     next_semantic_token_result: u64,
     pending_identity_renames: HashMap<Uri, Vec<Vec<PendingIdentityRename>>>,
@@ -140,6 +148,9 @@ impl ServerState {
         Self {
             pending_identity_renames: HashMap::new(),
             documents: HashMap::new(),
+            homes: HashMap::new(),
+            projects: ProjectLocator::default(),
+            diagnostics: None,
             semantic_tokens: HashMap::new(),
             next_semantic_token_result: 0,
         }
@@ -152,6 +163,26 @@ impl ServerState {
     fn next_semantic_token_result_id(&mut self) -> String {
         self.next_semantic_token_result += 1;
         format!("orna-semantic-{}", self.next_semantic_token_result)
+    }
+
+    /// The open documents with their projects.
+    fn snapshot(&self) -> Snapshot {
+        Arc::new(
+            self.documents
+                .values()
+                .map(|document| OpenFile {
+                    document: document.clone(),
+                    home: self.homes.get(&document.uri).cloned().flatten(),
+                })
+                .collect(),
+        )
+    }
+
+    /// Queues diagnostics for `uri` and whatever its project check changes.
+    fn schedule_diagnostics(&self, uri: &Uri, home: Option<ProjectHome>) {
+        if let Some(worker) = &self.diagnostics {
+            worker.schedule(self.snapshot(), vec![(uri.clone(), home)]);
+        }
     }
 }
 
@@ -168,6 +199,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Err(error);
     }
     let mut state = ServerState::new();
+    let sender = connection.sender.clone();
+    state.diagnostics = Some(DiagnosticsWorker::spawn(Publisher::new(move |message| {
+        let _ = sender.send(message);
+    })));
 
     for message in &connection.receiver {
         match message {
@@ -178,7 +213,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 handle_request(&mut state, &connection, request);
             }
             Message::Notification(notification) => {
-                if handle_notification(&mut state, &connection, notification) {
+                if handle_notification(&mut state, notification) {
                     break;
                 }
             }
@@ -186,8 +221,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    // Drop the connection first: the writer thread terminates only when its
-    // channel sender is gone.
+    // Stop the diagnostics worker, which holds a sender, then drop the
+    // connection: the writer thread terminates only when every sender is gone.
+    drop(state);
     drop(connection);
     io_threads.join()?;
     Ok(())
@@ -298,8 +334,8 @@ fn server_capabilities() -> serde_json::Value {
             },
         ))),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-            identifier: Some("orna-syntax-v1".to_owned()),
-            inter_file_dependencies: false,
+            identifier: Some(analysis::DIAGNOSTIC_SOURCE.to_owned()),
+            inter_file_dependencies: true,
             workspace_diagnostics: false,
             work_done_progress_options: Default::default(),
         })),
@@ -387,11 +423,7 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
 }
 
 /// Handles one client notification. Returns true when the server must exit.
-fn handle_notification(
-    state: &mut ServerState,
-    connection: &Connection,
-    notification: Notification,
-) -> bool {
+fn handle_notification(state: &mut ServerState, notification: Notification) -> bool {
     let method = notification.method.clone();
     match method.as_str() {
         "exit" => true,
@@ -410,8 +442,10 @@ fn handle_notification(
             );
             state.pending_identity_renames.remove(&uri);
             state.semantic_tokens.remove(&uri);
+            let home = state.projects.home(&uri);
+            state.homes.insert(uri.clone(), home.clone());
             state.documents.insert(uri.clone(), document);
-            publish_diagnostics(state, connection, &uri);
+            state.schedule_diagnostics(&uri, home);
             false
         }
         "textDocument/didChange" => {
@@ -440,15 +474,20 @@ fn handle_notification(
             };
             document.text = text;
             document.version = version;
-            publish_diagnostics(state, connection, &uri);
+            let home = state.homes.get(&uri).cloned().flatten();
+            state.schedule_diagnostics(&uri, home);
             false
         }
         "textDocument/didSave" => {
             if let Ok(params) =
                 serde_json::from_value::<lsp_types::DidSaveTextDocumentParams>(notification.params)
             {
-                persist_pending_rename_identity(state, &params.text_document.uri);
-                publish_diagnostics(state, connection, &params.text_document.uri);
+                let uri = params.text_document.uri;
+                persist_pending_rename_identity(state, &uri);
+                if state.documents.contains_key(&uri) {
+                    let home = state.homes.get(&uri).cloned().flatten();
+                    state.schedule_diagnostics(&uri, home);
+                }
             }
             false
         }
@@ -459,15 +498,9 @@ fn handle_notification(
                 let uri = params.text_document.uri;
                 state.pending_identity_renames.remove(&uri);
                 state.semantic_tokens.remove(&uri);
-                let _ = connection.sender.send(Message::Notification(Notification {
-                    method: "textDocument/publishDiagnostics".to_owned(),
-                    params: serde_json::to_value(PublishDiagnosticsParams {
-                        uri,
-                        diagnostics: Vec::new(),
-                        version: None,
-                    })
-                    .expect("serialisable diagnostics"),
-                }));
+                state.documents.remove(&uri);
+                let home = state.homes.remove(&uri).flatten();
+                state.schedule_diagnostics(&uri, home);
             }
             false
         }
@@ -497,24 +530,6 @@ fn apply_content_changes(
         candidate.replace_range(start..end, &change.text);
     }
     Some(candidate)
-}
-
-/// Recomputes and publishes the diagnostics for one document.
-fn publish_diagnostics(state: &ServerState, connection: &Connection, uri: &Uri) {
-    let Some(document) = state.document(uri) else {
-        return;
-    };
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = analysis::check_document(document, &mapper);
-    let params = PublishDiagnosticsParams {
-        uri: uri.clone(),
-        diagnostics,
-        version: Some(document.version),
-    };
-    let _ = connection.sender.send(Message::Notification(Notification {
-        method: "textDocument/publishDiagnostics".to_owned(),
-        params: serde_json::to_value(params).expect("serialisable diagnostics"),
-    }));
 }
 
 /// Parses one document with its current mapper.
@@ -2496,15 +2511,8 @@ fn request_document_diagnostic(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentDiagnosticParams>("textDocument/diagnostic")?;
     let uri = params.text_document.uri;
-    let (version, diagnostics) = if let Some(document) = state.document(&uri) {
-        let mapper = PositionMapper::new(&document.text);
-        (
-            Some(document.version),
-            analysis::check_document(document, &mapper),
-        )
-    } else {
-        (None, Vec::new())
-    };
+    let (version, diagnostics) = diagnostics::document_report(&state.snapshot(), &uri)
+        .map_or((None, Vec::new()), |report| (report.version, report.diagnostics));
     let result_id = diagnostic_result_id(&uri, version, &diagnostics);
     let report = if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
         DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
@@ -2528,13 +2536,13 @@ fn diagnostic_result_id(uri: &Uri, version: Option<i32>, diagnostics: &[Diagnost
     // server session. Include the document version as well as the report so
     // same-version edits cannot accidentally retain a stale pull result.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "orna-syntax-v1-diagnostics".hash(&mut hasher);
+    "orna-diagnostics".hash(&mut hasher);
     uri.as_str().hash(&mut hasher);
     version.hash(&mut hasher);
     serde_json::to_vec(diagnostics)
-        .expect("serialisable syntax diagnostics")
+        .expect("serialisable diagnostics")
         .hash(&mut hasher);
-    format!("orna-syntax-v1-{:016x}", hasher.finish())
+    format!("orna-{:016x}", hasher.finish())
 }
 
 fn request_document_links(
@@ -2711,11 +2719,11 @@ mod identity_rename_follow_tests {
 #[cfg(test)]
 mod persisted_object_rename_tests {
     use super::*;
+    use orna_semantic_v1::ModuleInput;
     use std::{fs, process::Command};
 
     fn notify(state: &mut ServerState, notification: Notification) {
-        let (connection, _transport) = Connection::memory();
-        handle_notification(state, &connection, notification);
+        handle_notification(state, notification);
     }
 
     fn did_save(state: &mut ServerState, uri: &Uri) {

@@ -23,8 +23,42 @@ use crate::documents::{Document, PositionMapper};
 pub type EditorParse = Parse<SyntaxTree>;
 
 /// orna-syntax-v1 carries no severity on its diagnostics; every parser error is
-/// a hard error, so the editor maps all of them to ERROR.
-const SYNTAX_DIAGNOSTIC_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
+/// a hard error, so the editor maps all of them to ERROR. Semantic analysis
+/// likewise only produces errors.
+const ERROR_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
+
+/// The `source` of every diagnostic this server publishes: the same checks
+/// that `orna check` runs.
+pub(crate) const DIAGNOSTIC_SOURCE: &str = "orna";
+
+/// One error diagnostic for a project or semantic check, in the same shape as
+/// the syntax diagnostics.
+pub(crate) fn source_diagnostic(
+    range: lsp_types::Range,
+    code: &str,
+    message: &str,
+    help: &[&str],
+) -> Diagnostic {
+    let help = help
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    Diagnostic {
+        range,
+        severity: Some(ERROR_SEVERITY),
+        code: Some(NumberOrString::String(code.to_owned())),
+        code_description: None,
+        source: Some(DIAGNOSTIC_SOURCE.to_owned()),
+        message: lsp_diagnostic_message(message, message, &help, &[]),
+        related_information: None,
+        tags: None,
+        data: Some(serde_json::json!({
+            "title": message,
+            "help": help,
+            "notes": [],
+        })),
+    }
+}
 
 /// Syntax diagnostics emitted by the 1.0 parser with their original byte spans.
 pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
@@ -53,10 +87,10 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 .collect::<Vec<_>>();
             Diagnostic {
                 range: mapper.range(&diagnostic.span),
-                severity: Some(SYNTAX_DIAGNOSTIC_SEVERITY),
+                severity: Some(ERROR_SEVERITY),
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
-                source: Some("orna-syntax-v1".to_owned()),
+                source: Some(DIAGNOSTIC_SOURCE.to_owned()),
                 message: lsp_diagnostic_message(
                     &diagnostic.title,
                     &diagnostic.message,
