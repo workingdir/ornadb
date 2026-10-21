@@ -4302,7 +4302,7 @@ impl Parser {
             let lambda_stage = op == "|" && self.pipeline_stage_is_lambda();
             let rhs_min = if lambda_stage {
                 0
-            } else if op.starts_with('|') {
+            } else if matches!(op.as_str(), "|" | "|?") {
                 10
             } else if right {
                 prec
@@ -4311,7 +4311,7 @@ impl Parser {
             };
             let rhs = self.recurse(|parser| parser.pratt(rhs_min, mode));
             let Some(rhs) = rhs else { break };
-            if op.starts_with('|')
+            if matches!(op.as_str(), "|" | "|?")
                 && let Some((next_prec, _)) = self.infix()
                 && (6..=9).contains(&next_prec)
             {
