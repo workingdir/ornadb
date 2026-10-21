@@ -1051,6 +1051,8 @@ pub struct SourceMutationEffectHandler {
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1071,6 +1073,7 @@ impl SourceMutationEffectHandler {
             overlay: BTreeMap::new(),
             source_row_schemas: Vec::new(),
             protected_field_pins: Vec::new(),
+            explain_catalogue: None,
         }
     }
 
@@ -2326,6 +2329,12 @@ impl EffectHandler for SourceMutationEffectHandler {
             next: None,
         }))
     }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        self.explain_catalogue
+            .as_ref()
+            .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
+    }
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {
@@ -2989,6 +2998,19 @@ impl LiveApplication for ApplicationLiveAdapter {
                     }
                 };
                 let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                // The REPL serves `sys.explain` from the activation's pinned CWD
+                // snapshot (ORNA-SYS-008), as the module activation does. A pure
+                // evaluation has no activation context, so no catalogue is pinned
+                // and explain reports the coordinate unavailable.
+                if let Some(context) = context {
+                    handler.explain_catalogue = Some(
+                        orna_evaluator_v1::ActivationExplainCatalogue::new(
+                            context.capture().snapshot(),
+                            handler.tables.keys().map(String::as_str),
+                        )
+                        .map_err(|_| LiveError::ApplicationRejected)?,
+                    );
+                }
                 let (value, successor) =
                     match repl.evaluate_staged_with_effects(staged, &mut handler) {
                         Ok(result) => result,
