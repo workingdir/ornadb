@@ -1,7 +1,7 @@
 //! Parser conformance for the W27 grammar audit against `grammar/orna.ebnf`.
 //! Each test pins one audited divergence and states the production it follows.
 
-use orna_syntax_v1::parse_expression;
+use orna_syntax_v1::{Expr, Pattern, parse_expression};
 
 fn expression_is_accepted(source: &str) {
     let parsed = parse_expression(source);
@@ -63,4 +63,16 @@ fn continue_statement_takes_no_value() {
     expression_is_rejected("loop { continue 1; }");
     expression_is_accepted("loop { continue; }");
     expression_is_accepted("loop { break 1; }");
+}
+
+// W27-05 (grammar pattern: "(" pattern ")" is grouping; a tuple pattern needs
+// a comma): a single parenthesised pattern is its inner pattern.
+#[test]
+fn parenthesised_single_pattern_is_grouping() {
+    let parsed = parse_expression("case x { (a): 1 }");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Expr::Control { arms, .. } = parsed.value else {
+        panic!("expected a case expression");
+    };
+    assert!(matches!(arms[0].pattern, Pattern::Name(..)), "{:?}", arms[0].pattern);
 }
