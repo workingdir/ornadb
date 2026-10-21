@@ -1,1 +1,1 @@
-fn bad(rows: [Int]) = std.collection.every(rows, value => true);
+fn bad(rows: [Int]) = every(rows, value => true);
