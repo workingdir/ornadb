@@ -106,6 +106,37 @@ impl ReplContext {
         }
     }
 
+    /// Suggests session names resembling `name` and modules exporting it.
+    ///
+    /// Used only to explain an unresolved name; it never changes the session.
+    #[must_use]
+    pub fn name_hints(&self, name: &str) -> NameHints {
+        let similar = self
+            .symbols
+            .keys()
+            .filter(|candidate| !candidate.starts_with('$') && candidate.as_str() != name)
+            .filter(|candidate| names_are_similar(name, candidate))
+            .cloned()
+            .collect();
+        let modules = self
+            .modules
+            .iter()
+            .filter(|(_, header)| header.exports.contains_key(name))
+            .map(|(namespace, _)| namespace.display())
+            .collect();
+        let namespaces = self
+            .modules
+            .keys()
+            .map(|namespace| namespace.display())
+            .filter(|namespace| namespace == name)
+            .collect();
+        NameHints {
+            similar,
+            modules,
+            namespaces,
+        }
+    }
+
     /// Checks one parsed REPL input and returns a staged successor.
     ///
     /// The input is an AST supplied by the caller; no source module is
@@ -298,6 +329,48 @@ impl ReplContext {
         scope.unlinked_system_members = self.system_providers.admission_record();
         scope
     }
+}
+
+/// Explanations for an unresolved REPL name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NameHints {
+    /// Session names close to the unresolved identifier, in sorted order.
+    pub similar: Vec<String>,
+    /// Modules exporting the identifier, by dotted namespace, in sorted order.
+    pub modules: Vec<String>,
+    /// Loaded module namespaces spelled exactly like the unresolved identifier,
+    /// so `use NAME;` brings the module itself into scope.
+    pub namespaces: Vec<String>,
+}
+
+fn names_are_similar(name: &str, candidate: &str) -> bool {
+    let name = name.to_lowercase();
+    let candidate = candidate.to_lowercase();
+    if name == candidate {
+        return true;
+    }
+    let limit = if name.chars().count().max(candidate.chars().count()) <= 4 {
+        1
+    } else {
+        2
+    };
+    edit_distance(&name, &candidate) <= limit
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (row, left_char) in left.chars().enumerate() {
+        let mut current = vec![row + 1; right.len() + 1];
+        for (column, right_char) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_char != *right_char);
+            current[column + 1] = substitution
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 #[cfg(test)]
