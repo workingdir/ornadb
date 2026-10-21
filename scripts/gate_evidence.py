@@ -135,7 +135,6 @@ class KnownFailure:
     test: str
     bead: str
     reason: str
-    intermittent: bool = False
     record: str = "*"
 
     def matches(self, failure: Failure, record: str) -> bool:
@@ -152,7 +151,6 @@ class KnownFailure:
             "test": self.test,
             "bead": self.bead,
             "reason": self.reason,
-            "intermittent": self.intermittent,
             "record": self.record,
         }
 
@@ -411,7 +409,7 @@ def load_baseline(path: Path) -> list[KnownFailure]:
         where = f"{path.name}: failure {index}"
         keys = set(entry)
         missing = {"package", "target", "bead", "reason"} - keys
-        extra = keys - {"package", "target", "test", "tests", "bead", "reason", "intermittent", "record"}
+        extra = keys - {"package", "target", "test", "tests", "bead", "reason", "record"}
         if missing or extra or ("test" in keys) == ("tests" in keys):
             raise EvidenceError(
                 f"{where}: needs package, target, bead, reason and one of test or tests; "
@@ -432,15 +430,12 @@ def load_baseline(path: Path) -> list[KnownFailure]:
         record = str(entry.get("record", "*"))
         if not record or not re.fullmatch(r"[a-z0-9*?-]+", record):
             raise EvidenceError(f"{where}: record must be a record ID or glob")
-        intermittent = entry.get("intermittent", False)
-        if not isinstance(intermittent, bool):
-            raise EvidenceError(f"{where}: intermittent must be true or false")
         for test in tests:
             key = (package, target, test, record)
             if key in seen:
                 raise EvidenceError(f"{where}: duplicate entry for {package} {target} {test}")
             seen.add(key)
-            entries.append(KnownFailure(package, target, test, bead, reason.strip(), intermittent, record))
+            entries.append(KnownFailure(package, target, test, bead, reason.strip(), record))
     return entries
 
 
@@ -1047,7 +1042,7 @@ def markdown(summary: dict) -> str:
         lines += [f"- {problem}" for problem in summary["problems"]]
     lines += ["", "### Known failures", "", "| Entry | Bead | Status |", "|---|---|---|"]
     for entry in summary["baseline"]:
-        status = entry["status"] + (" (intermittent)" if entry["intermittent"] else "")
+        status = entry["status"]
         lines.append(f"| `{entry['package']} {entry['target']} {entry['test']}` | {entry['bead']} | {status} |")
     return "\n".join(lines) + "\n"
 
@@ -1118,26 +1113,85 @@ def command_check(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def skip_arguments(baseline: list[KnownFailure], packages: list[str]) -> list[str]:
-    """Return libtest `--skip NAME` pairs for the named-test baseline entries of these packages.
-
-    Per-PR jobs pass them with `--exact`, so a test failing on main runs nightly
-    only until the change that fixes it deletes its baseline entry.
-    """
-    names = sorted(
-        {
-            entry.test
-            for entry in baseline
-            if entry.package in packages and entry.test != "*" and entry.record == "*" and not entry.target.startswith("check:")
-        }
+def cargo_metadata() -> dict:
+    completed = subprocess.run(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        cwd=WORKSPACE_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    return [argument for name in names for argument in ("--skip", name)]
+    if completed.returncode != 0:
+        raise EvidenceError(f"cargo metadata failed: {completed.stderr.strip()}")
+    return json.loads(completed.stdout)
 
 
-def command_skip_args(arguments: argparse.Namespace) -> int:
-    for argument in skip_arguments(load_baseline(Path(arguments.baseline)), arguments.package):
-        print(argument)
-    return 0
+def select_test_targets(metadata: dict, packages: list[str], targets: list[str], integration: bool) -> list[tuple[str, str]]:
+    """Return (package, target label) for the test targets of the named packages, in metadata order.
+
+    `targets` keeps only the named labels, and every named package must have each of them.
+    `integration` keeps only `test:` targets, for jobs whose library suite runs in another job.
+    """
+    members = {str(package["name"]): package for package in metadata.get("packages", [])}
+    unknown = sorted(set(packages) - set(members))
+    if unknown:
+        raise EvidenceError(f"no workspace package named {', '.join(unknown)}")
+    selected: list[tuple[str, str]] = []
+    for name in dict.fromkeys(packages):
+        labels = [
+            target_label(list(target.get("kind") or []), str(target["name"]))
+            for target in members[name].get("targets", [])
+            if target.get("test")
+        ]
+        if integration:
+            labels = [label for label in labels if label.startswith("test:")]
+        for wanted in targets:
+            if wanted not in labels:
+                raise EvidenceError(f"{name} has no test target {wanted}")
+        if targets:
+            labels = [label for label in labels if label in targets]
+        selected.extend((name, label) for label in labels)
+    return selected
+
+
+def known_failures_for(baseline: list[KnownFailure], package: str, target: str) -> tuple[list[str], bool]:
+    """Return the libtest names to skip in one target, and whether a whole-binary failure removes the target.
+
+    Only entries that apply to every record count; record-limited entries belong to their own gate job.
+    """
+    names: set[str] = set()
+    whole = False
+    for entry in baseline:
+        if entry.package == package and entry.target == target and entry.record == "*":
+            if entry.test == "*":
+                whole = True
+            else:
+                names.add(entry.test)
+    return sorted(names), whole
+
+
+def command_test(arguments: argparse.Namespace) -> int:
+    for target in arguments.target:
+        if not TARGET_PATTERN.fullmatch(target):
+            raise EvidenceError(f"target {target!r} is not lib, doc or KIND:NAME")
+    baseline = load_baseline(Path(arguments.baseline))
+    selected = select_test_targets(cargo_metadata(), arguments.package, arguments.target, arguments.integration)
+    failed: list[str] = []
+    for package, target in selected:
+        names, whole = known_failures_for(baseline, package, target)
+        if whole:
+            print(f"ornadb: skipped {package} {target}: a known failure aborts the whole binary", file=sys.stderr)
+            continue
+        command = ["cargo", "test", "--locked", "-p", package, *target_flags(target)]
+        if arguments.features:
+            command += ["--features", arguments.features]
+        command += ["--", "--exact", *[argument for name in names for argument in ("--skip", name)], "--nocapture"]
+        print(f"ornadb: {shlex.join(command)}", flush=True)
+        if subprocess.run(command, cwd=WORKSPACE_ROOT, check=False).returncode != 0:
+            failed.append(f"{package} {target}")
+    for item in failed:
+        print(f"ornadb: test failed: {item}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1173,9 +1227,12 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
     check.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
 
-    skips = commands.add_parser("skip-args", help="print libtest --skip arguments for known failures, one per line")
-    skips.add_argument("-p", "--package", action="append", required=True, help="Cargo package the job tests")
-    skips.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
+    tests = commands.add_parser("test", help="run each test target with the known failures of the baseline skipped")
+    tests.add_argument("-p", "--package", action="append", required=True, help="Cargo package to test (repeatable)")
+    tests.add_argument("--target", action="append", default=[], help="only this target: lib, test:NAME or bin:NAME (repeatable)")
+    tests.add_argument("--integration", action="store_true", help="only integration test targets (test:NAME)")
+    tests.add_argument("--features", help="Cargo features to enable")
+    tests.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
 
     arguments = parser.parse_args(argv)
     try:
@@ -1185,8 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_run(arguments)
         if arguments.action == "summarize":
             return command_summarize(arguments)
-        if arguments.action == "skip-args":
-            return command_skip_args(arguments)
+        if arguments.action == "test":
+            return command_test(arguments)
         return command_check(arguments)
     except (EvidenceError, OSError, tomllib.TOMLDecodeError, json.JSONDecodeError, re.error) as error:
         print(f"ornadb: {error}", file=sys.stderr)
