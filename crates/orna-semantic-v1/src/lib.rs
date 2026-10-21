@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
@@ -56,6 +57,9 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Portable failure code for a required `sys` member that has no linked
+/// production provider (ORNA-SYS-008, `api/sys.json` `failure_codes`).
+pub const DIAG_SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -1557,10 +1561,48 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Whether `sys` members were admitted against production providers.
+    production_sys_providers: bool,
 }
 impl Analysis {
     pub fn is_ok(&self) -> bool {
         self.diagnostics.is_empty()
+    }
+
+    /// The provider linkage this analysis admitted `sys` members against.
+    pub(crate) fn system_providers(&self) -> SystemProviders {
+        if self.production_sys_providers {
+            SystemProviders::Production
+        } else {
+            SystemProviders::DeclaredSurface
+        }
+    }
+}
+
+/// The provider linkage that analysis admits portable `sys` members against.
+///
+/// A member's static type comes from the declared `api/sys.json` surface;
+/// whether it can execute depends on the providers of the host that evaluates
+/// the program. Every caller that evaluates analysed source passes
+/// [`SystemProviders::Production`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SystemProviders {
+    /// Every member of the declared surface counts as linked, so analysis
+    /// checks typing only. For source that is not admitted for evaluation.
+    DeclaredSurface,
+    /// Only members a production host links a provider for are admitted;
+    /// every other member is rejected with `sys.version.incompatible`
+    /// (ORNA-SYS-008).
+    Production,
+}
+
+impl SystemProviders {
+    /// A fresh admission record, or `None` when only typing is checked.
+    fn admission_record(self) -> Option<Rc<RefCell<BTreeSet<String>>>> {
+        match self {
+            Self::DeclaredSurface => None,
+            Self::Production => Some(Rc::default()),
+        }
     }
 }
 
@@ -1783,14 +1825,21 @@ pub fn admit_row_unit_with_owner_fields(
         }
     }
     let mut inferred = Vec::new();
+    let scope = Scope {
+        unlinked_system_members: analysis.system_providers().admission_record(),
+        ..Scope::default()
+    };
     let input_type = infer_table_row_input(
         &parsed.value,
         &source_schema_fields,
-        &Scope::default(),
+        &scope,
         &BTreeMap::new(),
         &mut inferred,
         true,
     );
+    if let Some(record) = &scope.unlinked_system_members {
+        report_unlinked_system_members(record, &mut inferred);
+    }
     result.diagnostics.extend(inferred);
     if let Type::Record(fields) = input_type.ty {
         result.fields = fields;
@@ -1811,26 +1860,58 @@ pub fn admit_row_unit_with_owner_fields(
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
-/// modules may not define either reserved root.
+/// modules may not define either reserved root. Portable `sys` members are
+/// checked against the declared surface only; see [`analyze_with_providers`].
 pub fn analyze(inputs: &[ModuleInput]) -> Analysis {
     analyze_with_catalogue(inputs, &Catalogue::empty())
 }
 
 /// Load source modules with an explicit declaration catalogue.  Names not in
 /// source or this catalogue remain unresolved; no profile is installed by
-/// default.
+/// default. Portable `sys` members are checked against the declared surface
+/// only; see [`analyze_with_providers`].
 pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> Analysis {
-    analyze_retaining_context(inputs, catalogue, false).0
+    analyze_with_providers(inputs, catalogue, SystemProviders::DeclaredSurface)
 }
 
+/// Load source modules with an explicit declaration catalogue and admit each
+/// portable `sys` member against `providers`. A host that evaluates the
+/// analysed program passes [`SystemProviders::Production`], so a member with
+/// no linked provider fails here with `sys.version.incompatible` rather than
+/// mid-evaluation.
+pub fn analyze_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    providers: SystemProviders,
+) -> Analysis {
+    analyze_retaining_context_with_providers(inputs, catalogue, false, providers).0
+}
+
+/// Semantic payload derivation describes declarations rather than admitting
+/// a program for evaluation, so it checks the declared `sys` surface only.
 fn analyze_retaining_context(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
     retain_context: bool,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    analyze_retaining_context_with_providers(
+        inputs,
+        catalogue,
+        retain_context,
+        SystemProviders::DeclaredSurface,
+    )
+}
+
+fn analyze_retaining_context_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+    providers: SystemProviders,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
+        production_sys_providers: providers == SystemProviders::Production,
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
@@ -1904,6 +1985,9 @@ fn analyze_retaining_context(
         &catalogue.attached_symbols,
         &mut dependency_summaries,
     );
+    // Every module of one analysis belongs to a single admission, so each
+    // unlinked `sys` member is reported once.
+    let unlinked_system_members = providers.admission_record();
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -1919,6 +2003,7 @@ fn analyze_retaining_context(
             &mut result.diagnostics,
         );
         scope.current_namespace = Some(namespace.clone());
+        scope.unlinked_system_members = unlinked_system_members.clone();
         let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
         visible_unit_namespaces.extend(scope.modules.values().cloned());
         scope.source_units = result
@@ -1973,6 +2058,9 @@ fn analyze_retaining_context(
         if retain_context {
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
+    }
+    if let Some(record) = &unlinked_system_members {
+        report_unlinked_system_members(record, &mut result.diagnostics);
     }
     result
         .diagnostics
@@ -3241,6 +3329,13 @@ struct Scope {
     /// pure helper calls. This remains semantic-loader state rather than a
     /// public Symbol field so existing catalogue/value contracts stay stable.
     function_dependencies: RefCell<BTreeMap<String, BTreeSet<String>>>,
+    /// Diagnostic messages for the portable `sys` members a production
+    /// admission requires without a linked provider; `None` when only the
+    /// declared surface is checked. Inference only records them and the
+    /// admission boundary reports them after checking, so provider linkage
+    /// never alters inferred types or other diagnostics. Clones share the
+    /// record: nested scopes belong to the same admission.
+    unlinked_system_members: Option<Rc<RefCell<BTreeSet<String>>>>,
     ambiguous: BTreeSet<String>,
     /// Source spellings mapped to compiler-local nominal identities. The
     /// values are qualified by defining module and are never a substitute for
@@ -3353,6 +3448,7 @@ fn resolve_imports_with_dependencies(
         current_namespace: None,
         source_units: BTreeMap::new(),
         function_dependencies: RefCell::new(BTreeMap::new()),
+        unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
@@ -8157,7 +8253,7 @@ fn infer_node(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
-                && let Some(inferred) = infer_system_path(&path, diagnostics)
+                && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
             {
                 return inferred;
             }
@@ -16526,16 +16622,20 @@ enum DescriptorPathInference {
 /// Resolves only the JSON-described, read-only descriptor surface. The
 /// descriptor is metadata, not a runtime-value factory: a schema-known member
 /// that has no implementation route fails explicitly instead of acquiring a
-/// guessed type or effect.
+/// guessed type or effect, and a resolved member without a linked production
+/// provider is rejected with `sys.version.incompatible`.
 fn infer_descriptor_system_path(
     path: &[&str],
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DescriptorPathInference {
-    use system_api::PathResolution;
+    use system_api::{PathResolution, SystemMember};
 
     let api = system_api::embedded_system_api();
     let name = path.join(".");
     if let Some(relation) = api.historical_relation(path) {
+        let view = name.strip_suffix(".as_of").unwrap_or(&name);
+        require_linked_system_member(SystemMember::HistoricalView(view), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -16545,6 +16645,7 @@ fn infer_descriptor_system_path(
         });
     }
     if path == ["sys", "database", "as_of"] {
+        require_linked_system_member(SystemMember::HistoricalView("sys.database"), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -16554,6 +16655,7 @@ fn infer_descriptor_system_path(
         });
     }
     if let Some(singleton) = api.historical_singleton(path) {
+        require_linked_system_member(SystemMember::HistoricalView(&singleton.name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -16568,12 +16670,14 @@ fn infer_descriptor_system_path(
             .find(|function| descriptor_function_is_staticly_supported(function))
     }) && let Some(ty) = descriptor_function_type(function)
     {
+        require_linked_system_member(SystemMember::Callable(&function.label), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty,
             effects: descriptor_effects(function.effect),
         });
     }
     if let Some(relation) = api.relation(&name) {
+        require_linked_system_member(SystemMember::Relation(&name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: Type::Relation(Box::new(Type::Named(relation.name.clone()))),
             effects: descriptor_effects(system_api::SystemEffect::Read),
@@ -16586,10 +16690,15 @@ fn infer_descriptor_system_path(
         });
     }
     match api.resolve(path) {
-        PathResolution::ReadOnly(ty) => DescriptorPathInference::Resolved(Inferred {
-            ty: descriptor_type(ty),
-            effects: EffectSummary::default(),
-        }),
+        PathResolution::ReadOnly(ty) => {
+            if let Some(singleton) = api.singleton_view(path) {
+                require_linked_system_member(SystemMember::Singleton(singleton), scope);
+            }
+            DescriptorPathInference::Resolved(Inferred {
+                ty: descriptor_type(ty),
+                effects: EffectSummary::default(),
+            })
+        }
         PathResolution::Removed(removed) => {
             diagnostics.push(diag(
                 if removed.diagnostic == DIAG_LEGACY_SYS_RUNTIME {
@@ -16615,10 +16724,41 @@ fn infer_descriptor_system_path(
     }
 }
 
+/// Admission requires a linked production provider for every portable member
+/// a program uses. The member keeps its descriptor type and inference carries
+/// on unchanged; the record only feeds `report_unlinked_system_members`.
+fn require_linked_system_member(member: system_api::SystemMember<'_>, scope: &Scope) {
+    if let Some(record) = &scope.unlinked_system_members
+        && !system_api::embedded_system_api().provider_linked(member)
+    {
+        record
+            .borrow_mut()
+            .insert(format!("{member} has no provider linked in this implementation"));
+    }
+}
+
+/// Reports each member in an admission record that has no linked production
+/// provider once, as `sys.version.incompatible`. The program is rejected
+/// before evaluation can perform writes (ORNA-SYS-008) instead of failing
+/// mid-evaluation.
+pub(crate) fn report_unlinked_system_members(
+    record: &RefCell<BTreeSet<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    diagnostics.extend(
+        record
+            .take()
+            .into_iter()
+            .map(|message| diag(DIAG_SYS_VERSION_INCOMPATIBLE, message)),
+    );
+}
+
 fn descriptor_function_is_staticly_supported(function: &system_api::FunctionDescriptor) -> bool {
-    // Semantic admission can model every concrete portable signature and its
+    // Semantic admission can type every concrete portable signature and its
     // declared effect. Generic functions remain explicitly unsupported unless
     // a dedicated descriptor-driven admission path handles their type args.
+    // Typing is not execution: each selected overload must still pass
+    // `require_linked_system_member`.
     function.type_parameters.is_empty()
 }
 
@@ -16801,6 +16941,7 @@ fn infer_descriptor_system_call(
             effects,
         });
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     effects.join(&descriptor_effects(function.effect));
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
@@ -16870,6 +17011,7 @@ fn infer_invoke_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = invoke_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.invoke overload");
 
@@ -17076,6 +17218,7 @@ fn infer_start_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = start_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.start overload");
 
@@ -17481,6 +17624,10 @@ fn infer_query_explain_system_call(
     let wants_query = query_shape && (query_named || is_query || generic_requested);
 
     if wants_query {
+        require_linked_system_member(
+            system_api::SystemMember::Callable(&query_descriptor.label),
+            scope,
+        );
         effects.join(&descriptor_effects(query_descriptor.effect));
         if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
             return Some(Inferred {
@@ -17572,6 +17719,10 @@ fn infer_query_explain_system_call(
                     && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
             })
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -17587,6 +17738,10 @@ fn infer_query_explain_system_call(
             })
             .find(|function| descriptor_arguments_match(function, arguments, &values))
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -17653,6 +17808,7 @@ fn infer_meta_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if !valid_shape {
         diagnostics.push(diag(
             DIAG_TYPE,
@@ -17830,6 +17986,7 @@ fn infer_cancel_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -17989,6 +18146,7 @@ fn infer_await_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -18268,11 +18426,15 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
     }
 }
 
-fn infer_system_path(path: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Option<Inferred> {
+fn infer_system_path(
+    path: &[&str],
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if path.first() != Some(&"sys") {
         return None;
     }
-    match infer_descriptor_system_path(path, diagnostics) {
+    match infer_descriptor_system_path(path, scope, diagnostics) {
         DescriptorPathInference::Resolved(inferred) => Some(inferred),
         DescriptorPathInference::Rejected => Some(Inferred {
             ty: Type::Error,
@@ -22901,19 +23063,27 @@ fn infer_historical_member(
 
     // The portable system surface is descriptor-backed rather than a source
     // ModuleHeader.  Project only relations explicitly present in api/sys.json
-    // and keep unknown historical system members unresolved.
-    if namespace == "sys"
-        && system_api::embedded_system_api()
-            .relation(&format!("sys.{name}"))
+    // and keep unknown historical system members unresolved. Reading one
+    // through a database snapshot is its historical view, which needs its own
+    // linked provider.
+    if namespace == "sys" {
+        let relation = format!("sys.{name}");
+        if system_api::embedded_system_api()
+            .relation(&relation)
             .is_some()
-    {
-        return Some(Inferred {
-            ty: historical_table_type(snapshot, &format!("sys.{name}")),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        });
+        {
+            require_linked_system_member(
+                system_api::SystemMember::HistoricalView(&relation),
+                scope,
+            );
+            return Some(Inferred {
+                ty: historical_table_type(snapshot, &relation),
+                effects: EffectSummary {
+                    effects: BTreeSet::from(["database read".into()]),
+                    may_fail: true,
+                },
+            });
+        }
     }
 
     let module = scope.historical_modules.get(&Namespace(
@@ -25822,8 +25992,27 @@ mod tests {
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }
+    /// Analysis as an evaluating host admits it: against production providers.
+    fn admitted(inputs: &[ModuleInput]) -> Analysis {
+        analyze_with_providers(inputs, &Catalogue::empty(), SystemProviders::Production)
+    }
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
+    }
+    /// Every diagnostic as `code: message`. Diagnostic `Debug` output is
+    /// redacted, so tests compare these texts instead.
+    fn diagnostic_texts(diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect()
+    }
+    /// The admission diagnostic for a portable member without a linked
+    /// production provider.
+    fn unlinked(member: &str) -> String {
+        format!(
+            "{DIAG_SYS_VERSION_INCOMPATIBLE}: {member} has no provider linked in this implementation"
+        )
     }
     #[test]
     fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
@@ -26192,6 +26381,18 @@ mod tests {
                 ),
             )]);
             assert!(valid.is_ok(), "{operation}: {:#?}", valid.diagnostics);
+            // The call types, but no production provider is linked for the
+            // failure administration callables (ORNA-SYS-008).
+            let admitted_call = admitted(&[ModuleInput::new(
+                "failure-cas.orna",
+                format!(
+                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
+                ),
+            )]);
+            assert_eq!(
+                diagnostic_texts(&admitted_call.diagnostics),
+                [unlinked(&format!("portable system callable `sys.admin.{operation}`"))],
+            );
 
             let missing_version = checked(&[ModuleInput::new(
                 "failure-cas.orna",
@@ -26205,6 +26406,129 @@ mod tests {
                 missing_version.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn unlinked_sys_members_are_rejected_with_version_incompatible() {
+        for (source, member) in [
+            (
+                "pub fn info() = sys.rt.info();",
+                "portable system callable `sys.rt.info`",
+            ),
+            (
+                "pub fn head() = sys.snapshot(\"HEAD~1\");",
+                "portable system callable `sys.snapshot(Str)`",
+            ),
+            (
+                "pub fn metadata() = sys.meta(1);",
+                "portable system callable `sys.meta`",
+            ),
+            (
+                "pub fn plan(function: sys.FunctionRef) = sys.explain(function);",
+                "portable system callable `sys.explain(FunctionRef)`",
+            ),
+            ("pub fn plans() = sys.Plan;", "portable system relation `sys.Plan`"),
+            ("pub fn runs() = sys.Run;", "portable system relation `sys.Run`"),
+            (
+                "pub fn objects() = sys.storage.objects;",
+                "portable system relation `sys.storage.objects`",
+            ),
+            ("pub fn owner() = sys.rt.id;", "portable system singleton `sys.rt`"),
+            (
+                "pub fn published() = sys.Storage.as_of(HEAD);",
+                "historical view `sys.Storage.as_of`",
+            ),
+            (
+                "pub fn old() = sys.database.as_of(HEAD);",
+                "historical view `sys.database.as_of`",
+            ),
+        ] {
+            let declared = checked(&[ModuleInput::new("main.orna", source)]);
+            assert!(declared.is_ok(), "{source}: {:#?}", diagnostic_texts(&declared.diagnostics));
+            let analysis = admitted(&[ModuleInput::new("main.orna", source)]);
+            assert_eq!(
+                diagnostic_texts(&analysis.diagnostics),
+                [unlinked(member)],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_sys_members_are_admitted() {
+        let analysis = admitted(&[ModuleInput::new(
+            "linked.orna",
+            "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");
+            pub fn capture(): Blob = sys.blob.capture_file(\"data\", \"input.bin\", 1024);
+            pub fn pause(stream: sys.StreamRef): Bool = sys.admin.pause_stream(stream);
+            pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
+            pub fn storage() = sys.Storage;
+            pub fn maintenance() = sys.MaintenanceJob;
+            pub fn plan() = sys.Storage | sys.explain();",
+        )]);
+        assert!(
+            analysis.is_ok(),
+            "{:#?}",
+            diagnostic_texts(&analysis.diagnostics)
+        );
+    }
+
+    #[test]
+    fn each_unlinked_sys_member_is_reported_once_per_analysis() {
+        let analysis = admitted(&[
+            ModuleInput::new(
+                "a.orna",
+                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+            ),
+            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+        ]);
+        assert_eq!(
+            diagnostic_texts(&analysis.diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+    }
+
+    #[test]
+    fn provider_linkage_leaves_type_checking_unchanged() {
+        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let declared = diagnostic_texts(&checked(&source).diagnostics);
+        let mut production = diagnostic_texts(&admitted(&source).diagnostics);
+        assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
+        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        assert!(production.contains(&unlinked_member), "{production:#?}");
+        production.retain(|text| *text != unlinked_member);
+        assert_eq!(production, declared);
+    }
+
+    #[test]
+    fn repl_admission_rejects_unlinked_sys_members() {
+        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        assert!(rejected.is_ok());
+        let diagnostics = ReplContext::with_providers(SystemProviders::Production)
+            .stage(&rejected.value)
+            .expect_err("no production provider is linked for sys.rt.info");
+        assert_eq!(
+            diagnostic_texts(&diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+
+        assert!(ReplContext::empty().stage(&rejected.value).is_ok());
+        let project = admitted(&[ModuleInput::new("main.orna", "pub fn one(): Int = 1;")]);
+        assert!(
+            ReplContext::from_analysis(&project)
+                .unwrap()
+                .stage(&rejected.value)
+                .is_err(),
+            "a REPL built from a production analysis keeps its provider linkage"
+        );
+
+        let admitted_input = orna_syntax_v1::parse_repl("sys.Storage");
+        assert!(admitted_input.is_ok());
+        assert!(
+            ReplContext::with_providers(SystemProviders::Production)
+                .stage(&admitted_input.value)
+                .is_ok()
+        );
     }
 
     #[test]
