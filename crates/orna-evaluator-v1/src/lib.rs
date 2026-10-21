@@ -5841,6 +5841,7 @@ impl Context<'_, '_> {
             scope,
             !self.restrict_function_names,
             function_name(callee).is_some_and(|name| self.functions.contains_key(&name)),
+            self.functions,
         ) || resolved
             .as_deref()
             .is_some_and(|name| matches!(name, "std.collection.asof_join" | "std.query.asof_join"));
@@ -7781,6 +7782,7 @@ impl Context<'_, '_> {
             !self.restrict_function_names,
             source_export_available,
             captured_timezone_snapshot_matches(self.functions),
+            self.functions,
         );
         let native_math = native_binding
             .filter(|binding| binding.kind == StandardBindingKind::Math)
@@ -13939,6 +13941,7 @@ fn registered_standard_binding(
     allow_unresolved_qualified: bool,
     source_export_available: bool,
     captured_timezone_matches: bool,
+    functions: &Functions,
 ) -> Option<RegisteredStandardBinding> {
     let spelling = function_name(callee);
     let name = resolved_function.or(spelling.as_deref())?;
@@ -13951,6 +13954,16 @@ fn registered_standard_binding(
             .find(|registered| *registered == operation)
             .map(|operation| (*module, operation))
     })?;
+    // A bare spelling of a root intrinsic is served natively; only qualified or
+    // aliased `std.collection.<name>` spellings depend on the captured pin.
+    let root_intrinsic_spelling = spelling.as_deref() == Some(operation);
+    if module.kind == StandardBindingKind::Collection
+        && !root_intrinsic_spelling
+        && LEGACY_ROOT_WRAPPER_OPERATIONS.contains(&operation)
+        && !legacy_root_wrapper_is_pinned(module.prefix, operation, functions)
+    {
+        return None;
+    }
     if module.kind == StandardBindingKind::Time && !captured_timezone_matches {
         return None;
     }
@@ -13972,6 +13985,7 @@ fn is_native_collection_binding(
     scope: &Scope,
     allow_unresolved_qualified: bool,
     source_export_available: bool,
+    functions: &Functions,
 ) -> bool {
     registered_standard_binding(
         callee,
@@ -13980,6 +13994,7 @@ fn is_native_collection_binding(
         allow_unresolved_qualified,
         source_export_available,
         true,
+        functions,
     )
     .is_some_and(|binding| binding.kind == StandardBindingKind::Collection)
 }
@@ -14023,6 +14038,23 @@ fn captured_collection_helper_is_loop(functions: &Functions, name: &str) -> bool
                 }
             ))
     )
+}
+
+/// Root intrinsics that pinned collection and query modules used to re-declare
+/// as `std.<module>.<name>` wrappers. Only the historical wrappers keep a Rust
+/// shadow; the current pin declares none, so these names resolve to the root
+/// intrinsic without consulting the registry.
+const LEGACY_ROOT_WRAPPER_OPERATIONS: &[&str] = &[
+    "filter", "map", "flat_map", "sort_by", "take", "drop", "distinct", "union", "count", "first",
+    "one", "sum", "min", "max", "every", "exists",
+];
+
+/// Whether a captured pin still declares the legacy root wrapper that the
+/// registry shadows. A wrapper whose `*_from` helper is a `while` loop is
+/// evaluated from its Orna body instead (ORNA-LIB-001).
+fn legacy_root_wrapper_is_pinned(prefix: &str, operation: &str, functions: &Functions) -> bool {
+    functions.contains_key(&format!("{prefix}{operation}"))
+        && !captured_collection_helper_is_loop(functions, &format!("{prefix}{operation}_from"))
 }
 
 /// Whether a registered collection binding still evaluates in Rust for a
@@ -15220,8 +15252,14 @@ mod tests {
             "map",
             &collection_functions_for(HISTORICAL_MAP_FROM)
         ));
-        // The current pin defines map_from as a while loop, so the Orna body shadows native map.
+        // A pin whose map_from is a while loop shadows native map with its Orna body.
+        let looping_map_from = "fn map_from<T, U>(values: [T], transform: fn(T): U, index: Int, end: Int, output: [U]): [U] { let cursor = index; let result = output; while cursor < end { cursor = cursor + 1; }; result }";
         assert!(!captured_collection_binding_is_native(
+            "map",
+            &collection_functions_for(looping_map_from)
+        ));
+        // The current pin declares no map_from or map wrapper, so the root intrinsic is native.
+        assert!(captured_collection_binding_is_native(
             "map",
             &collection_functions_for(include_str!("../../../stdlib/std/collection.orna"))
         ));
@@ -15230,13 +15268,18 @@ mod tests {
     }
 
     #[test]
-    fn pinned_collection_loop_bodies_resolve_without_registry_hits() {
+    fn pinned_collection_declares_no_legacy_root_wrappers() {
         let pinned = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
+        for operation in LEGACY_ROOT_WRAPPER_OPERATIONS {
+            assert!(!pinned.contains_key(&format!("std.collection.{operation}")), "{operation}");
+            assert!(
+                !pinned.contains_key(&format!("std.collection.{operation}_from")),
+                "{operation}_from"
+            );
+        }
         for (operation, helper) in [
             ("chunk", "chunk_from"),
             ("flatten", "flatten_from"),
-            ("filter", "filter_from"),
-            ("map", "map_from"),
             ("partition", "partition_from"),
             ("zip", "zip_from"),
             ("pairs", "pairs_from"),
@@ -15250,6 +15293,55 @@ mod tests {
             );
             assert!(!captured_collection_binding_is_native(operation, &pinned), "{operation}");
         }
+    }
+
+    const HISTORICAL_ROOT_WRAPPERS: &str = "fn filter<T>(values: [T], predicate: fn(T): Bool): [T] = filter_from(values, predicate, 0, __list_length(values), []);
+fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, output: [T]): [T] = if index >= end { output } else { filter_from(values, predicate, index + 1, end, output) };
+";
+
+    #[test]
+    fn legacy_root_wrapper_shadow_follows_the_captured_pin() {
+        let scope = Scope(
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            NominalDefinitions::new(),
+            BTreeSet::new(),
+        );
+        let call = orna_syntax_v1::parse_expression("std.collection.filter(values)");
+        assert!(call.is_ok(), "{:?}", call.diagnostics);
+        // Replay of a pin that still declares the root wrapper keeps the native shadow.
+        let historical = collection_functions_for(HISTORICAL_ROOT_WRAPPERS);
+        assert!(is_native_collection_binding(
+            &call.value,
+            Some("std.collection.filter"),
+            &scope,
+            false,
+            true,
+            &historical,
+        ));
+        // The current pin declares no wrapper, so the name is not registered.
+        let current = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
+        assert!(!is_native_collection_binding(
+            &call.value,
+            Some("std.collection.filter"),
+            &scope,
+            false,
+            true,
+            &current,
+        ));
+        assert!(
+            registered_standard_binding(
+                &call.value,
+                Some("std.collection.filter"),
+                &scope,
+                false,
+                true,
+                true,
+                &current,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -15290,6 +15382,7 @@ mod tests {
                     false,
                     true,
                     true,
+                    &Functions::new(),
                 );
                 #[cfg(feature = "system-host-bindings")]
                 let system_host = orna_sys_v1::system_host_operation_registry()
