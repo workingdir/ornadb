@@ -2898,12 +2898,14 @@ impl Repository {
         Ok(reference)
     }
 
-    fn advance_current_ref_bound(
+    /// Resolves the branch a publication may advance. `HEAD` must still name
+    /// `expected_head` through an attached `refs/heads/*` symbolic ref, and a
+    /// branch bound by the journal must be that ref (ORNA-PUB-009).
+    fn advance_target_ref(
         &self,
         expected_head: &GitCommitRef,
-        candidate: &PrivateCommit,
         expected_ref: Option<&str>,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<String, RepositoryError> {
         let actual = self.head()?.ok_or(RepositoryError::UnbornHead)?;
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
@@ -2912,11 +2914,148 @@ impl Repository {
         if expected_ref.is_some_and(|expected| expected != reference) {
             return Err(RepositoryError::StaleHead);
         }
+        Ok(reference)
+    }
+
+    fn advance_current_ref_bound(
+        &self,
+        expected_head: &GitCommitRef,
+        candidate: &PrivateCommit,
+        expected_ref: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let reference = self.advance_target_ref(expected_head, expected_ref)?;
+        // ORNA-PUB-005: every object the candidate adds is durable before the
+        // ref names it, and the ref is durable before a journal stage or the
+        // runtime's tail consumption relies on it. A ref backend whose refs
+        // cannot be flushed is refused before the ref moves.
+        native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
+        self.sync_candidate_objects(expected_head, candidate.commit())?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
         Ok(())
+    }
+
+    /// Flushes every object `candidate` adds over `base`: the commit, its root
+    /// tree, and each tree and blob on a changed path. `write-tree` and
+    /// `commit-tree` leave their loose objects unflushed under Git's default
+    /// `core.fsync`, so without this a crash after the ref names them could
+    /// lose or truncate them.
+    fn sync_candidate_objects(
+        &self,
+        base: &GitCommitRef,
+        candidate: &GitCommitRef,
+    ) -> Result<(), RepositoryError> {
+        let algorithm = match self.native_object_id_length()? {
+            40 => GitHashAlgorithm::Sha1,
+            64 => GitHashAlgorithm::Sha256,
+            _ => return Err(RepositoryError::UnsupportedObjectFormat),
+        };
+        let oid = |hex: &str| NativeOid::from_hex(algorithm, hex).map_err(RepositoryError::Graph);
+        let root_tree = format!("{}^{{tree}}", candidate.as_str());
+        let mut objects = BTreeSet::from([
+            oid(candidate.as_str())?,
+            oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
+        ]);
+        let changes = self.git_bytes_no_lazy_fetch([
+            "diff-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--no-renames",
+            base.as_str(),
+            candidate.as_str(),
+        ])?;
+        // Raw `-z` output alternates `:<old mode> <new mode> <old> <new> <status>`
+        // records with their paths.
+        let mut fields = changes
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty());
+        while let Some(record) = fields.next() {
+            fields.next().ok_or(RepositoryError::GitOperationFailed)?;
+            let record =
+                std::str::from_utf8(record).map_err(|_| RepositoryError::GitOperationFailed)?;
+            let mut parts = record
+                .strip_prefix(':')
+                .ok_or(RepositoryError::GitOperationFailed)?
+                .split(' ');
+            let new_mode = parts.nth(1).ok_or(RepositoryError::GitOperationFailed)?;
+            let new_object = parts.nth(1).ok_or(RepositoryError::GitOperationFailed)?;
+            // A deletion names no object, and a gitlink names a commit in
+            // another repository.
+            if new_mode != "000000" && new_mode != "160000" {
+                objects.insert(oid(new_object)?);
+            }
+        }
+        let objects_dir = self.git_path("objects")?;
+        native_graph::sync_object_files(&objects_dir, &objects, || Ok(()))
+            .map_err(RepositoryError::Graph)
+    }
+
+    /// Persists the ref `HEAD` resolves through: its branch when attached,
+    /// otherwise `HEAD` itself.
+    fn sync_head_ref(&self) -> Result<(), RepositoryError> {
+        let reference = self.git(["rev-parse", "--symbolic-full-name", "HEAD"])?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)
+    }
+
+    /// Whether `HEAD` names `commit` or descends from it. A commit that is not
+    /// in the object database is contained by no ref.
+    fn head_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
+        let Some(head) = self.head()? else {
+            return Ok(false);
+        };
+        if &head == commit {
+            return Ok(true);
+        }
+        if self
+            .commit_optional(&format!("{}^{{commit}}", commit.as_str()))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let mut command = self.command();
+        command.args([
+            "merge-base",
+            "--is-ancestor",
+            commit.as_str(),
+            head.as_str(),
+        ]);
+        let output = command
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// Whether a local branch names `commit` or descends from it. A commit
+    /// that is not in the object database is contained by no branch.
+    fn branch_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
+        if self
+            .commit_optional(&format!("{}^{{commit}}", commit.as_str()))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let mut command = self.command();
+        command.env("GIT_NO_LAZY_FETCH", "1").args([
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            "--contains",
+            commit.as_str(),
+            "refs/heads/",
+        ]);
+        Ok(self
+            .run(command)?
+            .stdout
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace()))
     }
 
     /// Installs the ordinary index image for a published candidate. Only the
@@ -3951,7 +4090,9 @@ impl Repository {
         Ok(())
     }
 
-    /// returned error leaves the journal available for recovery.
+    /// Publishes a prepared candidate through the ref, index and worktree
+    /// boundaries. A refusal before the ref CAS leaves no journal behind; an
+    /// error after the CAS leaves the journal available for recovery.
     pub fn publish_candidate(
         &self,
         expected_index: &IndexGeneration,
@@ -3960,7 +4101,8 @@ impl Repository {
     ) -> Result<IndexGeneration, RepositoryError> {
         self.publish_candidate_impl_with_migration(expected_index, candidate, journal, false, false, None, |_| {})
     }
-    /// Executes publication and observes durable ref/index journal stages.
+    /// Executes publication and observes each durable journal stage, from
+    /// the Prepared intent through the reconciled index.
     pub fn publish_candidate_with_stage_hook(
         &self,
         expected_index: &IndexGeneration,
@@ -4111,15 +4253,16 @@ impl Repository {
         // candidate. Never replace it with another publisher's prepared
         // journal: doing so would discard the first candidate's exact
         // ref/index/worktree evidence before recovery can reconcile it.
-        if let Some(retained) = self.read_publication_journal_locked()? {
+        let resumes_retained_journal = match self.read_publication_journal_locked()? {
             // Compact publication persists this exact prepared journal before
             // it invokes the common PUB-1 boundary, so an exact retry is the
             // same recovery operation, not a second publisher. Any differing
             // journal remains fenced rather than replacing its evidence.
-            if retained != *journal {
+            Some(retained) if retained != *journal => {
                 return Err(RepositoryError::PublicationPending);
             }
-        }
+            retained => retained.is_some(),
+        };
         let paths = self.publication_index_paths(candidate, journal)?;
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
@@ -4130,8 +4273,14 @@ impl Repository {
         // post-ref/pre-index race where an ordinary Git writer could publish
         // the captured, stale index.
         let git_lock = GitIndexLock::acquire_owned(index.with_extension("lock"), lock_binding)?;
-        self.write_publication_journal_locked(journal)?;
+        // PUB-3 step 7: every precondition of the ref CAS is revalidated under
+        // the lock before the Prepared journal exists. A refusal here leaves
+        // no record that could fence the pending batch (ORNA-PUB-006).
         self.ensure_no_git_operation_in_progress()?;
+        let selected_ref = journal
+            .compact_manifest()
+            .map(|witness| witness.selected_ref());
+        self.advance_target_ref(journal.old_head(), selected_ref)?;
         if let Some(review) = review {
             let bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
             if Sha256::digest(bytes).as_slice() != review.index_bytes_digest
@@ -4139,7 +4288,6 @@ impl Repository {
                 || self.current_branch()? != review.head_ref
                 || self.worktree_state()? != *review.cwd.worktree()
             {
-                drop(git_lock);
                 return Err(RepositoryError::StaleReviewedCandidate);
             }
         }
@@ -4151,28 +4299,37 @@ impl Repository {
             let target = self.managed_target(&entry.path)?;
             let current = self.read_managed_file(&target)?;
             if current.as_deref() != entry.expected() && current.as_deref() != entry.next() {
-                drop(git_lock);
                 return Err(RepositoryError::ManagedContentConflict);
             }
         }
-        if let Err(error) =
-            self.reconcile_store_worktree_transition(expected_index, candidate, false)
-        {
-            // A failed pre-ref store check has no observable publication to recover.
-            // Remove its prepared journal so the preserved pending batch can be retried.
-            if self.head()?.as_ref() == Some(journal.old_head()) {
+        self.reconcile_store_worktree_transition(expected_index, candidate, false)?;
+        self.write_publication_journal_locked(journal)?;
+        on_stage(PublicationJournalStage::Prepared);
+        // PUB-3 step 7: the reconciled index is built from `base_index`, so
+        // the ordinary index must still hold exactly those bytes when the ref
+        // moves. A write that landed after capture, including one just before
+        // this attempt took Git's lock, is refused here rather than replaced
+        // by an index that stages the inverse of the batch (ORNA-PUB-011,
+        // ORNA-PUB-017).
+        let advanced = self
+            .require_index_unchanged(expected_index, &index, &base_index)
+            .and_then(|()| {
+                self.advance_current_ref_bound(journal.old_head(), candidate, selected_ref)
+            });
+        if let Err(error) = advanced {
+            // After a refused or lost CAS, a candidate that neither HEAD nor
+            // any branch contains shows that the journal this attempt wrote
+            // names nothing that was published: discard it and keep the batch
+            // pending. A journal retained from an earlier attempt stays with
+            // recovery.
+            if !resumes_retained_journal
+                && !self.head_contains_commit(candidate.commit())?
+                && !self.branch_contains_commit(candidate.commit())?
+            {
                 self.clear_publication_journal_locked()?;
             }
-            drop(git_lock);
             return Err(error);
         }
-        self.advance_current_ref_bound(
-            journal.old_head(),
-            candidate,
-            journal
-                .compact_manifest()
-                .map(|witness| witness.selected_ref()),
-        )?;
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
@@ -4184,7 +4341,9 @@ impl Repository {
             &base_index,
             &git_lock,
         )?;
-
+        // Gate D boundary: the reconciled index is installed but its stage is
+        // not yet durable, so recovery must recognise the installed index.
+        crate::publication_crash_barrier("index-install");
         journal.advance(PublicationJournalStage::IndexReconciled)?;
         self.write_publication_journal_locked(journal)?;
         on_stage(PublicationJournalStage::IndexReconciled);
@@ -4229,7 +4388,9 @@ impl Repository {
 
     /// Resumes a persisted publication after a process interruption. The
     /// journal is advanced only after each observable boundary is verified;
-    /// unexpected ref, index, or worktree state remains a typed conflict.
+    /// unexpected ref, index, or worktree state remains a typed conflict. When
+    /// `HEAD` does not contain a prepared publication's candidate, the journal
+    /// is discarded and its batch stays pending in the runtime.
     pub fn recover_publication(&self) -> Result<Option<IndexGeneration>, RepositoryError> {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
@@ -4245,6 +4406,28 @@ impl Repository {
             head: Some(journal.old_head().clone()),
             tree: Some(base_tree),
         };
+        // Recovery row "Ref still at H": Orna changes the ordinary index and
+        // worktree only after RefAdvanced is durable. While neither HEAD nor
+        // any branch contains the candidate, a Prepared publication journal
+        // therefore records nothing that was published. Drop it and keep the
+        // batch pending in the runtime, whether or not the unreferenced
+        // candidate still exists and whatever the user staged since
+        // (ORNA-PUB-006, ORNA-PUB-012). A candidate that a branch holds while
+        // HEAD does not may already be published there, so the journal stays
+        // as a recovery conflict (row "Ref no longer H or N"). Compact and
+        // legacy-migration journals carry evidence their publishers resume
+        // from, so they keep their own boundaries below.
+        if journal.stage() == PublicationJournalStage::Prepared
+            && journal.compact_manifest().is_none()
+            && journal.migration_continuity().is_none()
+            && !self.head_contains_commit(journal.new_head())?
+        {
+            if self.branch_contains_commit(journal.new_head())? {
+                return Err(RepositoryError::StaleHead);
+            }
+            self.clear_publication_journal_locked()?;
+            return Ok(Some(self.index_generation()?));
+        }
         let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
         let candidate_commit = self.commit_optional(&commit_expression)?;
         if journal.stage() == PublicationJournalStage::Prepared
@@ -4289,6 +4472,11 @@ impl Repository {
                 GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
 
             if journal.stage() == PublicationJournalStage::Prepared {
+                // The publisher may have stopped between its CAS and the
+                // barriers after it, so the candidate and the ref must be
+                // durable before RefAdvanced is recorded (ORNA-PUB-005).
+                self.sync_candidate_objects(journal.old_head(), journal.new_head())?;
+                self.sync_head_ref()?;
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
             }
@@ -4926,6 +5114,27 @@ impl Repository {
             });
         }
         Ok(base_index)
+    }
+
+    /// Refuses publication when the ordinary index no longer holds the bytes
+    /// captured as the reconciliation base.
+    fn require_index_unchanged(
+        &self,
+        expected: &IndexGeneration,
+        index: &Path,
+        base_index: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let current = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        if current == base_index {
+            return Ok(());
+        }
+        Err(RepositoryError::StaleIndex {
+            expected: expected.clone(),
+            actual: IndexGeneration {
+                head: self.head()?,
+                tree: self.index_tree_from_file(index)?,
+            },
+        })
     }
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.
@@ -7192,15 +7401,19 @@ impl Repository {
         candidate: &PrivateCommit,
         path: &ManagedPath,
     ) -> Result<Option<(String, String)>, RepositoryError> {
+        self.tree_entry(candidate.commit.as_str(), path)
+    }
+
+    /// Reads the entry at `path` in `treeish`. Only a blob, or the tree at
+    /// the fixed `.orna/store` position, is admitted.
+    fn tree_entry(
+        &self,
+        treeish: &str,
+        path: &ManagedPath,
+    ) -> Result<Option<(String, String)>, RepositoryError> {
         let mut command = self.command();
         command
-            .args([
-                "ls-tree",
-                "-z",
-                "--full-tree",
-                candidate.commit.as_str(),
-                "--",
-            ])
+            .args(["ls-tree", "-z", "--full-tree", treeish, "--"])
             .arg(path.as_path());
         let output = self.run(command)?.stdout;
         let Some(entry) = output.split(|byte| *byte == 0).next() else {
@@ -7292,6 +7505,20 @@ impl Repository {
         journal: &PublicationJournal,
     ) -> Result<bool, RepositoryError> {
         for path in self.publication_index_paths(candidate, journal)? {
+            let expected = self.candidate_tree_entry(candidate, &path)?;
+            if expected.as_ref().is_some_and(|(mode, _)| mode == "040000") {
+                // The index holds a bound tree as its leaf entries, never as
+                // one `040000` record, so compare the subtree the index writes
+                // at this path with the candidate's store root (ORNA-PUB-007).
+                let index = self.git_path("index")?;
+                let Some(tree) = self.index_tree_from_file(&index)? else {
+                    return Ok(false);
+                };
+                if self.tree_entry(tree.as_str(), &path)? != expected {
+                    return Ok(false);
+                }
+                continue;
+            }
             let mut command = self.command();
             command
                 .args(["ls-files", "--stage", "-z", "--"])
@@ -7301,7 +7528,6 @@ impl Repository {
                 .split(|byte| *byte == 0)
                 .filter(|record| !record.is_empty())
                 .collect::<Vec<_>>();
-            let expected = self.candidate_tree_entry(candidate, &path)?;
             match (expected, records.as_slice()) {
                 (None, []) => {}
                 (Some((mode, object)), [record]) => {
@@ -10352,6 +10578,114 @@ mod tests {
             fs::read(root.path().join(path.as_path())).unwrap(),
             b"second\n"
         );
+    }
+
+    /// ORNA-PUB-007: a publisher killed after installing the reconciled index
+    /// but before IndexReconciled is durable leaves `.orna/store` bound as
+    /// leaf entries. Recovery must recognise that index as the candidate's
+    /// rather than report it as stale.
+    #[test]
+    fn recovery_recognises_an_installed_store_index_before_its_journal_stage() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        let database = include_str!("../tests/fixtures/format-context/database-final.orna");
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), database).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/data").unwrap(),
+                        Some(b"store root two".to_vec()),
+                    ),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/refs/node/data").unwrap(),
+                        Some(b"child node".to_vec()),
+                    ),
+                    ManagedFileChange::new(
+                        ManagedPath::new(".orna/store/refs/node/chunk").unwrap(),
+                        Some(b"payload chunk".to_vec()),
+                    ),
+                ],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let store_root = git(
+            root.path(),
+            &[
+                "rev-parse",
+                &format!("{}:.orna/store", candidate.commit().as_str()),
+            ],
+        );
+        let algorithm = if store_root.len() == 64 {
+            super::GitHashAlgorithm::Sha256
+        } else {
+            super::GitHashAlgorithm::Sha1
+        };
+        let marker = ManagedPath::new(".orna/database.orna").unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [61; 16],
+            vec![PublicationJournalEntry::new(
+                marker.clone(),
+                Some(database.as_bytes().to_vec()),
+                Some(database.as_bytes().to_vec()),
+            )],
+        )
+        .unwrap()
+        .with_store_root(&super::NativeOid::from_hex(algorithm, &store_root).unwrap())
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository.advance_current_ref(&head, &candidate).unwrap();
+        journal
+            .advance(PublicationJournalStage::RefAdvanced)
+            .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        let installed = repository
+            .reconcile_published_index(
+                &index,
+                &candidate,
+                &[marker, ManagedPath::new(".orna/store").unwrap()],
+            )
+            .unwrap();
+        assert!(
+            git(root.path(), &["ls-files", "--stage", "--", ".orna/store"])
+                .lines()
+                .count()
+                > 1
+        );
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        let mut recovered = repository.read_publication_journal().unwrap().unwrap();
+        assert_eq!(
+            recovered.stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(repository.index_generation().unwrap(), installed);
+        assert_eq!(
+            fs::read(root.path().join(".orna/store/data")).unwrap(),
+            b"store root two"
+        );
+        repository
+            .mark_runtime_complete([61; 16], &mut recovered)
+            .unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
     }
 
     #[test]
