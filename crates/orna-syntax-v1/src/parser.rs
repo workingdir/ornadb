@@ -4275,9 +4275,23 @@ impl Parser {
                 );
                 break;
             }
-            let rhs =
-                self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode));
+            // A pipeline stage is a postfix expression: additive, multiplicative,
+            // power, and range operators bind tighter than `|`, so they cannot
+            // continue a stage. Parse the stage at postfix precedence and reject
+            // any such operator that follows it.
+            let rhs_min = if op.starts_with('|') { 10 } else if right { prec } else { prec + 1 };
+            let rhs = self.recurse(|parser| parser.pratt(rhs_min, mode));
             let Some(rhs) = rhs else { break };
+            if op.starts_with('|')
+                && let Some((next_prec, _)) = self.infix()
+                && (6..=9).contains(&next_prec)
+            {
+                self.error_here(
+                    "ORNA-PARSE-001",
+                    "pipeline stages must be postfix expressions",
+                );
+                break;
+            }
             if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
                 self.errors.push(Diagnostic::error(
                     "ORNA-PARSE-001",
