@@ -670,7 +670,8 @@ fn finite_list_callback_annotations_use_canonical_identity() {
 }
 
 // ORNA-INFER-011: generic money constructor arguments use the same canonical
-// nominal currency identity as their contextual result type.
+// nominal currency identity as their contextual result type. The imported
+// `GBP` implements `Currency`, as every `Money` currency must (ORNA-MONEY-004).
 #[test]
 fn generic_money_constructor_uses_canonical_currency_identity() {
     let result = analyze(&[
