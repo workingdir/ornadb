@@ -600,7 +600,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\n  --> line 1, column 1\n  |\n1 | use std.collection;\n  | ^^^^^^^^^^^^^^^^^^^\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
