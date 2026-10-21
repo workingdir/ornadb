@@ -2603,6 +2603,10 @@ pub struct RuntimeActivationContext {
     capture: CwdCapture,
     activation_time: SystemTime,
     table_object_ids: BTreeMap<String, TableObjectId>,
+    /// Committed rows at the published `HEAD` pin, keyed by table name and
+    /// stored under the oid keyspace. Activations read these as the base of
+    /// every table; the unpublished tail overrides them key by key.
+    committed_rows: Arc<RuntimeTableRows>,
 }
 
 /// Reusable source-derived work for one captured table activation.
@@ -2675,6 +2679,9 @@ pub struct RunningTableRequestContinuation {
 /// transaction, so evaluation cannot combine a generation from one durable
 /// state with rows from another.
 pub type RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
+
+/// The empty committed base of a validator that reads no committed rows.
+static EMPTY_COMMITTED_ROWS: RuntimeTableRows = BTreeMap::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeTableActivationSnapshot {
@@ -3151,6 +3158,12 @@ pub trait StreamTableCandidateValidator {
         BTreeMap::new()
     }
 
+    /// Committed `HEAD` rows the candidate relations are read beneath. Name-only
+    /// validators read no committed base.
+    fn committed_rows(&self) -> &RuntimeTableRows {
+        &EMPTY_COMMITTED_ROWS
+    }
+
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
 }
@@ -3167,6 +3180,12 @@ pub trait TableActivationCandidateValidator {
     /// Name-only validators keep the default empty map.
     fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
         BTreeMap::new()
+    }
+
+    /// Committed `HEAD` rows the candidate relations are read beneath. Name-only
+    /// validators read no committed base.
+    fn committed_rows(&self) -> &RuntimeTableRows {
+        &EMPTY_COMMITTED_ROWS
     }
 
     /// Exact repository-issued CWD and schema generation used to decode and
@@ -6203,6 +6222,7 @@ impl RuntimeState {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
             table_object_ids: BTreeMap::new(),
+            committed_rows: Arc::new(BTreeMap::new()),
         })
     }
 
@@ -6340,6 +6360,7 @@ impl RuntimeState {
             capture: run.snapshot,
             activation_time: observation_instant(run.started_ms)?,
             table_object_ids,
+            committed_rows: Arc::new(BTreeMap::new()),
         };
         transaction
             .commit()
@@ -6364,7 +6385,7 @@ impl RuntimeState {
             .iter()
             .map(|table| validate_table_name(table).map(|()| (*table).to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
-        self.begin_table_activation_inner(&names, BTreeMap::new(), None)
+        self.begin_table_activation_inner(&names, BTreeMap::new(), None, Arc::new(BTreeMap::new()))
             .await
     }
 
@@ -6378,6 +6399,25 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             None,
+            Arc::new(BTreeMap::new()),
+        )
+        .await
+    }
+
+    /// Captures an admitted activation whose declared relations are read over
+    /// `committed`: the published `HEAD` rows of each relation. The unpublished
+    /// tail overlays those rows, so a key the tail deleted or rewrote is never
+    /// returned from the committed base.
+    pub async fn begin_admitted_table_activation_over_committed(
+        &self,
+        tables: &[RuntimeTableIdentity],
+        committed: RuntimeTableRows,
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        self.begin_table_activation_inner(
+            &admitted_table_names(tables)?,
+            admitted_table_object_ids(tables)?,
+            None,
+            Arc::new(committed),
         )
         .await
     }
@@ -6400,6 +6440,7 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             Some(continuation.context().capture()),
+            Arc::new(BTreeMap::new()),
         )
         .await
     }
@@ -6409,6 +6450,7 @@ impl RuntimeState {
         tables: &[String],
         table_object_ids: BTreeMap<String, TableObjectId>,
         expected_capture: Option<&CwdCapture>,
+        committed: Arc<RuntimeTableRows>,
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
         let transaction = self
             .connection
@@ -6421,7 +6463,15 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
-        let table_rows = table_rows_tx(&transaction, tables, &table_object_ids).await?;
+        let base = CommittedTableBase::load_tx(
+            &transaction,
+            &committed,
+            tables
+                .iter()
+                .map(|table| (table.as_str(), table_object_ids.get(table).copied())),
+        )
+        .await?;
+        let table_rows = table_rows_tx(&transaction, tables, &table_object_ids, &base).await?;
         transaction
             .commit()
             .await
@@ -6431,6 +6481,7 @@ impl RuntimeState {
                 capture,
                 activation_time: SystemTime::now(),
                 table_object_ids: table_object_ids.clone(),
+                committed_rows: committed,
             },
             table_rows,
             table_object_ids,
@@ -6494,8 +6545,9 @@ impl RuntimeState {
             });
         }
         self.require_owner(&tx, lease).await?;
+        let mut base = load_candidate_base_tx(&tx, &context.committed_rows, mutations, None).await?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next =
             append_mutations_tx(&tx, context.capture(), &encoded, next_digest, faults).await?;
@@ -6620,8 +6672,16 @@ impl RuntimeState {
                 ));
             }
         }
+        let mut base = load_candidate_base_tx(
+            &transaction,
+            &context.committed_rows,
+            mutations,
+            Some(&*validator),
+        )
+        .await
+        .map_err(TableActivationError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&transaction, mutation)
+            apply_table_mutation_tx(&transaction, mutation, &mut base)
                 .await
                 .map_err(TableActivationError::Runtime)?;
         }
@@ -6629,6 +6689,7 @@ impl RuntimeState {
             &transaction,
             validator.tables(),
             &validator.table_object_ids(),
+            &base,
         )
         .await
         .map_err(TableActivationError::Runtime)?;
@@ -7039,8 +7100,19 @@ impl RuntimeState {
                 Err(error) => return Err(request_activation_rollback(transaction, error).await?),
             }
         }
+        let mut base = match load_candidate_base_tx(
+            &transaction,
+            &context.committed_rows,
+            mutations,
+            validator.as_deref(),
+        )
+        .await
+        {
+            Ok(base) => base,
+            Err(error) => return Err(request_activation_rollback(transaction, error).await?),
+        };
         for mutation in mutations {
-            if let Err(error) = apply_table_mutation_tx(&transaction, mutation).await {
+            if let Err(error) = apply_table_mutation_tx(&transaction, mutation, &mut base).await {
                 return Err(request_activation_rollback(transaction, error).await?);
             }
         }
@@ -7052,6 +7124,7 @@ impl RuntimeState {
                 &transaction,
                 validator.tables(),
                 &validator.table_object_ids(),
+                &base,
             )
             .await
             {
@@ -10362,17 +10435,33 @@ impl RuntimeState {
                 .map_err(StreamTableDeliveryError::Runtime)?;
             return Ok((current, result));
         }
+        let validator_object_ids = validator.table_object_ids();
+        let mut base = CommittedTableBase::load_tx(
+            &tx,
+            validator.committed_rows(),
+            validator
+                .tables()
+                .iter()
+                .map(|table| (table.as_str(), validator_object_ids.get(table).copied())),
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation)
+            apply_table_mutation_tx(&tx, mutation, &mut base)
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
+        let rows = table_rows_tx(
+            &tx,
+            validator.tables(),
+            &validator_object_ids,
+            &base,
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         validator
             .validate(&rows)
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
@@ -10437,8 +10526,9 @@ impl RuntimeState {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
         }
+        let mut base = CommittedTableBase::default();
         for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -10518,8 +10608,9 @@ impl RuntimeState {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
         }
+        let mut base = CommittedTableBase::default();
         for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -10608,15 +10699,26 @@ impl RuntimeState {
                 .map_err(StreamTableDeliveryError::Runtime)?;
             return Ok((current, result));
         }
+        let validator_object_ids = validator.table_object_ids();
+        let mut base = CommittedTableBase::load_tx(
+            &tx,
+            validator.committed_rows(),
+            validator
+                .tables()
+                .iter()
+                .map(|table| (table.as_str(), validator_object_ids.get(table).copied())),
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation)
+            apply_table_mutation_tx(&tx, mutation, &mut base)
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
+        let rows = table_rows_tx(&tx, validator.tables(), &validator_object_ids, &base)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
@@ -18930,40 +19032,161 @@ fn read_length_prefixed<'a>(
     Ok(bytes)
 }
 
+/// Committed `HEAD` rows of one storage table and the keys whose live
+/// `table_row` state now governs.
+#[derive(Default)]
+struct CommittedTable {
+    /// Committed value of each key at the published pin.
+    rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Keys mutated after the pin, by the unpublished tail or by the batch in
+    /// progress. The committed value of such a key no longer applies.
+    overridden: BTreeSet<Vec<u8>>,
+}
+
+/// Committed base rows an activation or commit reads beneath the live
+/// `table_row` state, keyed by storage table.
+#[derive(Default)]
+struct CommittedTableBase {
+    tables: BTreeMap<String, CommittedTable>,
+}
+
+impl CommittedTableBase {
+    /// Loads the committed rows of each target that has any, overriding every
+    /// key mutated after the published pin.
+    async fn load_tx<'a>(
+        connection: &Connection,
+        committed: &RuntimeTableRows,
+        targets: impl IntoIterator<Item = (&'a str, Option<TableObjectId>)>,
+    ) -> Result<Self, RuntimeError> {
+        let mut base = Self::default();
+        let mut published_sequence = None;
+        for (table, object_id) in targets {
+            let Some(rows) = committed.get(table).filter(|rows| !rows.is_empty()) else {
+                continue;
+            };
+            let storage = table_storage_key(table, object_id);
+            if base.tables.contains_key(&storage) {
+                continue;
+            }
+            let sequence = match published_sequence {
+                Some(sequence) => sequence,
+                None => *published_sequence
+                    .insert(published_mutation_sequence_tx(connection).await?),
+            };
+            let mut state = CommittedTable {
+                rows: rows.iter().cloned().collect(),
+                overridden: BTreeSet::new(),
+            };
+            let mut tail = connection
+                .query(
+                    "SELECT DISTINCT row_key FROM runtime_table_history
+                     WHERE table_id = ?1 AND mutation_sequence > ?2",
+                    params![storage.clone(), sequence],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            while let Some(row) = tail
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            {
+                let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                state.overridden.insert(key);
+            }
+            base.tables.insert(storage, state);
+        }
+        Ok(base)
+    }
+
+    /// Marks `key` of `storage` as governed by `table_row` from now on.
+    fn override_key(&mut self, storage: &str, key: &[u8]) {
+        if let Some(table) = self.tables.get_mut(storage) {
+            table.overridden.insert(key.to_vec());
+        }
+    }
+
+    /// Whether a committed row `key` of `storage` is untouched since the pin.
+    fn committed_visible(&self, storage: &str, key: &[u8]) -> bool {
+        self.tables.get(storage).is_some_and(|table| {
+            table.rows.contains_key(key) && !table.overridden.contains(key)
+        })
+    }
+}
+
+/// Mutation sequence of the newest published checkpoint; zero before any
+/// publication has committed.
+async fn published_mutation_sequence_tx(connection: &Connection) -> Result<i64, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT COALESCE(MAX(publication_freeze.checkpoint_mutation_sequence), 0)
+             FROM publication_freeze
+             JOIN publication_commit
+               ON publication_commit.intent_id = publication_freeze.intent_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+/// Whether `key` is live in `storage`: present in `table_row`, or a committed
+/// base row that no mutation has touched since the pin.
+async fn row_present_tx(
+    connection: &Connection,
+    storage: &str,
+    key: &[u8],
+    base: &CommittedTableBase,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+            params![storage.to_owned(), key.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(base.committed_visible(storage, key))
+}
+
+/// Applies one table mutation to the live rows and records the keys it
+/// overrides beneath the committed base.
 async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
+    base: &mut CommittedTableBase,
+) -> Result<(), RuntimeError> {
+    apply_table_row_tx(connection, mutation, base).await?;
+    let storage_table = mutation.storage_table();
+    base.override_key(&storage_table, mutation.key());
+    if let Some(new_key) = mutation.rekey_to() {
+        base.override_key(&storage_table, new_key);
+    }
+    Ok(())
+}
+
+async fn apply_table_row_tx(
+    connection: &Connection,
+    mutation: &TableMutation,
+    base: &CommittedTableBase,
 ) -> Result<(), RuntimeError> {
     let storage_table = mutation.storage_table();
     if let Some(new_key) = mutation.rekey_to() {
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), mutation.key().to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_none()
-        {
+        if !row_present_tx(connection, &storage_table, mutation.key(), base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), new_key.to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        if row_present_tx(connection, &storage_table, new_key, base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
         let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
@@ -18992,19 +19215,7 @@ async fn apply_table_mutation_tx(
     }
     if mutation.is_insert() {
         let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), mutation.key().to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        if row_present_tx(connection, &storage_table, mutation.key(), base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
         let digest: [u8; 32] = Sha256::digest(value).into();
@@ -19065,10 +19276,41 @@ async fn apply_table_mutation_tx(
     Ok(())
 }
 
+/// Loads the committed base beneath one candidate: the relations its mutations
+/// address and the relations its validator reads.
+async fn load_candidate_base_tx(
+    connection: &Connection,
+    committed: &RuntimeTableRows,
+    mutations: &[TableMutation],
+    validator: Option<&dyn TableActivationCandidateValidator>,
+) -> Result<CommittedTableBase, RuntimeError> {
+    let validator_ids = validator
+        .map(|validator| validator.table_object_ids())
+        .unwrap_or_default();
+    let validator_tables: &[String] = match validator {
+        Some(validator) => validator.tables(),
+        None => &[],
+    };
+    CommittedTableBase::load_tx(
+        connection,
+        committed,
+        mutations
+            .iter()
+            .map(|mutation| (mutation.table(), mutation.table_object_id()))
+            .chain(
+                validator_tables
+                    .iter()
+                    .map(|table| (table.as_str(), validator_ids.get(table).copied())),
+            ),
+    )
+    .await
+}
+
 async fn table_rows_tx(
     connection: &Connection,
     tables: &[String],
     table_object_ids: &BTreeMap<String, TableObjectId>,
+    base: &CommittedTableBase,
 ) -> Result<RuntimeTableRows, RuntimeError> {
     let mut result = BTreeMap::new();
     for table in tables {
@@ -19077,6 +19319,16 @@ async fn table_rows_tx(
             continue;
         }
         let storage = table_storage_key(table, table_object_ids.get(table).copied());
+        // The committed `HEAD` rows the unpublished tail has not touched are
+        // the base of the relation; the live `table_row` state overlays them.
+        let mut rows_by_key: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        if let Some(committed) = base.tables.get(&storage) {
+            for (key, value) in &committed.rows {
+                if !committed.overridden.contains(key) {
+                    rows_by_key.insert(key.clone(), value.clone());
+                }
+            }
+        }
         let mut query = connection
             .query(
                 "SELECT row_key, row_value FROM table_row
@@ -19085,18 +19337,16 @@ async fn table_rows_tx(
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = Vec::new();
         while let Some(row) = query
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            rows.push((
-                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            ));
+            let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            rows_by_key.insert(key, value);
         }
-        result.insert(table.clone(), rows);
+        result.insert(table.clone(), rows_by_key.into_iter().collect());
     }
     Ok(result)
 }
@@ -22308,6 +22558,7 @@ mod tests {
             capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
             activation_time: context.activation_time(),
             table_object_ids: BTreeMap::new(),
+            committed_rows: Arc::new(BTreeMap::new()),
         };
         let result = state
             .commit_validated_catalogue_table_request_activation(
@@ -22921,7 +23172,8 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .unwrap();
-        apply_table_mutation_tx(&transaction, &interrupted_mutation)
+        let mut base = CommittedTableBase::default();
+        apply_table_mutation_tx(&transaction, &interrupted_mutation, &mut base)
             .await
             .unwrap();
         let interrupted_capture = append_mutations_tx(
@@ -23201,6 +23453,57 @@ mod tests {
         );
         assert_eq!(snapshot.table_rows().get("unused"), Some(&Vec::new()));
         assert_eq!(snapshot.table_rows().len(), 2);
+    }
+
+    /// A committed `HEAD` row the unpublished tail deleted is hidden from a
+    /// later activation, while a committed row the tail left untouched stays
+    /// visible. The base is what the activation reads; the live `table_row`
+    /// state only overlays it.
+    #[tokio::test]
+    async fn table_activation_over_committed_head_hides_tail_deleted_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed: RuntimeTableRows = BTreeMap::from([(
+            "books".to_owned(),
+            vec![(vec![1], vec![9]), (vec![2], vec![8])],
+        )]);
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+
+        let snapshot = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![8])])
+        );
+
+        let delete = TableMutation::new(id(5), "books", vec![1], None)
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[delete], digest(6), &NoFault)
+            .await
+            .unwrap();
+
+        let after = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![8])])
+        );
+        assert_eq!(after.query_exact("books", &[1]).unwrap(), None);
+        assert_eq!(after.query_exact("books", &[2]).unwrap(), Some(&[8][..]));
     }
 
     struct QuerySessionEffects<'session, 'snapshot> {
