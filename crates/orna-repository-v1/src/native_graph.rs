@@ -370,6 +370,22 @@ impl AdmittedRowFields {
     pub fn fields(&self) -> &[AdmittedRowField] {
         &self.fields
     }
+
+    /// The row's format-3 identity (store-format-3 section 5): `orna.row.v3`
+    /// over the SOV-3 encoding of `[database_uuid, table_uuid, typed_key,
+    /// stored_fields]`. Blobs enter by length, SHA-256 and annotations and
+    /// overflow values as the values they hold, so rows with the same
+    /// logical content have the same identity however they are stored, and
+    /// computing it reads nothing beyond the fields already decoded.
+    pub fn row_identity(&self) -> Result<[u8; 32], GraphError> {
+        row_identity_v3(
+            self.version.database_id(),
+            self.version.relation_id(),
+            &self.key,
+            &self.canonical_fields,
+            self.version.store_root().algorithm().width(),
+        )
+    }
 }
 
 /// Shared owner-issued graph and read-scope authority for one Blob capture
@@ -620,7 +636,11 @@ impl NativeGraphContext {
         if schema_digest != self.schema_digest {
             return Err(GraphError::ContentIdentityMismatch);
         }
-        let mut digest = crate::blob_store::ContentDigest::new();
+        // The node records the `orna.schema.v3` identity of its descriptor
+        // bytes (store-format-3 section 5), streamed here with the byte
+        // index's chunk digests and boundaries.
+        let mut digest =
+            crate::blob_store::ContentDigest::domain_separated(SCHEMA_IDENTITY_DOMAIN);
         let mut chunk_boundaries = GearBoundaryVerifier::new();
         self.walk_full_index(
             &byte_root,
@@ -890,8 +910,7 @@ impl NativeGraphContext {
             &mut objects,
             &mut schema_bytes,
         )?;
-        let actual_schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
-        if actual_schema_digest != schema_digest {
+        if schema_identity_v3(&schema_bytes) != schema_digest {
             return Err(GraphError::ContentIdentityMismatch);
         }
         let descriptor = SchemaDescriptor::decode(&schema_bytes)
@@ -6525,7 +6544,7 @@ pub(crate) fn load_format3_row_map(
             actual: schema_node.kind(),
         });
     };
-    let schema_bytes = reader.read_full_byte_index(&byte_root, encoded_length, schema_digest)?;
+    let schema_bytes = reader.read_schema_byte_index(&byte_root, encoded_length, schema_digest)?;
     let descriptor =
         SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
     if schema_relation_id(&descriptor)? != relation_id {
@@ -6815,11 +6834,14 @@ impl PinnedNativeGraphReader {
     }
 
 
-    fn read_full_byte_index(
+    /// Reads a kind-6 node's descriptor bytes and checks them against the
+    /// node's `orna.schema.v3` identity (store-format-3 section 5), hashed
+    /// while the byte index streams.
+    fn read_schema_byte_index(
         &mut self,
         root: &NativeObjectId,
         expected_length: u64,
-        expected_digest: [u8; 32],
+        schema_identity: [u8; 32],
     ) -> Result<Vec<u8>, GraphError> {
         if expected_length > MAX_RANGE_METADATA_BYTES {
             return Err(GraphError::MetadataQuotaExceeded);
@@ -6831,6 +6853,8 @@ impl PinnedNativeGraphReader {
             .try_reserve_exact(capacity)
             .map_err(|_| GraphError::MetadataQuotaExceeded)?;
         let mut hasher = Sha256::new();
+        hasher.update(SCHEMA_IDENTITY_DOMAIN.as_bytes());
+        hasher.update([0]);
         let (length, _) = self.walk_byte_index(
             root,
             None,
@@ -6839,7 +6863,7 @@ impl PinnedNativeGraphReader {
             Some(expected_length),
         )?;
         let digest: [u8; 32] = hasher.finalize().into();
-        if length != expected_length || digest != expected_digest {
+        if length != expected_length || digest != schema_identity {
             return Err(GraphError::ContentIdentityMismatch);
         }
         Ok(output)
@@ -7395,6 +7419,64 @@ fn rows_domain(relation_id: &[u8; 16], schema_digest: &[u8; 32]) -> Vec<u8> {
     ])
 }
 
+/// Domain of the format-3 schema identity (store-format-3 section 5).
+pub(crate) const SCHEMA_IDENTITY_DOMAIN: &str = "orna.schema.v3";
+
+/// Domain of the format-3 row identity (store-format-3 section 5).
+const ROW_IDENTITY_DOMAIN: &str = "orna.row.v3";
+
+/// SHA-256 of an ASCII domain, NUL and a canonical SOV-3 payload: a format-3
+/// domain digest (store-format-3 section 5).
+fn sov3_domain_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update([0]);
+    digest.update(payload);
+    digest.finalize().into()
+}
+
+/// The format-3 schema identity a kind-6 node records and every rows domain
+/// of the relation binds: `orna.schema.v3` over the full closed storage
+/// descriptor. A descriptor holds no Blob, so its canonical SOV-3 encoding
+/// is its canonical descriptor bytes.
+pub(crate) fn schema_identity_v3(descriptor: &[u8]) -> [u8; 32] {
+    sov3_domain_digest(SCHEMA_IDENTITY_DOMAIN, descriptor)
+}
+
+/// The format-3 row identity (store-format-3 section 5): `orna.row.v3` over
+/// the canonical SOV-3 encoding of `[database_uuid, table_uuid, typed_key,
+/// stored_fields]`. `stored_fields` is the row's canonical ROV-3 field tuple
+/// with every overflow value already expanded; each Blob enters as its
+/// tag-60112 form, so the identity binds content and annotations and no
+/// descriptor, page or overflow object ID enters it.
+fn row_identity_v3(
+    database_id: &[u8; 16],
+    relation_id: &[u8; 16],
+    key: &crate::row_store::TypedKey,
+    stored_fields: &[u8],
+    oid_width: usize,
+) -> Result<[u8; 32], GraphError> {
+    let fields = sov3_value(
+        decode_canonical_content(stored_fields)?,
+        oid_width,
+        // An overflow reference here was not expanded: not a logical row.
+        &mut |_| Err(GraphError::NonCanonicalData),
+    )?;
+    if !matches!(fields, CborValue::Array(_)) {
+        return Err(GraphError::NonCanonicalData);
+    }
+    let key = decode_canonical_content(
+        &key.canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?,
+    )?;
+    let uuid = |id: &[u8; 16]| CborValue::Tag(37, Box::new(CborValue::Bytes(id.to_vec())));
+    let payload = CborValue::Array(vec![uuid(database_id), uuid(relation_id), key, fields]);
+    Ok(sov3_domain_digest(
+        ROW_IDENTITY_DOMAIN,
+        &canonical_value_bytes(&payload),
+    ))
+}
+
 fn validate_ordered_root_node(
     node: &NodeData,
     expected_domain: &[u8],
@@ -7720,7 +7802,7 @@ mod persisted_orp_tests {
         descriptor: &SchemaDescriptor,
     ) -> (NativeOid, [u8; 32]) {
         let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest = schema_identity_v3(&schema_bytes);
         let chunk = fixture_git_object(directory, "blob", &schema_bytes);
         let byte_root = fixture_git_node(
             directory,
@@ -7730,7 +7812,7 @@ mod persisted_orp_tests {
                 entries: vec![ByteIndexEntry {
                     span_length: schema_bytes.len() as u64,
                     target: chunk,
-                    chunk_sha256: Some(schema_digest),
+                    chunk_sha256: Some(Sha256::digest(&schema_bytes).into()),
                 }],
             },
         );
@@ -7889,7 +7971,7 @@ mod persisted_orp_tests {
         ]))
         .expect("valid relation schema descriptor");
         let schema_bytes = descriptor.encode().expect("canonical schema bytes");
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest = schema_identity_v3(&schema_bytes);
         let schema_chunk = fixture_git_object(directory.path(), "blob", &schema_bytes);
         let schema_byte_root = fixture_git_node(
             directory.path(),
@@ -7899,7 +7981,7 @@ mod persisted_orp_tests {
                 entries: vec![ByteIndexEntry {
                     span_length: schema_bytes.len() as u64,
                     target: schema_chunk,
-                    chunk_sha256: Some(schema_digest),
+                    chunk_sha256: Some(Sha256::digest(&schema_bytes).into()),
                 }],
             },
         );
@@ -10667,6 +10749,189 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         )
         .expect("complete build");
         assert_eq!(update.primary_root(), &complete);
+    }
+
+    /// store-format-3 section 5 (A07-storage-rows-07): the row identity is
+    /// `orna.row.v3` over the SOV-3 row `[database_uuid, table_uuid,
+    /// typed_key, stored_fields]`. A Blob enters by length, SHA-256 and
+    /// annotations, so rows naming different descriptor objects for the same
+    /// content and annotations share an identity ("No physical object ID
+    /// enters semantic type/row identity"), while an annotation, key or table
+    /// change gives another.
+    #[test]
+    fn row_identity_binds_logical_content_not_physical_objects() {
+        let database = [0x41; 16];
+        let table = [0x42; 16];
+        let key = TypedKey::Text("cover".to_owned());
+        let blob = |media_type: &str, descriptor: u8| {
+            CborValue::Tag(
+                60111,
+                Box::new(CborValue::Array(vec![
+                    CborValue::Unsigned(68),
+                    CborValue::Bytes(vec![0x5a; 32]),
+                    CborValue::Text(media_type.to_owned()),
+                    CborValue::Null,
+                    CborValue::Bytes(vec![descriptor; 20]),
+                ])),
+            )
+        };
+        let row = |field: CborValue| {
+            canonical_value_bytes(&CborValue::Array(vec![
+                CborValue::Text("Ridge".to_owned()),
+                field,
+            ]))
+        };
+        let identity = |table: &[u8; 16], key: &TypedKey, fields: &[u8]| {
+            row_identity_v3(&database, table, key, fields, 20).expect("row identity")
+        };
+
+        let stored = identity(&table, &key, &row(blob("image/png", 0x01)));
+        assert_eq!(
+            stored,
+            identity(&table, &key, &row(blob("image/png", 0x02))),
+            "a descriptor object ID does not enter the identity"
+        );
+        assert_ne!(
+            stored,
+            identity(&table, &key, &row(blob("image/jpeg", 0x01))),
+            "annotations do"
+        );
+        assert_ne!(
+            stored,
+            identity(
+                &table,
+                &TypedKey::Text("other".to_owned()),
+                &row(blob("image/png", 0x01))
+            )
+        );
+        assert_ne!(
+            stored,
+            identity(&[0x43; 16], &key, &row(blob("image/png", 0x01)))
+        );
+
+        // ASCII domain, NUL and the canonical SOV-3 payload.
+        let uuid = |id: [u8; 16]| CborValue::Tag(37, Box::new(CborValue::Bytes(id.to_vec())));
+        let payload = canonical_value_bytes(&CborValue::Array(vec![
+            uuid(database),
+            uuid(table),
+            CborValue::Text("cover".to_owned()),
+            CborValue::Array(vec![
+                CborValue::Text("Ridge".to_owned()),
+                CborValue::Tag(
+                    60112,
+                    Box::new(CborValue::Array(vec![
+                        CborValue::Unsigned(68),
+                        CborValue::Bytes(vec![0x5a; 32]),
+                        CborValue::Text("image/png".to_owned()),
+                        CborValue::Null,
+                    ])),
+                ),
+            ]),
+        ]));
+        let mut expected = Sha256::new();
+        expected.update(b"orna.row.v3\0");
+        expected.update(&payload);
+        assert_eq!(stored, <[u8; 32]>::from(expected.finalize()));
+
+        // Fields that still name an overflow node are not a logical row.
+        let overflow = CborValue::Tag(
+            60113,
+            Box::new(CborValue::Array(vec![CborValue::Bytes(vec![0x09; 20])])),
+        );
+        assert_eq!(
+            row_identity_v3(&database, &table, &key, &row(overflow), 20),
+            Err(GraphError::NonCanonicalData)
+        );
+    }
+
+    /// store-format-3 section 5 (A07-storage-rows-07): a kind-6 node records
+    /// the `orna.schema.v3` identity of its closed descriptor, and every rows
+    /// domain binds it. A store whose schema node records the plain SHA-256 of
+    /// the descriptor, as builds before this one wrote, is refused by the
+    /// row-map loader instead of being read under the wrong identity.
+    #[test]
+    fn schema_nodes_record_the_v3_schema_identity() {
+        let (directory, graph) = capture_test_context();
+        let root = directory.path();
+        let version = graph.row_snapshot.version().clone();
+        let scope = graph.open_read_scope().expect("schema scope");
+        let bytes = graph
+            .read_schema_descriptor(&scope)
+            .expect("the issued graph verified its schema node")
+            .encode()
+            .expect("canonical descriptor bytes");
+        let mut expected = Sha256::new();
+        expected.update(b"orna.schema.v3\0");
+        expected.update(&bytes);
+        let identity: [u8; 32] = expected.finalize().into();
+        assert_eq!(version.schema().schema_digest(), &identity);
+
+        let store_with = |schema_digest: [u8; 32]| {
+            let chunk = fixture_git_object(root, "blob", &bytes);
+            let byte_root = fixture_git_node(
+                root,
+                &NodeData::ByteIndex {
+                    height: 0,
+                    total_length: bytes.len() as u64,
+                    entries: vec![ByteIndexEntry {
+                        span_length: bytes.len() as u64,
+                        target: chunk,
+                        chunk_sha256: Some(Sha256::digest(&bytes).into()),
+                    }],
+                },
+            );
+            let schema_oid = fixture_git_node(
+                root,
+                &NodeData::Schema {
+                    encoded_length: bytes.len() as u64,
+                    schema_digest,
+                    byte_root,
+                },
+            );
+            let primary_root = fixture_git_node(
+                root,
+                &NodeData::OrderedLeaf {
+                    domain: rows_domain(*version.relation_id(), schema_digest),
+                    entries: Vec::new(),
+                },
+            );
+            let relation_map = fixture_git_node(
+                root,
+                &NodeData::OrderedLeaf {
+                    domain: canonical_value_bytes(&CborValue::Array(vec![
+                        CborValue::Text("relations".to_owned()),
+                        CborValue::Bytes(version.database_id().to_vec()),
+                    ])),
+                    entries: vec![OrderedLeafEntry {
+                        key: TypedKey::Bytes(version.relation_id().to_vec())
+                            .canonical_bytes()
+                            .expect("canonical relation key"),
+                        value: canonical_value_bytes(&CborValue::Array(vec![
+                            CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+                            CborValue::Bytes(primary_root.as_bytes().to_vec()),
+                            CborValue::Null,
+                            CborValue::Unsigned(0),
+                        ])),
+                    }],
+                },
+            );
+            fixture_git_node(root, &NodeData::StoreRoot { relation_map })
+        };
+        let load = |store_root: NativeOid| {
+            load_format3_row_map(
+                &graph.repository,
+                graph.algorithm,
+                store_root,
+                *version.database_id(),
+                graph.snapshot_id,
+                *version.relation_id(),
+            )
+        };
+        assert!(load(store_with(identity)).is_ok());
+        assert_eq!(
+            load(store_with(Sha256::digest(&bytes).into())).err(),
+            Some(GraphError::ContentIdentityMismatch)
+        );
     }
 
     fn fixture_git_stdout(directory: &Path, args: &[&str]) -> String {

@@ -968,7 +968,9 @@ fn write_store_root(
 }
 
 /// Writes a closed descriptor as a kind-6 schema node over its OGB-2 byte
-/// index. The digest is the SHA-256 of the encoded descriptor.
+/// index. The digest is the format-3 schema identity, `orna.schema.v3` over
+/// the encoded descriptor (store-format-3 section 5), which every rows
+/// domain of the relation binds.
 fn write_schema_node(
     writer: &mut NodeWriter<'_>,
     descriptor: &SchemaDescriptor,
@@ -976,7 +978,7 @@ fn write_schema_node(
     let bytes = descriptor
         .encode()
         .map_err(|_| GraphError::NonCanonicalData)?;
-    let schema_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let schema_digest = crate::native_graph::schema_identity_v3(&bytes);
     let byte_root = write_byte_index(writer, &bytes)?.ok_or(GraphError::InvalidByteIndex)?;
     let schema_oid = writer.node(&NodeData::Schema {
         encoded_length: bytes.len() as u64,

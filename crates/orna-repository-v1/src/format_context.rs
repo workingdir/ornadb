@@ -1891,7 +1891,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
@@ -2430,6 +2430,91 @@ mod graph_bridge_tests {
         }
     }
 
+    /// store-format-3 section 2: the child ranges of a branch are
+    /// nonoverlapping and exhaustive in fence order. A row map whose second
+    /// page starts inside the first page's range still opens, because the
+    /// loader checks only the root, but a range read across the pages and a
+    /// maintenance pass that rewrites the second page both refuse it, so
+    /// neither a query nor a publication returns or writes rows from
+    /// overlapping pages (ornadb-5il1.129 bead comment, A07-storage-rows-04).
+    #[test]
+    fn range_reads_and_maintenance_reject_overlapping_child_ranges() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x6e; 16];
+        let initial = context(root);
+        if initial.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(root, &initial, relation_id, None);
+        }
+        let seeding = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &seeding, relation_id);
+        let algorithm = seeding
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let domain = row_domain(relation_id, schema_digest);
+        let page = |keys: std::ops::RangeInclusive<u64>| {
+            rows_leaf(
+                root,
+                algorithm,
+                &domain,
+                &keys.map(|key| (key, inline_value())).collect::<Vec<_>>(),
+            )
+        };
+        let fence = |key: u64| TypedKey::UInt(key).canonical_bytes().expect("fence key");
+        // The right page starts at key 15, inside the left page's 1..=20.
+        let (left, right) = (page(1..=20), page(15..=34));
+        let branch = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: domain.clone(),
+                height: 1,
+                entries: vec![
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(20),
+                        child: left,
+                        row_count: 20,
+                    },
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(34),
+                        child: right,
+                        row_count: 20,
+                    },
+                ],
+            },
+        );
+        install_rows_store(root, &seeding, relation_id, &schema_oid, &branch, 40);
+
+        let pinned = context(root);
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the loader checks the root");
+        let graph = pinned.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner scope");
+        assert!(
+            graph
+                .range_rows(
+                    &crate::row_store::KeyRange::new(None, None, 100).expect("whole range"),
+                    &scope,
+                )
+                .is_err(),
+            "a range read refuses overlapping pages"
+        );
+        assert!(
+            graph
+                .maintain_row_index(
+                    &[RowIndexMutation::Delete {
+                        key: TypedKey::UInt(30),
+                    }],
+                    &scope,
+                )
+                .is_err(),
+            "maintenance refuses to rewrite an overlapping page"
+        );
+    }
+
     #[test]
     fn orp1_index_maintenance_rejects_malformed_pages_on_read() {
         let directory = repository();
@@ -2792,6 +2877,9 @@ mod graph_bridge_tests {
         git(directory, &["update-ref", "refs/heads/main", commit]);
     }
 
+    /// Writes `schema_bytes` as a kind-6 node over a one-chunk byte index.
+    /// The chunk entry carries the chunk's own SHA-256; the node records
+    /// `schema_digest`, which a valid node sets to the bytes' schema identity.
     fn schema_descriptor_node(
         directory: &Path,
         algorithm: GitHashAlgorithm,
@@ -2809,7 +2897,7 @@ mod graph_bridge_tests {
                 entries: vec![ByteIndexEntry {
                     span_length: schema_bytes.len() as u64,
                     target: chunk_oid,
-                    chunk_sha256: Some(schema_digest),
+                    chunk_sha256: Some(Sha256::digest(schema_bytes).into()),
                 }],
             },
         );
@@ -2854,7 +2942,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             directory,
             algorithm,
@@ -3802,7 +3890,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let valid_bytes = MAIN_SOURCE.as_bytes();
-        let valid_digest: [u8; 32] = Sha256::digest(valid_bytes).into();
+        let valid_digest = crate::native_graph::schema_identity_v3(valid_bytes);
 
         let mut tampered_bytes = valid_bytes.to_vec();
         tampered_bytes[0] ^= 1;
@@ -3972,7 +4060,7 @@ mod graph_bridge_tests {
         ]))
         .expect("valid three-field table manifest");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
