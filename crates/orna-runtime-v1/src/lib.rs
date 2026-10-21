@@ -2468,6 +2468,10 @@ pub enum RuntimeError {
     FaultInjected(FaultPoint),
     SystemProviderAbiInvalid,
     StorageUnavailable,
+    /// The format recorded at `HEAD` is 1 or 2, so durable writes are refused
+    /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
+    /// format and remedy.
+    LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
 }
 impl RuntimeError {
     /// Returns the stable public system code when this runtime error has one.
@@ -2548,6 +2552,7 @@ impl fmt::Display for RuntimeError {
             Self::FaultInjected(_) => "runtime fault injected",
             Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
+            Self::LegacyHeadReadOnly(refusal) => refusal.title(),
         })
     }
 }
