@@ -88,6 +88,17 @@ been published.
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
 
+- Publication refuses a detached HEAD, a stale reviewed candidate, managed-file
+  edits and store conflicts before it writes its prepared journal, and rechecks
+  the captured index immediately before the ref compare-and-set. A refused or
+  lost compare-and-set discards that journal, so the pending batch can be
+  retried. Recovery likewise discards a prepared journal whenever HEAD does not
+  contain its candidate, even if the candidate object survives or the index
+  changed since; legacy-migration journals stay resumable. Recovery also
+  recognises a reconciled `.orna/store` index installed before its journal
+  stage. New candidate objects are flushed before the ref names them, and the
+  ref is flushed before the runtime tail is consumed.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
