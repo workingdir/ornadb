@@ -30,7 +30,7 @@ use orna_runtime_v1::{
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
-    Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
+    Catalogue, ModuleInput, Namespace, SymbolKind, SystemProviders, TableSchema, analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
@@ -229,9 +229,10 @@ impl ApplicationAuthority {
             ));
         }
 
-        let analysis = analyze_with_catalogue(
+        let analysis = analyze_with_providers(
             &[ModuleInput::new(logical_path.clone(), source.clone())],
             &self.catalogue,
+            SystemProviders::Production,
         );
         if !analysis.is_ok() {
             return Err(ApplicationError::Semantic(
@@ -1207,8 +1208,9 @@ impl SourceMutationEffectHandler {
         let OvbRaw::Array(declared_fields) = declared_fields else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
-        let role_stored = BigInt::from(1);
         let role_key = BigInt::from(0);
+        let role_stored = BigInt::from(1);
+        let role_computed = BigInt::from(2);
         let mut stored_field_ids = Vec::new();
         for declared_field in declared_fields {
             let OvbRaw::Array(parts) = declared_field else {
@@ -1228,7 +1230,9 @@ impl SourceMutationEffectHandler {
                 Some(OvbRaw::Int(role)) if role == &role_stored => {
                     stored_field_ids.push(field_object_id);
                 }
-                Some(OvbRaw::Int(role)) if role == &role_key => {}
+                // Keys travel in the row key, and a computed selector has no
+                // stored value (ORNA-FIELD-006, ORNA-FIELD-011).
+                Some(OvbRaw::Int(role)) if role == &role_key || role == &role_computed => {}
                 _ => return Err(ApplicationError::InvalidTableMetadata),
             }
         }
@@ -2670,7 +2674,7 @@ impl ApplicationLiveAdapter {
     }
 
     fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
-        analyze_with_catalogue(&[], &self.authority.catalogue)
+        analyze_with_providers(&[], &self.authority.catalogue, SystemProviders::Production)
             .modules
             .values()
             .flat_map(admitted_table_schemas)
@@ -4307,7 +4311,7 @@ mod tests {
         let staged = session
             .stage_activation(source)
             .expect("table insert should be admitted");
-        let tables = analyze_with_catalogue(&[], &catalogue)
+        let tables = analyze_with_providers(&[], &catalogue, SystemProviders::Production)
             .modules
             .values()
             .flat_map(admitted_table_schemas)
