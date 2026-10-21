@@ -708,21 +708,6 @@ async fn eval_003_replays_the_terminal_outcome_without_a_second_row() {
 #[tokio::test]
 async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_writing() {
     let (temp, repository) = durable_repository();
-    fs::create_dir_all(temp.path().join(".orna")).expect("legacy metadata directory");
-    fs::write(temp.path().join(".orna/format.orna"), "format 2\n").expect("legacy format");
-    fs::write(
-        temp.path().join(".orna/database.orna"),
-        "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
-    )
-    .expect("legacy database sidecar");
-    git(temp.path(), &["add", ".orna"]);
-    git(temp.path(), &["commit", "--quiet", "-m", "format 2 metadata"]);
-    let head = repository.head().unwrap().expect("legacy head");
-    assert_eq!(
-        orna_storage_v1::writable_snapshot_context(&repository, &head).err(),
-        Some(orna_storage_v1::Error::LegacyReadOnly { format: 2 })
-    );
-
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
     let identity = RuntimeIdentity {
         database_id: [61; 16],
@@ -739,6 +724,23 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
             .unwrap(),
         StageOutcome::Passed
     ));
+
+    // The publication target is a committed format-2 snapshot.
+    fs::create_dir_all(temp.path().join(".orna")).expect("legacy metadata directory");
+    fs::write(temp.path().join(".orna/format.orna"), "format 2\n").expect("legacy format");
+    fs::write(
+        temp.path().join(".orna/database.orna"),
+        "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
+    )
+    .expect("legacy database sidecar");
+    git(temp.path(), &["add", ".orna"]);
+    git(temp.path(), &["commit", "--quiet", "-m", "format 2 metadata"]);
+    let head = repository.head().unwrap().expect("legacy head");
+    assert_eq!(
+        orna_storage_v1::writable_snapshot_context(&repository, &head).err(),
+        Some(orna_storage_v1::Error::LegacyReadOnly { format: 2 })
+    );
+
     let state = RuntimeState::open(&repository, identity, [64; 32])
         .await
         .expect("reopen runtime before publication");
