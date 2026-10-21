@@ -66,8 +66,11 @@ const DECLARED_LINKS: [SystemProviderLink; 6] = [
     },
     // `orna-evaluator-v1`: `Evaluator::call` lowers the query natively through
     // `explain_bindings`; the plan pins its source through the catalogue the
-    // host installs. The `FunctionRef` and `Diagnostic` overloads stay
-    // unlinked: the evaluator rejects them.
+    // host installs. No production host installs an `ExplainCatalogue` yet
+    // (A10-sys-inventory-03, bead ornadb-5il1.124), so `orna run`, `orna serve`
+    // and REPL calls fail with `sys.abi.unavailable` until one does. The
+    // `FunctionRef` and `Diagnostic` overloads stay unlinked: the evaluator
+    // rejects them.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.explain(Query)"),
         host: SystemProviderHost::Evaluator,
