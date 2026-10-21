@@ -216,8 +216,8 @@ pub(crate) fn explain_diagnostic(
     };
     let mut fields = BTreeMap::new();
     fields.insert("summary".to_owned(), Value::String(summary));
-    fields.insert("causes".to_owned(), Value::List(causes));
-    fields.insert("suggestions".to_owned(), Value::List(suggestions));
+    fields.insert("causes".to_owned(), Value::List(causes.into()));
+    fields.insert("suggestions".to_owned(), Value::List(suggestions.into()));
     fields.insert(
         "related_objects".to_owned(),
         Value::List(related_objects.into_iter().map(Value::Reference).collect()),
