@@ -1159,10 +1159,12 @@ fn colon_generic_bounds_receive_the_frozen_legacy_diagnostic() {
     }));
 }
 
+// `Note.value` is `pub` so the fixtures' direct construction stays valid
+// outside the owning type (ORNA-NOMINAL-005, ORNA-NOMINAL-007).
 #[test]
 fn generic_calls_retain_callee_effect_and_failure_summaries() {
     let filesystem = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/be79a57479d0.orna"
+        "fixtures/inline-v1_review_regressions/95048dfb2efb.orna"
     ));
     assert!(filesystem.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "declaration assertion uses forbidden filesystem effect"
@@ -1178,12 +1180,14 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
     assert!(reads.effects.effects.contains("filesystem"));
     assert!(reads.effects.may_fail);
 
+    // Failure is not a forbidden assertion effect: evaluation failure inside
+    // an assertion propagates and aborts the same boundary as a false
+    // assertion (ORNA-ASSERT-049), so the plan must retain the callee's
+    // failure summary through the generic call.
     let fallible = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/4a6f31b2f192.orna"
+        "fixtures/inline-v1_review_regressions/4975c26d0fe4.orna"
     ));
-    assert!(fallible.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "assertion has forbidden effects or failure"
-    }));
+    expect_accepted(&fallible);
     let maybe = fallible
         .modules
         .values()
@@ -1193,6 +1197,13 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
         .get("maybe")
         .expect("generic fallible function");
     assert!(maybe.effects.may_fail);
+    let plan = fallible
+        .assertions
+        .values()
+        .flatten()
+        .find(|plan| plan.owner == AssertionOwner::Module)
+        .expect("module assertion plan");
+    assert!(plan.effects.may_fail);
 }
 
 #[test]
