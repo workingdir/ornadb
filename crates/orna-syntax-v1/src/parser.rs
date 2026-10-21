@@ -3966,13 +3966,16 @@ impl Parser {
     }
 
     /// Parses the header of `if`, `while` or `for`, whose body is a block. A
-    /// record-shaped body after a qualified name is an unparenthesised
-    /// nominal constructor, which the lexical construction rule forbids in
-    /// a control header; report it and skip its fields so the real body
-    /// still parses.
+    /// record-shaped brace group after a qualified name and directly before
+    /// another `{` is an unparenthesised nominal constructor, which the
+    /// lexical construction rule forbids in a control header; report it and
+    /// skip its fields so the real body still parses.
     fn block_control_header(&mut self) -> Option<Expr> {
         let condition = self.control_condition();
-        if self.is_direct_record_body() && condition.as_ref().is_some_and(ends_with_nominal_path) {
+        if self.is_direct_record_body()
+            && condition.as_ref().is_some_and(ends_with_nominal_path)
+            && self.brace_group_precedes_brace()
+        {
             self.error_here(
                 "ORNA-PARSE-001",
                 "nominal constructors before a control body must be parenthesized",
@@ -3980,6 +3983,28 @@ impl Parser {
             self.parse_record();
         }
         condition
+    }
+
+    /// True when the `{ .. }` group at the cursor is directly followed by
+    /// another `{`. Interpolation braces are separate tokens.
+    fn brace_group_precedes_brace(&self) -> bool {
+        let mut depth = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.at) {
+            match token.kind {
+                TokenKind::Punct("{") => depth += 1,
+                TokenKind::Punct("}") => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return matches!(
+                            self.tokens.get(index + 1).map(|next| &next.kind),
+                            Some(TokenKind::Punct("{"))
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn expr_with_nominal_braces(&mut self, mode: NominalBraceMode) -> Option<Expr> {
