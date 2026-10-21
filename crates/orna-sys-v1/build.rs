@@ -28,6 +28,44 @@ fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Runs `git` in the package directory. `None` when git is unavailable, the
+/// directory is not a checkout, or the output is empty.
+fn git_output(manifest: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(manifest)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The `build_id` of this build: the full git commit of `HEAD`, or the package
+/// version with a `+nogit` suffix when the package carries no git metadata.
+///
+/// The files that move `HEAD` are watched so that a new commit reruns this
+/// script and the emitted identity follows the checkout.
+fn build_id(manifest: &Path) -> String {
+    let Some(commit) = git_output(manifest, &["rev-parse", "--verify", "HEAD"]) else {
+        let version = env::var("CARGO_PKG_VERSION").expect("package version");
+        return format!("{version}+nogit");
+    };
+    for git_path in ["HEAD", "refs", "packed-refs"] {
+        if let Some(path) = git_output(manifest, &["rev-parse", "--git-path", git_path]) {
+            let path = manifest.join(path);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    commit
+}
+
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source_root = manifest.join("src");
@@ -41,6 +79,17 @@ fn main() {
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
+
+    // `sys.RuntimeInfo` coordinates this build reports; see `src/host_context.rs`.
+    println!(
+        "cargo:rustc-env=ORNA_SYS_LANGUAGE_VERSION={}",
+        build_support::GENERATED_API_LANGUAGE_VERSION
+    );
+    println!(
+        "cargo:rustc-env=ORNA_SYS_SYS_VERSION={}",
+        build_support::GENERATED_API_SYS_VERSION
+    );
+    println!("cargo:rustc-env=ORNA_SYS_BUILD_ID={}", build_id(&manifest));
 
     // `syn` scans written Rust source and cannot see items emitted later by
     // `macro_rules!` or procedural-macro expansion. Annotated methods in impls
