@@ -18,9 +18,9 @@ use orna_semantic_v1::{
     TableSchema, Type, declared_type,
 };
 use orna_syntax_v1::{
-    Declaration, EnumVariant, Expr, FieldInitializer, ImplMember, LiteralKind, Pattern, SyntaxTree,
-    TableMember, Token, TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex,
-    parse_module,
+    Argument, AssignmentTarget, Declaration, EnumVariant, Expr, FieldInitializer, ImplMember,
+    LiteralKind, Pattern, RecordField, Statement, StringSegment, SyntaxTree, TableMember, Token,
+    TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex, parse_module,
 };
 use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 
@@ -571,11 +571,18 @@ impl ObjectIdentityManifest {
 }
 /// Implementation-owned digest domains for source expressions recorded by a
 /// closed storage descriptor: a computed selector's `[2, expression_digest]`
-/// and a refined type's `assertion_semantic_digests` (29-formats.md). The
-/// payload is the expression's lexical token stream, so whitespace and
-/// comments never change a schema fingerprint while every token does.
-const COMPUTED_SELECTOR_DIGEST_DOMAIN: &str = "ornadb.computed-selector.v1";
-const REFINEMENT_ASSERTION_DIGEST_DOMAIN: &str = "ornadb.refinement-assertion.v1";
+/// and a refined type's `assertion_semantic_digests` (29-formats.md). Neither
+/// is one of the fixed 29-formats.md domains; work ADR 0118 documents both.
+///
+/// The payload is an OVB-1 array with one entry per lexical token of the
+/// expression, so whitespace and comments never change a fingerprint
+/// (ORNA-SYS-034). An identifier that is a free reference is replaced by what
+/// it resolves to, `["declaration", namespace, name]` or `["module",
+/// namespace]`, so identical tokens bound to a different declaration give a
+/// different fingerprint. Row fields, local bindings and core names keep
+/// their `["identifier", name]` entry.
+const COMPUTED_SELECTOR_DIGEST_DOMAIN: &str = "ornadb.computed-selector.v2";
+const REFINEMENT_ASSERTION_DIGEST_DOMAIN: &str = "ornadb.refinement-assertion.v2";
 
 const RECORD_DEFINITION: u64 = 0;
 const ENUM_DEFINITION: u64 = 1;
@@ -711,8 +718,12 @@ impl<'a> DescriptorBuilder<'a> {
         {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let computed =
-            self.computed_selector_digests(namespace, declaration_name, &admission.computed)?;
+        let computed = self.computed_selector_digests(
+            namespace,
+            declaration_name,
+            &admission.computed,
+            &schema.fields,
+        )?;
         let mut encoded_fields = Vec::with_capacity(schema.fields.len());
         for (name, ty) in &schema.fields {
             let id = field_ids
@@ -762,6 +773,7 @@ impl<'a> DescriptorBuilder<'a> {
         namespace: &Namespace,
         declaration_name: &str,
         computed: &BTreeSet<String>,
+        fields: &BTreeMap<String, Type>,
     ) -> Result<BTreeMap<String, [u8; 32]>, SourceTableSchemaError> {
         let source = self.source(namespace)?;
         let mut tables = source
@@ -785,10 +797,11 @@ impl<'a> DescriptorBuilder<'a> {
                 ..
             } = member
             {
-                let digest = expression_digest(
+                let digest = self.expression_digest(
                     COMPUTED_SELECTOR_DIGEST_DOMAIN,
-                    &source.module.source,
+                    namespace,
                     expression,
+                    Some(fields),
                 )?;
                 if digests.insert(name.clone(), digest).is_some() {
                     return Err(SourceTableSchemaError::InvalidSourceSchema);
@@ -799,6 +812,55 @@ impl<'a> DescriptorBuilder<'a> {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
         Ok(digests)
+    }
+
+    /// Digests one expression declared in `namespace` under `domain`.
+    /// `row_fields` are the table fields a computed selector reads as lexical
+    /// selectors (ORNA-FIELD-009); refinement assertions have none.
+    fn expression_digest(
+        &self,
+        domain: &str,
+        namespace: &Namespace,
+        expression: &Expr,
+        row_fields: Option<&BTreeMap<String, Type>>,
+    ) -> Result<[u8; 32], SourceTableSchemaError> {
+        let mut references = ReferenceResolver {
+            builder: self,
+            namespace,
+            row_fields,
+            scopes: Vec::new(),
+            resolved: BTreeMap::new(),
+        };
+        references.expr(expression)?;
+        let source = self.source(namespace)?;
+        let span = expression.span();
+        let tokens = source
+            .module
+            .source
+            .get(span.start..span.end)
+            .and_then(|text| lex(text).ok())
+            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
+        let mut replaced = 0_usize;
+        let payload = Raw::Array(
+            tokens
+                .iter()
+                .filter_map(|token| {
+                    let reference = references.resolved.get(&(span.start + token.span.start));
+                    match (&token.kind, reference) {
+                        (TokenKind::Identifier { .. }, Some(reference)) => {
+                            replaced += 1;
+                            Some(reference.clone())
+                        }
+                        _ => token_raw(token),
+                    }
+                })
+                .collect(),
+        );
+        // Every resolved reference must stand in for exactly one identifier.
+        if replaced != references.resolved.len() {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        domain_digest(domain, &payload).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
     }
 
     /// Encodes one declared type, spelled in `namespace`, as a closed type node.
@@ -1130,7 +1192,6 @@ impl<'a> DescriptorBuilder<'a> {
         base: &TypeExpr,
         members: &'a [TypeMember],
     ) -> Result<Raw, SourceTableSchemaError> {
-        let source = self.source(namespace)?;
         let base = self.type_node(&declared_type(base), namespace)?;
         let digests = members
             .iter()
@@ -1139,12 +1200,8 @@ impl<'a> DescriptorBuilder<'a> {
                 _ => None,
             })
             .map(|value| {
-                expression_digest(
-                    REFINEMENT_ASSERTION_DIGEST_DOMAIN,
-                    &source.module.source,
-                    value,
-                )
-                .map(|digest| Raw::Bytes(digest.to_vec()))
+                self.expression_digest(REFINEMENT_ASSERTION_DIGEST_DOMAIN, namespace, value, None)
+                    .map(|digest| Raw::Bytes(digest.to_vec()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Raw::Array(vec![base, Raw::Array(digests)]))
@@ -1437,19 +1494,347 @@ impl<'a> DescriptorBuilder<'a> {
     }
 }
 
-/// Digests one source expression's lexical token stream under `domain`.
-fn expression_digest(
-    domain: &str,
-    source: &str,
-    expression: &Expr,
-) -> Result<[u8; 32], SourceTableSchemaError> {
-    let span = expression.span();
-    let tokens = source
-        .get(span.start..span.end)
-        .and_then(|text| lex(text).ok())
-        .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
-    let payload = Raw::Array(tokens.iter().filter_map(token_raw).collect());
-    domain_digest(domain, &payload).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
+/// Finds the free references of one expression and what they resolve to,
+/// keyed by the source offset of their identifier token. Local bindings shadow
+/// row fields, which shadow module declarations and imports (ORNA-FIELD-009);
+/// a name that resolves to none of these is a core name and stays spelled.
+struct ReferenceResolver<'r, 'a> {
+    builder: &'r DescriptorBuilder<'a>,
+    namespace: &'r Namespace,
+    row_fields: Option<&'r BTreeMap<String, Type>>,
+    scopes: Vec<BTreeSet<String>>,
+    resolved: BTreeMap<usize, Raw>,
+}
+
+impl ReferenceResolver<'_, '_> {
+    fn bound(&self, name: &str) -> bool {
+        name == "self"
+            || self.scopes.iter().any(|scope| scope.contains(name))
+            || self
+                .row_fields
+                .is_some_and(|fields| fields.contains_key(name))
+    }
+
+    fn value_name(&mut self, name: &str, start: usize) -> Result<(), SourceTableSchemaError> {
+        if self.bound(name) {
+            return Ok(());
+        }
+        self.declared_name(name, start)
+    }
+
+    /// Records the declaration or module a free spelling resolves to.
+    fn declared_name(&mut self, name: &str, start: usize) -> Result<(), SourceTableSchemaError> {
+        let reference = match self.builder.resolve(self.namespace, name) {
+            Ok((namespace, name)) => Raw::Array(vec![
+                Raw::Text("declaration".into()),
+                Raw::Text(namespace.display()),
+                Raw::Text(name),
+            ]),
+            Err(SourceTableSchemaError::UnsupportedType) => {
+                match self.builder.module_binding(self.namespace, name) {
+                    Ok(namespace) => Raw::Array(vec![
+                        Raw::Text("module".into()),
+                        Raw::Text(namespace.display()),
+                    ]),
+                    Err(SourceTableSchemaError::UnsupportedType) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        self.resolved.insert(start, reference);
+        Ok(())
+    }
+
+    fn scoped(
+        &mut self,
+        names: BTreeSet<String>,
+        body: impl FnOnce(&mut Self) -> Result<(), SourceTableSchemaError>,
+    ) -> Result<(), SourceTableSchemaError> {
+        self.scopes.push(names);
+        let result = body(self);
+        self.scopes.pop();
+        result
+    }
+
+    fn expr(&mut self, expression: &Expr) -> Result<(), SourceTableSchemaError> {
+        match expression {
+            Expr::Name { text, span } => self.value_name(text, span.start),
+            Expr::Literal { .. } | Expr::ReplBinding { .. } => Ok(()),
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let StringSegment::Expression { value, .. } = segment {
+                        self.expr(value)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Unary { rhs, .. } => self.expr(rhs),
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::Index {
+                base: lhs,
+                index: rhs,
+                ..
+            } => {
+                self.expr(lhs)?;
+                self.expr(rhs)
+            }
+            Expr::Range { lower, upper, .. } => {
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.expr(bound)?;
+                }
+                Ok(())
+            }
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                self.expr(callee)?;
+                self.arguments(arguments)
+            }
+            Expr::GenericCall {
+                callee,
+                type_arguments,
+                arguments,
+                ..
+            } => {
+                self.expr(callee)?;
+                for argument in type_arguments {
+                    self.type_expr(argument)?;
+                }
+                self.arguments(arguments)
+            }
+            // A member name after `.` is resolved by the base value's type,
+            // not by scope; only the base is a reference.
+            Expr::Field { base, .. } => self.expr(base),
+            Expr::Group { inner, .. } => self.expr(inner),
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for element in elements {
+                    self.expr(element)?;
+                }
+                Ok(())
+            }
+            Expr::Record { fields, .. } => self.record_fields(fields),
+            Expr::Nominal { path, fields, .. } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(&first.text, first.span.start)?;
+                }
+                self.record_fields(fields)
+            }
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                let mut names = BTreeSet::new();
+                for parameter in parameters {
+                    if let Some(annotation) = &parameter.annotation {
+                        self.type_expr(annotation)?;
+                    }
+                    self.pattern(&parameter.pattern, &mut names)?;
+                }
+                self.scoped(names, |resolver| resolver.expr(body))
+            }
+            Expr::Block {
+                statements, tail, ..
+            } => self.scoped(BTreeSet::new(), |resolver| {
+                for statement in statements {
+                    resolver.statement(statement)?;
+                }
+                tail.as_deref().map_or(Ok(()), |tail| resolver.expr(tail))
+            }),
+            Expr::Control {
+                binding,
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    self.expr(condition)?;
+                }
+                let mut names = BTreeSet::new();
+                if let Some(binding) = binding {
+                    self.pattern(binding, &mut names)?;
+                }
+                if let Some(body) = body {
+                    self.scoped(names, |resolver| resolver.expr(body))?;
+                }
+                for arm in arms {
+                    let mut names = BTreeSet::new();
+                    self.pattern(&arm.pattern, &mut names)?;
+                    self.scoped(names, |resolver| {
+                        if let Some(guard) = &arm.guard {
+                            resolver.expr(guard)?;
+                        }
+                        resolver.expr(&arm.body)
+                    })?;
+                }
+                alternate
+                    .as_deref()
+                    .map_or(Ok(()), |alternate| self.expr(alternate))
+            }
+        }
+    }
+
+    fn statement(&mut self, statement: &Statement) -> Result<(), SourceTableSchemaError> {
+        match statement {
+            Statement::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                if let Some(annotation) = annotation {
+                    self.type_expr(annotation)?;
+                }
+                self.expr(value)?;
+                let mut names = BTreeSet::new();
+                self.pattern(pattern, &mut names)?;
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.extend(names);
+                }
+                Ok(())
+            }
+            Statement::Assert { value, .. }
+            | Statement::Expression { value, .. }
+            | Statement::Control { value, .. } => self.expr(value),
+            Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                value.as_ref().map_or(Ok(()), |value| self.expr(value))
+            }
+            Statement::Continue { .. } => Ok(()),
+            Statement::Assignment { target, value, .. } => {
+                self.assignment_target(target)?;
+                self.expr(value)
+            }
+        }
+    }
+
+    fn assignment_target(
+        &mut self,
+        target: &AssignmentTarget,
+    ) -> Result<(), SourceTableSchemaError> {
+        match target {
+            AssignmentTarget::Name { name, span } => self.value_name(name, span.start),
+            AssignmentTarget::Field { base, .. } => self.assignment_target(base),
+            AssignmentTarget::Index { base, index, .. } => {
+                self.assignment_target(base)?;
+                self.expr(index)
+            }
+        }
+    }
+
+    fn arguments(&mut self, arguments: &[Argument]) -> Result<(), SourceTableSchemaError> {
+        for argument in arguments {
+            self.expr(&argument.value)?;
+        }
+        Ok(())
+    }
+
+    fn record_fields(&mut self, fields: &[RecordField]) -> Result<(), SourceTableSchemaError> {
+        for field in fields {
+            self.expr(&field.value)?;
+        }
+        Ok(())
+    }
+
+    /// Collects the names a pattern binds and resolves its constructor paths.
+    fn pattern(
+        &mut self,
+        pattern: &Pattern,
+        names: &mut BTreeSet<String>,
+    ) -> Result<(), SourceTableSchemaError> {
+        match pattern {
+            Pattern::Name(name, _) => {
+                names.insert(name.clone());
+                Ok(())
+            }
+            Pattern::Wildcard(_) | Pattern::Literal { .. } => Ok(()),
+            Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+                for element in elements {
+                    self.pattern(element, names)?;
+                }
+                Ok(())
+            }
+            Pattern::Record { fields, .. } => {
+                for (name, pattern, _) in fields {
+                    match pattern {
+                        Some(pattern) => self.pattern(pattern, names)?,
+                        None => {
+                            names.insert(name.clone());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Constructor {
+                path,
+                arguments,
+                fields,
+                ..
+            } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(&first.text, first.span.start)?;
+                }
+                for argument in arguments {
+                    self.pattern(argument, names)?;
+                }
+                for field in fields {
+                    match &field.pattern {
+                        Some(pattern) => self.pattern(pattern, names)?,
+                        None => {
+                            names.insert(field.name.clone());
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Type names are never row fields or local bindings.
+    fn type_expr(&mut self, ty: &TypeExpr) -> Result<(), SourceTableSchemaError> {
+        match ty {
+            TypeExpr::Name {
+                path,
+                arguments,
+                span,
+            } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(first, span.start)?;
+                }
+                for argument in arguments {
+                    self.type_expr(argument)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+                self.type_expr(inner)
+            }
+            TypeExpr::Product { lhs, rhs, .. } => {
+                self.type_expr(lhs)?;
+                self.type_expr(rhs)
+            }
+            TypeExpr::Record { fields, .. } => {
+                for (_, field, _) in fields {
+                    self.type_expr(field)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements {
+                    self.type_expr(element)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Function {
+                parameters, result, ..
+            } => {
+                for parameter in parameters {
+                    self.type_expr(parameter)?;
+                }
+                self.type_expr(result)
+            }
+        }
+    }
 }
 
 fn token_raw(token: &Token) -> Option<Raw> {
@@ -2520,6 +2905,81 @@ pub table Contact(
         assert_eq!(digest(&reformatted), original);
         let changed = SPEC_CONTACT.replace("\"{first} {last}\"", "\"{last}, {first}\"");
         assert_ne!(digest(&changed), original);
+    }
+
+    #[test]
+    fn computed_selector_digest_binds_the_resolved_helper_declaration() {
+        // Identical tokens bound to a different declaration are a different
+        // selector: semantic identity includes resolved meaning (15-system.md).
+        let digest = |module: &str| {
+            let modules = [
+                ModuleInput::new(
+                    "labels/plain.orna",
+                    "pub fn label(value: Str): Str = value;\n",
+                ),
+                ModuleInput::new(
+                    "labels/loud.orna",
+                    "pub fn label(value: Str): Str = \"{value}!\";\n",
+                ),
+                ModuleInput::new(
+                    "main.orna",
+                    format!(
+                        "use {module}.{{label}};\n\npub table Contact(id: Str) {{\n    name: Str,\n    display: Str => label(name),\n}}\n"
+                    ),
+                ),
+            ];
+            let (_, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+            descriptor_field(schema.unwrap().descriptor(), "display")[4].clone()
+        };
+        assert_ne!(digest("labels.plain"), digest("labels.loud"));
+    }
+
+    #[test]
+    fn computed_selector_digest_reads_row_fields_before_module_declarations() {
+        // A table field is a lexical selector inside a computed expression
+        // (ORNA-FIELD-009), so a module declaration with the same spelling
+        // does not change what the selector reads.
+        let digest = |extra: &str| {
+            let modules = [ModuleInput::new(
+                "main.orna",
+                format!(
+                    "{extra}pub table Contact(id: Str) {{\n    name: Str,\n    display: Str => name,\n}}\n"
+                ),
+            )];
+            let (_, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+            descriptor_field(schema.unwrap().descriptor(), "display")[4].clone()
+        };
+        assert_eq!(digest(""), digest("pub fn name(): Str = \"module\";\n\n"));
+    }
+
+    #[test]
+    fn refinement_digest_tracks_assertion_meaning_not_formatting() {
+        let digests = |refined: &str| {
+            let modules = [ModuleInput::new(
+                "main.orna",
+                format!("{refined}\npub table Player(id: Str) {{\n    score: Score,\n}}\n"),
+            )];
+            let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "Player");
+            let score = *manifest.id(ObjectKind::Type, "Score").unwrap();
+            let Raw::Array(definition) =
+                descriptor_definition(schema.unwrap().descriptor(), &score)
+            else {
+                panic!("refined definition is an array");
+            };
+            let Raw::Array(body) = &definition[2] else {
+                panic!("refined body is an array");
+            };
+            body[1].clone()
+        };
+        let original = digests("pub type Score = Int {\n    assert >= 0;\n}\n");
+        assert_eq!(
+            digests("pub type Score = Int {\n    // never negative\n    assert >=   0;\n}\n"),
+            original
+        );
+        assert_ne!(
+            digests("pub type Score = Int {\n    assert >= 1;\n}\n"),
+            original
+        );
     }
 
     #[test]
