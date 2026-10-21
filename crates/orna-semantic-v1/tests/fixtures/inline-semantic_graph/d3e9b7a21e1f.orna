@@ -2,7 +2,7 @@
             pub fn direct(rows: [Int]) = first(rows);
             pub fn pipeline(rows: [Int]) = rows | first();
             pub fn named(rows: [Int]) = first(rows: rows);
-            pub fn qualified(rows: [Int]) = std.collection.first(rows);
-            pub fn qualified_pipeline(rows: [Int]) = rows | std.collection.first();
-            pub fn qualified_named(rows: [Int]) = std.collection.first(rows: rows);
+            pub fn qualified(rows: [Int]) = first(rows);
+            pub fn qualified_pipeline(rows: [Int]) = rows | first();
+            pub fn qualified_named(rows: [Int]) = first(rows: rows);
         
