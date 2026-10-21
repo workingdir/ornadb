@@ -132,8 +132,11 @@ fn explicit_admin_capability_returns_host_outcome_for_fixture_source() {
     .expect("trusted host effect should complete");
 
     assert_eq!(staged.value().raw(), &OvbRaw::Bool(false));
-    assert_eq!(staged.mutations().len(), 1);
-    assert_eq!(staged.mutations()[0].table(), "Note");
+    // The pause fixture writes no table. ORNA-ADMIN-002 forbids an
+    // administrative call inside an activation holding uncommitted writes;
+    // that case (fixtures/admin-pause-staged.orna) is covered by
+    // async_source_effect.rs administrative_effect_is_busy_until_staged_table_writes_finish.
+    assert!(staged.mutations().is_empty());
     assert_eq!(
         effects.lock().unwrap().as_slice(),
         &[ApplicationEffectRequest::PauseStream {
