@@ -2407,6 +2407,8 @@ mod tests {
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(&local, &["push", "origin", "refs/heads/main"]);
+        // The push above also recorded a tracking ref; the fetch must install it.
+        git(&local, &["update-ref", "-d", "refs/remotes/origin/main"]);
 
         let repository = Repository::discover(&local).unwrap();
         let request = || {
