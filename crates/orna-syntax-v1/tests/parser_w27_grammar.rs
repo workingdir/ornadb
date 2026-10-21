@@ -76,3 +76,11 @@ fn parenthesised_single_pattern_is_grouping() {
     };
     assert!(matches!(arms[0].pattern, Pattern::Name(..)), "{:?}", arms[0].pattern);
 }
+
+// W27-06 (grammar enum_record_pattern: qualified_variant requires a dot): a bare
+// `Name { .. }` is not an enum record pattern.
+#[test]
+fn enum_record_pattern_requires_qualified_variant() {
+    expression_is_accepted("case x { Shape.circle { r }: r }");
+    expression_is_rejected("case x { Shape { r }: r }");
+}
