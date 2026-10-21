@@ -4297,7 +4297,18 @@ impl Parser {
             // power, and range operators bind tighter than `|`, so they cannot
             // continue a stage. Parse the stage at postfix precedence and reject
             // any such operator that follows it.
-            let rhs_min = if op.starts_with('|') { 10 } else if right { prec } else { prec + 1 };
+            // A lambda stage is parsed at the lowest precedence so the existing
+            // parenthesization diagnostic below reports it, not a trailing-input error.
+            let lambda_stage = op == "|" && self.pipeline_stage_is_lambda();
+            let rhs_min = if lambda_stage {
+                0
+            } else if op.starts_with('|') {
+                10
+            } else if right {
+                prec
+            } else {
+                prec + 1
+            };
             let rhs = self.recurse(|parser| parser.pratt(rhs_min, mode));
             let Some(rhs) = rhs else { break };
             if op.starts_with('|')
@@ -4773,6 +4784,14 @@ impl Parser {
             }
         }
         false
+    }
+    /// True when the current pipeline stage begins a lambda (`name =>` or `(...) =>`).
+    fn pipeline_stage_is_lambda(&self) -> bool {
+        match self.current().kind {
+            TokenKind::Identifier { .. } => Self::token_is_punct(&self.tokens, self.at + 1, "=>"),
+            TokenKind::Punct("(") => self.group_followed_by_arrow(),
+            _ => false,
+        }
     }
     fn parse_lambda_parameters(&mut self) -> Vec<LambdaParameter> {
         let mut parameters = Vec::new();
