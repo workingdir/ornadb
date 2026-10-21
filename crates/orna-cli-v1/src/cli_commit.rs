@@ -4,14 +4,14 @@
 //! (16-administration). Before review, the staged format-3 store is completed
 //! for the staged source: tables without a relation get one, a table whose
 //! schema changed evolves with its committed rows (ORNA-EVOL-002), a retired
-//! table's relation leaves the store, and the committed identity inventory is
-//! reconciled into the store. An unborn branch's first commit creates the
-//! branch ref.
+//! table's relation leaves the store, the committed identity inventory is
+//! reconciled into the store, and the allocator summary records each
+//! automatic-key table's current watermark (ORNA-AUTOID-005). An unborn
+//! branch's first commit creates the branch ref.
 
 use orna_repository_v1::{
     relation_admission::{
-        CommittedRelationChanges, OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError,
-        StagedRelation,
+        CommittedRelationChanges, RelationAdmissionError, StagedRelation, is_system_relation,
     },
     schema_evolution::SchemaChanges,
 };
@@ -93,14 +93,14 @@ fn stage_store(
     for (namespace, module) in &analysis.modules {
         let module_name = namespace.display();
         for (name, symbol) in &module.symbols {
-            let admitted = symbol.kind == orna_semantic_v1::SymbolKind::Table
-                && symbol
-                    .table_schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.admission.is_some());
-            if !admitted {
+            let Some(admission) = symbol
+                .table_schema
+                .as_ref()
+                .and_then(|schema| schema.admission.as_ref())
+                .filter(|_| symbol.kind == orna_semantic_v1::SymbolKind::Table)
+            else {
                 continue;
-            }
+            };
             let table = project
                 .source_table_schema_in_database(&identities, database_id, &module_name, name)
                 .map_err(|error| {
@@ -110,10 +110,14 @@ fn stage_store(
                     )
                 })?;
             names.insert(*table.table_object_id(), name.clone());
-            relations.push(
+            let relation =
                 StagedRelation::new(*table.table_object_id(), table.descriptor().clone())
-                    .with_introductions(project.constant_default_stored_values(&table)),
-            );
+                    .with_introductions(project.constant_default_stored_values(&table));
+            relations.push(if admission.automatic_key {
+                relation.with_automatic_key()
+            } else {
+                relation
+            });
         }
     }
     let table_name = |relation: &[u8; 16]| {
@@ -134,7 +138,7 @@ fn stage_store(
         .stage_store_admission(&staged, &relations, &identities.to_stored(), changes)
         .map_err(|error| admission_error(&error, &table_name))?;
     for relation in admission.admitted() {
-        if *relation != OBJECT_IDENTITY_RELATION_ID {
+        if !is_system_relation(relation) {
             println!(
                 "admitted table {} as relation {}",
                 table_name(relation),
@@ -199,11 +203,13 @@ fn admission_error(
                 ),
             )
         }
+        // The refusal names the table and field the staged source must
+        // change, so it is a source diagnostic shown without `--debug`.
         RelationAdmissionError::Evolution {
             relation_id,
             refusal,
         } => Diagnostic::target_with_detail(
-            "E2300",
+            "E2101",
             "staged schema change does not fit the committed rows",
             "change the staged table so its committed rows fit it (make a new field optional or give it a constant default, keep the primary key, use a lossless type change), stage it, then retry `orna commit -m MESSAGE`; no commit was created",
             format!("table {}: {refusal}", table_name(relation_id)),

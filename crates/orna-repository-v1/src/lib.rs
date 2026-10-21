@@ -27,6 +27,7 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+pub mod allocator;
 mod blob_store;
 mod crash_barrier;
 mod compact;
