@@ -3013,10 +3013,12 @@ impl Parser {
                     };
                 }
                 let mut elements = Vec::new();
+                let mut saw_comma = false;
                 while !self.eof() && !self.is_punct(close) {
                     elements.push(self.parse_pattern());
                     if self.is_punct(",") {
-                        self.bump()
+                        self.bump();
+                        saw_comma = true;
                     } else {
                         break;
                     }
@@ -3028,6 +3030,8 @@ impl Parser {
                 }
                 let span = token.span.join(self.previous().span.clone());
                 match open.as_str() {
+                    // A parenthesised pattern without a comma is grouping, not a tuple.
+                    "(" if !saw_comma && elements.len() == 1 => elements.swap_remove(0),
                     "(" => Pattern::Tuple { elements, span },
                     "[" => Pattern::List { elements, span },
                     _ => unreachable!(),
