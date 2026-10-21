@@ -1,0 +1,23 @@
+pub table PlanEvidence(id: Int) {
+    plan: Str,
+    actual: Bool,
+}
+
+pub table FailureEvidence(id: Int) {
+    code: Str,
+}
+
+pub fn main() {
+    let storage = sys.Storage | sys.explain();
+    let limited = sys.explain(sys.Storage | distinct() | take(1));
+    let evidence = PlanEvidence | take(1) | sys.explain();
+    assert storage.id == (sys.Storage | sys.explain()).id;
+    assert storage.id != limited.id;
+    assert storage.actual_available == false;
+    PlanEvidence.insert({ id: 1, plan: storage.id, actual: storage.actual_available });
+    PlanEvidence.insert({ id: 2, plan: limited.id, actual: limited.actual_available });
+    PlanEvidence.insert({ id: 3, plan: evidence.id, actual: evidence.actual_available });
+    let unrepresentable = (sys.Storage | filter(row => row.pending_rows > 0) | sys.explain()).id
+        |? (failure => failure.code);
+    FailureEvidence.insert({ id: 1, code: unrepresentable });
+}
