@@ -118,6 +118,18 @@ fn validate_candidate_source_rows(
             },
         ));
     }
+    // "A table publication generation is bound to its captured root and
+    // schema" (PUB-3 step 4): `orna commit` admits a table's relation, and
+    // publication never creates one. A row whose table has no relation in the
+    // captured store stops here with that remedy.
+    let committed_relations = repository
+        .committed_store_relations(head)
+        .map_err(|error| {
+            publish_error(
+                "format-3 committed store could not be read",
+                format!("{error}; the pending range was preserved"),
+            )
+        })?;
     let mut mutation_ids = std::collections::BTreeSet::new();
     for mutation in mutations {
         if !mutation_ids.insert(mutation.id()) {
@@ -132,6 +144,18 @@ fn validate_candidate_source_rows(
                 "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
             )
         })?;
+        if !committed_relations.contains(&table_id.bytes()) {
+            return Err(Diagnostic::target_with_detail(
+                "E2300",
+                "source row table has no relation in the committed store",
+                "stage the table's source and run `orna commit -m MESSAGE` to admit it, then retry `orna publish`",
+                format!(
+                    "table {:?} has object id {} but the committed .orna/store has no relation for it; the pending range was preserved",
+                    mutation.table(),
+                    orna_repository_v1::Uuid::from_bytes(table_id.bytes()).simple(),
+                ),
+            ));
+        }
         let schema = loader
             .resolve_committed_source_table_schema(repository, head, table_id)
             .map_err(|error| {

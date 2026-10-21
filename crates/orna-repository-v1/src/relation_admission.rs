@@ -433,6 +433,32 @@ impl Repository {
         })
     }
 
+    /// The relation UUIDs a format-3 commit's `.orna/store` binds, empty when
+    /// the commit has no store. Every page of the relation map is validated
+    /// before the set is returned.
+    pub fn committed_store_relations(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<BTreeSet<[u8; 16]>, RelationAdmissionError> {
+        let format = self.open_pinned_format_context(commit.as_str())?;
+        if format.repository_format() != RepositoryFormat::Format3 {
+            return Err(RelationAdmissionError::NotFormat3);
+        }
+        let database_id = *format.require_database_id()?.as_bytes();
+        let Some(store_root) = self.tree_store_root(commit.as_str())? else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(NativeGraphContext::read_store_relations(
+            self,
+            store_root.algorithm(),
+            database_id,
+            &store_root,
+        )?
+        .into_iter()
+        .map(|entry| entry.relation_id)
+        .collect())
+    }
+
     /// Reads the committed identity inventory from a format-3 snapshot's
     /// store. `Ok(None)` means the snapshot has no inventory relation: it is a
     /// legacy snapshot (an older format, no store, or a store written before
@@ -442,19 +468,10 @@ impl Repository {
         commit: &GitCommitRef,
     ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
         let format = self.open_pinned_format_context(commit.as_str())?;
-        if format.repository_format() != RepositoryFormat::Format3 {
-            return Ok(None);
-        }
-        let database_id = *format.require_database_id()?.as_bytes();
-        let Some(store_root) = self.tree_store_root(commit.as_str())? else {
-            return Ok(None);
-        };
-        let algorithm = store_root.algorithm();
-        let relations =
-            NativeGraphContext::read_store_relations(self, algorithm, database_id, &store_root)?;
-        if !relations
-            .iter()
-            .any(|relation| relation.relation_id == OBJECT_IDENTITY_RELATION_ID)
+        if format.repository_format() != RepositoryFormat::Format3
+            || !self
+                .committed_store_relations(commit)?
+                .contains(&OBJECT_IDENTITY_RELATION_ID)
         {
             return Ok(None);
         }
