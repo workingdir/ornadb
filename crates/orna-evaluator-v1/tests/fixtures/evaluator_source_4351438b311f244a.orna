@@ -1,1 +1,1 @@
-std.collection.sum(rows: rows)
+sum(rows: rows)
