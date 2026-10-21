@@ -41,6 +41,9 @@ jobs:
         env:
           ORNA_REQUIRE_FUSE: "1"
         run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
+
+      - name: Test the publication crash-barrier matrix
+        run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     steps:
