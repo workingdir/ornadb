@@ -67,7 +67,15 @@ fn normalize_repl_mutations(
     for mutation in mutations {
         let table = mutation.table().to_owned();
         let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
-        if mutation.is_insert() {
+        // A row admitted through `admit_format3_row` (the Blob insert path)
+        // already carries its canonical store key and stored-field tuple, and
+        // its source-row provenance says so. Every other mutation, a plain
+        // insert included, still holds the evaluator's row map and is
+        // projected to the stored-field tuple here.
+        if source_row_schemas
+            .iter()
+            .any(|source_row| source_row.mutation_id == mutation.id())
+        {
             normalized.push(mutation);
             continue;
         }
