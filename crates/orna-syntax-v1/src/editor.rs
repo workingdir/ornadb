@@ -3,14 +3,20 @@
 //! Every generated vocabulary is derived from this crate's lexer. In
 //! particular, editor keyword lists come from `Keyword::ALL`, the table used
 //! by `Keyword::from_text`; no earlier grammar contributes editor tokens.
+//! Token patterns come from one lexical model (`editor::lexical`) rendered
+//! per editor dialect.
+
+mod lexical;
 
 use std::ops::Range;
 
+use lexical::{Dialect, Re};
+
 use crate::{
-    Keyword, TokenKind,
+    TokenKind,
     lexer::{
-        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, NUMBER_PATTERN, OPERATORS,
-        PUNCTUATION, STRING_DELIMITER, lex_recovering,
+        BLOCK_COMMENT_END, BLOCK_COMMENT_START, LINE_COMMENT_START, OPERATORS, PUNCTUATION,
+        STRING_DELIMITER, lex_recovering,
     },
 };
 
@@ -519,13 +525,6 @@ fn artifact(path: &'static str, contents: String) -> GeneratedArtifact {
     GeneratedArtifact { path, contents }
 }
 
-fn keywords() -> Vec<&'static str> {
-    Keyword::ALL
-        .iter()
-        .map(|keyword| keyword.spelling())
-        .collect()
-}
-
 fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
@@ -543,93 +542,132 @@ fn json_string(value: &str) -> String {
     out
 }
 
-fn regex_escape(value: &str) -> String {
-    let mut out = String::new();
-    for c in value.chars() {
-        if matches!(
-            c,
-            '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
-        ) {
-            out.push('\\');
+/// Oniguruma token patterns shared by the TextMate and Sublime grammars.
+struct OnigurumaRules {
+    keyword: String,
+    contextual_name: String,
+    number: String,
+    operator: String,
+    punctuation: String,
+    identifier: String,
+    escape: String,
+    line_comment: String,
+    block_comment_start: String,
+    block_comment_end: String,
+    quote: String,
+    open_brace: String,
+    close_brace: String,
+}
+
+impl OnigurumaRules {
+    fn new() -> Self {
+        let render = |re: &Re| re.render(Dialect::Oniguruma);
+        let continuation = render(&Re::IdentifierContinue);
+        let not_after_name = format!("(?<!{continuation})");
+        let not_before_name = format!("(?!{continuation})");
+        let keywords = render(&lexical::spellings(&lexical::keywords()));
+        let labels = render(&lexical::spellings(&lexical::label_keywords()));
+        Self {
+            keyword: format!("{not_after_name}{keywords}{not_before_name}"),
+            // "Contextual names and construction": after a single `.` a reserved
+            // word is a member, variant or qualified name, and before `:` it
+            // labels a record field or a named argument. `..` is the range
+            // operator, and `true`/`false`/`null` before `:` are case-arm
+            // literal patterns.
+            contextual_name: format!(
+                r"(?:(?<=[^.]\.)|(?<=^\.)){keywords}{not_before_name}|{not_after_name}{labels}{not_before_name}(?=[ \t]*:)"
+            ),
+            number: format!(
+                "{not_after_name}{}{not_before_name}",
+                render(&lexical::number())
+            ),
+            operator: render(&lexical::operators()),
+            punctuation: render(&lexical::punctuation()),
+            identifier: render(&lexical::identifier()),
+            escape: render(&lexical::escape_sequence()),
+            line_comment: format!("{}.*", render(&Re::text(LINE_COMMENT_START))),
+            block_comment_start: render(&Re::text(BLOCK_COMMENT_START)),
+            block_comment_end: render(&Re::text(BLOCK_COMMENT_END)),
+            quote: render(&Re::text(&STRING_DELIMITER.to_string())),
+            open_brace: render(&Re::text("{")),
+            close_brace: render(&Re::text("}")),
         }
-        out.push(c);
     }
-    out
 }
 
-fn regex_alternation(values: &[&str]) -> String {
-    let mut sorted = values.to_vec();
-    sorted.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    sorted.dedup();
-    sorted
-        .into_iter()
-        .map(regex_escape)
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
+/// TextMate grammar for VS Code. A block comment nests only block comments
+/// (ORNA-LEX-004), so `//` inside one is comment text. An interpolation
+/// keeps nested braces and strings balanced, because interpolation
+/// expressions use the ordinary lexer and nested-delimiter rules (ORNA-LIT-004,
+/// "String escapes").
 fn render_textmate() -> String {
-    let keyword_re = format!(
-        r"(?<![\p{{L}}\p{{N}}_])(?:{})(?![\p{{L}}\p{{N}}_])",
-        regex_alternation(&keywords())
+    let rules = OnigurumaRules::new();
+    let scope = |class| json_string(presentation(class).textmate_scope);
+    let punctuation_scope = scope(TokenClass::Punctuation);
+    let identifier_scope = scope(TokenClass::Identifier);
+    let braces = format!(
+        "\"begin\": {}, \"end\": {}, \"beginCaptures\": {{ \"0\": {{ \"name\": {punctuation_scope} }} }}, \"endCaptures\": {{ \"0\": {{ \"name\": {punctuation_scope} }} }}, \"patterns\": [{{ \"include\": \"#expressions\" }}]",
+        json_string(&rules.open_brace),
+        json_string(&rules.close_brace)
     );
-    let number_re = format!(r"(?<![\p{{L}}\p{{N}}_])(?:{NUMBER_PATTERN})(?![\p{{L}}\p{{N}}_])");
-    let operator_re = regex_alternation(OPERATORS);
-    let punctuation_re = regex_alternation(PUNCTUATION);
-    let line_comment_re = json_string(&format!("{}[^\\r\\n]*", regex_escape(LINE_COMMENT_START)));
-    let block_begin_re = json_string(&regex_escape(BLOCK_COMMENT_START));
-    let block_end_re = json_string(&regex_escape(BLOCK_COMMENT_END));
-    let string_delimiter_re = json_string(&regex_escape(&STRING_DELIMITER.to_string()));
-    let patterns = format!(
+    let includes = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("{{ \"include\": \"#{name}\" }}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let tokens = [
+        "contextual_name",
+        "keyword",
+        "number",
+        "operator",
+        "punctuation",
+        "identifier",
+    ];
+    let top_level = includes(&[&["comments", "string"][..], &tokens[..]].concat());
+    let expressions = includes(&[&["comments", "string", "braces"][..], &tokens[..]].concat());
+    format!(
         r##"{{
-  "scopeName": {},
-  "patterns": [
-    {{ "include": "#comments" }},
-    {{ "include": "#string" }},
-    {{ "include": "#keyword" }},
-    {{ "include": "#number" }},
-    {{ "include": "#operator" }},
-    {{ "include": "#punctuation" }},
-    {{ "include": "#identifier" }}
-  ],
+  "scopeName": {scope_name},
+  "patterns": [{top_level}],
   "repository": {{
-    "comments": {{ "patterns": [
-      {{ "name": {}, "match": {} }},
-      {{ "name": {}, "begin": {}, "end": {}, "patterns": [{{ "include": "#comments" }}] }}
+    "comments": {{ "patterns": [{{ "include": "#line_comment" }}, {{ "include": "#block_comment" }}] }},
+    "line_comment": {{ "name": {comment_scope}, "match": {line_comment} }},
+    "block_comment": {{ "name": {comment_scope}, "begin": {block_start}, "end": {block_end}, "patterns": [{{ "include": "#block_comment" }}] }},
+    "string": {{ "name": {string_scope}, "begin": {quote}, "end": {quote}, "patterns": [
+      {{ "name": "constant.character.escape.orna", "match": {escape} }},
+      {{ "name": "meta.interpolation.orna", {braces} }}
     ]}},
-    "string": {{ "name": {}, "begin": {}, "end": {}, "patterns": [
-      {{ "name": "constant.character.escape.orna", "match": "\\\\(?:[\\\"\\\\nrt0]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})" }},
-      {{ "name": "meta.interpolation.orna", "begin": "(?<!\\\\)\\{{", "end": "\\}}", "patterns": [{{ "include": "#expressions" }}] }}
-    ]}},
-    "expressions": {{ "patterns": [{{ "include": "#comments" }}, {{ "include": "#string" }}, {{ "include": "#keyword" }}, {{ "include": "#number" }}, {{ "include": "#operator" }}, {{ "include": "#punctuation" }}, {{ "include": "#identifier" }}] }},
-    "keyword": {{ "name": {}, "match": {} }},
-    "number": {{ "name": {}, "match": {} }},
-    "operator": {{ "name": {}, "match": {} }},
-    "punctuation": {{ "name": {}, "match": {} }},
-    "identifier": {{ "name": {}, "match": "[_\\p{{L}}][_\\p{{L}}\\p{{N}}]*" }}
+    "braces": {{ {braces} }},
+    "expressions": {{ "patterns": [{expressions}] }},
+    "contextual_name": {{ "name": {identifier_scope}, "match": {contextual_name} }},
+    "keyword": {{ "name": {keyword_scope}, "match": {keyword} }},
+    "number": {{ "name": {number_scope}, "match": {number} }},
+    "operator": {{ "name": {operator_scope}, "match": {operator} }},
+    "punctuation": {{ "name": {punctuation_scope}, "match": {punctuation} }},
+    "identifier": {{ "name": {identifier_scope}, "match": {identifier} }}
   }}
 }}
 "##,
-        json_string(SOURCE_SCOPE),
-        json_string(presentation(TokenClass::Comment).textmate_scope),
-        line_comment_re,
-        json_string(presentation(TokenClass::Comment).textmate_scope),
-        block_begin_re,
-        block_end_re,
-        json_string(presentation(TokenClass::String).textmate_scope),
-        string_delimiter_re,
-        string_delimiter_re,
-        json_string(presentation(TokenClass::Keyword).textmate_scope),
-        json_string(&keyword_re),
-        json_string(presentation(TokenClass::Number).textmate_scope),
-        json_string(&number_re),
-        json_string(presentation(TokenClass::Operator).textmate_scope),
-        json_string(&operator_re),
-        json_string(presentation(TokenClass::Punctuation).textmate_scope),
-        json_string(&punctuation_re),
-        json_string(presentation(TokenClass::Identifier).textmate_scope)
-    );
-    format!("{patterns}\n")
+        scope_name = json_string(SOURCE_SCOPE),
+        comment_scope = scope(TokenClass::Comment),
+        line_comment = json_string(&rules.line_comment),
+        block_start = json_string(&rules.block_comment_start),
+        block_end = json_string(&rules.block_comment_end),
+        string_scope = scope(TokenClass::String),
+        quote = json_string(&rules.quote),
+        escape = json_string(&rules.escape),
+        contextual_name = json_string(&rules.contextual_name),
+        keyword_scope = scope(TokenClass::Keyword),
+        keyword = json_string(&rules.keyword),
+        number_scope = scope(TokenClass::Number),
+        number = json_string(&rules.number),
+        operator_scope = scope(TokenClass::Operator),
+        operator = json_string(&rules.operator),
+        punctuation = json_string(&rules.punctuation),
+        identifier = json_string(&rules.identifier),
+    )
 }
 
 fn render_semantic_legend() -> String {
@@ -656,62 +694,61 @@ fn render_semantic_legend() -> String {
     )
 }
 
+/// Tree-sitter lexical highlighter: the token classes of the lexical
+/// structure, not the `orna.ebnf` productions. Braces pair up, so an
+/// interpolation keeps nested braces and strings balanced (ORNA-LIT-004). A
+/// block comment nests and closes at any run of `*` followed by `/`
+/// (ORNA-LEX-004). Reserved words are extracted from identifiers through the
+/// `word` rule (ORNA-LEX-007); after `.`, or as a label before `:`, they are
+/// contextual names and parse as identifiers.
 fn render_tree_sitter_grammar() -> String {
-    let keyword_choices = keywords()
-        .iter()
-        .map(|word| json_string(word))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let operator_choices = OPERATORS
-        .iter()
-        .map(|word| json_string(word))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let punctuation_choices = PUNCTUATION
-        .iter()
-        .map(|word| json_string(word))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source_choices = TOKEN_PRESENTATIONS
-        .iter()
-        .map(|item| format!("$.{}", class_name(item.class)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let number_pattern = NUMBER_PATTERN;
-    let line_comment = json_string(LINE_COMMENT_START);
-    let block_start = json_string(BLOCK_COMMENT_START);
-    let block_end = json_string(BLOCK_COMMENT_END);
-    let string_delimiter = json_string(&STRING_DELIMITER.to_string());
+    let render = |re: &Re| re.render(Dialect::TreeSitter);
+    let strings = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| json_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        r#"// Generated from orna-syntax-v1 lexer token definitions; edit the Rust source instead.
+        r#"// Generated from orna-syntax-v1 lexical rules; edit crates/orna-syntax-v1/src/editor.rs instead.
+// A lexical highlighter: token classes only, not the orna.ebnf productions.
 module.exports = grammar({{
   name: {language},
   extras: $ => [/\s/],
   word: $ => $.identifier,
   rules: {{
-    source_file: $ => repeat(choice({source_choices})),
+    source_file: $ => repeat($._token),
+    _token: $ => choice($.comment, $.string, $.block, $.member, $.label, $.keyword, $.number, $.operator, $.punctuation, $.identifier),
+    block: $ => seq("{{", repeat($._token), "}}"),
+    member: $ => prec(1, seq(".", choice($.identifier, alias($.keyword, $.identifier)))),
+    label: $ => prec(1, seq(alias($._label_keyword, $.identifier), ":")),
+    _label_keyword: _ => prec(1, choice({label_keywords})),
     comment: $ => choice($.line_comment, $.block_comment),
-    line_comment: _ => token(seq({line_comment}, /[^\r\n]*/)),
-    block_comment: $ => seq({block_start}, repeat(choice(/[^*/]+/, /\*[^/]/, /\/[^*]/, $.block_comment)), {block_end}),
-    string: _ => token(seq({string_delimiter}, repeat(choice(/[^"\\]/, /\\./)), {string_delimiter})),
-    keyword: _ => token(prec(2, choice({keyword_choices}))),
-    identifier: _ => token(prec(1, /[_\p{{XID_Start}}][_\p{{XID_Continue}}]*/)),
-    number: _ => token(/{number_pattern}/),
-    operator: _ => token(choice({operator_choices})),
-    punctuation: _ => token(choice({punctuation_choices}))
+    line_comment: _ => token(prec(1, seq({line_comment}, /[^\r\n]*/))),
+    block_comment: $ => seq(/\/+\*/, repeat(choice(/[^*/]+/, /\*+[^*/]/, /\/+[^*/]/, $.block_comment)), /\*+\//),
+    string: $ => seq({quote}, repeat(choice($.string_content, $.escape_sequence, $.interpolation)), token.immediate({quote})),
+    string_content: _ => token.immediate(prec(1, /[^"\\{{]+/)),
+    escape_sequence: _ => token.immediate(/{escape}/),
+    interpolation: $ => seq(token.immediate("{{"), repeat($._token), "}}"),
+    keyword: _ => choice({keywords}),
+    identifier: _ => /{identifier}/,
+    number: _ => token(/{number}/),
+    operator: _ => token(choice({operators})),
+    punctuation: _ => choice({punctuation})
   }}
 }});
 "#,
         language = json_string(LANGUAGE_ID),
-        source_choices = source_choices,
-        line_comment = line_comment,
-        block_start = block_start,
-        block_end = block_end,
-        string_delimiter = string_delimiter,
-        keyword_choices = keyword_choices,
-        number_pattern = number_pattern,
-        operator_choices = operator_choices,
-        punctuation_choices = punctuation_choices
+        label_keywords = strings(&lexical::label_keywords()),
+        line_comment = json_string(LINE_COMMENT_START),
+        quote = json_string(&STRING_DELIMITER.to_string()),
+        escape = render(&lexical::escape_sequence()),
+        keywords = strings(&lexical::keywords()),
+        identifier = render(&lexical::identifier()),
+        number = render(&lexical::number()),
+        operators = strings(OPERATORS),
+        punctuation = strings(&lexical::unpaired_punctuation()),
     )
 }
 
@@ -719,55 +756,118 @@ fn render_tree_sitter_query() -> String {
     let captures = TOKEN_PRESENTATIONS
         .iter()
         .map(|item| format!("({}) @{}", class_name(item.class), capture_name(item.class)))
+        .chain([
+            "(escape_sequence) @string.escape".to_owned(),
+            format!(
+                "[\"{{\" \"}}\" \".\" \":\"] @{}",
+                capture_name(TokenClass::Punctuation)
+            ),
+        ])
         .collect::<Vec<_>>()
         .join("\n");
     format!("; Generated from the orna-syntax-v1 lexical classes.\n{captures}\n")
 }
 
+/// Vim syntax over the shared lexical model in very-magic form. Where two
+/// items start in the same column the one defined later wins, so contextual
+/// names, strings and comments come after the token matches they override.
 fn render_vim() -> String {
-    let mut out = String::from(
-        "\" Generated from orna-syntax-v1.\nif exists(\"b:current_syntax\") | finish | endif\nsyntax case match\n",
-    );
-    out.push_str(&format!(
-        "syntax keyword ornaKeyword {}\n",
-        keywords().join(" ")
-    ));
-    let string_delimiter = STRING_DELIMITER.to_string();
-    let block_comment_start = vim_regex_literal(BLOCK_COMMENT_START);
-    let block_comment_end = vim_regex_literal(BLOCK_COMMENT_END);
-    out.push_str(&format!(
-        "syntax region ornaString start=+{string_delimiter}+ skip=+\\\\.+ end=+{string_delimiter}+ contains=ornaInterpolation\nsyntax region ornaInterpolation start=+\\\\{{+ end=+}}+ contained\nsyntax match ornaComment +{}.*$+\nsyntax region ornaComment start=+{block_comment_start}+ end=+{block_comment_end}+ contains=ornaComment\n",
-        LINE_COMMENT_START
-    ));
-    out.push_str(&format!(
-        "syntax match ornaNumber /\\v{}/\n",
-        vim_regex(NUMBER_PATTERN)
-    ));
-    out.push_str(&format!(
-        "syntax match ornaOperator @\\({}\\)@\n",
-        vim_alternation(OPERATORS)
-    ));
-    out.push_str(&format!(
-        "syntax match ornaPunctuation +\\({}\\)+\n",
-        vim_alternation(PUNCTUATION)
-    ));
-    out.push_str("syntax match ornaIdentifier +[_[:alpha:]][_[:alnum:]]*+\n");
-    for (class, group, face) in [
-        (TokenClass::Keyword, "ornaKeyword", "Statement"),
-        (TokenClass::String, "ornaString", "String"),
-        (TokenClass::Comment, "ornaComment", "Comment"),
-        (TokenClass::Number, "ornaNumber", "Number"),
-        (TokenClass::Operator, "ornaOperator", "Operator"),
-        (TokenClass::Punctuation, "ornaPunctuation", "Delimiter"),
-        (TokenClass::Identifier, "ornaIdentifier", "Identifier"),
+    let render = |re: &Re| re.render(Dialect::VimVeryMagic);
+    let keywords = render(&lexical::spellings(&lexical::keywords()));
+    let labels = render(&lexical::spellings(&lexical::label_keywords()));
+    let dot = render(&Re::text("."));
+    let mut lines = vec![
+        "\" Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead."
+            .to_owned(),
+        "if exists(\"b:current_syntax\") | finish | endif".to_owned(),
+        "syntax case match".to_owned(),
+        vim_match(
+            "ornaIdentifier",
+            // No word-end anchor: a combining mark ends no Vim word, and the
+            // greedy match already stops at the first non-identifier byte.
+            &format!(r"\v<{}", render(&lexical::identifier())),
+            "",
+        ),
+        format!(
+            "syntax keyword ornaKeyword {}",
+            lexical::keywords().join(" ")
+        ),
+        vim_match(
+            "ornaPunctuation",
+            &format!(r"\v{}", render(&lexical::punctuation())),
+            "",
+        ),
+        vim_match(
+            "ornaOperator",
+            &format!(r"\v{}", render(&lexical::operators())),
+            "",
+        ),
+        vim_match(
+            "ornaNumber",
+            &format!(r"\v<{}>", render(&lexical::number())),
+            "",
+        ),
+        // A reserved word after a single `.`, or labelling a record field or
+        // named argument, is a contextual name. These matches start at the
+        // `.` or the delimiter, ahead of the keyword item they replace.
+        vim_match(
+            "ornaContextualName",
+            &format!(r"\v%({dot})@<!{dot}{keywords}>"),
+            " contains=ornaPunctuation",
+        ),
+        vim_match(
+            "ornaContextualName",
+            &format!(r"\v%(^\s+|[(,{{]\s*){labels}>\ze\s*:"),
+            " contains=ornaPunctuation",
+        ),
+        format!(
+            "syntax region ornaString start=+{quote}+ skip=+\\\\.+ end=+{quote}+ contains=ornaEscape,ornaInterpolation",
+            quote = STRING_DELIMITER
+        ),
+        vim_match(
+            "ornaEscape",
+            &format!(r"\v{}", render(&lexical::escape_sequence())),
+            " contained",
+        ),
+        "syntax region ornaInterpolation matchgroup=ornaPunctuation start=+{+ end=+}+ contained contains=@ornaExpression".to_owned(),
+        "syntax region ornaBraces matchgroup=ornaPunctuation start=+{+ end=+}+ contained contains=@ornaExpression".to_owned(),
+        "syntax cluster ornaExpression contains=ornaIdentifier,ornaKeyword,ornaPunctuation,ornaOperator,ornaNumber,ornaContextualName,ornaString,ornaBraces,ornaLineComment,ornaBlockComment".to_owned(),
+        vim_match(
+            "ornaLineComment",
+            &format!(r"\v{}.*$", render(&Re::text(LINE_COMMENT_START))),
+            "",
+        ),
+        format!(
+            "syntax region ornaBlockComment start=+\\v{}+ end=+\\v{}+ contains=ornaBlockComment",
+            render(&Re::text(BLOCK_COMMENT_START)),
+            render(&Re::text(BLOCK_COMMENT_END))
+        ),
+    ];
+    for (group, face) in [
+        ("ornaKeyword", "Statement"),
+        ("ornaString", "String"),
+        ("ornaEscape", "SpecialChar"),
+        ("ornaLineComment", "Comment"),
+        ("ornaBlockComment", "Comment"),
+        ("ornaNumber", "Number"),
+        ("ornaOperator", "Operator"),
+        ("ornaPunctuation", "Delimiter"),
+        ("ornaIdentifier", "Identifier"),
+        ("ornaContextualName", "Identifier"),
     ] {
-        debug_assert!(
-            presentation(class).semantic_token_type.is_some() || class == TokenClass::Punctuation
-        );
-        out.push_str(&format!("hi def link {group} {face}\n"));
+        lines.push(format!("hi def link {group} {face}"));
     }
-    out.push_str("let b:current_syntax = \"orna\"\n");
-    out
+    lines.push("let b:current_syntax = \"orna\"".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// One `syntax match` line, delimited by a character the pattern lacks.
+fn vim_match(group: &str, pattern: &str, suffix: &str) -> String {
+    let delimiter = ['/', '+', '#', '!', '~', ';', '&', '=']
+        .into_iter()
+        .find(|candidate| !pattern.contains(*candidate))
+        .expect("a Vim pattern leaves one delimiter free");
+    format!("syntax match {group} {delimiter}{pattern}{delimiter}{suffix}")
 }
 
 fn render_vim_filetype() -> String {
@@ -833,111 +933,191 @@ return M
     )
 }
 
-fn vim_regex(pattern: &str) -> String {
-    pattern.replace("(?:", "\\%(")
-}
+/// Emacs support code shared by every generated `orna-mode`.
+///
+/// The syntax table makes `//` a line comment and `/* */` a nesting block
+/// comment (ORNA-LEX-003/004), so comment and string text is fontified
+/// syntactically before any token rule runs. A string nested in an
+/// interpolation would otherwise end the enclosing string at its first quote;
+/// `orna-syntax-propertize` gives such quotes punctuation syntax, and the
+/// interpolation matcher re-highlights the code between the braces
+/// (ORNA-LIT-004).
+const EMACS_SUPPORT: &str = r#"(defvar orna-punctuation-face
+  (if (facep 'font-lock-delimiter-face) 'font-lock-delimiter-face 'default)
+  "Face for Orna punctuation; `font-lock-delimiter-face' needs Emacs 29.")
+(defvar orna-mode-syntax-table
+  (let ((table (make-syntax-table)))
+    (modify-syntax-entry ?/ ". 124b" table)
+    (modify-syntax-entry ?* ". 23n" table)
+    (modify-syntax-entry ?\n "> b" table)
+    (modify-syntax-entry ?\" "\"" table)
+    (modify-syntax-entry ?\\ "\\" table)
+    (modify-syntax-entry ?_ "w" table)
+    (dolist (char '(?+ ?- ?= ?< ?> ?! ?? ?| ?& ?% ?^ ?. ?, ?\; ?:))
+      (modify-syntax-entry char "." table))
+    table)
+  "Syntax table for `orna-mode': line and nesting block comments, strings.")
+(defconst orna--nested-quote-syntax (string-to-syntax ".")
+  "Syntax of a quote that delimits a string nested in an interpolation.")
+(defvar orna--mark-nested-quotes nil
+  "Non-nil while `orna-syntax-propertize' scans strings.")
+(defun orna--skip-block-comment ()
+  "Move past the nesting block comment that starts at point."
+  (forward-char 2)
+  (let ((depth 1))
+    (while (and (> depth 0) (not (eobp)))
+      (cond ((looking-at "/\\*") (setq depth (1+ depth)) (forward-char 2))
+            ((looking-at "\\*/") (setq depth (1- depth)) (forward-char 2))
+            (t (forward-char 1))))))
+(defun orna--mark-nested-quote ()
+  "Give the quote at point punctuation syntax while propertizing."
+  (when orna--mark-nested-quotes
+    (put-text-property (point) (1+ (point)) 'syntax-table orna--nested-quote-syntax)))
+(defun orna--scan-string (nested)
+  "Move past the string whose opening quote is at point.
+NESTED means the string sits inside an interpolation."
+  (when nested (orna--mark-nested-quote))
+  (forward-char 1)
+  (catch 'done
+    (while (not (eobp))
+      (let ((char (char-after)))
+        (cond ((looking-at "\\\\u{")
+               (skip-chars-forward "^}")
+               (unless (eobp) (forward-char 1)))
+              ((eq char ?\\) (forward-char (min 2 (- (point-max) (point)))))
+              ((eq char ?\")
+               (when nested (orna--mark-nested-quote))
+               (forward-char 1)
+               (throw 'done t))
+              ((eq char ?{) (forward-char 1) (orna--scan-interpolation))
+              (t (forward-char 1)))))))
+(defun orna--scan-interpolation ()
+  "Move past the interpolation code at point and its closing brace."
+  (let ((depth 0))
+    (catch 'done
+      (while (not (eobp))
+        (let ((char (char-after)))
+          (cond ((eq char ?\") (orna--scan-string t))
+                ((looking-at "//") (forward-line 1))
+                ((looking-at "/\\*") (orna--skip-block-comment))
+                ((eq char ?{) (setq depth (1+ depth)) (forward-char 1))
+                ((eq char ?})
+                 (forward-char 1)
+                 (if (= depth 0) (throw 'done t) (setq depth (1- depth))))
+                (t (forward-char 1))))))))
+(defun orna-syntax-propertize (start end)
+  "Keep quotes of strings nested in interpolations between START and END
+from ending the enclosing string."
+  (goto-char start)
+  (let ((state (syntax-ppss)))
+    (when (nth 3 state) (goto-char (nth 8 state))))
+  (let ((orna--mark-nested-quotes t))
+    (while (re-search-forward "\"" end t)
+      (let ((open (match-beginning 0)))
+        (unless (nth 8 (save-excursion (syntax-ppss open)))
+          (goto-char open)
+          (orna--scan-string nil))))))
+(defvar orna--interpolation-start nil
+  "Start of the interpolation code `orna--match-interpolation' found.")
+(defvar orna--interpolation-end nil
+  "End of the interpolation code `orna--match-interpolation' found.")
+(defun orna--escaped-brace-p (open)
+  "Non-nil when the brace at OPEN belongs to an escape such as `\\u{7b}'."
+  (save-excursion
+    (goto-char open)
+    (when (eq (char-before) ?u) (backward-char))
+    (= 1 (% (- (skip-chars-backward "\\\\")) 2))))
+(defun orna--match-interpolation (limit)
+  "Match the opening brace of the next string interpolation before LIMIT."
+  (let (found)
+    (while (and (not found) (re-search-forward "{" limit t))
+      (let ((open (match-beginning 0)))
+        (when (and (nth 3 (save-excursion (syntax-ppss open)))
+                   (not (orna--escaped-brace-p open)))
+          (save-excursion
+            (goto-char (1+ open))
+            (orna--scan-interpolation)
+            (setq orna--interpolation-start (1+ open)
+                  orna--interpolation-end (point)))
+          (set-match-data (list open (1+ open)))
+          (setq found t))))
+    found))
+"#;
 
-fn vim_regex_literal(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if r#"\\.^$~[]*"#.contains(character) {
-                format!("\\{character}")
-            } else {
-                character.to_string()
-            }
-        })
-        .collect()
-}
-
-fn vim_alternation(values: &[&str]) -> String {
-    let mut sorted = values.to_vec();
-    sorted.sort_by_key(|item| std::cmp::Reverse(item.len()));
-    sorted
-        .into_iter()
-        .map(|item| {
-            item.chars()
-                .map(|c| {
-                    if r#"\\.^$~[]*""#.contains(c) {
-                        format!("\\{c}")
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\\|")
-}
-
+/// Emacs major mode with Eglot attachment. Faces are quoted symbols, and
+/// `font-lock-delimiter-face` falls back to `default` before Emacs 29.
 fn render_emacs() -> String {
-    let word_list = keywords()
+    let render = |re: &Re| re.render(Dialect::Emacs);
+    let keywords = render(&lexical::spellings(&lexical::keywords()));
+    let labels = render(&lexical::spellings(&lexical::label_keywords()));
+    let keyword_list = lexical::keywords()
         .iter()
         .map(|word| json_string(word))
         .collect::<Vec<_>>()
         .join(" ");
-    let operators = OPERATORS
-        .iter()
-        .map(|word| json_string(word))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let punctuation = PUNCTUATION
-        .iter()
-        .map(|word| json_string(word))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let number_pattern = emacs_regex(NUMBER_PATTERN);
-    let line_comment_pattern = emacs_regex(&format!("{}.*$", regex_escape(LINE_COMMENT_START)));
-    let block_comment_pattern = emacs_regex(&format!(
-        "{}(?:.|\\n)*?{}",
-        regex_escape(BLOCK_COMMENT_START),
-        regex_escape(BLOCK_COMMENT_END)
-    ));
-    let delimiter = STRING_DELIMITER.to_string();
-    let string_pattern = emacs_regex(&format!(
-        "{delimiter}(?:\\\\.|[^{delimiter}\\\\])*{delimiter}"
-    ));
-    let identifier_pattern = emacs_regex("[_[:alpha:]][_[:alnum:]]*");
-    let mut rules = Vec::new();
-    for item in TOKEN_PRESENTATIONS {
-        let face = emacs_face(item.class);
-        match item.class {
-            TokenClass::Keyword => {
-                rules.push(format!("(,(regexp-opt '({word_list}) 'words) . {face})"))
-            }
-            TokenClass::Identifier => {
-                rules.push(format!("({identifier_pattern} . {face})"));
-            }
-            TokenClass::Number => rules.push(format!("({number_pattern} . {face})")),
-            TokenClass::String => rules.push(format!("({string_pattern} . {face})")),
-            TokenClass::Comment => {
-                rules.push(format!("({line_comment_pattern} . {face})"));
-                rules.push(format!("({block_comment_pattern} . {face})"));
-            }
-            TokenClass::Operator => rules.push(format!("(,(regexp-opt '({operators})) . {face})")),
-            TokenClass::Punctuation => {
-                rules.push(format!("(,(regexp-opt '({punctuation})) . {face})"))
-            }
-        }
-    }
-    let rules = rules.join("\n    ");
+    let keyword = format!("(regexp-opt '({keyword_list}) 'words)");
+    // A reserved word after a single `.`, or labelling a record field or
+    // named argument, is a contextual name ("Contextual names and
+    // construction"); these rules run before the keyword rule.
+    let member = elisp_string(&format!(r"\(?:^\|[^.]\)\.\({keywords}\)\_>"));
+    let label = elisp_string(&format!(r"\_<\({labels}\)[[:blank:]]*:"));
+    let number = elisp_string(&format!(r"\_<{}\_>", render(&lexical::number())));
+    let identifier = elisp_string(&format!(r"\_<{}", render(&lexical::identifier())));
+    let operator = elisp_string(&render(&lexical::operators()));
+    let punctuation = elisp_string(&render(&lexical::punctuation()));
+    let nested_string = elisp_string(r#""\(?:\\.\|[^"\\]\)*""#);
+    let face = |class| emacs_face(class);
+    let top_level = [
+        format!("({member} 1 {})", face(TokenClass::Identifier)),
+        format!("({label} 1 {})", face(TokenClass::Identifier)),
+        format!("(,{keyword} . {})", face(TokenClass::Keyword)),
+        format!("({number} . {})", face(TokenClass::Number)),
+        format!("({identifier} . {})", face(TokenClass::Identifier)),
+        format!("({operator} . {})", face(TokenClass::Operator)),
+        format!("({punctuation} . {})", face(TokenClass::Punctuation)),
+    ];
+    // Inside an interpolation the string face is replaced token by token;
+    // later rules override earlier ones, and nested strings come last.
+    let interpolation = [
+        (identifier.clone(), 0, face(TokenClass::Identifier)),
+        (number.clone(), 0, face(TokenClass::Number)),
+        (format!(",{keyword}"), 0, face(TokenClass::Keyword)),
+        (member.clone(), 1, face(TokenClass::Identifier)),
+        (label.clone(), 1, face(TokenClass::Identifier)),
+        (operator.clone(), 0, face(TokenClass::Operator)),
+        (punctuation.clone(), 0, face(TokenClass::Punctuation)),
+        (nested_string, 0, face(TokenClass::String)),
+    ]
+    .into_iter()
+    .map(|(pattern, group, face)| {
+        format!(
+            "({pattern} orna--interpolation-end (goto-char orna--interpolation-start) ({group} {face} t))"
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("\n     ");
+    let rules = top_level.join("\n    ");
     let comment_start = json_string(&format!("{LINE_COMMENT_START} "));
-    let extension_pattern = emacs_regex(&format!(r"\.{}\'", SOURCE_EXTENSION));
+    let extension_pattern = elisp_string(&format!(r"\.{SOURCE_EXTENSION}\'"));
     format!(
         r#";;; orna-eglot.el --- Orna {LANGUAGE_VERSION} lexical highlighting -*- lexical-binding: t; -*-
-;; Generated from orna-syntax-v1.
+;; Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
 (require 'eglot)
 (defvar orna-eglot-server-command '("orna-lsp")
   "Command used by Eglot to start the Orna language server.")
-(defvar orna-font-lock-keywords
+{EMACS_SUPPORT}(defvar orna-font-lock-keywords
   `(
     {rules}
+    (orna--match-interpolation
+     (0 orna-punctuation-face t)
+     {interpolation})
   )
   "Lexical highlighting generated from the v1 lexer.")
 (define-derived-mode orna-mode prog-mode "Orna"
   "Major mode for Orna source files."
   (setq-local comment-start {comment_start})
   (setq-local comment-end "")
+  (setq-local syntax-propertize-function #'orna-syntax-propertize)
   (setq-local font-lock-defaults '(orna-font-lock-keywords nil nil)))
 (add-to-list 'auto-mode-alist '({extension_pattern} . orna-mode))
 (defun orna-setup-eglot ()
@@ -946,146 +1126,132 @@ fn render_emacs() -> String {
                (cons '(orna-mode) orna-eglot-server-command))
   (add-hook 'orna-mode-hook #'eglot-ensure))
 (provide 'orna-eglot)
-"#,
-        rules = rules,
-        comment_start = comment_start,
-        extension_pattern = extension_pattern
+"#
     )
 }
 
+/// The face form for one lexical class. Font-lock evaluates the form, so each
+/// face is a quoted symbol; punctuation names the variable that guards
+/// `font-lock-delimiter-face`.
 fn emacs_face(class: TokenClass) -> &'static str {
     match class {
-        TokenClass::Keyword => "font-lock-keyword-face",
-        TokenClass::Identifier => "font-lock-variable-name-face",
-        TokenClass::Number => "font-lock-constant-face",
-        TokenClass::String => "font-lock-string-face",
-        TokenClass::Comment => "font-lock-comment-face",
-        TokenClass::Operator => "font-lock-builtin-face",
-        TokenClass::Punctuation => "font-lock-delimiter-face",
+        TokenClass::Keyword => "'font-lock-keyword-face",
+        TokenClass::Identifier => "'font-lock-variable-name-face",
+        TokenClass::Number => "'font-lock-constant-face",
+        TokenClass::String => "'font-lock-string-face",
+        TokenClass::Comment => "'font-lock-comment-face",
+        TokenClass::Operator => "'font-lock-builtin-face",
+        TokenClass::Punctuation => "orna-punctuation-face",
     }
 }
 
-fn emacs_regex(pattern: &str) -> String {
-    let mut source = pattern.chars().peekable();
-    let mut regex = String::new();
-    let mut in_class = false;
-    while let Some(ch) = source.next() {
-        if ch == '\\' {
-            regex.push(ch);
-            if let Some(escaped) = source.next() {
-                regex.push(escaped);
-            }
-            continue;
+/// An Emacs Lisp string literal.
+fn elisp_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            out.push('\\');
         }
-        match ch {
-            '[' => {
-                in_class = true;
-                regex.push(ch);
-            }
-            ']' => {
-                in_class = false;
-                regex.push(ch);
-            }
-            '(' if !in_class => {
-                let mut lookahead = source.clone();
-                if lookahead.next() == Some('?') && lookahead.next() == Some(':') {
-                    source.next();
-                    source.next();
-                    regex.push_str("\\(?:");
-                } else {
-                    regex.push_str("\\(");
-                }
-            }
-            ')' if !in_class => regex.push_str("\\)"),
-            '|' | '?' | '+' if !in_class => {
-                regex.push('\\');
-                regex.push(ch);
-            }
-            '{' | '}' if !in_class => {
-                regex.push('\\');
-                regex.push(ch);
-            }
-            _ => regex.push(ch),
-        }
+        out.push(character);
     }
-    let mut literal = String::from("\"");
-    for ch in regex.chars() {
-        match ch {
-            '\\' => literal.push_str("\\\\"),
-            '"' => literal.push_str("\\\""),
-            _ => literal.push(ch),
-        }
-    }
-    literal.push('"');
-    literal
+    out.push('"');
+    out
 }
 
+/// Sublime Text syntax with real `push`/`pop` contexts. Regexes are written
+/// in single-backslash form inside YAML single quotes, where a backslash is
+/// literal.
 fn render_sublime() -> String {
-    let keyword_pattern = regex_alternation(&keywords());
-    let operator_pattern = regex_alternation(OPERATORS);
-    let punctuation_pattern = regex_alternation(PUNCTUATION);
-    let number_pattern = NUMBER_PATTERN;
-    let line_comment_match = yaml_string(&format!("{}.*$", regex_escape(LINE_COMMENT_START)));
-    let block_comment_start = yaml_string(&regex_escape(BLOCK_COMMENT_START));
-    let block_comment_end = yaml_string(&regex_escape(BLOCK_COMMENT_END));
-    let string_delimiter = yaml_string(&regex_escape(&STRING_DELIMITER.to_string()));
-    let comment_scope = yaml_string(presentation(TokenClass::Comment).textmate_scope);
-    let string_scope = yaml_string(presentation(TokenClass::String).textmate_scope);
-    let keyword_scope = yaml_string(presentation(TokenClass::Keyword).textmate_scope);
-    let number_scope = yaml_string(presentation(TokenClass::Number).textmate_scope);
-    let operator_scope = yaml_string(presentation(TokenClass::Operator).textmate_scope);
-    let punctuation_scope = yaml_string(presentation(TokenClass::Punctuation).textmate_scope);
-    let identifier_scope = yaml_string(presentation(TokenClass::Identifier).textmate_scope);
+    let rules = OnigurumaRules::new();
+    let scope = |class| yaml_string(presentation(class).textmate_scope);
     format!(
         r#"%YAML 1.2
 ---
+# Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
 name: Orna
 file_extensions: [{SOURCE_EXTENSION}]
-scope: source.orna
+scope: {SOURCE_SCOPE}
 contexts:
   main:
-    - match: {line_comment_match}
+    - include: comments
+    - include: strings
+    - include: tokens
+  comments:
+    - match: {line_comment}
       scope: {comment_scope}
-    - begin: {block_comment_start}
-      end: {block_comment_end}
-      scope: {comment_scope}
-    - begin: {string_delimiter}
-      end: {string_delimiter}
-      scope: {string_scope}
-      patterns:
-        - match: '\\\\(?:["\\\\nrt0]|u\\{{[0-9A-Fa-f]{{1,6}}\\}})'
-          scope: constant.character.escape.orna
-        - begin: '(?<!\\\\)\\{{'
-          end: '\\}}'
-          scope: meta.interpolation.orna
-          patterns:
-            - include: main
-    - match: '(?<![\\p{{L}}\\p{{N}}_])(?:{keyword_pattern})(?![\\p{{L}}\\p{{N}}_])'
-      scope: {keyword_scope}
-    - match: '{number_pattern}'
-      scope: {number_scope}
-    - match: '(?:{operator_pattern})'
-      scope: {operator_scope}
-    - match: '(?:{punctuation_pattern})'
+    - match: {block_start}
+      push: block_comment
+  block_comment:
+    - meta_scope: {comment_scope}
+    - match: {block_start}
+      push: block_comment
+    - match: {block_end}
+      pop: true
+  strings:
+    - match: {quote}
+      push: string
+  string:
+    - meta_scope: {string_scope}
+    - match: {quote}
+      pop: true
+    - match: {escape}
+      scope: 'constant.character.escape.orna'
+    - match: {open_brace}
       scope: {punctuation_scope}
-    - match: '[_\\p{{L}}][_\\p{{L}}\\p{{N}}]*'
+      push: interpolation
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: 'meta.interpolation.orna'
+    - match: {close_brace}
+      scope: {punctuation_scope}
+      pop: true
+    - include: expressions
+  braces:
+    - match: {close_brace}
+      scope: {punctuation_scope}
+      pop: true
+    - include: expressions
+  expressions:
+    - include: comments
+    - include: strings
+    - match: {open_brace}
+      scope: {punctuation_scope}
+      push: braces
+    - include: tokens
+  tokens:
+    - match: {contextual_name}
+      scope: {identifier_scope}
+    - match: {keyword}
+      scope: {keyword_scope}
+    - match: {number}
+      scope: {number_scope}
+    - match: {operator}
+      scope: {operator_scope}
+    - match: {punctuation}
+      scope: {punctuation_scope}
+    - match: {identifier}
       scope: {identifier_scope}
 "#,
-        line_comment_match = line_comment_match,
-        comment_scope = comment_scope,
-        block_comment_start = block_comment_start,
-        block_comment_end = block_comment_end,
-        string_delimiter = string_delimiter,
-        string_scope = string_scope,
-        keyword_pattern = keyword_pattern,
-        keyword_scope = keyword_scope,
-        number_pattern = number_pattern,
-        number_scope = number_scope,
-        operator_pattern = operator_pattern,
-        operator_scope = operator_scope,
-        punctuation_pattern = punctuation_pattern,
-        punctuation_scope = punctuation_scope,
-        identifier_scope = identifier_scope
+        line_comment = yaml_string(&rules.line_comment),
+        comment_scope = scope(TokenClass::Comment),
+        block_start = yaml_string(&rules.block_comment_start),
+        block_end = yaml_string(&rules.block_comment_end),
+        quote = yaml_string(&rules.quote),
+        string_scope = scope(TokenClass::String),
+        escape = yaml_string(&rules.escape),
+        open_brace = yaml_string(&rules.open_brace),
+        close_brace = yaml_string(&rules.close_brace),
+        punctuation_scope = scope(TokenClass::Punctuation),
+        contextual_name = yaml_string(&rules.contextual_name),
+        identifier_scope = scope(TokenClass::Identifier),
+        keyword = yaml_string(&rules.keyword),
+        keyword_scope = scope(TokenClass::Keyword),
+        number = yaml_string(&rules.number),
+        number_scope = scope(TokenClass::Number),
+        operator = yaml_string(&rules.operator),
+        operator_scope = scope(TokenClass::Operator),
+        punctuation = yaml_string(&rules.punctuation),
+        identifier = yaml_string(&rules.identifier),
     )
 }
 
