@@ -21,11 +21,14 @@ been published.
   parse qualified names without consuming multiplication or division operators.
 
 - `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
-  any freeze, with `E2300` and a request to migrate with `orna migrate copy`; it
-  writes nothing and the pending range stays. The loose and compact (Parquet)
-  row writers, their recovery paths and the CLI compact-journal recovery are
-  retired; format-1/2 commits keep their readers (ORNA-UPGRADE-003,
-  ORNA-ROW-013).
+  any freeze, with `E2300`; it writes nothing and the pending range stays. The
+  help says this build has no writer for format-1/2 snapshots and gives the
+  full `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`
+  command, noting that pending runtime changes are not carried into `DEST`.
+  Inside a prepared migration copy it says the format-3 candidate is prepared
+  but not activated instead. The loose and compact (Parquet) row writers, their
+  recovery paths and the CLI compact-journal recovery are retired; format-1/2
+  commits keep their readers (ORNA-UPGRADE-003, ORNA-ROW-013).
 
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
