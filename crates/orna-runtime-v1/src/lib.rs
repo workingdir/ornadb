@@ -2603,10 +2603,10 @@ pub struct RuntimeActivationContext {
     capture: CwdCapture,
     activation_time: SystemTime,
     table_object_ids: BTreeMap<String, TableObjectId>,
-    /// Committed rows at the published `HEAD` pin, keyed by table name and
-    /// stored under the oid keyspace. Activations read these as the base of
-    /// every table; the unpublished tail overrides them key by key.
-    committed_rows: Arc<RuntimeTableRows>,
+    /// Committed `HEAD` rows bound to the published pin they were read at.
+    /// `None` binds no committed base: the live `table_row` state is the whole
+    /// relation. The unpublished tail overrides the base key by key.
+    committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
 /// Reusable source-derived work for one captured table activation.
@@ -2680,8 +2680,55 @@ pub struct RunningTableRequestContinuation {
 /// state with rows from another.
 pub type RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
 
-/// The empty committed base of a validator that reads no committed rows.
-static EMPTY_COMMITTED_ROWS: RuntimeTableRows = BTreeMap::new();
+/// The published pin a committed base was read at: the mutation sequence of
+/// the newest published checkpoint, zero before any publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublishedPin {
+    mutation_sequence: i64,
+}
+
+impl PublishedPin {
+    /// Mutation sequence of the pinned checkpoint.
+    #[must_use]
+    pub fn mutation_sequence(&self) -> i64 {
+        self.mutation_sequence
+    }
+}
+
+/// Committed `HEAD` rows of declared relations, bound to the published pin they
+/// were read at. Every transaction that reads through the base verifies the pin
+/// still matches the published checkpoint and fails closed with
+/// [`RuntimeError::StaleCapture`] otherwise. Rows are keyed for direct lookup and
+/// shared by `Arc`, so a commit or validator never copies the relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedCommittedRows {
+    pin: PublishedPin,
+    tables: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl PinnedCommittedRows {
+    /// Binds `rows` to `pin`. A relation with a duplicate committed key is a
+    /// corrupt base and fails closed.
+    pub fn new(pin: PublishedPin, rows: RuntimeTableRows) -> Result<Self, RuntimeError> {
+        let mut tables = BTreeMap::new();
+        for (table, table_rows) in rows {
+            let mut keyed = BTreeMap::new();
+            for (key, value) in table_rows {
+                if keyed.insert(key, value).is_some() {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
+            tables.insert(table, keyed);
+        }
+        Ok(Self { pin, tables })
+    }
+
+    /// The published pin these rows were read at.
+    #[must_use]
+    pub fn pin(&self) -> PublishedPin {
+        self.pin
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeTableActivationSnapshot {
@@ -3158,10 +3205,11 @@ pub trait StreamTableCandidateValidator {
         BTreeMap::new()
     }
 
-    /// Committed `HEAD` rows the candidate relations are read beneath. Name-only
-    /// validators read no committed base.
-    fn committed_rows(&self) -> &RuntimeTableRows {
-        &EMPTY_COMMITTED_ROWS
+    /// Committed `HEAD` rows, pinned to the published checkpoint, that the
+    /// candidate relations are read beneath. Name-only validators read no
+    /// committed base.
+    fn committed_rows(&self) -> Option<&PinnedCommittedRows> {
+        None
     }
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
@@ -3182,10 +3230,11 @@ pub trait TableActivationCandidateValidator {
         BTreeMap::new()
     }
 
-    /// Committed `HEAD` rows the candidate relations are read beneath. Name-only
-    /// validators read no committed base.
-    fn committed_rows(&self) -> &RuntimeTableRows {
-        &EMPTY_COMMITTED_ROWS
+    /// Committed `HEAD` rows, pinned to the published checkpoint, that the
+    /// candidate relations are read beneath. Name-only validators read no
+    /// committed base.
+    fn committed_rows(&self) -> Option<&PinnedCommittedRows> {
+        None
     }
 
     /// Exact repository-issued CWD and schema generation used to decode and
@@ -6222,7 +6271,7 @@ impl RuntimeState {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
             table_object_ids: BTreeMap::new(),
-            committed_rows: Arc::new(BTreeMap::new()),
+            committed_rows: None,
         })
     }
 
@@ -6360,7 +6409,7 @@ impl RuntimeState {
             capture: run.snapshot,
             activation_time: observation_instant(run.started_ms)?,
             table_object_ids,
-            committed_rows: Arc::new(BTreeMap::new()),
+            committed_rows: None,
         };
         transaction
             .commit()
@@ -6375,8 +6424,17 @@ impl RuntimeState {
         })
     }
 
-    /// Captures one activation context and its declared committed relations
-    /// from the same durable read transaction.
+    /// Reads the published pin a committed base must be bound to. Read the pin
+    /// before the committed rows: a publication between the two reads fails the
+    /// activation closed with [`RuntimeError::StaleCapture`].
+    pub async fn published_pin(&self) -> Result<PublishedPin, RuntimeError> {
+        let mutation_sequence = published_mutation_sequence_tx(&self.connection).await?;
+        Ok(PublishedPin { mutation_sequence })
+    }
+
+    /// Captures one activation context and its table rows from the same durable
+    /// read transaction. No committed base is bound: the live `table_row` state
+    /// is the whole relation.
     pub async fn begin_table_activation(
         &self,
         tables: &[&str],
@@ -6385,7 +6443,7 @@ impl RuntimeState {
             .iter()
             .map(|table| validate_table_name(table).map(|()| (*table).to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
-        self.begin_table_activation_inner(&names, BTreeMap::new(), None, Arc::new(BTreeMap::new()))
+        self.begin_table_activation_inner(&names, BTreeMap::new(), None, None)
             .await
     }
 
@@ -6399,25 +6457,27 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             None,
-            Arc::new(BTreeMap::new()),
+            None,
         )
         .await
     }
 
     /// Captures an admitted activation whose declared relations are read over
-    /// `committed`: the published `HEAD` rows of each relation. The unpublished
-    /// tail overlays those rows, so a key the tail deleted or rewrote is never
-    /// returned from the committed base.
+    /// `committed`: the published `HEAD` rows, bound to the pin they were read at.
+    /// The pin is read before the rows, so a publication between the two reads
+    /// fails closed with `StaleCapture`. The unpublished tail overlays those rows,
+    /// so a key the tail deleted or rewrote is never returned from the committed
+    /// base.
     pub async fn begin_admitted_table_activation_over_committed(
         &self,
         tables: &[RuntimeTableIdentity],
-        committed: RuntimeTableRows,
+        committed: PinnedCommittedRows,
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
         self.begin_table_activation_inner(
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             None,
-            Arc::new(committed),
+            Some(Arc::new(committed)),
         )
         .await
     }
@@ -6440,7 +6500,7 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             Some(continuation.context().capture()),
-            Arc::new(BTreeMap::new()),
+            continuation.context().committed_rows.clone(),
         )
         .await
     }
@@ -6450,7 +6510,7 @@ impl RuntimeState {
         tables: &[String],
         table_object_ids: BTreeMap<String, TableObjectId>,
         expected_capture: Option<&CwdCapture>,
-        committed: Arc<RuntimeTableRows>,
+        committed: Option<Arc<PinnedCommittedRows>>,
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
         let transaction = self
             .connection
@@ -6465,7 +6525,7 @@ impl RuntimeState {
         }
         let base = CommittedTableBase::load_tx(
             &transaction,
-            &committed,
+            committed.as_deref(),
             tables
                 .iter()
                 .map(|table| (table.as_str(), table_object_ids.get(table).copied())),
@@ -6481,7 +6541,7 @@ impl RuntimeState {
                 capture,
                 activation_time: SystemTime::now(),
                 table_object_ids: table_object_ids.clone(),
-                committed_rows: committed,
+                committed_rows: committed.clone(),
             },
             table_rows,
             table_object_ids,
@@ -6545,7 +6605,8 @@ impl RuntimeState {
             });
         }
         self.require_owner(&tx, lease).await?;
-        let mut base = load_candidate_base_tx(&tx, &context.committed_rows, mutations, None).await?;
+        let mut base =
+            load_candidate_base_tx(&tx, context.committed_rows.as_deref(), mutations, None).await?;
         for mutation in mutations {
             apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
@@ -6674,7 +6735,7 @@ impl RuntimeState {
         }
         let mut base = load_candidate_base_tx(
             &transaction,
-            &context.committed_rows,
+            context.committed_rows.as_deref(),
             mutations,
             Some(&*validator),
         )
@@ -7102,7 +7163,7 @@ impl RuntimeState {
         }
         let mut base = match load_candidate_base_tx(
             &transaction,
-            &context.committed_rows,
+            context.committed_rows.as_deref(),
             mutations,
             validator.as_deref(),
         )
@@ -19032,51 +19093,52 @@ fn read_length_prefixed<'a>(
     Ok(bytes)
 }
 
-/// Committed `HEAD` rows of one storage table and the keys whose live
-/// `table_row` state now governs.
-#[derive(Default)]
-struct CommittedTable {
+/// Committed `HEAD` rows of one storage table, borrowed from the pinned base,
+/// and the keys whose live `table_row` state now governs.
+struct CommittedTable<'a> {
     /// Committed value of each key at the published pin.
-    rows: BTreeMap<Vec<u8>, Vec<u8>>,
+    rows: &'a BTreeMap<Vec<u8>, Vec<u8>>,
     /// Keys mutated after the pin, by the unpublished tail or by the batch in
     /// progress. The committed value of such a key no longer applies.
     overridden: BTreeSet<Vec<u8>>,
 }
 
-/// Committed base rows an activation or commit reads beneath the live
-/// `table_row` state, keyed by storage table.
+/// Committed `HEAD` rows an activation or commit reads beneath the live
+/// `table_row` state, keyed by storage table. `None` binds no committed base:
+/// the live `table_row` state is the whole relation.
 #[derive(Default)]
-struct CommittedTableBase {
-    tables: BTreeMap<String, CommittedTable>,
+struct CommittedTableBase<'a> {
+    tables: Option<BTreeMap<String, CommittedTable<'a>>>,
 }
 
-impl CommittedTableBase {
-    /// Loads the committed rows of each target that has any, overriding every
-    /// key mutated after the published pin.
-    async fn load_tx<'a>(
+/// The committed rows of a relation that has none at the pin.
+static NO_COMMITTED_ROWS: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+
+impl<'a> CommittedTableBase<'a> {
+    /// Binds the pinned committed rows of each target and overrides every key
+    /// mutated after the published pin. Fails closed with `StaleCapture` when the
+    /// pin no longer matches the published checkpoint.
+    async fn load_tx<'t>(
         connection: &Connection,
-        committed: &RuntimeTableRows,
-        targets: impl IntoIterator<Item = (&'a str, Option<TableObjectId>)>,
+        committed: Option<&'a PinnedCommittedRows>,
+        targets: impl IntoIterator<Item = (&'t str, Option<TableObjectId>)>,
     ) -> Result<Self, RuntimeError> {
-        let mut base = Self::default();
-        let mut published_sequence = None;
+        let Some(committed) = committed else {
+            return Ok(Self::default());
+        };
+        let sequence = published_mutation_sequence_tx(connection).await?;
+        if sequence != committed.pin.mutation_sequence {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture_tx(connection).await?),
+            });
+        }
+        let mut tables: BTreeMap<String, CommittedTable<'a>> = BTreeMap::new();
         for (table, object_id) in targets {
-            let Some(rows) = committed.get(table).filter(|rows| !rows.is_empty()) else {
-                continue;
-            };
             let storage = table_storage_key(table, object_id);
-            if base.tables.contains_key(&storage) {
+            if tables.contains_key(&storage) {
                 continue;
             }
-            let sequence = match published_sequence {
-                Some(sequence) => sequence,
-                None => *published_sequence
-                    .insert(published_mutation_sequence_tx(connection).await?),
-            };
-            let mut state = CommittedTable {
-                rows: rows.iter().cloned().collect(),
-                overridden: BTreeSet::new(),
-            };
+            let mut overridden = BTreeSet::new();
             let mut tail = connection
                 .query(
                     "SELECT DISTINCT row_key FROM runtime_table_history
@@ -19091,25 +19153,45 @@ impl CommittedTableBase {
                 .map_err(|_| RuntimeError::StorageUnavailable)?
             {
                 let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-                state.overridden.insert(key);
+                overridden.insert(key);
             }
-            base.tables.insert(storage, state);
+            let rows = committed.tables.get(table).unwrap_or(&NO_COMMITTED_ROWS);
+            tables.insert(storage, CommittedTable { rows, overridden });
         }
-        Ok(base)
+        Ok(Self {
+            tables: Some(tables),
+        })
     }
 
     /// Marks `key` of `storage` as governed by `table_row` from now on.
     fn override_key(&mut self, storage: &str, key: &[u8]) {
-        if let Some(table) = self.tables.get_mut(storage) {
+        if let Some(table) = self
+            .tables
+            .as_mut()
+            .and_then(|tables| tables.get_mut(storage))
+        {
             table.overridden.insert(key.to_vec());
+        }
+    }
+
+    /// Whether a live `table_row` key of `storage` belongs to the relation. With
+    /// no base bound every live row does. Beneath a base only keys the tail
+    /// overrode do, so a live row never shadows an untouched committed key.
+    fn includes_live_row(&self, storage: &str, key: &[u8]) -> bool {
+        match &self.tables {
+            None => true,
+            Some(tables) => tables
+                .get(storage)
+                .is_some_and(|table| table.overridden.contains(key)),
         }
     }
 
     /// Whether a committed row `key` of `storage` is untouched since the pin.
     fn committed_visible(&self, storage: &str, key: &[u8]) -> bool {
-        self.tables.get(storage).is_some_and(|table| {
-            table.rows.contains_key(key) && !table.overridden.contains(key)
-        })
+        self.tables
+            .as_ref()
+            .and_then(|tables| tables.get(storage))
+            .is_some_and(|table| table.rows.contains_key(key) && !table.overridden.contains(key))
     }
 }
 
@@ -19140,7 +19222,7 @@ async fn row_present_tx(
     connection: &Connection,
     storage: &str,
     key: &[u8],
-    base: &CommittedTableBase,
+    base: &CommittedTableBase<'_>,
 ) -> Result<bool, RuntimeError> {
     let mut rows = connection
         .query(
@@ -19165,7 +19247,7 @@ async fn row_present_tx(
 async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
-    base: &mut CommittedTableBase,
+    base: &mut CommittedTableBase<'_>,
 ) -> Result<(), RuntimeError> {
     apply_table_row_tx(connection, mutation, base).await?;
     let storage_table = mutation.storage_table();
@@ -19179,7 +19261,7 @@ async fn apply_table_mutation_tx(
 async fn apply_table_row_tx(
     connection: &Connection,
     mutation: &TableMutation,
-    base: &CommittedTableBase,
+    base: &CommittedTableBase<'_>,
 ) -> Result<(), RuntimeError> {
     let storage_table = mutation.storage_table();
     if let Some(new_key) = mutation.rekey_to() {
@@ -19278,12 +19360,12 @@ async fn apply_table_row_tx(
 
 /// Loads the committed base beneath one candidate: the relations its mutations
 /// address and the relations its validator reads.
-async fn load_candidate_base_tx(
+async fn load_candidate_base_tx<'a>(
     connection: &Connection,
-    committed: &RuntimeTableRows,
+    committed: Option<&'a PinnedCommittedRows>,
     mutations: &[TableMutation],
     validator: Option<&dyn TableActivationCandidateValidator>,
-) -> Result<CommittedTableBase, RuntimeError> {
+) -> Result<CommittedTableBase<'a>, RuntimeError> {
     let validator_ids = validator
         .map(|validator| validator.table_object_ids())
         .unwrap_or_default();
@@ -19310,7 +19392,7 @@ async fn table_rows_tx(
     connection: &Connection,
     tables: &[String],
     table_object_ids: &BTreeMap<String, TableObjectId>,
-    base: &CommittedTableBase,
+    base: &CommittedTableBase<'_>,
 ) -> Result<RuntimeTableRows, RuntimeError> {
     let mut result = BTreeMap::new();
     for table in tables {
@@ -19319,11 +19401,12 @@ async fn table_rows_tx(
             continue;
         }
         let storage = table_storage_key(table, table_object_ids.get(table).copied());
-        // The committed `HEAD` rows the unpublished tail has not touched are
-        // the base of the relation; the live `table_row` state overlays them.
+        // Beneath a committed base the relation is the committed `HEAD` rows no
+        // mutation touched plus the live rows the tail overrode. With no base the
+        // live `table_row` state is the whole relation.
         let mut rows_by_key: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-        if let Some(committed) = base.tables.get(&storage) {
-            for (key, value) in &committed.rows {
+        if let Some(committed) = base.tables.as_ref().and_then(|tables| tables.get(&storage)) {
+            for (key, value) in committed.rows {
                 if !committed.overridden.contains(key) {
                     rows_by_key.insert(key.clone(), value.clone());
                 }
@@ -19333,7 +19416,7 @@ async fn table_rows_tx(
             .query(
                 "SELECT row_key, row_value FROM table_row
                  WHERE table_id = ?1 ORDER BY row_key",
-                params![storage],
+                params![storage.clone()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -19344,7 +19427,9 @@ async fn table_rows_tx(
         {
             let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            rows_by_key.insert(key, value);
+            if base.includes_live_row(&storage, &key) {
+                rows_by_key.insert(key, value);
+            }
         }
         result.insert(table.clone(), rows_by_key.into_iter().collect());
     }
@@ -22558,7 +22643,7 @@ mod tests {
             capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
             activation_time: context.activation_time(),
             table_object_ids: BTreeMap::new(),
-            committed_rows: Arc::new(BTreeMap::new()),
+            committed_rows: None,
         };
         let result = state
             .commit_validated_catalogue_table_request_activation(
@@ -23465,10 +23550,7 @@ mod tests {
         let state = open_state(&repo).await;
         let object_id = TableObjectId::new(id(9));
         let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
-        let committed: RuntimeTableRows = BTreeMap::from([(
-            "books".to_owned(),
-            vec![(vec![1], vec![9]), (vec![2], vec![8])],
-        )]);
+        let committed = committed_books(&state, vec![(vec![1], vec![9]), (vec![2], vec![8])]).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
 
         let snapshot = state
@@ -23504,6 +23586,139 @@ mod tests {
         );
         assert_eq!(after.query_exact("books", &[1]).unwrap(), None);
         assert_eq!(after.query_exact("books", &[2]).unwrap(), Some(&[8][..]));
+    }
+
+    async fn committed_books(
+        state: &RuntimeState,
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> PinnedCommittedRows {
+        let pin = state.published_pin().await.unwrap();
+        PinnedCommittedRows::new(pin, BTreeMap::from([("books".to_owned(), rows)])).unwrap()
+    }
+
+    async fn books_snapshot_over(
+        state: &RuntimeState,
+        identity: &RuntimeTableIdentity,
+        committed: &PinnedCommittedRows,
+    ) -> RuntimeTableActivationSnapshot {
+        state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(identity),
+                committed.clone(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Mutations are checked against the committed base: inserting a committed
+    /// key again is a duplicate, a committed row the tail updates reads back
+    /// with the new value, a rekey moves a committed key, and a key the tail
+    /// deleted may be inserted again.
+    #[tokio::test]
+    async fn committed_base_enforces_key_identity_across_commits() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed = committed_books(&state, vec![(vec![1], vec![9]), (vec![2], vec![8])]).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        let duplicate = TableMutation::insert(id(5), "books", vec![1], vec![7])
+            .unwrap()
+            .with_table_object_id(object_id);
+        assert!(matches!(
+            state
+                .commit_table_activation(lease, snapshot.context(), &[duplicate], digest(6), &NoFault)
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        ));
+
+        let update = TableMutation::new(id(11), "books", vec![2], Some(vec![7]))
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[update], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![7])])
+        );
+
+        let rekey = TableMutation::rekey(id(12), "books", vec![1], vec![3], vec![5])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[rekey], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![7]), (vec![3], vec![5])])
+        );
+
+        let delete = TableMutation::new(id(13), "books", vec![2], None)
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[delete], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![3], vec![5])])
+        );
+
+        let reinsert = TableMutation::insert(id(14), "books", vec![2], vec![6])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[reinsert], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![6]), (vec![3], vec![5])])
+        );
+    }
+
+    /// A committed base read before a publication is stale once the publication
+    /// commits, so the activation fails closed instead of mixing pins.
+    #[tokio::test]
+    async fn committed_base_read_before_publication_fails_closed() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed = committed_books(&state, vec![(vec![1], vec![9])]).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        let insert = TableMutation::insert(id(5), "books", vec![2], vec![8])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[insert], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        let freeze = state.freeze(id(7), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+
+        let stale = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed,
+            )
+            .await;
+        assert!(matches!(stale, Err(RuntimeError::StaleCapture { .. })));
     }
 
     struct QuerySessionEffects<'session, 'snapshot> {

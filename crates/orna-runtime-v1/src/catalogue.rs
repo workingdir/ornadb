@@ -1766,7 +1766,7 @@ impl RuntimeState {
         encoded.push(catalogue_mutation);
         let mut base = crate::load_candidate_base_tx(
             &transaction,
-            &context.committed_rows,
+            context.committed_rows.as_deref(),
             mutations,
             None,
         )
