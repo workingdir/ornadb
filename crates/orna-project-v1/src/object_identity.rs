@@ -1,4 +1,5 @@
-//! Persisted source identities for table declarations and their fields.
+//! Persisted source identities for table declarations, their fields and the
+//! nominal types, variants and units that stored fields use.
 //!
 //! Reconciliation is an explicit authoring operation. Loading source never
 //! allocates identities, and retired identities are never reused.
@@ -13,11 +14,15 @@ use std::{
 use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, Repository, RepositoryError, Uuid};
 use orna_semantic_v1::{
-    Analysis, ModuleInput, SourceUnitIdentity, SourceUnitMetadata, SymbolKind, TableAdmission,
-    TableSchema, Type,
+    Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
+    TableSchema, Type, declared_type,
 };
-use orna_syntax_v1::{Declaration, Pattern, TableMember, parse_module};
-use orna_value_v1::{Raw, SchemaDescriptor, Value};
+use orna_syntax_v1::{
+    Declaration, EnumVariant, Expr, FieldInitializer, ImplMember, LiteralKind, Pattern, SyntaxTree,
+    TableMember, Token, TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex,
+    parse_module,
+};
+use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 
 /// Repository-relative committed location of the object identity inventory.
 pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
@@ -28,16 +33,29 @@ const MANIFEST_VERSION: u64 = 1;
 #[repr(u64)]
 pub enum ObjectKind {
     Table = 1,
+    /// A table column, including primary-key columns (`Table.column`).
     Field = 2,
     Unit = 3,
+    /// A nominal user type, refined nominal type or enum (`Type`).
+    Type = 4,
+    /// One enum variant (`Enum.variant`).
+    Variant = 5,
+    /// One field of a nominal record type (`Type.field`).
+    TypeField = 6,
+    /// One payload field of an enum variant (`Enum.variant.field`).
+    VariantField = 7,
 }
 
 impl ObjectKind {
     fn from_raw(raw: &Raw) -> Option<Self> {
-        match raw {
-            Raw::Int(value) if value.to_string() == "1" => Some(Self::Table),
-            Raw::Int(value) if value.to_string() == "2" => Some(Self::Field),
-            Raw::Int(value) if value.to_string() == "3" => Some(Self::Unit),
+        match raw_int(raw)? {
+            1 => Some(Self::Table),
+            2 => Some(Self::Field),
+            3 => Some(Self::Unit),
+            4 => Some(Self::Type),
+            5 => Some(Self::Variant),
+            6 => Some(Self::TypeField),
+            7 => Some(Self::VariantField),
             _ => None,
         }
     }
@@ -134,6 +152,9 @@ pub enum SourceTableSchemaError {
     MissingSchema,
     MissingAdmission,
     MissingIdentity,
+    /// A stored table reference names its database, which the caller did not
+    /// supply (29-formats.md type node 6).
+    MissingDatabaseIdentity,
     InvalidSourceSchema,
     UnsupportedType,
     InvalidDescriptor,
@@ -174,9 +195,16 @@ impl SourceTableSchemaArtifact {
 impl ObjectIdentityManifest {
     /// Derives a complete storage descriptor from one analyzed source table and
     /// this persisted identity inventory. No graph or row metadata is consulted.
+    ///
+    /// `modules` are the exact source units analysed into `analysis`; their
+    /// declarations supply computed selectors, nominal definitions and import
+    /// scopes. A stored table reference records the database that owns its
+    /// target, so a table storing one requires `database_id`.
     pub fn source_table_schema(
         &self,
+        modules: &[ModuleInput],
         analysis: &Analysis,
+        database_id: Option<[u8; 16]>,
         module_name: &str,
         source_path: &str,
         declaration_name: &str,
@@ -195,7 +223,7 @@ impl ObjectIdentityManifest {
                 return Err(SourceTableSchemaError::AmbiguousModule);
             }
         }
-        let (_, module) = selected.ok_or(SourceTableSchemaError::ModuleNotFound)?;
+        let (table_namespace, module) = selected.ok_or(SourceTableSchemaError::ModuleNotFound)?;
         let symbol = module
             .symbols
             .get(declaration_name)
@@ -252,15 +280,22 @@ impl ObjectIdentityManifest {
         if active_identities != expected_identities {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let descriptor = build_source_descriptor(
-            table_object_id,
-            &field_object_ids,
-            schema,
-            admission,
-            analysis,
-            module_name,
-            self,
-        )?;
+        let sources = parse_source_modules(modules)?;
+        if sources
+            .get(module_name)
+            .is_none_or(|source| source.module.logical_path != source_path)
+        {
+            return Err(SourceTableSchemaError::InvalidModulePath);
+        }
+        let descriptor = DescriptorBuilder::new(self, analysis, &sources, database_id)
+            .table_descriptor(
+                table_namespace,
+                declaration_name,
+                table_object_id,
+                &field_object_ids,
+                schema,
+                admission,
+            )?;
         Ok(SourceTableSchemaArtifact {
             module_name: module_name.to_owned(),
             source_path: source_path.to_owned(),
@@ -534,121 +569,996 @@ impl ObjectIdentityManifest {
         result
     }
 }
-fn build_source_descriptor(
-    table_id: [u8; 16],
-    field_ids: &BTreeMap<String, [u8; 16]>,
-    schema: &TableSchema,
-    admission: &TableAdmission,
-    analysis: &Analysis,
-    module_name: &str,
-    manifest: &ObjectIdentityManifest,
-) -> Result<SchemaDescriptor, SourceTableSchemaError> {
-    if !schema.conversions.is_empty()
-        || !admission.computed.is_empty()
-        || admission.private_required
-        || admission.keys.is_empty()
-        || field_ids.len() != schema.fields.len()
-        || admission
-            .required
-            .iter()
-            .any(|name| !schema.fields.contains_key(name))
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
+/// Implementation-owned digest domains for source expressions recorded by a
+/// closed storage descriptor: a computed selector's `[2, expression_digest]`
+/// and a refined type's `assertion_semantic_digests` (29-formats.md). The
+/// payload is the expression's lexical token stream, so whitespace and
+/// comments never change a schema fingerprint while every token does.
+const COMPUTED_SELECTOR_DIGEST_DOMAIN: &str = "ornadb.computed-selector.v1";
+const REFINEMENT_ASSERTION_DIGEST_DOMAIN: &str = "ornadb.refinement-assertion.v1";
+
+const RECORD_DEFINITION: u64 = 0;
+const ENUM_DEFINITION: u64 = 1;
+const REFINED_DEFINITION: u64 = 2;
+const UNIT_DEFINITION: u64 = 3;
+const CURRENCY_DEFINITION: u64 = 4;
+
+/// One parsed source unit, keyed by its namespace display name.
+struct SourceModule<'a> {
+    module: &'a ModuleInput,
+    tree: SyntaxTree,
+}
+
+fn parse_source_modules(
+    modules: &[ModuleInput],
+) -> Result<BTreeMap<String, SourceModule<'_>>, SourceTableSchemaError> {
+    let mut sources = BTreeMap::new();
+    for module in modules {
+        let namespace = module_namespace(&module.logical_path)
+            .ok_or(SourceTableSchemaError::InvalidModulePath)?;
+        let parsed = parse_module(&module.source);
+        if !parsed.is_ok() {
+            return Err(SourceTableSchemaError::InvalidAnalysis);
+        }
+        if sources
+            .insert(
+                namespace,
+                SourceModule {
+                    module,
+                    tree: parsed.value,
+                },
+            )
+            .is_some()
+        {
+            return Err(SourceTableSchemaError::AmbiguousModule);
+        }
     }
-    let mut source_units = BTreeMap::<SourceUnitIdentity, (SourceUnitMetadata, [u8; 16])>::new();
-    for ty in schema.fields.values() {
-        collect_source_units(ty, analysis, module_name, manifest, &mut source_units)?;
+    Ok(sources)
+}
+
+/// The definition body one nominal declaration contributes to key 4.
+enum NominalBody<'a> {
+    Record(&'a [TypeMember]),
+    Enum(&'a [EnumVariant]),
+    Refined(&'a TypeExpr, &'a [TypeMember]),
+}
+
+/// Builds one closed storage schema descriptor (29-formats.md and
+/// profiles/store-format-3.md §6) from checked semantics, parsed declarations
+/// and persisted identities. Every nominal, unit and currency definition that
+/// a type node reaches is emitted once under its ObjectId.
+struct DescriptorBuilder<'a> {
+    manifest: &'a ObjectIdentityManifest,
+    analysis: &'a Analysis,
+    sources: &'a BTreeMap<String, SourceModule<'a>>,
+    database_id: Option<[u8; 16]>,
+    definitions: BTreeMap<[u8; 16], (u64, Raw)>,
+    pending: BTreeSet<[u8; 16]>,
+    units: BTreeMap<SourceUnitIdentity, [u8; 16]>,
+    /// Transparent aliases and stored-reference keys being expanded; reaching
+    /// one again has no finite representation.
+    expanding: BTreeSet<String>,
+}
+
+impl<'a> DescriptorBuilder<'a> {
+    fn new(
+        manifest: &'a ObjectIdentityManifest,
+        analysis: &'a Analysis,
+        sources: &'a BTreeMap<String, SourceModule<'a>>,
+        database_id: Option<[u8; 16]>,
+    ) -> Self {
+        Self {
+            manifest,
+            analysis,
+            sources,
+            database_id,
+            definitions: BTreeMap::new(),
+            pending: BTreeSet::new(),
+            units: BTreeMap::new(),
+            expanding: BTreeSet::new(),
+        }
     }
-    let dimension_basis = source_units
-        .values()
-        .flat_map(|(unit, _)| unit.dimension_basis.keys().cloned())
-        .collect::<BTreeSet<_>>();
-    let mut unit_ids = BTreeMap::new();
-    let mut definitions = BTreeMap::new();
-    for (identity, (unit, id)) in &source_units {
-        let exponents = dimension_basis
-            .iter()
-            .map(|dimension| {
-                Raw::Int(BigInt::from(
-                    unit.dimension_basis
-                        .get(dimension)
-                        .copied()
-                        .unwrap_or_default(),
-                ))
-            })
-            .collect();
-        let body = Raw::Array(vec![
-            Raw::Array(exponents),
-            source_unit_integer(&unit.scale.numerator)?,
-            source_unit_integer(&unit.scale.denominator)?,
-            source_unit_integer(&unit.offset.numerator)?,
-            source_unit_integer(&unit.offset.denominator)?,
-            Raw::Bool(unit.affine),
-        ]);
-        definitions.insert(
-            *id,
-            Raw::Array(vec![uuid_raw(id), Raw::Int(3.into()), body]),
-        );
-        unit_ids.insert(identity.clone(), *id);
-    }
-    let mut ids = BTreeSet::from([table_id]);
-    if field_ids.values().any(|id| !ids.insert(*id)) {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-    let mut key_names = BTreeSet::new();
-    let mut key_ids = Vec::with_capacity(admission.keys.len());
-    for (name, key_type) in &admission.keys {
-        if !key_names.insert(name.as_str()) || schema.fields.get(name) != Some(key_type) {
+
+    fn table_descriptor(
+        mut self,
+        namespace: &Namespace,
+        declaration_name: &str,
+        table_id: [u8; 16],
+        field_ids: &BTreeMap<String, [u8; 16]>,
+        schema: &TableSchema,
+        admission: &TableAdmission,
+    ) -> Result<SchemaDescriptor, SourceTableSchemaError> {
+        if !schema.conversions.is_empty()
+            || admission.private_required
+            || admission.keys.is_empty()
+            || field_ids.len() != schema.fields.len()
+            || admission
+                .required
+                .iter()
+                .chain(&admission.computed)
+                .any(|name| !schema.fields.contains_key(name))
+            || admission
+                .computed
+                .iter()
+                .any(|name| admission.required.contains(name))
+        {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        key_ids.push(uuid_raw(
-            field_ids
+        let mut ids = BTreeSet::from([table_id]);
+        if field_ids.values().any(|id| !ids.insert(*id)) {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        let mut key_names = BTreeSet::new();
+        let mut key_ids = Vec::with_capacity(admission.keys.len());
+        for (name, key_type) in &admission.keys {
+            // A computed field is never a primary-key field (29-formats.md).
+            if !key_names.insert(name.as_str())
+                || schema.fields.get(name) != Some(key_type)
+                || admission.computed.contains(name)
+            {
+                return Err(SourceTableSchemaError::InvalidSourceSchema);
+            }
+            key_ids.push(uuid_raw(
+                field_ids
+                    .get(name)
+                    .ok_or(SourceTableSchemaError::MissingIdentity)?,
+            ));
+        }
+        if admission.automatic_key
+            && (admission.keys.len() != 1
+                || admission.keys[0].0 != "id"
+                || admission.keys[0].1 != Type::Int)
+        {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        let computed =
+            self.computed_selector_digests(namespace, declaration_name, &admission.computed)?;
+        let mut encoded_fields = Vec::with_capacity(schema.fields.len());
+        for (name, ty) in &schema.fields {
+            let id = field_ids
                 .get(name)
-                .ok_or(SourceTableSchemaError::MissingIdentity)?,
-        ));
+                .ok_or(SourceTableSchemaError::MissingIdentity)?;
+            // Required and defaulted fields are both stored (role 1): an
+            // insert-time default is code in the schema revision, never a
+            // `[1, value]` read fallback. A computed selector (role 2) stores
+            // no value and records its expression digest (ORNA-FIELD-001..011).
+            let (role, fallback) = if key_names.contains(name.as_str()) {
+                (0_u64, no_fallback())
+            } else if let Some(digest) = computed.get(name) {
+                (
+                    2,
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Bytes(digest.to_vec())]),
+                )
+            } else {
+                (1, no_fallback())
+            };
+            encoded_fields.push((
+                *id,
+                Raw::Array(vec![
+                    uuid_raw(id),
+                    Raw::Text(name.clone()),
+                    self.type_node(ty, namespace)?,
+                    Raw::Int(role.into()),
+                    fallback,
+                ]),
+            ));
+        }
+        let fields = sorted_by_id(encoded_fields);
+        let definitions = self.finish_definitions()?;
+        let raw = Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw(&table_id)),
+            (Raw::Int(2.into()), Raw::Array(key_ids)),
+            (Raw::Int(3.into()), fields),
+            (Raw::Int(4.into()), Raw::Array(definitions)),
+        ]);
+        SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
     }
-    if admission.automatic_key
-        && (admission.keys.len() != 1
-            || admission.keys[0].0 != "id"
-            || admission.keys[0].1 != Type::Int)
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-    let mut encoded_fields = Vec::with_capacity(schema.fields.len());
-    for (name, ty) in &schema.fields {
-        if !admission.required.contains(name) && !(admission.automatic_key && name == "id") {
+
+    /// Digests every computed selector of the table declaration, which must
+    /// declare exactly the computed fields that semantic analysis admitted.
+    fn computed_selector_digests(
+        &self,
+        namespace: &Namespace,
+        declaration_name: &str,
+        computed: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, [u8; 32]>, SourceTableSchemaError> {
+        let source = self.source(namespace)?;
+        let mut tables = source
+            .tree
+            .items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Table { name, members, .. } if name == declaration_name => {
+                    Some(members)
+                }
+                _ => None,
+            });
+        let (Some(members), None) = (tables.next(), tables.next()) else {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        };
+        let mut digests = BTreeMap::new();
+        for member in members {
+            if let TableMember::Field {
+                name,
+                initializer: Some(FieldInitializer::Computed(expression)),
+                ..
+            } = member
+            {
+                let digest = expression_digest(
+                    COMPUTED_SELECTOR_DIGEST_DOMAIN,
+                    &source.module.source,
+                    expression,
+                )?;
+                if digests.insert(name.clone(), digest).is_some() {
+                    return Err(SourceTableSchemaError::InvalidSourceSchema);
+                }
+            }
+        }
+        if !digests.keys().eq(computed.iter()) {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let id = field_ids
-            .get(name)
-            .ok_or(SourceTableSchemaError::MissingIdentity)?;
-        let role = u64::from(!key_names.contains(name.as_str()));
-        encoded_fields.push((
-            *id,
-            Raw::Array(vec![
-                uuid_raw(id),
-                Raw::Text(name.clone()),
-                source_type_node(ty, analysis, module_name, &unit_ids)?,
-                Raw::Int(role.into()),
-                Raw::Array(vec![Raw::Int(0.into())]),
-            ]),
-        ));
+        Ok(digests)
     }
-    encoded_fields.sort_by_key(|(id, _)| *id);
-    let raw = Raw::Map(vec![
-        (Raw::Int(0.into()), Raw::Int(1.into())),
-        (Raw::Int(1.into()), uuid_raw(&table_id)),
-        (Raw::Int(2.into()), Raw::Array(key_ids)),
-        (
-            Raw::Int(3.into()),
-            Raw::Array(encoded_fields.into_iter().map(|(_, field)| field).collect()),
-        ),
-        (
-            Raw::Int(4.into()),
-            Raw::Array(definitions.into_values().collect()),
-        ),
-    ]);
-    SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
+
+    /// Encodes one declared type, spelled in `namespace`, as a closed type node.
+    fn type_node(
+        &mut self,
+        ty: &Type,
+        namespace: &Namespace,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let primitive = match ty {
+            Type::Int => Some("Int"),
+            Type::Decimal => Some("Decimal"),
+            Type::Float => Some("Float"),
+            Type::Date => Some("Date"),
+            Type::Instant => Some("Instant"),
+            Type::Text => Some("Str"),
+            Type::Bool => Some("Bool"),
+            Type::Unit => Some("Unit"),
+            Type::Named(name) => match name.as_str() {
+                "Blob" | "std.BINARY_LARGE_OBJECT" => Some("Blob"),
+                "std.UUID" => Some("Uuid"),
+                "std.TIME" => Some("TimeOfDay"),
+                "std.DURATION" => Some("Duration"),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(name) = primitive {
+            return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
+        }
+        Ok(match ty {
+            Type::List(element) => Raw::Array(vec![
+                Raw::Int(1.into()),
+                self.type_node(element, namespace)?,
+            ]),
+            Type::Optional(element) => Raw::Array(vec![
+                Raw::Int(2.into()),
+                self.type_node(element, namespace)?,
+            ]),
+            Type::Tuple(elements) => Raw::Array(vec![
+                Raw::Int(3.into()),
+                Raw::Array(
+                    elements
+                        .iter()
+                        .map(|element| self.type_node(element, namespace))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            ]),
+            Type::Record(fields) => Raw::Array(vec![
+                Raw::Int(4.into()),
+                Raw::Array(
+                    fields
+                        .iter()
+                        .map(|(name, field)| {
+                            Ok(Raw::Array(vec![
+                                Raw::Text(name.clone()),
+                                self.type_node(field, namespace)?,
+                            ]))
+                        })
+                        .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
+                ),
+            ]),
+            Type::Range(endpoint) => Raw::Array(vec![
+                Raw::Int(9.into()),
+                self.type_node(endpoint, namespace)?,
+            ]),
+            Type::Applied { base, arguments } => match (base.as_str(), arguments.as_slice()) {
+                ("Float" | "Decimal", [Type::Named(unit)]) => Raw::Array(vec![
+                    Raw::Int(7.into()),
+                    Raw::Array(vec![Raw::Int(0.into()), Raw::Text(base.clone())]),
+                    uuid_raw(&self.unit(namespace, unit)?),
+                ]),
+                ("Money", [Type::Named(currency)]) => self.currency_node(namespace, currency)?,
+                _ => return Err(SourceTableSchemaError::UnsupportedType),
+            },
+            Type::Named(name) => self.named_node(namespace, name)?,
+            _ => return Err(SourceTableSchemaError::UnsupportedType),
+        })
+    }
+
+    /// Resolves a unit spelling exactly as semantic analysis does: a qualified
+    /// path names its declaring namespace; a bare name prefers the current
+    /// module, then the one source unit with that name.
+    fn unit(
+        &mut self,
+        namespace: &Namespace,
+        spelling: &str,
+    ) -> Result<[u8; 16], SourceTableSchemaError> {
+        let analysis = self.analysis;
+        let identity = match spelling.rsplit_once('.') {
+            Some((unit_namespace, name)) => SourceUnitIdentity {
+                namespace: Namespace(unit_namespace.split('.').map(str::to_owned).collect()),
+                name: name.to_owned(),
+            },
+            None => {
+                let local = SourceUnitIdentity {
+                    namespace: namespace.clone(),
+                    name: spelling.to_owned(),
+                };
+                if analysis.source_units.contains_key(&local) {
+                    local
+                } else {
+                    let mut candidates = analysis
+                        .source_units
+                        .keys()
+                        .filter(|identity| identity.name == spelling);
+                    match (candidates.next(), candidates.next()) {
+                        (Some(identity), None) => identity.clone(),
+                        _ => return Err(SourceTableSchemaError::UnsupportedType),
+                    }
+                }
+            }
+        };
+        if !analysis.source_units.contains_key(&identity) {
+            return Err(SourceTableSchemaError::UnsupportedType);
+        }
+        let id = *self
+            .manifest
+            .id(
+                ObjectKind::Unit,
+                &qualify(&identity.namespace.display(), &identity.name),
+            )
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
+        self.units.insert(identity, id);
+        Ok(id)
+    }
+
+    fn named_node(
+        &mut self,
+        namespace: &Namespace,
+        spelling: &str,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let (target, name) = self.resolve(namespace, spelling)?;
+        let symbol = self.symbol(&target, &name)?;
+        match symbol.kind {
+            SymbolKind::Table => self.reference_node(&target, &name, symbol),
+            SymbolKind::Type | SymbolKind::Enum => self.declared_type_node(&target, &name),
+            _ => Err(SourceTableSchemaError::UnsupportedType),
+        }
+    }
+
+    /// A table type used as a field is a stored reference: the owning
+    /// database, the table ObjectId and the target's complete key shape, never
+    /// an embedded row (ORNA-REF-001, ORNA-KEY-005).
+    fn reference_node(
+        &mut self,
+        namespace: &Namespace,
+        name: &str,
+        symbol: &'a Symbol,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let database_id = self
+            .database_id
+            .ok_or(SourceTableSchemaError::MissingDatabaseIdentity)?;
+        let qualified = qualify(&namespace.display(), name);
+        let table_id = *self
+            .manifest
+            .id(ObjectKind::Table, &qualified)
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
+        let keys = symbol
+            .table_schema
+            .as_ref()
+            .and_then(|schema| schema.admission.as_ref())
+            .map(|admission| &admission.keys)
+            .filter(|keys| !keys.is_empty())
+            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
+        if !self.expanding.insert(qualified.clone()) {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        let key_nodes = keys
+            .iter()
+            .map(|(_, key_type)| self.type_node(key_type, namespace))
+            .collect::<Result<Vec<_>, _>>();
+        self.expanding.remove(&qualified);
+        Ok(Raw::Array(vec![
+            Raw::Int(6.into()),
+            uuid_raw(&database_id),
+            uuid_raw(&table_id),
+            Raw::Array(key_nodes?),
+        ]))
+    }
+
+    fn declared_type_node(
+        &mut self,
+        namespace: &Namespace,
+        name: &str,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        match self.declaration(namespace, name)? {
+            // An uninstantiated generic declaration has no closed type node.
+            Declaration::Type { generics, .. } | Declaration::Enum { generics, .. }
+                if !generics.is_empty() =>
+            {
+                Err(SourceTableSchemaError::UnsupportedType)
+            }
+            Declaration::Type {
+                representation: TypeRepresentation::Alias { ty, refinements },
+                ..
+            } if refinements.is_empty() => {
+                // A transparent alias lowers to its target (ORNA-NOMINAL-001).
+                let qualified = qualify(&namespace.display(), name);
+                if !self.expanding.insert(qualified.clone()) {
+                    return Err(SourceTableSchemaError::InvalidSourceSchema);
+                }
+                let node = self.type_node(&declared_type(ty), namespace);
+                self.expanding.remove(&qualified);
+                node
+            }
+            Declaration::Type {
+                representation: TypeRepresentation::Alias { ty, refinements },
+                ..
+            } => self.nominal_node(namespace, name, NominalBody::Refined(ty, refinements)),
+            Declaration::Type {
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            } => self.nominal_node(namespace, name, NominalBody::Record(members)),
+            Declaration::Enum { variants, .. } => {
+                self.nominal_node(namespace, name, NominalBody::Enum(variants))
+            }
+            _ => Err(SourceTableSchemaError::UnsupportedType),
+        }
+    }
+
+    fn nominal_node(
+        &mut self,
+        namespace: &Namespace,
+        name: &str,
+        body: NominalBody<'a>,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let qualified = qualify(&namespace.display(), name);
+        let id = *self
+            .manifest
+            .id(ObjectKind::Type, &qualified)
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
+        let kind = match body {
+            NominalBody::Record(_) => RECORD_DEFINITION,
+            NominalBody::Enum(_) => ENUM_DEFINITION,
+            NominalBody::Refined(..) => REFINED_DEFINITION,
+        };
+        let node = Raw::Array(vec![Raw::Int(5.into()), uuid_raw(&id)]);
+        match self.definitions.get(&id) {
+            Some((existing, _)) if *existing == kind => return Ok(node),
+            Some(_) => return Err(SourceTableSchemaError::InvalidSourceSchema),
+            None => {}
+        }
+        // A recursive use while this definition is being built is a reference
+        // by ID; the descriptor validator checks finite constructibility.
+        if !self.pending.insert(id) {
+            return Ok(node);
+        }
+        let encoded = match body {
+            NominalBody::Record(members) => self.record_body(namespace, &qualified, members)?,
+            NominalBody::Enum(variants) => self.enum_body(namespace, &qualified, variants)?,
+            NominalBody::Refined(base, members) => self.refined_body(namespace, base, members)?,
+        };
+        self.pending.remove(&id);
+        let definition = Raw::Array(vec![uuid_raw(&id), Raw::Int(kind.into()), encoded]);
+        if self.definitions.insert(id, (kind, definition)).is_some() {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        Ok(node)
+    }
+
+    /// Every declared field, public or private, belongs to the stored
+    /// representation of a nominal record (29-formats.md definition kind 0).
+    fn record_body(
+        &mut self,
+        namespace: &Namespace,
+        owner: &str,
+        members: &'a [TypeMember],
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let mut fields = Vec::new();
+        for member in members {
+            let TypeMember::Field { name, ty, .. } = member else {
+                continue;
+            };
+            let id = *self
+                .manifest
+                .id(ObjectKind::TypeField, &format!("{owner}.{name}"))
+                .ok_or(SourceTableSchemaError::MissingIdentity)?;
+            let node = self.type_node(&declared_type(ty), namespace)?;
+            fields.push((id, member_descriptor(&id, name, node)));
+        }
+        Ok(sorted_by_id(fields))
+    }
+
+    /// Variants `[variant_id, name, payload_fields]` in variant-ID order
+    /// (29-formats.md definition kind 1).
+    fn enum_body(
+        &mut self,
+        namespace: &Namespace,
+        owner: &str,
+        variants: &'a [EnumVariant],
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let mut encoded = Vec::with_capacity(variants.len());
+        for variant in variants {
+            let qualified = format!("{owner}.{}", variant.name);
+            let id = *self
+                .manifest
+                .id(ObjectKind::Variant, &qualified)
+                .ok_or(SourceTableSchemaError::MissingIdentity)?;
+            let mut payload = Vec::with_capacity(variant.fields.len());
+            for field in &variant.fields {
+                let field_id = *self
+                    .manifest
+                    .id(
+                        ObjectKind::VariantField,
+                        &format!("{qualified}.{}", field.name),
+                    )
+                    .ok_or(SourceTableSchemaError::MissingIdentity)?;
+                let node = self.type_node(&declared_type(&field.ty), namespace)?;
+                payload.push((field_id, member_descriptor(&field_id, &field.name, node)));
+            }
+            encoded.push((
+                id,
+                Raw::Array(vec![
+                    uuid_raw(&id),
+                    Raw::Text(variant.name.clone()),
+                    sorted_by_id(payload),
+                ]),
+            ));
+        }
+        Ok(sorted_by_id(encoded))
+    }
+
+    /// A refined nominal type is its base representation plus the digests of
+    /// its declaration assertions in source order (ORNA-NOMINAL-003,
+    /// ORNA-REFINE-001).
+    fn refined_body(
+        &mut self,
+        namespace: &Namespace,
+        base: &TypeExpr,
+        members: &'a [TypeMember],
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let source = self.source(namespace)?;
+        let base = self.type_node(&declared_type(base), namespace)?;
+        let digests = members
+            .iter()
+            .filter_map(|member| match member {
+                TypeMember::Assertion { value, .. } => Some(value),
+                _ => None,
+            })
+            .map(|value| {
+                expression_digest(
+                    REFINEMENT_ASSERTION_DIGEST_DOMAIN,
+                    &source.module.source,
+                    value,
+                )
+                .map(|digest| Raw::Bytes(digest.to_vec()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Raw::Array(vec![base, Raw::Array(digests)]))
+    }
+
+    /// `Money<C>` names a nominal type with one nested `Currency`
+    /// implementation whose static code and minor digits are literals
+    /// (ORNA-MONEY-004); its definition is currency kind 4.
+    fn currency_node(
+        &mut self,
+        namespace: &Namespace,
+        spelling: &str,
+    ) -> Result<Raw, SourceTableSchemaError> {
+        let (target, name) = self.resolve(namespace, spelling)?;
+        if self.symbol(&target, &name)?.kind != SymbolKind::Type {
+            return Err(SourceTableSchemaError::UnsupportedType);
+        }
+        let Declaration::Type {
+            generics,
+            representation: TypeRepresentation::Nominal { members },
+            ..
+        } = self.declaration(&target, &name)?
+        else {
+            return Err(SourceTableSchemaError::UnsupportedType);
+        };
+        if !generics.is_empty() {
+            return Err(SourceTableSchemaError::UnsupportedType);
+        }
+        let mut implementations = members.iter().filter_map(|member| match member {
+            TypeMember::Implementation { implementation, .. }
+                if matches!(
+                    &implementation.protocol,
+                    TypeExpr::Name { path, arguments, .. }
+                        if path.as_slice() == ["Currency"] && arguments.is_empty()
+                ) =>
+            {
+                Some(implementation.members.as_slice())
+            }
+            _ => None,
+        });
+        let (Some(statics), None) = (implementations.next(), implementations.next()) else {
+            return Err(SourceTableSchemaError::UnsupportedType);
+        };
+        let code = currency_code(currency_static(statics, "code")?)?;
+        let minor_digits = currency_minor_digits(currency_static(statics, "minor_digits")?)?;
+        let id = *self
+            .manifest
+            .id(ObjectKind::Type, &qualify(&target.display(), &name))
+            .ok_or(SourceTableSchemaError::MissingIdentity)?;
+        let definition = Raw::Array(vec![
+            uuid_raw(&id),
+            Raw::Int(CURRENCY_DEFINITION.into()),
+            Raw::Array(vec![Raw::Text(code), Raw::Int(minor_digits)]),
+        ]);
+        if self.pending.contains(&id)
+            || self
+                .definitions
+                .get(&id)
+                .is_some_and(|(_, existing)| existing != &definition)
+        {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        self.definitions
+            .insert(id, (CURRENCY_DEFINITION, definition));
+        Ok(Raw::Array(vec![Raw::Int(8.into()), uuid_raw(&id)]))
+    }
+
+    /// Resolves a declared spelling in `namespace` to its defining module and
+    /// declaration through the module's own declarations and imports
+    /// (ORNA-IMPORT-001..005). A qualified spelling is either the canonical
+    /// module-qualified identity semantic analysis gives a nominal
+    /// declaration (`shop.Price`), or starts at an imported namespace binding
+    /// and names a public declaration. Analysis already rejected ambiguity,
+    /// so any remaining doubt fails instead of choosing.
+    fn resolve(
+        &self,
+        namespace: &Namespace,
+        spelling: &str,
+    ) -> Result<(Namespace, String), SourceTableSchemaError> {
+        let analysis = self.analysis;
+        let declares = |module: &Namespace, name: &str| {
+            analysis
+                .modules
+                .get(module)
+                .is_some_and(|header| header.symbols.contains_key(name))
+        };
+        if let Some((binding, member)) = spelling.split_once('.') {
+            if let Some((qualifier, name)) = spelling.rsplit_once('.') {
+                let target = Namespace(qualifier.split('.').map(str::to_owned).collect());
+                if analysis
+                    .modules
+                    .get(&target)
+                    .and_then(|header| header.symbols.get(name))
+                    .is_some_and(|symbol| symbol.ty == Type::Named(spelling.to_owned()))
+                {
+                    return Ok((target, name.to_owned()));
+                }
+            }
+            let mut target = self.module_binding(namespace, binding)?;
+            let name = match member.rsplit_once('.') {
+                Some((nested, name)) => {
+                    target.0.extend(nested.split('.').map(str::to_owned));
+                    name
+                }
+                None => member,
+            };
+            return if analysis
+                .modules
+                .get(&target)
+                .is_some_and(|header| header.exports.contains_key(name))
+            {
+                Ok((target, name.to_owned()))
+            } else {
+                Err(SourceTableSchemaError::UnsupportedType)
+            };
+        }
+        if declares(namespace, spelling) {
+            return Ok((namespace.clone(), spelling.to_owned()));
+        }
+        let mut explicit = BTreeSet::new();
+        let mut glob = BTreeSet::new();
+        for (target, tail) in self.imports(namespace) {
+            let Some(header) = analysis.modules.get(&target) else {
+                continue;
+            };
+            if !header.exports.contains_key(spelling) {
+                continue;
+            }
+            match tail {
+                UseTail::Names(names) if names.iter().any(|import| import.name == spelling) => {
+                    explicit.insert(target);
+                }
+                UseTail::Alias { name, .. }
+                    if name == "_" && header.prelude_exports.contains(spelling) =>
+                {
+                    explicit.insert(target);
+                }
+                UseTail::Glob { .. } => {
+                    glob.insert(target);
+                }
+                _ => {}
+            }
+        }
+        let mut candidates = if explicit.is_empty() { glob } else { explicit }.into_iter();
+        match (candidates.next(), candidates.next()) {
+            (Some(target), None) => Ok((target, spelling.to_owned())),
+            (Some(_), Some(_)) => Err(SourceTableSchemaError::InvalidSourceSchema),
+            (None, _) => Err(SourceTableSchemaError::UnsupportedType),
+        }
+    }
+
+    /// The namespace bound to `binding` by `use a.b;` or `use a.b as x;`.
+    fn module_binding(
+        &self,
+        namespace: &Namespace,
+        binding: &str,
+    ) -> Result<Namespace, SourceTableSchemaError> {
+        let mut targets = self
+            .imports(namespace)
+            .into_iter()
+            .filter_map(|(target, tail)| {
+                let bound = match tail {
+                    UseTail::None => target.0.last().is_some_and(|last| last == binding),
+                    UseTail::Alias { name, .. } => name != "_" && name == binding,
+                    UseTail::Glob { .. } | UseTail::Names(_) => false,
+                };
+                bound.then_some(target)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter();
+        match (targets.next(), targets.next()) {
+            (Some(target), None) => Ok(target),
+            (Some(_), Some(_)) => Err(SourceTableSchemaError::InvalidSourceSchema),
+            (None, _) => Err(SourceTableSchemaError::UnsupportedType),
+        }
+    }
+
+    fn imports(&self, namespace: &Namespace) -> Vec<(Namespace, &'a UseTail)> {
+        let sources = self.sources;
+        sources
+            .get(&namespace.display())
+            .map_or_else(Vec::new, |source| {
+                source
+                    .tree
+                    .items
+                    .iter()
+                    .filter_map(|item| match &item.declaration {
+                        Declaration::Use { path, tail } => Some((
+                            Namespace(path.iter().map(|segment| segment.name.clone()).collect()),
+                            tail,
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            })
+    }
+
+    fn declaration(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+    ) -> Result<&'a Declaration, SourceTableSchemaError> {
+        let source = self.source(namespace)?;
+        let mut matches = source
+            .tree
+            .items
+            .iter()
+            .map(|item| &item.declaration)
+            .filter(|declaration| {
+                matches!(
+                    declaration,
+                    Declaration::Type { name: candidate, .. }
+                        | Declaration::Enum { name: candidate, .. }
+                        if candidate == name
+                )
+            });
+        match (matches.next(), matches.next()) {
+            (Some(declaration), None) => Ok(declaration),
+            _ => Err(SourceTableSchemaError::InvalidSourceSchema),
+        }
+    }
+
+    fn source(
+        &self,
+        namespace: &Namespace,
+    ) -> Result<&'a SourceModule<'a>, SourceTableSchemaError> {
+        let sources = self.sources;
+        sources
+            .get(&namespace.display())
+            .ok_or(SourceTableSchemaError::ModuleNotFound)
+    }
+
+    fn symbol(
+        &self,
+        namespace: &Namespace,
+        name: &str,
+    ) -> Result<&'a Symbol, SourceTableSchemaError> {
+        let analysis = self.analysis;
+        analysis
+            .modules
+            .get(namespace)
+            .and_then(|module| module.symbols.get(name))
+            .ok_or(SourceTableSchemaError::UnsupportedType)
+    }
+
+    /// Emits unit definitions over the dimension basis shared by every unit
+    /// this descriptor reached, then every definition in type-ID order.
+    fn finish_definitions(mut self) -> Result<Vec<Raw>, SourceTableSchemaError> {
+        if !self.pending.is_empty() {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        let analysis = self.analysis;
+        let units = self
+            .units
+            .iter()
+            .map(|(identity, id)| {
+                analysis
+                    .source_units
+                    .get(identity)
+                    .map(|unit| (unit, *id))
+                    .ok_or(SourceTableSchemaError::InvalidSourceSchema)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let dimension_basis = units
+            .iter()
+            .flat_map(|(unit, _)| unit.dimension_basis.keys())
+            .collect::<BTreeSet<_>>();
+        for (unit, id) in units {
+            let exponents = dimension_basis
+                .iter()
+                .map(|dimension| {
+                    Raw::Int(BigInt::from(
+                        unit.dimension_basis
+                            .get(*dimension)
+                            .copied()
+                            .unwrap_or_default(),
+                    ))
+                })
+                .collect();
+            let body = Raw::Array(vec![
+                Raw::Array(exponents),
+                source_unit_integer(&unit.scale.numerator)?,
+                source_unit_integer(&unit.scale.denominator)?,
+                source_unit_integer(&unit.offset.numerator)?,
+                source_unit_integer(&unit.offset.denominator)?,
+                Raw::Bool(unit.affine),
+            ]);
+            let definition =
+                Raw::Array(vec![uuid_raw(&id), Raw::Int(UNIT_DEFINITION.into()), body]);
+            if self
+                .definitions
+                .insert(id, (UNIT_DEFINITION, definition))
+                .is_some()
+            {
+                return Err(SourceTableSchemaError::InvalidSourceSchema);
+            }
+        }
+        Ok(self
+            .definitions
+            .into_values()
+            .map(|(_, definition)| definition)
+            .collect())
+    }
+}
+
+/// Digests one source expression's lexical token stream under `domain`.
+fn expression_digest(
+    domain: &str,
+    source: &str,
+    expression: &Expr,
+) -> Result<[u8; 32], SourceTableSchemaError> {
+    let span = expression.span();
+    let tokens = source
+        .get(span.start..span.end)
+        .and_then(|text| lex(text).ok())
+        .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
+    let payload = Raw::Array(tokens.iter().filter_map(token_raw).collect());
+    domain_digest(domain, &payload).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
+}
+
+fn token_raw(token: &Token) -> Option<Raw> {
+    let (class, spelling) = match &token.kind {
+        TokenKind::Identifier { normalized } => ("identifier", normalized.as_str()),
+        TokenKind::Keyword(keyword) => ("keyword", keyword.spelling()),
+        TokenKind::Integer => ("integer", token.text.as_str()),
+        TokenKind::Decimal => ("decimal", token.text.as_str()),
+        TokenKind::Float => ("float", token.text.as_str()),
+        TokenKind::Date => ("date", token.text.as_str()),
+        TokenKind::Instant => ("instant", token.text.as_str()),
+        TokenKind::String => ("string", token.text.as_str()),
+        TokenKind::StringStart => ("string-start", token.text.as_str()),
+        TokenKind::StringText => ("string-text", token.text.as_str()),
+        TokenKind::InterpolationStart => ("interpolation-start", token.text.as_str()),
+        TokenKind::InterpolationEnd => ("interpolation-end", token.text.as_str()),
+        TokenKind::StringEnd => ("string-end", token.text.as_str()),
+        TokenKind::ReplBinding => ("repl-binding", token.text.as_str()),
+        TokenKind::Punct(punctuation) => ("punctuation", *punctuation),
+        TokenKind::Eof => return None,
+    };
+    Some(Raw::Array(vec![
+        Raw::Text(class.into()),
+        Raw::Text(spelling.into()),
+    ]))
+}
+
+fn currency_static<'e>(
+    members: &'e [ImplMember],
+    name: &str,
+) -> Result<&'e Expr, SourceTableSchemaError> {
+    let mut values = members.iter().filter_map(|member| match member {
+        ImplMember::Static {
+            name: candidate,
+            value,
+            ..
+        } if candidate == name => Some(value),
+        _ => None,
+    });
+    match (values.next(), values.next()) {
+        (Some(value), None) => Ok(value),
+        _ => Err(SourceTableSchemaError::UnsupportedType),
+    }
+}
+
+/// The descriptor never evaluates source, so a currency code must be an
+/// escape-free string literal.
+fn currency_code(value: &Expr) -> Result<String, SourceTableSchemaError> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::String,
+        ..
+    } = value
+    else {
+        return Err(SourceTableSchemaError::UnsupportedType);
+    };
+    text.strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
+        .filter(|code| !code.contains(['\\', '"']))
+        .map(str::to_owned)
+        .ok_or(SourceTableSchemaError::UnsupportedType)
+}
+
+fn currency_minor_digits(value: &Expr) -> Result<BigInt, SourceTableSchemaError> {
+    let Expr::Literal {
+        text,
+        kind: LiteralKind::Integer,
+        ..
+    } = value
+    else {
+        return Err(SourceTableSchemaError::UnsupportedType);
+    };
+    let digits = text.replace('_', "");
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SourceTableSchemaError::UnsupportedType);
+    }
+    BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(SourceTableSchemaError::UnsupportedType)
+}
+
+fn member_descriptor(id: &[u8; 16], name: &str, type_node: Raw) -> Raw {
+    Raw::Array(vec![
+        uuid_raw(id),
+        Raw::Text(name.to_owned()),
+        type_node,
+        Raw::Int(1.into()),
+        no_fallback(),
+    ])
+}
+
+fn no_fallback() -> Raw {
+    Raw::Array(vec![Raw::Int(0.into())])
+}
+
+fn sorted_by_id(mut entries: Vec<([u8; 16], Raw)>) -> Raw {
+    entries.sort_by_key(|(id, _)| *id);
+    Raw::Array(entries.into_iter().map(|(_, entry)| entry).collect())
 }
 
 fn source_unit_integer(value: &str) -> Result<Raw, SourceTableSchemaError> {
@@ -659,148 +1569,6 @@ fn source_unit_integer(value: &str) -> Result<Raw, SourceTableSchemaError> {
 
 fn uuid_raw(id: &[u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
-}
-
-fn source_unit_metadata<'a>(
-    analysis: &'a Analysis,
-    module_name: &str,
-    name: &str,
-) -> Result<&'a SourceUnitMetadata, SourceTableSchemaError> {
-    let (namespace, unit_name) = name.rsplit_once('.').unwrap_or((module_name, name));
-    let mut matches = analysis.source_units.values().filter(|unit| {
-        unit.identity.namespace.display() == namespace && unit.identity.name == unit_name
-    });
-    let unit = matches
-        .next()
-        .ok_or(SourceTableSchemaError::UnsupportedType)?;
-    if matches.next().is_some() || analysis.source_units.get(&unit.identity) != Some(unit) {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-    Ok(unit)
-}
-
-fn collect_source_units(
-    ty: &Type,
-    analysis: &Analysis,
-    module_name: &str,
-    manifest: &ObjectIdentityManifest,
-    output: &mut BTreeMap<SourceUnitIdentity, (SourceUnitMetadata, [u8; 16])>,
-) -> Result<(), SourceTableSchemaError> {
-    match ty {
-        Type::Applied { base, arguments }
-            if matches!(base.as_str(), "Float" | "Decimal") && arguments.len() == 1 =>
-        {
-            let Type::Named(name) = &arguments[0] else {
-                return Err(SourceTableSchemaError::UnsupportedType);
-            };
-            let unit = source_unit_metadata(analysis, module_name, name)?;
-            let qualified_name = qualify(&unit.identity.namespace.display(), &unit.identity.name);
-            let id = *manifest
-                .id(ObjectKind::Unit, &qualified_name)
-                .ok_or(SourceTableSchemaError::MissingIdentity)?;
-            output.insert(unit.identity.clone(), (unit.clone(), id));
-            Ok(())
-        }
-        Type::List(element) | Type::Optional(element) => {
-            collect_source_units(element, analysis, module_name, manifest, output)
-        }
-        Type::Tuple(elements) => {
-            for element in elements {
-                collect_source_units(element, analysis, module_name, manifest, output)?;
-            }
-            Ok(())
-        }
-        Type::Record(fields) => {
-            for field in fields.values() {
-                collect_source_units(field, analysis, module_name, manifest, output)?;
-            }
-            Ok(())
-        }
-        Type::Applied { .. } => Err(SourceTableSchemaError::UnsupportedType),
-        _ => Ok(()),
-    }
-}
-
-fn source_type_node(
-    ty: &Type,
-    analysis: &Analysis,
-    module_name: &str,
-    unit_ids: &BTreeMap<SourceUnitIdentity, [u8; 16]>,
-) -> Result<Raw, SourceTableSchemaError> {
-    let primitive = match ty {
-        Type::Int => Some("Int"),
-        Type::Decimal => Some("Decimal"),
-        Type::Float => Some("Float"),
-        Type::Date => Some("Date"),
-        Type::Instant => Some("Instant"),
-        Type::Text => Some("Str"),
-        Type::Bool => Some("Bool"),
-        Type::Unit => Some("Unit"),
-        _ => None,
-    };
-    if let Some(name) = primitive {
-        return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
-    }
-    match ty {
-        Type::List(element) => Ok(Raw::Array(vec![
-            Raw::Int(1.into()),
-            source_type_node(element, analysis, module_name, unit_ids)?,
-        ])),
-        Type::Optional(element) => Ok(Raw::Array(vec![
-            Raw::Int(2.into()),
-            source_type_node(element, analysis, module_name, unit_ids)?,
-        ])),
-        Type::Tuple(elements) => Ok(Raw::Array(vec![
-            Raw::Int(3.into()),
-            Raw::Array(
-                elements
-                    .iter()
-                    .map(|element| source_type_node(element, analysis, module_name, unit_ids))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ])),
-        Type::Record(fields) => Ok(Raw::Array(vec![
-            Raw::Int(4.into()),
-            Raw::Array(
-                fields
-                    .iter()
-                    .map(|(name, ty)| {
-                        Ok(Raw::Array(vec![
-                            Raw::Text(name.clone()),
-                            source_type_node(ty, analysis, module_name, unit_ids)?,
-                        ]))
-                    })
-                    .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
-            ),
-        ])),
-        Type::Applied { base, arguments }
-            if matches!(base.as_str(), "Float" | "Decimal") && arguments.len() == 1 =>
-        {
-            let Type::Named(name) = &arguments[0] else {
-                return Err(SourceTableSchemaError::UnsupportedType);
-            };
-            let unit = source_unit_metadata(analysis, module_name, name)?;
-            let unit_id = unit_ids
-                .get(&unit.identity)
-                .ok_or(SourceTableSchemaError::MissingIdentity)?;
-            Ok(Raw::Array(vec![
-                Raw::Int(7.into()),
-                Raw::Array(vec![Raw::Int(0.into()), Raw::Text(base.clone())]),
-                uuid_raw(unit_id),
-            ]))
-        }
-        Type::Named(name) => {
-            let name = match name.as_str() {
-                "Blob" | "std.BINARY_LARGE_OBJECT" => "Blob",
-                "std.UUID" => "Uuid",
-                "std.TIME" => "TimeOfDay",
-                "std.DURATION" => "Duration",
-                _ => return Err(SourceTableSchemaError::UnsupportedType),
-            };
-            Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]))
-        }
-        _ => Err(SourceTableSchemaError::UnsupportedType),
-    }
 }
 
 fn temporary_path(parent: &Path, manifest: &Path) -> PathBuf {
@@ -843,28 +1611,47 @@ fn apply_explicit_renames(
         }
     }
 
-    let explicit_field_targets = renames
-        .iter()
-        .filter(|rename| rename.kind == ObjectKind::Field)
-        .map(|rename| rename.new_qualified_name.as_str())
-        .collect::<BTreeSet<_>>();
-    for rename in renames
-        .iter()
-        .filter(|rename| rename.kind == ObjectKind::Table)
-    {
+    // An explicitly renamed owner carries its member identities with it unless
+    // a member has its own explicit rename (ORNA-OBJECT-003). `nesting` is the
+    // number of dots a member name has below its owner.
+    for rename in renames {
+        let members: &[(ObjectKind, usize)] = match rename.kind {
+            ObjectKind::Table => &[(ObjectKind::Field, 0)],
+            ObjectKind::Type => &[
+                (ObjectKind::TypeField, 0),
+                (ObjectKind::Variant, 0),
+                (ObjectKind::VariantField, 1),
+            ],
+            ObjectKind::Variant => &[(ObjectKind::VariantField, 0)],
+            ObjectKind::Field
+            | ObjectKind::Unit
+            | ObjectKind::TypeField
+            | ObjectKind::VariantField => &[],
+        };
         let old_prefix = format!("{}.", rename.old_qualified_name);
         let new_prefix = format!("{}.", rename.new_qualified_name);
-        for record in records.iter_mut().filter(|record| {
-            !record.retired
-                && record.kind == ObjectKind::Field
-                && record.qualified_name.starts_with(&old_prefix)
-        }) {
-            let target = format!("{new_prefix}{}", &record.qualified_name[old_prefix.len()..]);
-            if explicit_field_targets.contains(target.as_str()) {
-                continue;
-            }
-            if active.contains(&(ObjectKind::Field, target.clone())) {
-                record.qualified_name = target;
+        for &(kind, nesting) in members {
+            let explicit_targets = renames
+                .iter()
+                .filter(|member| member.kind == kind)
+                .map(|member| member.new_qualified_name.as_str())
+                .collect::<BTreeSet<_>>();
+            for record in records
+                .iter_mut()
+                .filter(|record| !record.retired && record.kind == kind)
+            {
+                let Some(member) = record.qualified_name.strip_prefix(&old_prefix) else {
+                    continue;
+                };
+                if member.matches('.').count() != nesting {
+                    continue;
+                }
+                let target = format!("{new_prefix}{member}");
+                if !explicit_targets.contains(target.as_str())
+                    && active.contains(&(kind, target.clone()))
+                {
+                    record.qualified_name = target;
+                }
             }
         }
     }
@@ -911,6 +1698,46 @@ fn source_identity_keys(
                             keys.push((ObjectKind::Field, format!("{table}.{name}")));
                         }
                     }
+                }
+                Declaration::Type {
+                    name,
+                    representation,
+                    ..
+                } => {
+                    let owner = qualify(&namespace, name);
+                    match representation {
+                        TypeRepresentation::Nominal { members } => {
+                            for member in members {
+                                if let TypeMember::Field { name, .. } = member {
+                                    keys.push((ObjectKind::TypeField, format!("{owner}.{name}")));
+                                }
+                            }
+                            keys.push((ObjectKind::Type, owner));
+                        }
+                        // A transparent alias has no runtime or equality
+                        // identity; a refined alias is a nominal type
+                        // (ORNA-NOMINAL-001, ORNA-NOMINAL-003).
+                        TypeRepresentation::Alias { refinements, .. }
+                            if !refinements.is_empty() =>
+                        {
+                            keys.push((ObjectKind::Type, owner));
+                        }
+                        TypeRepresentation::Alias { .. } => {}
+                    }
+                }
+                Declaration::Enum { name, variants, .. } => {
+                    let owner = qualify(&namespace, name);
+                    for variant in variants {
+                        let variant_name = format!("{owner}.{}", variant.name);
+                        for field in &variant.fields {
+                            keys.push((
+                                ObjectKind::VariantField,
+                                format!("{variant_name}.{}", field.name),
+                            ));
+                        }
+                        keys.push((ObjectKind::Variant, variant_name));
+                    }
+                    keys.push((ObjectKind::Type, owner));
                 }
                 _ => {}
             }
@@ -1384,7 +2211,14 @@ mod tests {
         let manifest =
             ObjectIdentityManifest::reconcile(std::slice::from_ref(&source), None).unwrap();
         let schema = manifest
-            .source_table_schema(&analysis, "", "main.orna", "Media")
+            .source_table_schema(
+                std::slice::from_ref(&source),
+                &analysis,
+                None,
+                "",
+                "main.orna",
+                "Media",
+            )
             .unwrap();
         let unit_id = *manifest.id(ObjectKind::Unit, "MiB").unwrap();
         let Raw::Map(entries) = schema.descriptor.raw() else {
@@ -1450,6 +2284,889 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::read_bounded_manifest(&path),
             Err(ObjectIdentityError::InvalidEncoding)
+        );
+    }
+
+    // 07-tables.md "Stored, defaulted and computed fields".
+    const SPEC_CONTACT: &str = "pub table Contact(id: Str) {
+    first: Str,
+    last: Str,
+    country: Str = \"GB\",
+    full_name: Str => \"{first} {last}\",
+}
+";
+
+    // 07-tables.md "Automatic keys" and "Key defaults".
+    const SPEC_KEY_DEFAULTS: &str = "pub table Event(id: Uuid = uuid7()) {
+    time: Instant,
+    value: Str,
+}
+
+pub table Contact(
+    id: Uuid = uuid7()
+) {
+    name: Str,
+    emails: [Str],
+}
+";
+
+    fn source_descriptor(
+        modules: &[ModuleInput],
+        database_id: Option<[u8; 16]>,
+        source_path: &str,
+        table: &str,
+    ) -> (
+        ObjectIdentityManifest,
+        Result<SourceTableSchemaArtifact, SourceTableSchemaError>,
+    ) {
+        let analysis = orna_semantic_v1::analyze(modules);
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+        let manifest = ObjectIdentityManifest::reconcile(modules, None).unwrap();
+        let module_name = module_namespace(source_path).unwrap();
+        let schema = manifest.source_table_schema(
+            modules,
+            &analysis,
+            database_id,
+            &module_name,
+            source_path,
+            table,
+        );
+        (manifest, schema)
+    }
+
+    fn descriptor_entry(descriptor: &SchemaDescriptor, key: u64) -> &Raw {
+        let Raw::Map(entries) = descriptor.raw() else {
+            panic!("schema descriptor is a map");
+        };
+        entries
+            .iter()
+            .find(|(raw_key, _)| matches!(raw_key, Raw::Int(value) if value == &BigInt::from(key)))
+            .map(|(_, value)| value)
+            .expect("schema descriptor key")
+    }
+
+    fn descriptor_field<'a>(descriptor: &'a SchemaDescriptor, name: &str) -> &'a [Raw] {
+        let Raw::Array(fields) = descriptor_entry(descriptor, 3) else {
+            panic!("schema fields are an array");
+        };
+        fields
+            .iter()
+            .find_map(|field| match field {
+                Raw::Array(parts) if parts.get(1) == Some(&Raw::Text(name.into())) => {
+                    Some(parts.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("schema field {name}"))
+    }
+
+    fn descriptor_definition(descriptor: &SchemaDescriptor, id: &[u8; 16]) -> Raw {
+        let Raw::Array(definitions) = descriptor_entry(descriptor, 4) else {
+            panic!("schema definitions are an array");
+        };
+        definitions
+            .iter()
+            .find(|definition| {
+                matches!(definition, Raw::Array(parts) if parts.first() == Some(&uuid_raw(id)))
+            })
+            .cloned()
+            .expect("schema definition")
+    }
+
+    fn primitive(name: &str) -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())])
+    }
+
+    fn canonical(raw: Raw) -> Vec<u8> {
+        Value::new(raw).unwrap().encode().unwrap()
+    }
+
+    /// Canonical stored values for every role-1 field, in descriptor order.
+    fn stored_row(descriptor: &SchemaDescriptor, values: &[(&str, Raw)]) -> Vec<u8> {
+        let Raw::Array(fields) = descriptor_entry(descriptor, 3) else {
+            panic!("schema fields are an array");
+        };
+        let stored = fields
+            .iter()
+            .filter_map(|field| {
+                let Raw::Array(parts) = field else {
+                    panic!("schema field is an array");
+                };
+                (parts[3] == Raw::Int(1.into())).then(|| {
+                    values
+                        .iter()
+                        .find(|(name, _)| parts[1] == Raw::Text((*name).into()))
+                        .map(|(_, value)| value.clone())
+                        .expect("stored field value")
+                })
+            })
+            .collect();
+        canonical(Raw::Array(stored))
+    }
+
+    #[test]
+    fn spec_contact_stores_defaulted_fields_and_omits_the_computed_selector() {
+        let modules = [ModuleInput::new("main.orna", SPEC_CONTACT)];
+        let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+        let schema = schema.expect("defaulted and computed fields produce a schema node");
+        let descriptor = schema.descriptor();
+        let field_id = |name: &str| {
+            *manifest
+                .id(ObjectKind::Field, &format!("Contact.{name}"))
+                .unwrap()
+        };
+        assert_eq!(
+            descriptor_entry(descriptor, 2),
+            &Raw::Array(vec![uuid_raw(&field_id("id"))])
+        );
+        for (name, role) in [("id", 0), ("first", 1), ("last", 1), ("country", 1)] {
+            let field = descriptor_field(descriptor, name);
+            assert_eq!(field[0], uuid_raw(&field_id(name)));
+            assert_eq!(field[2], primitive("Str"));
+            assert_eq!(field[3], Raw::Int(role.into()), "{name}");
+            // An insert-time default is code, never a `[1, value]` fallback.
+            assert_eq!(field[4], Raw::Array(vec![Raw::Int(0.into())]), "{name}");
+        }
+        let full_name = descriptor_field(descriptor, "full_name");
+        assert_eq!(full_name[0], uuid_raw(&field_id("full_name")));
+        assert_eq!(full_name[2], primitive("Str"));
+        assert_eq!(full_name[3], Raw::Int(2.into()));
+        assert!(matches!(
+            &full_name[4],
+            Raw::Array(fallback) if matches!(
+                fallback.as_slice(),
+                [Raw::Int(kind), Raw::Bytes(digest)] if kind == &BigInt::from(2) && digest.len() == 32
+            )
+        ));
+        assert_eq!(descriptor_entry(descriptor, 4), &Raw::Array(Vec::new()));
+        assert_eq!(
+            &SchemaDescriptor::decode(&descriptor.encode().unwrap()).unwrap(),
+            descriptor
+        );
+
+        // Stored columns are exactly the role-1 fields; the computed selector
+        // has no stored value (ORNA-FIELD-006, ORNA-FIELD-011).
+        let key = canonical(Raw::Text("ada".into()));
+        let row = [
+            ("first", Raw::Text("Ada".into())),
+            ("last", Raw::Text("Lovelace".into())),
+            ("country", Raw::Text("GB".into())),
+        ];
+        descriptor
+            .validate_stored_row(
+                *schema.table_object_id(),
+                &key,
+                &stored_row(descriptor, &row),
+            )
+            .expect("a row without the computed field is admitted");
+        let with_computed = canonical(Raw::Array(vec![
+            Raw::Text("Ada".into()),
+            Raw::Text("Lovelace".into()),
+            Raw::Text("GB".into()),
+            Raw::Text("Ada Lovelace".into()),
+        ]));
+        assert!(
+            descriptor
+                .validate_stored_row(*schema.table_object_id(), &key, &with_computed)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn spec_key_defaults_encode_generated_keys_as_primary_keys() {
+        let modules = [ModuleInput::new("main.orna", SPEC_KEY_DEFAULTS)];
+        let tables = [
+            (
+                "Event",
+                vec![("time", primitive("Instant")), ("value", primitive("Str"))],
+            ),
+            (
+                "Contact",
+                vec![
+                    ("name", primitive("Str")),
+                    (
+                        "emails",
+                        Raw::Array(vec![Raw::Int(1.into()), primitive("Str")]),
+                    ),
+                ],
+            ),
+        ];
+        for (table, stored) in tables {
+            let (manifest, schema) = source_descriptor(&modules, None, "main.orna", table);
+            let schema = schema.unwrap_or_else(|error| panic!("{table}: {error:?}"));
+            let descriptor = schema.descriptor();
+            let key_id = *manifest
+                .id(ObjectKind::Field, &format!("{table}.id"))
+                .unwrap();
+            assert_eq!(
+                descriptor_entry(descriptor, 2),
+                &Raw::Array(vec![uuid_raw(&key_id)])
+            );
+            let key = descriptor_field(descriptor, "id");
+            assert_eq!(key[2], primitive("Uuid"));
+            assert_eq!(key[3], Raw::Int(0.into()));
+            assert_eq!(key[4], Raw::Array(vec![Raw::Int(0.into())]));
+            for (name, node) in stored {
+                let field = descriptor_field(descriptor, name);
+                assert_eq!(field[2], node, "{table}.{name}");
+                assert_eq!(field[3], Raw::Int(1.into()), "{table}.{name}");
+            }
+            let generated = canonical(Raw::Tag(37, Box::new(Raw::Bytes(vec![7; 16]))));
+            descriptor
+                .validate_stored_key(*schema.table_object_id(), &generated)
+                .expect("a generated Uuid key is the stored row identity");
+        }
+    }
+
+    #[test]
+    fn computed_selector_digest_ignores_formatting_and_binds_the_expression() {
+        let digest = |source: &str| {
+            let modules = [ModuleInput::new("main.orna", source)];
+            let (_, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+            descriptor_field(schema.unwrap().descriptor(), "full_name")[4].clone()
+        };
+        let original = digest(SPEC_CONTACT);
+        let reformatted = SPEC_CONTACT.replace(
+            "=> \"{first} {last}\"",
+            "=>\n        // display name\n        \"{first} {last}\"",
+        );
+        assert_eq!(digest(&reformatted), original);
+        let changed = SPEC_CONTACT.replace("\"{first} {last}\"", "\"{last}, {first}\"");
+        assert_ne!(digest(&changed), original);
+    }
+
+    #[test]
+    fn stored_reference_records_database_table_and_target_key_shape() {
+        let database_id = [0x42; 16];
+        let modules = [
+            ModuleInput::new(
+                "directory/main.orna",
+                "pub table Contact(id: Uuid) {\n    name: Str,\n}\n",
+            ),
+            // 07-tables.md "Stored table references", plus a reference key
+            // component (ORNA-KEY-005).
+            ModuleInput::new(
+                "main.orna",
+                "use directory;\n\npub table Vehicle(id: Uuid) {\n    owner: directory.Contact,\n}\n\npub table Registration(vehicle: Vehicle) {\n    plate: Str,\n}\n",
+            ),
+        ];
+        let uuid = |byte: u8| Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])));
+        let reference = |table: &[u8; 16], key: Raw| {
+            Raw::Tag(
+                60021,
+                Box::new(Raw::Array(vec![
+                    uuid_raw(&database_id),
+                    uuid_raw(table),
+                    key,
+                ])),
+            )
+        };
+
+        let (manifest, vehicle) =
+            source_descriptor(&modules, Some(database_id), "main.orna", "Vehicle");
+        let vehicle = vehicle.expect("a stored reference produces a schema node");
+        let contact_id = *manifest.id(ObjectKind::Table, "directory.Contact").unwrap();
+        let owner = descriptor_field(vehicle.descriptor(), "owner");
+        assert_eq!(
+            owner[2],
+            Raw::Array(vec![
+                Raw::Int(6.into()),
+                uuid_raw(&database_id),
+                uuid_raw(&contact_id),
+                Raw::Array(vec![primitive("Uuid")]),
+            ])
+        );
+        assert_eq!(owner[3], Raw::Int(1.into()));
+        vehicle
+            .descriptor()
+            .validate_stored_row(
+                *vehicle.table_object_id(),
+                &canonical(uuid(1)),
+                &canonical(Raw::Array(vec![reference(&contact_id, uuid(9))])),
+            )
+            .expect("the row stores the referenced key, not a row");
+
+        let (manifest, registration) =
+            source_descriptor(&modules, Some(database_id), "main.orna", "Registration");
+        let registration = registration.expect("a reference key produces a schema node");
+        let vehicle_id = *manifest.id(ObjectKind::Table, "Vehicle").unwrap();
+        let key = descriptor_field(registration.descriptor(), "vehicle");
+        assert_eq!(
+            key[2],
+            Raw::Array(vec![
+                Raw::Int(6.into()),
+                uuid_raw(&database_id),
+                uuid_raw(&vehicle_id),
+                Raw::Array(vec![primitive("Uuid")]),
+            ])
+        );
+        assert_eq!(key[3], Raw::Int(0.into()));
+        registration
+            .descriptor()
+            .validate_stored_key(
+                *registration.table_object_id(),
+                &canonical(reference(&vehicle_id, uuid(1))),
+            )
+            .expect("a reference key component");
+
+        let (_, without_database) = source_descriptor(&modules, None, "main.orna", "Vehicle");
+        assert_eq!(
+            without_database,
+            Err(SourceTableSchemaError::MissingDatabaseIdentity)
+        );
+    }
+
+    #[test]
+    fn qualified_field_types_resolve_through_imported_namespaces() {
+        let database_id = [0x24; 16];
+        let modules = [
+            ModuleInput::new(
+                "sensors/main.orna",
+                "pub table Sensor(id: Str) {\n    label: Str,\n}\n",
+            ),
+            ModuleInput::new(
+                "sensors/greenhouse.orna",
+                "pub dim Illuminance;\npub unit lx : Illuminance base;\n\npub enum Mode {\n    auto,\n    manual,\n}\n",
+            ),
+            // ORNA-IMPORT-001: `use sensors;` binds the namespace by its final
+            // component; nested modules are reached through that binding.
+            ModuleInput::new(
+                "main.orna",
+                "use sensors;\n\npub table Reading(id: Str) {\n    sensor: sensors.Sensor,\n    mode: sensors.greenhouse.Mode,\n    level: Float<sensors.greenhouse.lx>,\n}\n",
+            ),
+        ];
+        let (manifest, schema) =
+            source_descriptor(&modules, Some(database_id), "main.orna", "Reading");
+        let schema = schema.expect("qualified field types produce a schema node");
+        let descriptor = schema.descriptor();
+        let sensor = *manifest.id(ObjectKind::Table, "sensors.Sensor").unwrap();
+        let mode = *manifest
+            .id(ObjectKind::Type, "sensors.greenhouse.Mode")
+            .unwrap();
+        let lux = *manifest
+            .id(ObjectKind::Unit, "sensors.greenhouse.lx")
+            .unwrap();
+        assert_eq!(
+            descriptor_field(descriptor, "sensor")[2],
+            Raw::Array(vec![
+                Raw::Int(6.into()),
+                uuid_raw(&database_id),
+                uuid_raw(&sensor),
+                Raw::Array(vec![primitive("Str")]),
+            ])
+        );
+        assert_eq!(
+            descriptor_field(descriptor, "mode")[2],
+            Raw::Array(vec![Raw::Int(5.into()), uuid_raw(&mode)])
+        );
+        assert_eq!(
+            descriptor_field(descriptor, "level")[2],
+            Raw::Array(vec![Raw::Int(7.into()), primitive("Float"), uuid_raw(&lux),])
+        );
+        let Raw::Array(definition) = descriptor_definition(descriptor, &mode) else {
+            panic!("enum definition is an array");
+        };
+        assert_eq!(definition[1], Raw::Int(1.into()));
+        let Raw::Array(definition) = descriptor_definition(descriptor, &lux) else {
+            panic!("unit definition is an array");
+        };
+        assert_eq!(definition[1], Raw::Int(3.into()));
+    }
+
+    #[test]
+    fn canonical_nominal_identities_resolve_in_declaring_and_importing_modules() {
+        // Semantic analysis canonicalizes a nominal field type to its
+        // module-qualified identity, so `price: Price` declared in module
+        // `shop` and a named import of it both reach the builder as
+        // `shop.Price`.
+        let modules = [
+            ModuleInput::new(
+                "shop.orna",
+                "pub type Price {\n    pub amount: Int,\n}\n\npub table Order(id: Str) {\n    price: Price,\n}\n",
+            ),
+            ModuleInput::new(
+                "main.orna",
+                "use shop.{Price};\n\npub table Quote(id: Str) {\n    price: Price,\n}\n",
+            ),
+        ];
+        for (source_path, table) in [("shop.orna", "Order"), ("main.orna", "Quote")] {
+            let (manifest, schema) = source_descriptor(&modules, None, source_path, table);
+            let schema = schema.unwrap_or_else(|error| panic!("{table}: {error:?}"));
+            let price = *manifest.id(ObjectKind::Type, "shop.Price").unwrap();
+            assert_eq!(
+                descriptor_field(schema.descriptor(), "price")[2],
+                Raw::Array(vec![Raw::Int(5.into()), uuid_raw(&price)])
+            );
+            let Raw::Array(definition) = descriptor_definition(schema.descriptor(), &price) else {
+                panic!("nominal definition is an array");
+            };
+            assert_eq!(definition[1], Raw::Int(0.into()));
+        }
+    }
+
+    #[test]
+    fn nominal_enum_and_refined_field_types_emit_closed_definitions() {
+        let source = "pub type Username = Str {
+    assert != \"\";
+}
+
+pub type EmailAddress {
+    value: Str,
+}
+
+pub enum Role {
+    admin,
+    member,
+}
+
+pub enum Availability {
+    ready,
+    waiting { reason: Str },
+}
+
+pub table User(id: Uuid) {
+    username: Username,
+    email: EmailAddress?,
+    role: Role,
+    availability: Availability,
+}
+";
+        let modules = [ModuleInput::new("main.orna", source)];
+        let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "User");
+        let schema = schema.expect("nominal, enum and refined fields produce a schema node");
+        let descriptor = schema.descriptor();
+        let id = |kind: ObjectKind, name: &str| *manifest.id(kind, name).unwrap();
+        let username = id(ObjectKind::Type, "Username");
+        let email = id(ObjectKind::Type, "EmailAddress");
+        let email_value = id(ObjectKind::TypeField, "EmailAddress.value");
+        let role = id(ObjectKind::Type, "Role");
+        let availability = id(ObjectKind::Type, "Availability");
+        let waiting = id(ObjectKind::Variant, "Availability.waiting");
+        let reason = id(ObjectKind::VariantField, "Availability.waiting.reason");
+        let nominal = |id: &[u8; 16]| Raw::Array(vec![Raw::Int(5.into()), uuid_raw(id)]);
+        let member = |id: &[u8; 16], name: &str, node: Raw| {
+            Raw::Array(vec![
+                uuid_raw(id),
+                Raw::Text(name.into()),
+                node,
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        };
+        let variants = |entries: Vec<([u8; 16], Raw)>| {
+            let mut entries = entries;
+            entries.sort_by_key(|(id, _)| *id);
+            Raw::Array(entries.into_iter().map(|(_, variant)| variant).collect())
+        };
+
+        assert_eq!(
+            descriptor_field(descriptor, "username")[2],
+            nominal(&username)
+        );
+        assert_eq!(
+            descriptor_field(descriptor, "email")[2],
+            Raw::Array(vec![Raw::Int(2.into()), nominal(&email)])
+        );
+        assert_eq!(descriptor_field(descriptor, "role")[2], nominal(&role));
+        assert_eq!(
+            descriptor_field(descriptor, "availability")[2],
+            nominal(&availability)
+        );
+
+        let Raw::Array(refined) = descriptor_definition(descriptor, &username) else {
+            panic!("refined definition is an array");
+        };
+        assert_eq!(refined[1], Raw::Int(2.into()));
+        assert!(matches!(
+            &refined[2],
+            Raw::Array(body) if body.len() == 2
+                && body[0] == primitive("Str")
+                && matches!(&body[1], Raw::Array(digests)
+                    if matches!(digests.as_slice(), [Raw::Bytes(digest)] if digest.len() == 32))
+        ));
+        // A private nominal field is still part of the stored representation.
+        assert_eq!(
+            descriptor_definition(descriptor, &email),
+            Raw::Array(vec![
+                uuid_raw(&email),
+                Raw::Int(0.into()),
+                Raw::Array(vec![member(&email_value, "value", primitive("Str"))]),
+            ])
+        );
+        let admin = id(ObjectKind::Variant, "Role.admin");
+        let role_member = id(ObjectKind::Variant, "Role.member");
+        assert_eq!(
+            descriptor_definition(descriptor, &role),
+            Raw::Array(vec![
+                uuid_raw(&role),
+                Raw::Int(1.into()),
+                variants(vec![
+                    (
+                        admin,
+                        Raw::Array(vec![
+                            uuid_raw(&admin),
+                            Raw::Text("admin".into()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ),
+                    (
+                        role_member,
+                        Raw::Array(vec![
+                            uuid_raw(&role_member),
+                            Raw::Text("member".into()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ),
+                ]),
+            ])
+        );
+        let ready = id(ObjectKind::Variant, "Availability.ready");
+        assert_eq!(
+            descriptor_definition(descriptor, &availability),
+            Raw::Array(vec![
+                uuid_raw(&availability),
+                Raw::Int(1.into()),
+                variants(vec![
+                    (
+                        ready,
+                        Raw::Array(vec![
+                            uuid_raw(&ready),
+                            Raw::Text("ready".into()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ),
+                    (
+                        waiting,
+                        Raw::Array(vec![
+                            uuid_raw(&waiting),
+                            Raw::Text("waiting".into()),
+                            Raw::Array(vec![member(&reason, "reason", primitive("Str"))]),
+                        ]),
+                    ),
+                ]),
+            ])
+        );
+
+        let row = [
+            ("username", Raw::Text("ada".into())),
+            (
+                "email",
+                Raw::Tag(
+                    60013,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(1.into()),
+                        Raw::Tag(
+                            60009,
+                            Box::new(Raw::Array(vec![
+                                uuid_raw(&email),
+                                Raw::Array(vec![Raw::Array(vec![
+                                    uuid_raw(&email_value),
+                                    Raw::Text("ada@example.com".into()),
+                                ])]),
+                            ])),
+                        ),
+                    ])),
+                ),
+            ),
+            (
+                "role",
+                Raw::Tag(
+                    60008,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(&role),
+                        uuid_raw(&admin),
+                        Raw::Null,
+                    ])),
+                ),
+            ),
+            (
+                "availability",
+                Raw::Tag(
+                    60008,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(&availability),
+                        uuid_raw(&waiting),
+                        Raw::Tag(
+                            60009,
+                            Box::new(Raw::Array(vec![
+                                uuid_raw(&waiting),
+                                Raw::Array(vec![Raw::Array(vec![
+                                    uuid_raw(&reason),
+                                    Raw::Text("busy".into()),
+                                ])]),
+                            ])),
+                        ),
+                    ])),
+                ),
+            ),
+        ];
+        descriptor
+            .validate_stored_row(
+                *schema.table_object_id(),
+                &canonical(Raw::Tag(37, Box::new(Raw::Bytes(vec![3; 16])))),
+                &stored_row(descriptor, &row),
+            )
+            .expect("nominal, refined and enum values validate against their definitions");
+    }
+
+    #[test]
+    fn transparent_alias_lowers_to_its_target_without_an_identity() {
+        let modules = [ModuleInput::new(
+            "main.orna",
+            "type UserId = Uuid;\n\npub table Session(id: UserId) {\n    owner: UserId?,\n}\n",
+        )];
+        let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "Session");
+        let schema = schema.expect("a transparent alias produces a schema node");
+        assert_eq!(
+            descriptor_field(schema.descriptor(), "id")[2],
+            primitive("Uuid")
+        );
+        assert_eq!(
+            descriptor_field(schema.descriptor(), "owner")[2],
+            Raw::Array(vec![Raw::Int(2.into()), primitive("Uuid")])
+        );
+        assert_eq!(
+            descriptor_entry(schema.descriptor(), 4),
+            &Raw::Array(Vec::new())
+        );
+        assert!(manifest.id(ObjectKind::Type, "UserId").is_none());
+    }
+
+    #[test]
+    fn money_field_records_its_currency_definition() {
+        let modules = [ModuleInput::new(
+            "main.orna",
+            "pub protocol Currency {
+    static code: Str;
+    static minor_digits: Int;
+}
+
+pub type GBP {
+    impl Currency {
+        static code = \"GBP\";
+        static minor_digits = 2;
+    }
+}
+
+pub table Invoice(id: Str) {
+    total: Money<GBP>,
+}
+",
+        )];
+        let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "Invoice");
+        let schema = schema.expect("a Money field produces a schema node");
+        let currency = *manifest.id(ObjectKind::Type, "GBP").unwrap();
+        assert_eq!(
+            descriptor_field(schema.descriptor(), "total")[2],
+            Raw::Array(vec![Raw::Int(8.into()), uuid_raw(&currency)])
+        );
+        assert_eq!(
+            descriptor_definition(schema.descriptor(), &currency),
+            Raw::Array(vec![
+                uuid_raw(&currency),
+                Raw::Int(4.into()),
+                Raw::Array(vec![Raw::Text("GBP".into()), Raw::Int(2.into())]),
+            ])
+        );
+        let amount = Raw::Tag(
+            60007,
+            Box::new(Raw::Array(vec![
+                Raw::Tag(
+                    60000,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(1234.into()),
+                        Raw::Int((-2).into()),
+                    ])),
+                ),
+                uuid_raw(&currency),
+            ])),
+        );
+        schema
+            .descriptor()
+            .validate_stored_row(
+                *schema.table_object_id(),
+                &canonical(Raw::Text("inv-1".into())),
+                &canonical(Raw::Array(vec![amount])),
+            )
+            .expect("a money value in its declared currency");
+    }
+
+    #[test]
+    fn portable_scalar_spellings_map_to_closed_primitives_and_unsupported_types_fail() {
+        let modules = [ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Int) { blob: Blob, uuid: UUID, time: TIME, duration: DURATION, bytes: BYTES, }",
+        )];
+        let (_, schema) = source_descriptor(&modules, None, "main.orna", "Media");
+        let schema = schema.expect("portable scalar table descriptor");
+        for (field, primitive_name) in [
+            ("blob", "Blob"),
+            ("uuid", "Uuid"),
+            ("time", "TimeOfDay"),
+            ("duration", "Duration"),
+            ("bytes", "Blob"),
+        ] {
+            assert_eq!(
+                descriptor_field(schema.descriptor(), field)[2],
+                primitive(primitive_name)
+            );
+        }
+
+        let analysis = orna_semantic_v1::analyze(&modules);
+        assert_eq!(
+            ObjectIdentityManifest::default().source_table_schema(
+                &modules,
+                &analysis,
+                None,
+                "",
+                "main.orna",
+                "Media",
+            ),
+            Err(SourceTableSchemaError::MissingIdentity)
+        );
+
+        let relation = [ModuleInput::new(
+            "main.orna",
+            "pub table Contact(id: Int) { relation: Relation<Int>, }",
+        )];
+        let (_, schema) = source_descriptor(&relation, None, "main.orna", "Contact");
+        assert_eq!(schema, Err(SourceTableSchemaError::UnsupportedType));
+    }
+
+    #[test]
+    fn nominal_identities_are_issued_and_follow_explicit_type_renames() {
+        let original = ModuleInput::new(
+            "main.orna",
+            "type Alias = Str;\npub type Point {\n    x: Int,\n    y: Int,\n}\npub enum Shape {\n    dot,\n    circle { radius: Float },\n}\n",
+        );
+        let first = ObjectIdentityManifest::reconcile(std::slice::from_ref(&original), None)
+            .expect("initial identities");
+        for (kind, name) in [
+            (ObjectKind::Type, "Point"),
+            (ObjectKind::TypeField, "Point.x"),
+            (ObjectKind::TypeField, "Point.y"),
+            (ObjectKind::Type, "Shape"),
+            (ObjectKind::Variant, "Shape.dot"),
+            (ObjectKind::Variant, "Shape.circle"),
+            (ObjectKind::VariantField, "Shape.circle.radius"),
+        ] {
+            assert!(first.id(kind, name).is_some(), "{kind:?} {name}");
+        }
+        assert!(first.id(ObjectKind::Type, "Alias").is_none());
+        assert_eq!(
+            ObjectIdentityManifest::decode(&first.encode().unwrap()).unwrap(),
+            first
+        );
+
+        let renamed = ModuleInput::new(
+            "main.orna",
+            "type Alias = Str;\npub type Location {\n    x: Int,\n    y: Int,\n}\npub enum Figure {\n    dot,\n    circle { radius: Float },\n}\n",
+        );
+        let next = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&renamed),
+            Some(&first),
+            &[
+                ObjectIdentityRename::new(ObjectKind::Type, "Point", "Location"),
+                ObjectIdentityRename::new(ObjectKind::Type, "Shape", "Figure"),
+            ],
+        )
+        .expect("explicit type renames");
+        for (kind, old, new) in [
+            (ObjectKind::Type, "Point", "Location"),
+            (ObjectKind::TypeField, "Point.x", "Location.x"),
+            (ObjectKind::TypeField, "Point.y", "Location.y"),
+            (ObjectKind::Type, "Shape", "Figure"),
+            (ObjectKind::Variant, "Shape.dot", "Figure.dot"),
+            (ObjectKind::Variant, "Shape.circle", "Figure.circle"),
+            (
+                ObjectKind::VariantField,
+                "Shape.circle.radius",
+                "Figure.circle.radius",
+            ),
+        ] {
+            assert_eq!(next.id(kind, new), first.id(kind, old), "{kind:?} {new}");
+            assert!(next.id(kind, old).is_none(), "{kind:?} {old}");
+        }
+
+        // A renamed variant carries its payload field identities too.
+        let reshaped = ModuleInput::new(
+            "main.orna",
+            "type Alias = Str;\npub type Location {\n    x: Int,\n    y: Int,\n}\npub enum Figure {\n    dot,\n    round { radius: Float },\n}\n",
+        );
+        let last = ObjectIdentityManifest::reconcile_with_renames(
+            std::slice::from_ref(&reshaped),
+            Some(&next),
+            &[ObjectIdentityRename::new(
+                ObjectKind::Variant,
+                "Figure.circle",
+                "Figure.round",
+            )],
+        )
+        .expect("explicit variant rename");
+        assert_eq!(
+            last.id(ObjectKind::Variant, "Figure.round"),
+            first.id(ObjectKind::Variant, "Shape.circle")
+        );
+        assert_eq!(
+            last.id(ObjectKind::VariantField, "Figure.round.radius"),
+            first.id(ObjectKind::VariantField, "Shape.circle.radius")
+        );
+    }
+
+    /// Pins the manifest and descriptor bytes, and the `orna.schema.v1`
+    /// digest, that the previous builder produced for a table it could
+    /// already encode, so lifecycle support cannot change existing schema
+    /// node identities.
+    #[test]
+    fn previously_supported_table_descriptor_bytes_are_stable() {
+        const MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
+        const DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
+        const SCHEMA_DIGEST: &str =
+            "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let source = ModuleInput::new(
+            "main.orna",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
+        );
+        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+        let record = |kind: ObjectKind, name: &str, byte: u8| ObjectIdentity {
+            kind,
+            qualified_name: name.to_owned(),
+            id: [byte; 16],
+            retired: false,
+        };
+        let manifest = ObjectIdentityManifest {
+            records: vec![
+                record(ObjectKind::Table, "Media", 0x11),
+                record(ObjectKind::Field, "Media.id", 0x21),
+                record(ObjectKind::Field, "Media.payload", 0x22),
+                record(ObjectKind::Field, "Media.size", 0x23),
+                record(ObjectKind::Unit, "B", 0x31),
+                record(ObjectKind::Unit, "MiB", 0x32),
+            ],
+        };
+        assert_eq!(hex(&manifest.encode().unwrap()), MANIFEST);
+
+        let schema = manifest
+            .source_table_schema(
+                std::slice::from_ref(&source),
+                &analysis,
+                None,
+                "",
+                "main.orna",
+                "Media",
+            )
+            .unwrap();
+        assert_eq!(hex(&schema.descriptor().encode().unwrap()), DESCRIPTOR);
+        assert_eq!(
+            hex(&orna_value_v1::schema_identity(schema.descriptor()).unwrap()),
+            SCHEMA_DIGEST
         );
     }
 }
