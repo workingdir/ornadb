@@ -1211,7 +1211,8 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         _context: &'a RuntimeActivationContext,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
     {
-        Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
+        // A dispatcher without resume support cannot perform the mutation.
+        Box::pin(async { Err("sys.admin.read_only".to_owned()) })
     }
 
     fn reject_staged_admin_effect<'a>(
@@ -1251,7 +1252,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                 .publication_metadata_rows()
                 .await
                 .map(Some)
-                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+                .map_err(|_| "sys.storage.unavailable".to_owned())
         })
     }
 
@@ -1276,16 +1277,13 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
                     | orna_runtime_v1::StreamAdministrationOutcome::PausePending { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1308,15 +1306,12 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Running { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1346,13 +1341,34 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     invocation_id,
                 )
                 .await
-                .map_err(|error| match error {
-                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                    _ => "sys.admin.unavailable".to_owned(),
-                })?;
+                .map_err(|error| admin_failure_code(&error))?;
             Err("sys.admin.busy".to_owned())
         })
     }
+}
+
+/// Maps a runtime administration failure onto the portable code
+/// `source/16-administration.md` assigns it (ORNA-SYS-097): an incompatible
+/// owner, lease or concurrent write activation is `sys.admin.busy`
+/// (ORNA-ADMIN-002); a stream reference naming no live stream of the current
+/// owner is a missing object, `sys.admin.missing_object`; snapshot and
+/// checkpoint failures keep their more specific codes; and a runtime store
+/// that cannot complete the transition is `sys.storage.unavailable`.
+fn admin_failure_code(error: &RuntimeError) -> String {
+    error
+        .public_code()
+        .unwrap_or(match error {
+            RuntimeError::InvalidObservationReference
+            | RuntimeError::ObservationCoordinateMismatch
+            | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
+            RuntimeError::LeaseHeld
+            | RuntimeError::OwnerLost
+            | RuntimeError::StaleCapture { .. }
+            | RuntimeError::AdminInvocationConflict
+            | RuntimeError::RecoveryPending => "sys.admin.busy",
+            _ => "sys.storage.unavailable",
+        })
+        .to_owned()
 }
 
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
@@ -11093,5 +11109,34 @@ mod tests {
             ),
             Err(ActionRegistrationError::InvalidDescriptor)
         );
+    }
+
+    /// ORNA-SYS-097, ORNA-ADMIN-002: stream administration failures surface
+    /// the portable codes of `source/16-administration.md`, never a
+    /// vendor-only code.
+    #[test]
+    fn admin_failures_map_onto_portable_codes() {
+        for (error, code) in [
+            (RuntimeError::AdminBusy, "sys.admin.busy"),
+            (RuntimeError::LeaseHeld, "sys.admin.busy"),
+            (RuntimeError::OwnerLost, "sys.admin.busy"),
+            (RuntimeError::AdminInvocationConflict, "sys.admin.busy"),
+            (
+                RuntimeError::InvalidObservationReference,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamIdentityMismatch,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamCheckpointStale,
+                "sys.checkpoint.conflict",
+            ),
+            (RuntimeError::SnapshotNotFound, "sys.snapshot.not_found"),
+            (RuntimeError::StorageUnavailable, "sys.storage.unavailable"),
+        ] {
+            assert_eq!(admin_failure_code(&error), code, "{error:?}");
+        }
     }
 }

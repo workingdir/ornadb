@@ -26,6 +26,15 @@ impl ApplicationAuthority {
         bindings: &mut SysHostBindingRegistry,
     ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ApplicationError> {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
+        // The REPL host serves no publication relation, so its explain
+        // catalogue pins the activation's project tables only.
+        let explain_catalogue = orna_evaluator_v1::ActivationExplainCatalogue::new(
+            scope.runtime_context.capture().snapshot(),
+            tables.keys().map(String::as_str),
+        )
+        .map_err(|_| {
+            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
+        })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
@@ -41,6 +50,7 @@ impl ApplicationAuthority {
             mutations,
             scope,
             next_row_ordinal: 0,
+            explain_catalogue,
         };
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
@@ -320,6 +330,7 @@ struct ReplTransactionEffectHandler<'a, 'scope> {
     mutations: SourceMutationEffectHandler,
     scope: &'a ReplTransactionScope<'scope>,
     next_row_ordinal: u64,
+    explain_catalogue: orna_evaluator_v1::ActivationExplainCatalogue,
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {
@@ -599,6 +610,10 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
 
     fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
         Some(self)
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        Some(&self.explain_catalogue)
     }
 }
 
