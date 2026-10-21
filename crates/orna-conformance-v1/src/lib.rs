@@ -32,6 +32,7 @@ mod admitted_repl;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
+mod vector_suites;
 #[cfg(test)]
 mod test_support;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
@@ -41,6 +42,7 @@ pub use semantic_adapter::{
     transactional_loaded_project_candidate_validator, transactional_table_candidate_validator,
 };
 pub use syntax_adapter::SyntaxAdapter;
+pub use vector_suites::{VectorSuiteEvidence, run_vector_suites};
 
 /// The only shared diagnostic carrier accepted by new Orna 1.0 integration.
 /// Existing generic adapters remain source-compatible during migration, but
@@ -1744,6 +1746,10 @@ pub struct RunReport {
     pub semantic_evidence: Vec<Evidence>,
     pub runtime_evidence: Vec<Evidence>,
     pub skipped_evidence: Vec<Evidence>,
+    /// Every published vector suite, executed through its production codec or
+    /// recorded as a known gap with its tracking bead. Kept apart from the
+    /// adapter's runtime evidence: no adapter produces these results.
+    pub vector_suites: Vec<VectorSuiteEvidence>,
     pub coverage: CoverageReport,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -2081,7 +2087,7 @@ impl Harness {
         self
     }
     pub fn run<A: ConformanceAdapter>(&self, adapter: &mut A) -> RunReport {
-        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
+        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], vector_suites: run_vector_suites(&self.corpus), coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
         for fixture in &self.corpus.manifest.fixtures {
             let result = self.run_fixture(fixture, adapter);
             for stage in &result.stages {
