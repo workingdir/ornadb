@@ -4108,7 +4108,7 @@ impl Parser {
     }
 
     fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
-        let lhs = self.prefix(mode)?;
+        let lhs = self.prefix(mode, min == 0)?;
         Some(self.pratt_from(lhs, min, mode))
     }
 
@@ -4312,7 +4312,9 @@ impl Parser {
         }
         lhs
     }
-    fn prefix(&mut self, mode: NominalBraceMode) -> Option<Expr> {
+    /// `allow_lambda` is true only at the lowest binding power: a lambda is a
+    /// complete expression and cannot be the operand of an infix or prefix operator.
+    fn prefix(&mut self, mode: NominalBraceMode, allow_lambda: bool) -> Option<Expr> {
         let t = self.current().clone();
         if matches!(t.kind, TokenKind::Punct(".." | "..=")) {
             self.bump();
@@ -4366,7 +4368,7 @@ impl Parser {
                     ));
                 }
                 self.bump();
-                if self.is_punct("=>") {
+                if allow_lambda && self.is_punct("=>") {
                     self.bump();
                     let body = self.parse_lambda_body();
                     return Some(Expr::Lambda {
@@ -4423,7 +4425,7 @@ impl Parser {
                 Keyword::If | Keyword::Case | Keyword::For | Keyword::While | Keyword::Loop,
             ) => Some(self.parse_control_expression()),
             TokenKind::Punct("(") => {
-                if self.group_followed_by_arrow() {
+                if allow_lambda && self.group_followed_by_arrow() {
                     let parameters = self.parse_lambda_parameters();
                     self.bump();
                     let body = self.parse_lambda_body();
