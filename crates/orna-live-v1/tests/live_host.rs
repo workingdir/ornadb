@@ -8668,7 +8668,7 @@ fn delete_requires_current_unexpired_bearer_and_original_origin() {
         .push(("authorization".into(), format!("Bearer {credential}")));
     assert_eq!(
         block_on(transport.handle(stale, 3, &mut authority, &mut issuer, &mut deletion,)).status,
-        410
+        401
     );
     assert_eq!(deletion.calls, 0);
 
