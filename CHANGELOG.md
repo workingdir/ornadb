@@ -5,6 +5,16 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Opening a repository format context reads only the root tree, the `.orna`
+  tree and its metadata blobs, through one long-lived `git cat-file
+  --batch-command` reader per repository handle. It no longer lists the whole
+  commit, `.orna/store` included, with a Git process per entry, so point reads
+  no longer slow down as the store grows, and a snapshot with more than 65,536
+  tree entries opens.
+- The project loader's 4,096-entry limit is now `ProjectLimits::max_source_modules`
+  (formerly `max_repository_entries`) and counts source modules only. The
+  loader never walks `.orna/store`, in the worktree or in a committed snapshot,
+  so `orna check`, `orna run` and `orna repl` load databases with large stores.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
