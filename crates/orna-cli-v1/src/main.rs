@@ -2409,6 +2409,21 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
+/// A located `ORNA-REPL-EFFECT` failure for a project binding the REPL cannot
+/// honour, naming what is wrong and the remedy to apply.
+fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
+    repl::ReplFailure {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            message: message.to_owned(),
+            span: None,
+            notes: Vec::new(),
+            help: vec![remedy.to_owned()],
+        }),
+    }
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
@@ -2420,13 +2435,24 @@ fn run_repl_input(
         Err(_) => return session.submit(source).map_err(repl::ReplFailure::from),
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+        return Err(repl::ReplFailure::from(
+            orna_evaluator_v1::effect_rejection(staged.effects()),
+        ));
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+    if current_commit != transactions.commit {
+        return Err(repl_effect_failure(
+            "the project changed since this REPL session started",
+            "restart the REPL to bind to the current HEAD",
+        ));
+    }
+    if !transactions.format_context.supports_writes() {
+        return Err(repl_effect_failure(
+            "this repository's format does not accept REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
     }
     if transactions.state.is_none() {
         let state = transactions
