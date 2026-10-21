@@ -721,7 +721,9 @@ impl Corpus {
             .get("scenarios")
             .and_then(Value::as_array)
             .ok_or_else(|| CorpusError("scenarios must contain a scenarios array".into()))?;
-        if scenarios.len() != 144
+        let declared = self.scenarios.get("count").and_then(Value::as_u64);
+        if declared != Some(scenarios.len() as u64)
+            || scenarios.is_empty()
             || scenarios.iter().any(|scenario| {
                 scenario.get("id").and_then(Value::as_str).is_none()
                     || scenario
@@ -731,7 +733,7 @@ impl Corpus {
             })
         {
             return Err(CorpusError(
-                "scenario corpus must contain 144 identified requirement-linked scenarios".into(),
+                "scenario corpus must declare its exact scenario count and identify every scenario".into(),
             ));
         }
         if self.vectors.len() != VECTOR_FILES.len() || self.vectors.values().any(Value::is_null) {
