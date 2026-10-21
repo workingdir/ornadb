@@ -1759,9 +1759,14 @@ mod tests {
                 .stage_object_identities(&staged, &renamed)
                 .unwrap()
         );
-        assert_eq!(
-            git(root, &["diff", "--cached", "--name-only"]),
-            ".orna/store\n"
+        // Only the store's node objects are staged; the source is untouched.
+        let staged_paths = git(root, &["diff", "--cached", "--name-only"]);
+        assert!(!staged_paths.is_empty());
+        assert!(
+            staged_paths
+                .lines()
+                .all(|path| path.starts_with(".orna/store/")),
+            "{staged_paths}"
         );
         let restaged = repository.capture_staged_candidate().unwrap();
         assert_eq!(
