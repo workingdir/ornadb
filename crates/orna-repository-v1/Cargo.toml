@@ -15,6 +15,7 @@ legacy-fixture-writer = []
 bytes = "1.10.1"
 fs2 = "0.4.3"
 libc = "0.2.180"
+num-bigint = "0.4.6"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-value-v1 = { path = "../orna-value-v1" }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
@@ -25,7 +26,6 @@ tempfile = "3.23.0"
 uuid.workspace = true
 
 [dev-dependencies]
-num-bigint = "0.4.6"
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-project-v1 = { path = "../orna-project-v1" }
