@@ -121,3 +121,16 @@ fn braced_control_flow_statement_precedes_block_tail() {
         assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
     }
 }
+
+// Regression: the pipeline precedence rule applies to `|` and `|?` only.
+// `||` is logical OR, so its right operand must still bind comparisons.
+#[test]
+fn logical_or_rhs_binds_comparison() {
+    let parsed = parse_expression("count <= 0 || value == \"\"");
+    assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+    let Expr::Binary { op, rhs, .. } = parsed.value else {
+        panic!("expected binary expression");
+    };
+    assert_eq!(op, "||");
+    assert!(matches!(*rhs, Expr::Binary { ref op, .. } if op == "=="));
+}
