@@ -935,26 +935,24 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) {
     let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return; };
     let applicable = chains.into_iter().filter_map(|chain| {
         let first = chain.first()?;
-        let mut furthest_saved_rename = None;
-        for step in &chain {
-            if !step.applied_version.is_some_and(|version| version <= saved_version) {
-                break;
-            }
+        // Intermediate destinations are not in the saved source, so the
+        // furthest applied step that reconciles against it is the one saved.
+        let applied = chain
+            .iter()
+            .take_while(|step| step.applied_version.is_some_and(|version| version <= saved_version))
+            .collect::<Vec<_>>();
+        applied.into_iter().rev().find_map(|step| {
             let rename = ObjectIdentityRename::new(
                 first.rename.kind(),
                 first.rename.old_qualified_name(),
                 step.rename.new_qualified_name(),
             );
-            let Ok(_reconciled) = ObjectIdentityManifest::reconcile_with_renames(
+            ObjectIdentityManifest::reconcile_with_renames(
                 &modules, Some(&previous), std::slice::from_ref(&rename),
-            ) else {
-                break;
-            };
-            // Reconciliation confirms the acknowledged destination exists in saved source.
-            // The didChange version/text match above is the evidence of application.
-            furthest_saved_rename = Some(rename);
-        }
-        furthest_saved_rename
+            )
+            .ok()
+            .map(|_| rename)
+        })
     }).collect::<Vec<_>>();
     if applicable.is_empty() { return; }
     let _ = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
@@ -1301,6 +1299,11 @@ fn request_prepare_call_hierarchy(
     let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
+    // A module with syntax errors has no reliable declarations to prepare,
+    // so preparation fails closed as the other parser-error refusals do.
+    if !workspace.file(module).parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
     Ok(serde_json::to_value(hierarchy::prepare_call_hierarchy(
         &workspace, module, byte,
     ))?)
