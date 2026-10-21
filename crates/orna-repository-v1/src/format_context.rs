@@ -6,7 +6,7 @@
 //! handles for later value/schema/store work. It does not write rows, convert
 //! data, or interpret native graph objects.
 
-use std::{fmt, process::Command, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, RecordField, parse_module, parse_row};
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::native_graph::{
     GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
 };
+use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::row_store::RowMapSnapshot;
 use crate::{Repository, RepositoryError};
 use orna_value_v1::{
@@ -30,14 +31,18 @@ pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 /// Per-module source bound compatible with project loading's aggregate budget.
 const MAX_SOURCE_MODULE_BYTES: usize = 4 * 1024 * 1024;
 
-const DATABASE_PATH: &str = ".orna/database.orna";
+/// The tracked metadata directory and the two files format admission reads
+/// from it (ORNA-META-001, ORNA-META-002).
+const METADATA_DIRECTORY: &str = ".orna";
+const DATABASE_FILE: &str = "database.orna";
+const LEGACY_FORMAT_FILE: &str = "format.orna";
 pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
+const DATABASE_PATH: &str = ".orna/database.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
+/// The bound on the fixed `main.orna` schema root a format-3 snapshot admits.
+const MAX_SCHEMA_ROOT_BYTES: usize = 64 * 1024;
 /// The fixed position of the format-3 native store root inside a snapshot.
 pub(crate) const STORE_PATH: &str = ".orna/store";
-// Used only to classify a failed metadata-path lookup. The valid format-3
-// store path never recursively enumerates this tree.
-const MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC: usize = 65_536;
 const MAX_METADATA_READ_BYTES: usize = FORMAT_CONTEXT_MAX_METADATA_BYTES * 2;
 
 /// Repository-format dispatch selected from tracked metadata.
@@ -454,7 +459,7 @@ impl RepositoryFormatContext {
         self.require_format3()?;
         let source = match self
             .snapshot
-            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
+            .read_file(&self.repository, MAIN_SOURCE_PATH, MAX_SCHEMA_ROOT_BYTES)
         {
             Ok(source) => source,
             Err(RepositoryError::GitUnavailable) => {
@@ -1053,6 +1058,38 @@ impl Repository {
             .map(|context| context.repository_format_number())
     }
 
+    /// Validates the exact staged index tree a reviewed commit will record,
+    /// before any commit object names it. The administration `commit` builds
+    /// its candidate, validates it, and only then creates the commit, so a
+    /// refused candidate leaves no object or ref behind (16-administration).
+    ///
+    /// The checks are the ones a pinned format-3 context applies: admitted
+    /// format-3 metadata, a bounded `main.orna` schema root, and an
+    /// `.orna/store` tree.
+    pub(crate) fn validate_format3_index_tree(
+        &self,
+        tree: &crate::IndexTreeRef,
+    ) -> Result<(), FormatContextError> {
+        let database = read_tree_metadata_file(self, tree, DATABASE_PATH)?;
+        let legacy_format = read_tree_metadata_file(self, tree, LEGACY_FORMAT_PATH)?;
+        let (format, _) = admit_metadata(database.as_deref(), legacy_format.as_deref())?;
+        if !format.supports_writes() {
+            return Err(FormatContextError::LegacyReadOnly(format.number()));
+        }
+        self.read_tree_file(tree.as_str(), MAIN_SOURCE_PATH, MAX_SCHEMA_ROOT_BYTES)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                _ => FormatContextError::SchemaRootInvalid,
+            })?;
+        let store =
+            crate::ManagedPath::new(STORE_PATH).map_err(|_| FormatContextError::StoreRootInvalid)?;
+        match self.tree_entry(tree.as_str(), &store) {
+            Ok(Some((mode, _))) if mode == "040000" => Ok(()),
+            Err(RepositoryError::GitUnavailable) => Err(FormatContextError::StoreRootUnavailable),
+            _ => Err(FormatContextError::StoreRootInvalid),
+        }
+    }
+
     /// Opens and validates format metadata at the current immutable HEAD.
     /// Worktree-only metadata is not silently treated as a committed snapshot.
     pub fn open_format_context(&self) -> Result<RepositoryFormatContext, FormatContextError> {
@@ -1142,8 +1179,7 @@ impl Repository {
         if !snapshot.belongs_to(self) {
             return Err(FormatContextError::PinMismatch);
         }
-        let database = read_metadata_file(self, snapshot, DATABASE_PATH)?;
-        let legacy_format = read_metadata_file(self, snapshot, LEGACY_FORMAT_PATH)?;
+        let (database, legacy_format) = read_tracked_metadata(self, snapshot)?;
         parse_context(self.clone(), snapshot.clone(), database, legacy_format)
     }
 }
@@ -1151,17 +1187,17 @@ impl Repository {
 fn repository_hash_algorithm(
     repository: &Repository,
 ) -> Result<GitHashAlgorithm, FormatContextError> {
-    let output = repository_git_output(repository, &["rev-parse", "--show-object-format=storage"])?;
-    match std::str::from_utf8(&output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim()
-    {
-        "sha1" => Ok(GitHashAlgorithm::Sha1),
-        "sha256" => Ok(GitHashAlgorithm::Sha256),
-        _ => Err(FormatContextError::GraphContextInvalid),
-    }
+    repository
+        .objects()
+        .algorithm()
+        .map_err(|error| match error {
+            RepositoryError::UnsupportedObjectFormat => FormatContextError::GraphContextInvalid,
+            _ => FormatContextError::GraphContextUnavailable,
+        })
 }
 
+/// Resolves one fixed snapshot path to its object through the repository's
+/// object reader, and checks the object type.
 fn committed_path_oid(
     repository: &Repository,
     commit: &crate::GitCommitRef,
@@ -1169,44 +1205,16 @@ fn committed_path_oid(
     path: &str,
     expected_kind: &str,
 ) -> Result<NativeOid, FormatContextError> {
-    let object_spec = format!("{}:{path}", commit.as_str());
-    let output = repository_git_output(repository, &["rev-parse", "--verify", &object_spec])?;
-    let hex = std::str::from_utf8(&output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim();
-    let oid =
-        NativeOid::from_hex(algorithm, hex).map_err(|_| FormatContextError::GraphContextInvalid)?;
-    let kind_output = repository_git_output(repository, &["cat-file", "-t", &oid.to_hex()])?;
-    if std::str::from_utf8(&kind_output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim()
-        != expected_kind
-    {
+    let object = repository
+        .objects()
+        .info(&format!("{}:{path}", commit.as_str()))
+        .map_err(|_| FormatContextError::GraphContextUnavailable)?
+        .ok_or(FormatContextError::GraphContextUnavailable)?;
+    if object.kind().name() != expected_kind {
         return Err(FormatContextError::GraphContextInvalid);
     }
-    Ok(oid)
-}
-
-fn repository_git_output(
-    repository: &Repository,
-    args: &[&str],
-) -> Result<Vec<u8>, FormatContextError> {
-    let output = Command::new("git")
-        .current_dir(repository.worktree())
-        .args(args)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| FormatContextError::GraphContextUnavailable)?;
-    if !output.status.success() {
-        return Err(FormatContextError::GraphContextUnavailable);
-    }
-    Ok(output.stdout)
+    NativeOid::from_hex(algorithm, object.oid())
+        .map_err(|_| FormatContextError::GraphContextInvalid)
 }
 
 fn map_snapshot_error(error: RepositoryError) -> FormatContextError {
@@ -1218,48 +1226,117 @@ fn map_snapshot_error(error: RepositoryError) -> FormatContextError {
     }
 }
 
-fn read_metadata_file(
+/// Reads the two tracked files that select the repository format.
+///
+/// Admission needs only `.orna/database.orna` and the legacy
+/// `.orna/format.orna` (ORNA-META-001, ORNA-META-002). It reads the snapshot's
+/// root tree, its `.orna` tree and at most those two blobs through the
+/// repository's object reader, and never lists the snapshot recursively: the
+/// format-3 store beside them grows with the rows it holds, and its size must
+/// not decide whether metadata can be read (ORNA-ROW-009).
+fn read_tracked_metadata(
     repository: &Repository,
     snapshot: &RepositorySnapshotPin,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), FormatContextError> {
+    let objects = repository.objects();
+    let root = match &snapshot.private_candidate {
+        Some(candidate) => candidate.tree().as_str().to_owned(),
+        None => objects
+            .info(&format!("{}^{{tree}}", snapshot.commit.as_str()))
+            .map_err(map_metadata_read_error)?
+            .filter(|tree| tree.kind() == ObjectKind::Tree)
+            .ok_or(FormatContextError::MetadataInvalid)?
+            .oid()
+            .to_owned(),
+    };
+    let metadata = match objects
+        .find_tree_entry(&root, METADATA_DIRECTORY.as_bytes())
+        .map_err(map_metadata_read_error)?
+    {
+        Some(directory) if directory.mode() == TreeEntryMode::Tree => objects
+            .tree_entries(directory.oid())
+            .map_err(map_metadata_read_error)?,
+        // A snapshot without a `.orna` directory records no metadata.
+        _ => return Ok((None, None)),
+    };
+    let read = |name: &str| {
+        metadata
+            .iter()
+            .find(|entry| entry.name() == name.as_bytes())
+            .map(|entry| read_metadata_blob(objects, entry))
+            .transpose()
+    };
+    Ok((read(DATABASE_FILE)?, read(LEGACY_FORMAT_FILE)?))
+}
+
+/// Reads one metadata blob under the record bound. A metadata path that holds
+/// a directory, symlink or submodule is present but invalid.
+fn read_metadata_blob(
+    objects: &ObjectReader,
+    entry: &TreeEntry,
+) -> Result<Vec<u8>, FormatContextError> {
+    if !matches!(
+        entry.mode(),
+        TreeEntryMode::File | TreeEntryMode::Executable
+    ) {
+        return Err(FormatContextError::MetadataInvalid);
+    }
+    objects
+        .read_blob(entry.oid(), FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        .map_err(map_metadata_read_error)
+}
+
+fn map_metadata_read_error(error: RepositoryError) -> FormatContextError {
+    match error {
+        RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
+        _ => FormatContextError::MetadataInvalid,
+    }
+}
+
+/// Reads one tracked metadata file from an exact tree that no commit names
+/// yet. As for a pinned snapshot, an entry that is present but unreadable is
+/// invalid rather than absent.
+fn read_tree_metadata_file(
+    repository: &Repository,
+    tree: &crate::IndexTreeRef,
     path: &str,
 ) -> Result<Option<Vec<u8>>, FormatContextError> {
-    match snapshot.read_file(repository, path, MAX_METADATA_READ_BYTES) {
+    match repository.read_tree_file(tree.as_str(), path, MAX_METADATA_READ_BYTES) {
         Ok(bytes) if bytes.len() <= FORMAT_CONTEXT_MAX_METADATA_BYTES => Ok(Some(bytes)),
         Ok(_) => Err(FormatContextError::MetadataInvalid),
         Err(RepositoryError::GitUnavailable) => Err(FormatContextError::MetadataUnavailable),
-        // File readers redact absence. Inspect the selected tree before
-        // treating a missing metadata path as a supported layout.
         Err(_) => {
-            let path_is_present = if let Some(candidate) = &snapshot.private_candidate {
-                let managed_path = crate::ManagedPath::new(path)
-                    .map_err(|_| FormatContextError::MetadataInvalid)?;
-                repository
-                    .candidate_tree_entry(candidate, &managed_path)
-                    .map_err(|_| FormatContextError::MetadataInvalid)?
-                    .is_some()
-            } else {
-                repository
-                    .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC)
-                    .map_err(|error| match error {
-                        RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
-                        _ => FormatContextError::MetadataInvalid,
-                    })?
-                    .into_iter()
-                    .any(|entry| {
-                        entry.path().as_path().to_str().is_some_and(|entry_path| {
-                            entry_path == path
-                                || entry_path
-                                    .strip_prefix(path)
-                                    .is_some_and(|suffix| suffix.starts_with('/'))
-                        })
-                    })
-            };
-            if path_is_present {
-                Err(FormatContextError::MetadataInvalid)
-            } else {
-                Ok(None)
+            let managed_path =
+                crate::ManagedPath::new(path).map_err(|_| FormatContextError::MetadataInvalid)?;
+            match repository.tree_entry(tree.as_str(), &managed_path) {
+                Ok(None) => Ok(None),
+                Err(RepositoryError::GitUnavailable) => Err(FormatContextError::MetadataUnavailable),
+                Ok(Some(_)) | Err(_) => Err(FormatContextError::MetadataInvalid),
             }
         }
+    }
+}
+
+/// Selects the repository format and database identity recorded by the
+/// tracked metadata files.
+fn admit_metadata(
+    database: Option<&[u8]>,
+    legacy_format: Option<&[u8]>,
+) -> Result<(RepositoryFormat, Option<DatabaseId>), FormatContextError> {
+    let legacy = legacy_format.map(parse_legacy_format).transpose()?;
+    match (database, legacy) {
+        (None, None) => Err(FormatContextError::MetadataUnavailable),
+        (None, Some(format)) => Ok((format, None)),
+        (Some(database), None) => match parse_database_record(database)? {
+            DatabaseRecord::Format3(database_id) => {
+                Ok((RepositoryFormat::Format3, Some(database_id)))
+            }
+            DatabaseRecord::LegacySidecar(_) => Err(FormatContextError::MetadataInvalid),
+        },
+        (Some(database), Some(format)) => match parse_database_record(database)? {
+            DatabaseRecord::Format3(_) => Err(FormatContextError::MixedFormats),
+            DatabaseRecord::LegacySidecar(database_id) => Ok((format, Some(database_id))),
+        },
     }
 }
 
@@ -1269,41 +1346,14 @@ fn parse_context(
     database: Option<Vec<u8>>,
     legacy_format: Option<Vec<u8>>,
 ) -> Result<RepositoryFormatContext, FormatContextError> {
-    let legacy = legacy_format
-        .as_deref()
-        .map(parse_legacy_format)
-        .transpose()?;
-
-    match (database.as_deref(), legacy) {
-        (None, None) => Err(FormatContextError::MetadataUnavailable),
-        (None, Some(format)) => Ok(RepositoryFormatContext {
-            repository,
-            format,
-            database_id: None,
-            snapshot,
-            runtime_owner_id: None,
-        }),
-        (Some(database), None) => match parse_database_record(database)? {
-            DatabaseRecord::Format3(database_id) => Ok(RepositoryFormatContext {
-                repository,
-                format: RepositoryFormat::Format3,
-                database_id: Some(database_id),
-                snapshot,
-                runtime_owner_id: None,
-            }),
-            DatabaseRecord::LegacySidecar(_) => Err(FormatContextError::MetadataInvalid),
-        },
-        (Some(database), Some(format)) => match parse_database_record(database)? {
-            DatabaseRecord::Format3(_) => Err(FormatContextError::MixedFormats),
-            DatabaseRecord::LegacySidecar(database_id) => Ok(RepositoryFormatContext {
-                repository,
-                format,
-                database_id: Some(database_id),
-                snapshot,
-                runtime_owner_id: None,
-            }),
-        },
-    }
+    let (format, database_id) = admit_metadata(database.as_deref(), legacy_format.as_deref())?;
+    Ok(RepositoryFormatContext {
+        repository,
+        format,
+        database_id,
+        snapshot,
+        runtime_owner_id: None,
+    })
 }
 
 enum DatabaseRecord {
@@ -1448,6 +1498,17 @@ pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
     match parse_database_record(bytes).map_err(|_| ())? {
         DatabaseRecord::Format3(database_id) => Ok(database_id),
         DatabaseRecord::LegacySidecar(_) => Err(()),
+    }
+}
+
+/// The database identity of either a canonical format-3 record or a preserved
+/// legacy sidecar. A pending migration candidate carries the sidecar identity
+/// forward, so the runtime identity must read it from there.
+pub(super) fn parse_any_database_id(bytes: &[u8]) -> Result<DatabaseId, ()> {
+    match parse_database_record(bytes).map_err(|_| ())? {
+        DatabaseRecord::Format3(database_id) | DatabaseRecord::LegacySidecar(database_id) => {
+            Ok(database_id)
+        }
     }
 }
 

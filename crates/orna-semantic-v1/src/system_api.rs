@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::OnceLock,
 };
 
@@ -147,6 +148,46 @@ pub(crate) enum PathResolution<'a> {
     Unknown,
 }
 
+/// A portable member whose execution requires a linked production provider.
+///
+/// Admission accepts a member only when `orna-sys-v1` records a production
+/// provider for it. Wasm builds carry no host bindings, so nothing is linked
+/// there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SystemMember<'a> {
+    /// One callable overload, named by its exact `api/sys.json` label.
+    Callable(&'a str),
+    /// Current rows read through one canonical relation or grouped handle.
+    Relation(&'a str),
+    /// The snapshot-pinned `as_of` view of a relation path or singleton.
+    HistoricalView(&'a str),
+    /// A singleton view and every field read through it.
+    Singleton(&'a str),
+}
+
+impl fmt::Display for SystemMember<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callable(label) => write!(formatter, "portable system callable `{label}`"),
+            Self::Relation(path) => write!(formatter, "portable system relation `{path}`"),
+            Self::HistoricalView(path) => write!(formatter, "historical view `{path}.as_of`"),
+            Self::Singleton(name) => write!(formatter, "portable system singleton `{name}`"),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> From<SystemMember<'a>> for orna_sys_v1::SystemSurfaceMember<'a> {
+    fn from(member: SystemMember<'a>) -> Self {
+        match member {
+            SystemMember::Callable(label) => Self::Callable(label),
+            SystemMember::Relation(path) => Self::Relation(path),
+            SystemMember::HistoricalView(path) => Self::HistoricalView(path),
+            SystemMember::Singleton(name) => Self::Singleton(name),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SystemApiError {
     InvalidJson,
@@ -166,6 +207,7 @@ pub(crate) enum SystemApiError {
     InvalidValueTypeMetadata,
     InvalidFunctionMetadata,
     ProviderAbiMismatch,
+    ProviderLinkMismatch,
 }
 
 impl SystemApi {
@@ -173,7 +215,38 @@ impl SystemApi {
         let api = Self::from_json(generated_system_api_json())?;
         #[cfg(not(target_arch = "wasm32"))]
         api.validate_dispatch_table(orna_sys_v1::system_dispatch_table())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        api.validate_provider_links(orna_sys_v1::system_provider_linkage().links())?;
         Ok(api)
+    }
+
+    /// Every production provider link must name a published member of its
+    /// own kind; a stale link would otherwise admit nothing or the wrong
+    /// member.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_provider_links<'a>(
+        &self,
+        links: impl IntoIterator<Item = &'a orna_sys_v1::SystemProviderLink>,
+    ) -> Result<(), SystemApiError> {
+        use orna_sys_v1::SystemSurfaceMember;
+
+        let published = |link: &orna_sys_v1::SystemProviderLink| match link.member {
+            SystemSurfaceMember::Callable(label) => self
+                .functions
+                .values()
+                .flatten()
+                .any(|function| function.label == label),
+            SystemSurfaceMember::Relation(path) => self.relation(path).is_some(),
+            SystemSurfaceMember::HistoricalView(path) => {
+                self.relation(path).is_some() || self.singletons.contains_key(path)
+            }
+            SystemSurfaceMember::Singleton(name) => self.singletons.contains_key(name),
+        };
+        if links.into_iter().all(published) {
+            Ok(())
+        } else {
+            Err(SystemApiError::ProviderLinkMismatch)
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -208,40 +281,21 @@ impl SystemApi {
                 .iter()
                 .map(|precondition| precondition.declaration.as_str())
                 .collect::<Vec<_>>();
-            let namespace = descriptor
-                .label
-                .find(['(', '<'])
-                .map_or(descriptor.label.as_str(), |end| &descriptor.label[..end]);
-            let expected_failures = self
-                .failure_codes
-                .iter()
-                .filter(|code| {
-                    (descriptor.contract.as_deref() == Some("annotated-blob-format-3")
-                        && namespace == "sys.blob.annotate"
-                        && matches!(
-                            code.as_str(),
-                            "sys.blob.incompatible_suffix"
-                                | "sys.blob.invalid_media_type"
-                                | "sys.blob.invalid_suffix"
-                        ))
-                        || code.as_str() == namespace
-                        || code
-                            .strip_prefix(namespace)
-                            .is_some_and(|tail| tail.starts_with('.'))
-                })
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
-            let registered_failures = contract
+            // Each operation declares its portable failures explicitly; the
+            // published API lists no per-operation set, so every declared
+            // portable code must be a published failure code. The shared
+            // `sys.abi.*` provider-boundary codes never reach programs.
+            let failures_published = contract
                 .failures
                 .iter()
                 .map(orna_sys_v1::FailureCode::as_str)
                 .filter(|code| !code.starts_with("sys.abi."))
-                .collect::<BTreeSet<_>>();
+                .all(|code| self.failure_codes.contains(code));
             if contract.signature.source != descriptor.signature
                 || contract.effects.iter().count() != 1
                 || expected_effect != descriptor.effect
                 || registered_preconditions != expected_preconditions
-                || registered_failures != expected_failures
+                || !failures_published
             {
                 return Err(SystemApiError::ProviderAbiMismatch);
             }
@@ -730,6 +784,27 @@ impl SystemApi {
             }
         }
         PathResolution::KnownUnsupported
+    }
+
+    /// The singleton whose view `path` reads: the path itself or its longest
+    /// singleton prefix.
+    pub(crate) fn singleton_view(&self, path: &[&str]) -> Option<&str> {
+        (2..=path.len())
+            .rev()
+            .find_map(|index| self.singletons.get_key_value(&path[..index].join(".")))
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// True when a production host links a provider for `member`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn provider_linked(&self, member: SystemMember<'_>) -> bool {
+        orna_sys_v1::system_provider_linkage().is_linked(member.into())
+    }
+
+    /// Wasm builds carry no host bindings, so no provider is linked there.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn provider_linked(&self, _member: SystemMember<'_>) -> bool {
+        false
     }
 }
 
@@ -2109,6 +2184,36 @@ mod tests {
                 .first()
                 .map(|precondition| precondition.declaration.as_str())
         );
+    }
+
+    #[test]
+    fn provider_links_must_name_published_members_of_their_kind() {
+        use orna_sys_v1::{SystemProviderHost, SystemProviderLink, SystemSurfaceMember};
+
+        let api = SystemApi::embedded().unwrap();
+        assert_eq!(
+            api.validate_provider_links(orna_sys_v1::system_provider_linkage().links()),
+            Ok(())
+        );
+        assert!(api.provider_linked(SystemMember::Callable("sys.blob.annotate")));
+        assert!(!api.provider_linked(SystemMember::Callable("sys.rt.info")));
+        for member in [
+            SystemSurfaceMember::Callable("sys.blob.annotate_all"),
+            SystemSurfaceMember::Callable("sys.snapshot"),
+            SystemSurfaceMember::Relation("sys.rt"),
+            SystemSurfaceMember::HistoricalView("sys.rt.info"),
+            SystemSurfaceMember::Singleton("sys.Storage"),
+        ] {
+            let link = SystemProviderLink {
+                member,
+                host: SystemProviderHost::Evaluator,
+            };
+            assert_eq!(
+                api.validate_provider_links([&link]),
+                Err(SystemApiError::ProviderLinkMismatch),
+                "{member:?}"
+            );
+        }
     }
 
     #[test]
