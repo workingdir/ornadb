@@ -720,7 +720,7 @@ fn table_row_counts(mutations: &[TableMutation]) -> BTreeMap<String, usize> {
 
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
-fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
+pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
     use orna_storage_v1::Error as E;
     let detail = match error {
         E::ExternalConflict { path, .. } => format!(
