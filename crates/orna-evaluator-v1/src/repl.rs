@@ -310,6 +310,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
@@ -442,6 +443,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
@@ -1537,7 +1539,7 @@ mod tests {
 
     #[test]
     fn discarded_results_still_propagate_nested_evaluation_errors() {
-        let value = crate::Value::List(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
+        let value = crate::Value::list(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
         assert_eq!(
             value
                 .discard_result()
