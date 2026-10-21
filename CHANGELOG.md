@@ -5,7 +5,6 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-<<<<<<< HEAD
 - `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
   it to its activation snapshot: the admitted project tables, plus
   `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
@@ -60,7 +59,6 @@ been published.
   and `SystemDiagnosticAdapterError`). Also removed
   `SysHostBindingRegistry::with_explain_catalogue` and
   `CaptureFileError::code`.
-=======
 - Opening a repository format context reads only the root tree, the `.orna`
   tree and its metadata blobs, through one long-lived `git cat-file
   --batch-command` reader per repository handle. It no longer lists the whole
@@ -71,7 +69,6 @@ been published.
   (formerly `max_repository_entries`) and counts source modules only. The
   loader never walks `.orna/store`, in the worktree or in a committed snapshot,
   so `orna check`, `orna run` and `orna repl` load databases with large stores.
->>>>>>> origin/main
 - The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
   active calls: function, closure and callback bodies. Expression nesting inside
   one body no longer consumes it, so recursion depth no longer shrinks as bodies
