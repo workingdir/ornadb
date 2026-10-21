@@ -31,10 +31,13 @@ fn generic_call_trailing_comma_keeps_interpolation_closure_and_text_tails() {
     let Expr::InterpolatedString { segments, .. } = body else {
         panic!("outer interpolated string was lost: {body:?}");
     };
+    // A rejected trailing comma no longer discards the parsed type
+    // arguments (ornadb-5il1.118, A01-01), so recovery keeps a generic call
+    // with `Int`; this test previously pinned a plain call.
     let [
         StringSegment::Text { text: head, .. },
         StringSegment::Expression {
-            value: Expr::Call { .. },
+            value: Expr::GenericCall { type_arguments, .. },
             ..
         },
         StringSegment::Text { text: middle, .. },
@@ -47,6 +50,7 @@ fn generic_call_trailing_comma_keeps_interpolation_closure_and_text_tails() {
     else {
         panic!("recovery lost an interpolation boundary or text tail: {segments:?}");
     };
+    assert_eq!(type_arguments.len(), 1, "{type_arguments:?}");
     assert_eq!(head, "head ");
     assert_eq!(middle, " middle ");
     assert_eq!(tail, " tail");
