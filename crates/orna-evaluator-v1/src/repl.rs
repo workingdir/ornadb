@@ -10,7 +10,8 @@ use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
     CallReuse, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
-    PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    NominalDefinitions, PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    validate_nominal_definitions,
 };
 
 /// A bounded ephemeral module for one interactive Orna session.
@@ -23,6 +24,7 @@ pub struct ReplSession {
     limits: Limits,
     environment: Environment,
     functions: Functions,
+    nominals: NominalDefinitions,
     contextual_environment: BTreeMap<String, ContextValue>,
     aliases: BTreeMap<String, String>,
     wildcard_bindings: BTreeMap<String, String>,
@@ -55,6 +57,7 @@ impl ReplSession {
             limits,
             environment: Environment::new(),
             functions: Functions::new(),
+            nominals: NominalDefinitions::new(),
             contextual_environment: BTreeMap::new(),
             aliases: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
@@ -93,6 +96,7 @@ impl ReplSession {
             limits,
             environment,
             functions,
+            nominals: NominalDefinitions::new(),
             aliases: BTreeMap::new(),
             contextual_environment: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
@@ -104,6 +108,19 @@ impl ReplSession {
             last_success: None,
             last_status: None,
         })
+    }
+
+    /// Replaces the admitted project nominal definitions visible to this
+    /// session. Definitions are validated before they can reach evaluation.
+    #[cfg(feature = "project-repl")]
+    pub(crate) fn with_nominal_definitions(
+        mut self,
+        nominals: NominalDefinitions,
+    ) -> Result<Self, EvaluationError> {
+        validate_nominal_definitions(&nominals, self.limits)?;
+        self.limits.check_items(nominals.len())?;
+        self.nominals = nominals;
+        Ok(self)
     }
 
     #[cfg(feature = "project-repl")]
@@ -327,6 +344,7 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominals,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
@@ -459,6 +477,7 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominals,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
