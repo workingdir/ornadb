@@ -28,8 +28,10 @@ been published.
     unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
     quota is `sys.blob.limit`. A host without a filesystem provider reports
     `sys.blob.source_denied`, and one without a repository Blob writer reports
-    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The host
-    operation declares these codes instead of `sys.blob.capture.*`.
+    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The native
+    host operation declares `sys.blob.source_denied`, `sys.blob.limit` and
+    `sys.blob.source_changed` instead of `sys.blob.capture.*`; the binding
+    raises `sys.blob.bounds`, which the portable operation declares.
     `orna annotate` source errors cite the portable code.
   - `sys.blob.annotate`: an OVB-1 value is
     `sys.codec.unsupported_value_profile`; arguments that are not annotated
