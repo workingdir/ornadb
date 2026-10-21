@@ -3975,10 +3975,10 @@ impl Repository {
         message: &str,
         mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<GitCommitRef, RepositoryError> {
-        if review.token != reviewed_candidate_token(review)
-            || message.is_empty()
-            || message.contains('\0')
-        {
+        if message.is_empty() || message.contains('\0') {
+            return Err(RepositoryError::InvalidCommitMessage);
+        }
+        if review.token != reviewed_candidate_token(review) {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
         let runtime_intent_id = reviewed_candidate_runtime_intent_id(review, message);
@@ -4030,27 +4030,26 @@ impl Repository {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
         let old_head = review.cwd.head().ok_or(RepositoryError::UnbornHead)?.clone();
-        let mut commit_tree = self.command();
+        // 16-administration `commit`: the staged candidate is validated before
+        // its commit is created, and a missing identity fails before any commit
+        // object exists. A refused candidate therefore leaves no object or ref.
+        self.require_configured_commit_identity()?;
+        if review.repository_format != RepositoryFormat::Format3 {
+            return Err(RepositoryError::InvalidCommitCandidate);
+        }
+        self.validate_format3_index_tree(&review.index_tree)
+            .map_err(|_| RepositoryError::InvalidCommitCandidate)?;
+        let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-p", old_head.as_str(), "-m"])
             .arg(message);
+        // Like every other publication candidate, the commit stays unreachable
+        // until the branch compare-and-set names it; no private ref anchors it
+        // (ORNA-PUB-005, ORNA-GIT-008).
         let candidate = PrivateCommit {
             tree: review.index_tree.clone(),
             commit: self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?,
         };
-        let anchor = format!("refs/orna/review-candidates/{}", runtime_intent_id.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-        let mut pin = self.command();
-        pin.args(["update-ref", anchor.as_str(), candidate.commit().as_str()]);
-        self.run(pin)?;
-        let context = self.open_private_candidate_format_context(&candidate)
-            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
-        if context.repository_format() != review.repository_format
-            || context.repository_format() != RepositoryFormat::Format3
-            || context.validate_schema_root().is_err()
-            || context.validate_store_root().is_err()
-        {
-            return Err(RepositoryError::InvalidFormatMigration);
-        }
         let mut diff = self.command();
         diff.args(["diff", "--no-renames", "--name-only", "-z"]).arg(old_head.as_str()).arg(candidate.commit().as_str());
         let changed_paths = self.run(diff)?.stdout;
@@ -4074,6 +4073,38 @@ impl Repository {
             .map_err(|_| RepositoryError::LocalStateUnavailable)?;
         self.mark_runtime_complete(runtime_intent_id, &mut journal)?;
         Ok(candidate.commit().clone())
+    }
+
+    /// A Git command that records only a configured identity: Git refuses to
+    /// guess an author or committer from `EMAIL`, the account name or the
+    /// host name (`user.useConfigOnly`). Configuration and Git's explicit
+    /// `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables still apply.
+    fn configured_identity_command(&self) -> Command {
+        let mut command = self.command();
+        command.args(["-c", "user.useConfigOnly=true"]);
+        command
+    }
+
+    /// Requires the author and committer identity a reviewed commit records
+    /// to be configured. 16-administration: "Default author information comes
+    /// from configured Git identity; missing identity fails before creating a
+    /// commit." Both identities are resolved by Git itself, exactly as the
+    /// following `commit-tree` resolves them.
+    fn require_configured_commit_identity(&self) -> Result<(), RepositoryError> {
+        for identity in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
+            let mut command = self.configured_identity_command();
+            command
+                .args(["var", identity])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            let status = command
+                .status()
+                .map_err(|_| RepositoryError::GitUnavailable)?;
+            if !status.success() {
+                return Err(RepositoryError::MissingGitIdentity);
+            }
+        }
+        Ok(())
     }
 
     fn verify_reviewed_candidate_locked(
@@ -9583,6 +9614,9 @@ pub enum RepositoryError {
     InvalidSelector,
     InvalidBranchName,
     InvalidCommitMessage,
+    /// No author or committer identity is configured for a reviewed commit,
+    /// and Git is not allowed to guess one.
+    MissingGitIdentity,
     DetachedHead,
     InvalidPublicationJournal,
     InvalidFormatMigration,
@@ -9597,6 +9631,10 @@ pub enum RepositoryError {
     },
     StaleCwd,
     StaleReviewedCandidate,
+    /// The staged candidate violates the format-3 snapshot invariants a
+    /// reviewed commit validates before creating its commit
+    /// (`sys.admin.assertion_failed`).
+    InvalidCommitCandidate,
     ManagedContentConflict,
     /// Recovery found a pathname or private quarantine state that changed
     /// while it was being reconciled. The unexpected bytes remain on disk.
@@ -9641,6 +9679,9 @@ impl fmt::Display for RepositoryError {
             Self::InvalidSelector => f.write_str("invalid Git snapshot selector"),
             Self::InvalidBranchName => f.write_str("invalid Git branch name"),
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
+            Self::MissingGitIdentity => {
+                f.write_str("no Git author or committer identity is configured")
+            }
             Self::DetachedHead => f.write_str("publication requires a symbolic Git HEAD"),
             Self::InvalidPublicationJournal => f.write_str("invalid publication journal"),
             Self::InvalidFormatMigration => {
@@ -9656,6 +9697,9 @@ impl fmt::Display for RepositoryError {
             }
             Self::StaleCwd => f.write_str("Git CWD changed during observation"),
             Self::StaleReviewedCandidate => f.write_str("reviewed commit candidate is stale or forged"),
+            Self::InvalidCommitCandidate => {
+                f.write_str("staged commit candidate is not a valid format-3 snapshot")
+            }
             Self::ManagedContentConflict => {
                 f.write_str("managed worktree content changed since capture")
             }
@@ -11502,11 +11546,54 @@ mod tests {
         assert_eq!(repository.index_generation().unwrap().tree(), Some(&review.index_tree));
         assert_eq!(repository.read_committed_file(&committed, "main.orna", 1 << 20).unwrap(), staged);
         assert_eq!(fs::read(root.path().join("unrelated.txt")).unwrap(), b"unstaged");
+        assert_eq!(
+            git(root.path(), &["for-each-ref", "refs/orna/"]),
+            "",
+            "a completed reviewed commit leaves no private candidate ref behind"
+        );
         assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
         git(root.path(), &["commit", "--allow-empty", "-m", "later unrelated commit"]);
         assert_ne!(repository.head().unwrap(), Some(committed.clone()));
         let replay = repository.commit_reviewed_candidate(&review, "reviewed").unwrap();
         assert_eq!(replay, committed);
+    }
+
+    #[test]
+    fn reviewed_candidate_is_validated_before_any_commit_object_exists() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/database.orna"), include_str!("../tests/fixtures/format-context/database-final.orna")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"store root one").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "initial"]);
+        // The staged candidate drops the store root every format-3 snapshot has.
+        git(root.path(), &["rm", "-r", "--cached", "--quiet", ".orna/store"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([50; 16]), super::Uuid::from_bytes([51; 16]), 2,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(3), vec![0x81, 0x00],
+        ).unwrap();
+        let objects = || {
+            git(root.path(), &["cat-file", "--batch-all-objects", "--batch-check=%(objectname)"])
+        };
+        let objects_before = objects();
+        let head_before = repository.head().unwrap();
+
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, ""),
+            Err(RepositoryError::InvalidCommitMessage)
+        ));
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, "drop the store root"),
+            Err(RepositoryError::InvalidCommitCandidate)
+        ));
+        assert_eq!(objects(), objects_before, "a refused candidate creates no Git object");
+        assert_eq!(git(root.path(), &["for-each-ref", "refs/orna/"]), "");
+        assert_eq!(repository.head().unwrap(), head_before);
     }
 
     #[test]
