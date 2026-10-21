@@ -1,1 +1,1 @@
-fn bad(rows: [Int]) = std.collection.first(values: rows);
+fn bad(rows: [Int]) = first(values: rows);
