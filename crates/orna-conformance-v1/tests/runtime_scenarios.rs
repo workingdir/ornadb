@@ -358,7 +358,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .filter(|scenario| scenario.status == EvidenceStatus::Skipped)
             .count(),
-        140
+        275
     );
 }
 
@@ -800,7 +800,7 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
-    assert_eq!(scenarios.len(), 144);
+    assert_eq!(scenarios.len(), 279);
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),
