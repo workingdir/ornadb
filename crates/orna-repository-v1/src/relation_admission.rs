@@ -19,6 +19,11 @@
 //! maps but their schema/admission authority remains sealed", §2), not a
 //! sidecar file. A commit that still tracks the legacy sidecar predates this
 //! relation; staging migrates it and removes the sidecar from the index.
+//!
+//! A second sealed relation, the allocator summary, records the automatic-key
+//! watermark each snapshot knew (ORNA-AUTOID-005). It is historical only:
+//! allocation reads the hidden allocator refs (ORNA-AUTOID-004), and checking
+//! out an old summary rewinds nothing (ORNA-META-004).
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,20 +33,24 @@ use std::{
     process::Stdio,
 };
 
+use num_bigint::BigInt;
 use orna_value_v1::{Raw, SchemaDescriptor, Value, decode_canonical_storage_value};
 use sha2::{Digest, Sha256};
 
 use crate::{
     DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, IndexGeneration, IndexTreeRef,
     PrivateCommit, Repository, RepositoryError, RepositoryFormat, RepositoryFormatContext, Uuid,
+    allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::GearChunker,
     native_graph::{
-        ByteIndexEntry, GitHashAlgorithm, GraphError, MAX_GRAPH_HEIGHT, MAX_REFS,
+        ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        StoreRelationEntry, sync_all_pack_files, sync_directory,
+        RowIndexMutation, StoreRelationEntry, sync_all_pack_files, sync_directory,
     },
-    row_store::{KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowValue, TypedKey},
+    row_store::{
+        KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowMapSnapshot, RowValue, TypedKey,
+    },
     schema_evolution::{EvolutionPlan, EvolutionRefusal, SchemaChanges},
 };
 
@@ -66,6 +75,28 @@ const OBJECT_QUALIFIED_NAME_FIELD: [u8; 16] = [
 const OBJECT_RETIRED_FIELD: [u8; 16] = [
     0x3b, 0xe9, 0xf1, 0x3a, 0x2b, 0x65, 0x83, 0xeb, 0xb5, 0x7d, 0xf6, 0xb3, 0xdb, 0x4c, 0x31, 0x5b,
 ];
+
+/// Stable relation UUID of the sealed automatic-key allocator summary,
+/// derived like [`OBJECT_IDENTITY_RELATION_ID`] from `sys.Allocator`.
+///
+/// Each committed snapshot records in it, per automatic-key table, the
+/// allocator watermark known when the snapshot was made (ORNA-AUTOID-005).
+/// It is a historical observation only: allocation reads the hidden ref
+/// `refs/orna/ids/<table>`, and checking out a snapshot never rewinds it
+/// (ORNA-META-004).
+pub const ALLOCATOR_RELATION_ID: [u8; 16] = [
+    0x68, 0x05, 0x1d, 0xd0, 0xc0, 0xf0, 0x8c, 0x8d, 0xa5, 0xb7, 0x03, 0x0c, 0x77, 0x36, 0x5f, 0x38,
+];
+/// Field UUIDs of the allocator summary, derived from `sys.Allocator.<field>`.
+const ALLOCATOR_TABLE_FIELD: [u8; 16] = [
+    0x55, 0xc3, 0xce, 0x50, 0x3c, 0xc4, 0x8e, 0x73, 0x81, 0xaa, 0x6c, 0xcc, 0x23, 0x41, 0xa4, 0xbd,
+];
+const ALLOCATOR_WATERMARK_FIELD: [u8; 16] = [
+    0xbf, 0x18, 0x5f, 0xf3, 0x4f, 0x55, 0x81, 0x5f, 0x9f, 0x8e, 0xbe, 0x22, 0x36, 0x37, 0x02, 0x70,
+];
+
+/// Automatic-key allocator watermarks by table ObjectId.
+pub type AllocatorWatermarks = BTreeMap<[u8; 16], BigInt>;
 
 /// Location of the identity inventory before it moved into the store. Only
 /// legacy commits track it; staging removes it from the candidate index.
@@ -98,16 +129,20 @@ pub enum RelationAdmissionError {
         relation_id: [u8; 16],
         refusal: EvolutionRefusal,
     },
-    /// One relation was supplied twice, or a table used the system relation's
-    /// identity.
+    /// One relation was supplied twice, or a table used a sealed system
+    /// relation's identity.
     DuplicateRelation {
         relation_id: [u8; 16],
     },
     /// An identity record is not a valid inventory entry.
     InvalidIdentity,
+    /// An allocator summary row is not a table's watermark.
+    InvalidAllocatorSummary,
     /// The ordinary index stages no `.orna/store`, so it has no identity
     /// inventory to change; the first `orna commit` creates one.
     NoStagedStore,
+    /// A table's hidden allocator ref could not be read.
+    Allocator(AllocatorError),
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -145,7 +180,11 @@ impl std::fmt::Display for RelationAdmissionError {
                 Uuid::from_bytes(*relation_id)
             ),
             Self::InvalidIdentity => formatter.write_str("an object identity record is invalid"),
+            Self::InvalidAllocatorSummary => {
+                formatter.write_str("an allocator summary record is invalid")
+            }
             Self::NoStagedStore => formatter.write_str("the Git index stages no .orna/store"),
+            Self::Allocator(error) => write!(formatter, "{error}"),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -170,6 +209,12 @@ impl From<GraphError> for RelationAdmissionError {
 impl From<FormatContextError> for RelationAdmissionError {
     fn from(error: FormatContextError) -> Self {
         Self::Format(error)
+    }
+}
+
+impl From<AllocatorError> for RelationAdmissionError {
+    fn from(error: AllocatorError) -> Self {
+        Self::Allocator(error)
     }
 }
 
@@ -263,42 +308,123 @@ impl StoredObjectIdentity {
 /// key is the identity UUID text; its stored fields are the retirement flag,
 /// the object kind code and the qualified name.
 pub fn object_identity_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
+    sealed_descriptor(
+        OBJECT_IDENTITY_RELATION_ID,
+        OBJECT_ID_FIELD,
+        &[
+            (OBJECT_RETIRED_FIELD, "retired", "Bool", 1),
+            (OBJECT_ID_FIELD, "id", "Str", 0),
+            (OBJECT_KIND_FIELD, "kind", "Int", 1),
+            (OBJECT_QUALIFIED_NAME_FIELD, "qualified_name", "Str", 1),
+        ],
+    )
+    .ok_or(RelationAdmissionError::InvalidIdentity)
+}
+
+/// The sealed closed descriptor of the allocator summary relation. Its key
+/// is the table ObjectId's hyphenated UUID text; its stored field is the
+/// highest automatic ID reserved for that table.
+pub fn allocator_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
+    sealed_descriptor(
+        ALLOCATOR_RELATION_ID,
+        ALLOCATOR_TABLE_FIELD,
+        &[
+            (ALLOCATOR_TABLE_FIELD, "table", "Str", 0),
+            (ALLOCATOR_WATERMARK_FIELD, "watermark", "Int", 1),
+        ],
+    )
+    .ok_or(RelationAdmissionError::InvalidAllocatorSummary)
+}
+
+/// A sealed system relation's closed descriptor over primitive `fields`,
+/// each a field UUID, name, primitive type and role (0 key, 1 stored), which
+/// a closed descriptor lists in ascending field-UUID order.
+fn sealed_descriptor(
+    relation_id: [u8; 16],
+    key: [u8; 16],
+    fields: &[([u8; 16], &str, &str, u64)],
+) -> Option<SchemaDescriptor> {
     let uuid = |id: [u8; 16]| Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())));
-    let field = |id: [u8; 16], name: &str, primitive: &str, role: u64| {
-        Raw::Array(vec![
-            uuid(id),
-            Raw::Text(name.to_owned()),
-            Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.to_owned())]),
-            Raw::Int(role.into()),
-            Raw::Array(vec![Raw::Int(0.into())]),
-        ])
-    };
-    // A closed descriptor lists its fields in ascending field-UUID order.
+    let fields = fields
+        .iter()
+        .map(|(id, name, primitive, role)| {
+            Raw::Array(vec![
+                uuid(*id),
+                Raw::Text((*name).to_owned()),
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text((*primitive).to_owned())]),
+                Raw::Int((*role).into()),
+                Raw::Array(vec![Raw::Int(0.into())]),
+            ])
+        })
+        .collect();
     SchemaDescriptor::new(Raw::Map(vec![
         (Raw::Int(0.into()), Raw::Int(1.into())),
-        (Raw::Int(1.into()), uuid(OBJECT_IDENTITY_RELATION_ID)),
-        (Raw::Int(2.into()), Raw::Array(vec![uuid(OBJECT_ID_FIELD)])),
-        (
-            Raw::Int(3.into()),
-            Raw::Array(vec![
-                field(OBJECT_RETIRED_FIELD, "retired", "Bool", 1),
-                field(OBJECT_ID_FIELD, "id", "Str", 0),
-                field(OBJECT_KIND_FIELD, "kind", "Int", 1),
-                field(OBJECT_QUALIFIED_NAME_FIELD, "qualified_name", "Str", 1),
-            ]),
-        ),
+        (Raw::Int(1.into()), uuid(relation_id)),
+        (Raw::Int(2.into()), Raw::Array(vec![uuid(key)])),
+        (Raw::Int(3.into()), Raw::Array(fields)),
         (Raw::Int(4.into()), Raw::Array(Vec::new())),
     ]))
-    .map_err(|_| RelationAdmissionError::InvalidIdentity)
+    .ok()
+}
+
+/// Whether `relation_id` names one of the store's sealed system relations
+/// (the identity inventory or the allocator summary) rather than a table.
+pub fn is_system_relation(relation_id: &[u8; 16]) -> bool {
+    *relation_id == OBJECT_IDENTITY_RELATION_ID || *relation_id == ALLOCATOR_RELATION_ID
+}
+
+/// The allocator summary row of `table`: its key and stored fields.
+fn allocator_summary_row(
+    table: &[u8; 16],
+    watermark: &BigInt,
+) -> Result<(TypedKey, Vec<u8>), RelationAdmissionError> {
+    let fields = Value::new(Raw::Array(vec![Raw::Int(watermark.clone())]))
+        .and_then(|value| value.encode())
+        .map_err(|_| RelationAdmissionError::InvalidAllocatorSummary)?;
+    Ok((
+        TypedKey::Text(Uuid::from_bytes(*table).hyphenated().to_string()),
+        fields,
+    ))
+}
+
+/// Reads one allocator summary row back, validated against `descriptor`.
+fn decode_allocator_summary_row(
+    descriptor: &SchemaDescriptor,
+    key: &TypedKey,
+    fields: &[u8],
+) -> Result<([u8; 16], BigInt), RelationAdmissionError> {
+    let invalid = || RelationAdmissionError::InvalidAllocatorSummary;
+    let key_bytes = key.canonical_bytes().map_err(|_| invalid())?;
+    descriptor
+        .validate_stored_row(ALLOCATOR_RELATION_ID, &key_bytes, fields)
+        .map_err(|_| invalid())?;
+    let TypedKey::Text(text) = key else {
+        return Err(invalid());
+    };
+    let table = Uuid::parse_str(text).map_err(|_| invalid())?;
+    if table.hyphenated().to_string() != *text {
+        return Err(invalid());
+    }
+    let Raw::Array(values) = decode_canonical_storage_value(fields).map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    match values.as_slice() {
+        [Raw::Int(watermark)] if watermark.sign() != num_bigint::Sign::Minus => {
+            Ok((*table.as_bytes(), watermark.clone()))
+        }
+        _ => Err(invalid()),
+    }
 }
 
 /// One source table the staged candidate admits: its stable relation UUID,
-/// its closed storage descriptor and, for schema evolution, the stored value
-/// of each closed constant insert-time default by field ObjectId.
+/// its closed storage descriptor, whether its key is the implicit automatic
+/// `id` and, for schema evolution, the stored value of each closed constant
+/// insert-time default by field ObjectId.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StagedRelation {
     relation_id: [u8; 16],
     descriptor: SchemaDescriptor,
+    automatic_key: bool,
     introductions: BTreeMap<[u8; 16], Raw>,
 }
 
@@ -307,8 +433,18 @@ impl StagedRelation {
         Self {
             relation_id,
             descriptor,
+            automatic_key: false,
             introductions: BTreeMap::new(),
         }
+    }
+
+    /// Marks the table's key as the implicit automatic `id`
+    /// (ORNA-AUTOID-001), so the staged snapshot records the table's
+    /// allocator watermark (ORNA-AUTOID-005).
+    #[must_use]
+    pub fn with_automatic_key(mut self) -> Self {
+        self.automatic_key = true;
+        self
     }
 
     /// The stored values of the table's closed constant insert-time
@@ -327,6 +463,10 @@ impl StagedRelation {
 
     pub fn descriptor(&self) -> &SchemaDescriptor {
         &self.descriptor
+    }
+
+    pub const fn automatic_key(&self) -> bool {
+        self.automatic_key
     }
 }
 
@@ -489,10 +629,13 @@ impl Repository {
     /// the store with its rows (ORNA-OBJECT-004). Neither change is made
     /// while `changes` reports unpublished runtime rows. The identity
     /// inventory relation is rewritten from `identities`, and the legacy
-    /// identity sidecar leaves the index. The new store is bound at
-    /// `.orna/store` in the ordinary index under Git's index lock, its node
-    /// metadata is materialized in the worktree like a publication's, and
-    /// every other staged or unstaged path is preserved.
+    /// identity sidecar leaves the index. The allocator summary records the
+    /// current watermark of every automatic-key table, zero before its first
+    /// reservation (ORNA-AUTOID-005); a store with no such table has none.
+    /// The new store is bound at `.orna/store` in the ordinary index under
+    /// Git's index lock, its node metadata is materialized in the worktree
+    /// like a publication's, and every other staged or unstaged path is
+    /// preserved.
     pub fn stage_store_admission(
         &self,
         staged: &StagedCandidate,
@@ -501,10 +644,22 @@ impl Repository {
         changes: CommittedRelationChanges,
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let database_id = *staged.database_id.as_bytes();
+        let mut watermarks = AllocatorWatermarks::new();
+        for relation in relations.iter().filter(|relation| relation.automatic_key) {
+            let watermark = self
+                .automatic_id_watermark(&relation.relation_id)?
+                .unwrap_or_default();
+            watermarks.insert(relation.relation_id, watermark);
+        }
         let mut writer = NodeWriter::new(self)?;
         let (base, committed) = match staged.store_root.as_ref() {
             Some(root) => (
-                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)?,
+                NativeGraphContext::read_store_relations(
+                    self,
+                    writer.algorithm,
+                    database_id,
+                    root,
+                )?,
                 Some(self.open_private_candidate_format_context(&staged.candidate)?),
             ),
             None => (Vec::new(), None),
@@ -515,6 +670,7 @@ impl Repository {
             committed.as_ref(),
             relations,
             identities,
+            &watermarks,
             changes,
         )?;
         let store_root = write_store_root(&mut writer, database_id, &admitted.entries)?;
@@ -601,6 +757,88 @@ impl Repository {
     ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
         let format = self.open_pinned_format_context(commit.as_str())?;
         self.read_object_identities_in(&format, commit.as_str())
+    }
+
+    /// The allocator watermark of each automatic-key table that a format-3
+    /// commit recorded (ORNA-AUTOID-005), by table ObjectId. It is a
+    /// historical observation: allocation reads the hidden allocator refs,
+    /// which no checkout rewinds (ORNA-META-004). `Ok(None)` when the
+    /// snapshot has no allocator summary: it has no automatic-key table, or
+    /// its store predates the summary.
+    pub fn read_committed_allocator_watermarks(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Option<AllocatorWatermarks>, RelationAdmissionError> {
+        let Some((_, graph)) = self.committed_allocator_summary(commit)? else {
+            return Ok(None);
+        };
+        let descriptor = allocator_descriptor()?;
+        let mut watermarks = AllocatorWatermarks::new();
+        for (key, fields) in graph.committed_rows_with_fields(&graph.open_read_scope()?)? {
+            let (table, watermark) = decode_allocator_summary_row(&descriptor, &key, &fields)?;
+            watermarks.insert(table, watermark);
+        }
+        Ok(Some(watermarks))
+    }
+
+    /// The allocator summary change a publication on `base` makes: every
+    /// summary row whose table's allocator ref advanced since `base` was
+    /// committed is raised to the ref's watermark, so the publication commit
+    /// records the watermark known when it was made (ORNA-AUTOID-005).
+    /// `Ok(None)` when `base` has no summary or every recorded watermark is
+    /// current. The row map and maintenance derive from `base`'s exact store
+    /// root, as [`NativeGraphContext::maintain_relations_rows`] requires.
+    pub fn allocator_summary_maintenance(
+        &self,
+        base: &GitCommitRef,
+    ) -> Result<Option<(RowMapSnapshot, IndexMaintenance)>, RelationAdmissionError> {
+        let Some((rows, graph)) = self.committed_allocator_summary(base)? else {
+            return Ok(None);
+        };
+        let descriptor = allocator_descriptor()?;
+        let mut operations = Vec::new();
+        for (key, fields) in graph.committed_rows_with_fields(&graph.open_read_scope()?)? {
+            let (table, recorded) = decode_allocator_summary_row(&descriptor, &key, &fields)?;
+            let Some(current) = self.automatic_id_watermark(&table)? else {
+                continue;
+            };
+            if current <= recorded {
+                continue;
+            }
+            let (key, fields) = allocator_summary_row(&table, &current)?;
+            let key = key
+                .canonical_bytes()
+                .map_err(|_| RelationAdmissionError::InvalidAllocatorSummary)?;
+            operations.push(RowIndexMutation::delete_canonical(&key)?);
+            operations.push(RowIndexMutation::insert_canonical(&key, &fields)?);
+        }
+        if operations.is_empty() {
+            return Ok(None);
+        }
+        let maintenance = graph.maintain_row_index(&operations, &graph.open_read_scope()?)?;
+        Ok(Some((rows, maintenance)))
+    }
+
+    /// The allocator summary relation of a format-3 commit's store, with its
+    /// sealed descriptor verified, or `None` when the store has none.
+    fn committed_allocator_summary(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Option<(RowMapSnapshot, NativeGraphContext)>, RelationAdmissionError> {
+        let format = self.open_pinned_format_context(commit.as_str())?;
+        if format.repository_format() != RepositoryFormat::Format3
+            || !self
+                .store_relations_in(commit.as_str(), *format.require_database_id()?.as_bytes())?
+                .contains(&ALLOCATOR_RELATION_ID)
+        {
+            return Ok(None);
+        }
+        let rows = format.load_row_map(ALLOCATOR_RELATION_ID)?;
+        let graph = format.open_native_graph(&rows)?;
+        if graph.read_schema_descriptor(&graph.open_read_scope()?)? != allocator_descriptor()? {
+            return Err(RelationAdmissionError::InvalidAllocatorSummary);
+        }
+        Ok(Some((rows, graph)))
     }
 
     /// Reads the identity inventory the staged candidate's store carries:
@@ -977,13 +1215,16 @@ struct AdmittedRelations {
 /// store `committed` reads. New relations get their schema node and one empty
 /// leaf; a relation under a changed descriptor evolves; a base relation no
 /// staged table owns is removed; the inventory relation is rewritten from
-/// `identities`. Evolution and removal need `changes` to allow them.
+/// `identities` and the allocator summary from `watermarks`, which a store
+/// without automatic-key tables does not hold. Evolution and removal need
+/// `changes` to allow them.
 fn admit_relations(
     writer: &mut NodeWriter<'_>,
     base: Vec<StoreRelationEntry>,
     committed: Option<&RepositoryFormatContext>,
     relations: &[StagedRelation],
     identities: &[StoredObjectIdentity],
+    watermarks: &AllocatorWatermarks,
     changes: CommittedRelationChanges,
 ) -> Result<AdmittedRelations, RelationAdmissionError> {
     let mut entries = base
@@ -1000,9 +1241,7 @@ fn admit_relations(
         }
     };
     for relation in relations {
-        if relation.relation_id == OBJECT_IDENTITY_RELATION_ID
-            || !staged.insert(relation.relation_id)
-        {
+        if is_system_relation(&relation.relation_id) || !staged.insert(relation.relation_id) {
             return Err(RelationAdmissionError::DuplicateRelation {
                 relation_id: relation.relation_id,
             });
@@ -1050,7 +1289,7 @@ fn admit_relations(
     }
     let retired = entries
         .keys()
-        .filter(|id| **id != OBJECT_IDENTITY_RELATION_ID && !staged.contains(*id))
+        .filter(|id| !is_system_relation(id) && !staged.contains(*id))
         .copied()
         .collect::<Vec<_>>();
     let mut removed = Vec::with_capacity(retired.len());
@@ -1064,10 +1303,17 @@ fn admit_relations(
         }
     }
     let entry = write_identity_relation(writer, identities)?;
-    if !entries.contains_key(&OBJECT_IDENTITY_RELATION_ID) {
+    if entries.insert(OBJECT_IDENTITY_RELATION_ID, entry).is_none() {
         created.push(OBJECT_IDENTITY_RELATION_ID);
     }
-    entries.insert(OBJECT_IDENTITY_RELATION_ID, entry);
+    if watermarks.is_empty() {
+        entries.remove(&ALLOCATOR_RELATION_ID);
+    } else {
+        let entry = write_allocator_relation(writer, watermarks)?;
+        if entries.insert(ALLOCATOR_RELATION_ID, entry).is_none() {
+            created.push(ALLOCATOR_RELATION_ID);
+        }
+    }
     created.sort_unstable();
     Ok(AdmittedRelations {
         entries: entries.into_values().collect(),
@@ -1140,8 +1386,6 @@ fn write_identity_relation(
     writer: &mut NodeWriter<'_>,
     identities: &[StoredObjectIdentity],
 ) -> Result<StoreRelationEntry, RelationAdmissionError> {
-    let descriptor = object_identity_descriptor()?;
-    let (schema_oid, schema_digest) = write_schema_node(writer, &descriptor)?;
     let mut ids = BTreeSet::new();
     let mut rows = Vec::with_capacity(identities.len());
     for identity in identities {
@@ -1151,30 +1395,66 @@ fn write_identity_relation(
         {
             return Err(RelationAdmissionError::InvalidIdentity);
         }
-        let key = identity.row_key();
-        let key_bytes = key
-            .canonical_bytes()
-            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
-        let fields = identity.row_fields()?;
-        descriptor
-            .validate_stored_row(OBJECT_IDENTITY_RELATION_ID, &key_bytes, &fields)
-            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
-        let value = RowValue::decode_canonical_fields(fields)
-            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
-        rows.push(RowEntry::new(key, value));
+        rows.push((identity.row_key(), identity.row_fields()?));
     }
-    rows.sort_by(|left, right| left.key().cmp(right.key()));
+    write_sealed_relation(
+        writer,
+        OBJECT_IDENTITY_RELATION_ID,
+        &object_identity_descriptor()?,
+        rows,
+        || RelationAdmissionError::InvalidIdentity,
+    )
+}
+
+/// Writes the allocator summary's schema node and its complete row map.
+fn write_allocator_relation(
+    writer: &mut NodeWriter<'_>,
+    watermarks: &AllocatorWatermarks,
+) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let rows = watermarks
+        .iter()
+        .map(|(table, watermark)| allocator_summary_row(table, watermark))
+        .collect::<Result<Vec<_>, _>>()?;
+    write_sealed_relation(
+        writer,
+        ALLOCATOR_RELATION_ID,
+        &allocator_descriptor()?,
+        rows,
+        || RelationAdmissionError::InvalidAllocatorSummary,
+    )
+}
+
+/// Writes a sealed relation's schema node and the complete row map of
+/// `rows`, each validated against the relation's sealed `descriptor`.
+fn write_sealed_relation(
+    writer: &mut NodeWriter<'_>,
+    relation_id: [u8; 16],
+    descriptor: &SchemaDescriptor,
+    rows: Vec<(TypedKey, Vec<u8>)>,
+    invalid: fn() -> RelationAdmissionError,
+) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let (schema_oid, schema_digest) = write_schema_node(writer, descriptor)?;
+    let mut entries = Vec::with_capacity(rows.len());
+    for (key, fields) in rows {
+        let key_bytes = key.canonical_bytes().map_err(|_| invalid())?;
+        descriptor
+            .validate_stored_row(relation_id, &key_bytes, &fields)
+            .map_err(|_| invalid())?;
+        let value = RowValue::decode_canonical_fields(fields).map_err(|_| invalid())?;
+        entries.push(RowEntry::new(key, value));
+    }
+    entries.sort_by(|left, right| left.key().cmp(right.key()));
     let primary_root = NativeGraphContext::build_canonical_ordered_map(
-        &rows_domain(&OBJECT_IDENTITY_RELATION_ID, &schema_digest),
-        &rows,
+        &rows_domain(&relation_id, &schema_digest),
+        &entries,
         &mut |node| writer.node(node),
     )?;
     Ok(StoreRelationEntry {
-        relation_id: OBJECT_IDENTITY_RELATION_ID,
+        relation_id,
         schema_oid,
         primary_root,
         secondary_root: None,
-        row_count: rows.len() as u64,
+        row_count: entries.len() as u64,
     })
 }
 
@@ -1565,6 +1845,39 @@ mod tests {
             Uuid::from_bytes(OBJECT_IDENTITY_RELATION_ID).get_version_num(),
             8
         );
+        assert_eq!(ALLOCATOR_RELATION_ID, system_uuid("sys.Allocator"));
+        assert_eq!(ALLOCATOR_TABLE_FIELD, system_uuid("sys.Allocator.table"));
+        assert_eq!(
+            ALLOCATOR_WATERMARK_FIELD,
+            system_uuid("sys.Allocator.watermark")
+        );
+    }
+
+    #[test]
+    fn allocator_rows_round_trip_through_the_sealed_descriptor() {
+        let descriptor = allocator_descriptor().expect("sealed descriptor is valid");
+        let table = relation(9);
+        // Watermarks are unbounded Ints, as allocator refs hold up to 64
+        // decimal digits.
+        let watermark = BigInt::from(10_u8).pow(40);
+        let (key, fields) = allocator_summary_row(&table, &watermark).unwrap();
+        assert_eq!(
+            decode_allocator_summary_row(&descriptor, &key, &fields).unwrap(),
+            (table, watermark)
+        );
+        let (_, negative) = allocator_summary_row(&table, &BigInt::from(-1)).unwrap();
+        assert!(matches!(
+            decode_allocator_summary_row(&descriptor, &key, &negative),
+            Err(RelationAdmissionError::InvalidAllocatorSummary)
+        ));
+        assert!(matches!(
+            decode_allocator_summary_row(
+                &descriptor,
+                &TypedKey::Text("not-a-uuid".to_owned()),
+                &fields
+            ),
+            Err(RelationAdmissionError::InvalidAllocatorSummary)
+        ));
     }
 
     #[test]
@@ -1781,6 +2094,97 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_record_the_allocator_watermark_of_automatic_key_tables() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let music = relation(3);
+        let automatic = |id: [u8; 16]| {
+            StagedRelation::new(id, table_descriptor(id, "Str")).with_automatic_key()
+        };
+        let stage_automatic = |relations: &[StagedRelation]| {
+            let staged = repository.capture_staged_candidate()?;
+            repository.stage_store_admission(
+                &staged,
+                relations,
+                &identities_for(&[music]),
+                CommittedRelationChanges::Allowed,
+            )
+        };
+        let watermarks = |commit: &GitCommitRef| {
+            repository
+                .read_committed_allocator_watermarks(commit)
+                .expect("read the allocator summary")
+        };
+        let admission = stage_automatic(&[automatic(music)]).expect("stage the table");
+        assert_eq!(
+            admission.admitted(),
+            &[music, ALLOCATOR_RELATION_ID, OBJECT_IDENTITY_RELATION_ID]
+        );
+        git(root, &["commit", "--quiet", "-m", "automatic table"]);
+        let first = repository.head().unwrap().expect("committed HEAD");
+        // Before its first reservation a table's watermark is zero.
+        assert_eq!(
+            watermarks(&first),
+            Some(AllocatorWatermarks::from([(music, BigInt::from(0_u8))]))
+        );
+        assert!(
+            repository
+                .allocator_summary_maintenance(&first)
+                .unwrap()
+                .is_none()
+        );
+
+        // A reservation after the commit is what a publication on it records.
+        repository
+            .advance_automatic_id_watermark(&music, None, &BigInt::from(7_u8))
+            .expect("reserve IDs");
+        let (rows, maintenance) = repository
+            .allocator_summary_maintenance(&first)
+            .unwrap()
+            .expect("the summary is behind the allocator");
+        assert_eq!(rows.version().relation_id(), &ALLOCATOR_RELATION_ID);
+        assert_eq!(maintenance.row_count(), 1);
+        assert_ne!(maintenance.primary_root(), rows.version().primary_root());
+
+        // The next snapshot records it; the earlier one keeps the watermark it
+        // knew, and neither rewinds the allocator (ORNA-META-004).
+        assert!(stage_automatic(&[automatic(music)]).unwrap().changed());
+        git(root, &["commit", "--quiet", "-m", "record the watermark"]);
+        let second = repository.head().unwrap().expect("committed HEAD");
+        assert_eq!(
+            watermarks(&second),
+            Some(AllocatorWatermarks::from([(music, BigInt::from(7_u8))]))
+        );
+        assert_eq!(
+            watermarks(&first),
+            Some(AllocatorWatermarks::from([(music, BigInt::from(0_u8))]))
+        );
+        assert_eq!(
+            repository.automatic_id_watermark(&music).unwrap(),
+            Some(BigInt::from(7_u8))
+        );
+
+        // A store without automatic-key tables holds no summary.
+        stage(&repository, &[music]).expect("stage an explicit key");
+        git(root, &["commit", "--quiet", "-m", "explicit key"]);
+        let third = repository.head().unwrap().expect("committed HEAD");
+        assert!(
+            !repository
+                .committed_store_relations(&third)
+                .unwrap()
+                .contains(&ALLOCATOR_RELATION_ID)
+        );
+        assert_eq!(watermarks(&third), None);
+
+        // No table may claim a sealed system relation's identity.
+        assert!(matches!(
+            stage_automatic(&[automatic(ALLOCATOR_RELATION_ID)]),
+            Err(RelationAdmissionError::DuplicateRelation { relation_id })
+                if relation_id == ALLOCATOR_RELATION_ID
+        ));
+    }
+
+    #[test]
     fn relation_inserts_match_the_canonical_complete_build() {
         let (directory, repository) = initialized_repository();
         let root = directory.path();
@@ -1805,6 +2209,7 @@ mod tests {
             None,
             &tables,
             &identities_for(&all),
+            &AllocatorWatermarks::new(),
             CommittedRelationChanges::Allowed,
         )
         .unwrap()
@@ -1896,7 +2301,10 @@ mod tests {
             .expect("evolve one relation and remove the other");
         assert_eq!(admission.evolved().len(), 1);
         assert_eq!(admission.evolved()[0].relation_id(), &music);
-        assert_eq!(admission.evolved()[0].changes().converted(), &["title".to_owned()]);
+        assert_eq!(
+            admission.evolved()[0].changes().converted(),
+            &["title".to_owned()]
+        );
         assert_eq!(admission.removed().len(), 1);
         assert_eq!(admission.removed()[0].relation_id(), &video);
         let head = review_and_commit(&repository, "evolve");
@@ -1904,7 +2312,9 @@ mod tests {
             repository.committed_store_relations(&head).unwrap(),
             BTreeSet::from([music, OBJECT_IDENTITY_RELATION_ID])
         );
-        let format = repository.open_pinned_format_context(head.as_str()).unwrap();
+        let format = repository
+            .open_pinned_format_context(head.as_str())
+            .unwrap();
         let rows = format.load_row_map(music).unwrap();
         let graph = format.open_native_graph(&rows).unwrap();
         assert_eq!(
