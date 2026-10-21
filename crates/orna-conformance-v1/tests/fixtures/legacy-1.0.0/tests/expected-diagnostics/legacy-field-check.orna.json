@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-field-check.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-FIELD-CONSTRAINT",
+  "message_contains": "field `check` syntax was removed; use a table assertion",
+  "status": "expected-not-executed"
+}
