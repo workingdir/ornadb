@@ -5,6 +5,29 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Format-3 schema nodes record the Orna 1.1.0 schema identity, SHA-256 of
+  `orna.schema.v3`, NUL and the closed storage descriptor, and every row map
+  binds it. Earlier development builds recorded the descriptor's plain
+  SHA-256, so the row maps of format-3 stores they wrote no longer open;
+  re-create such a store with `orna init`, `orna commit` and `orna publish`.
+  The repository API also gives each admitted row its `orna.row.v3`
+  identity, which binds content and Blob annotations but no descriptor, page
+  or overflow object ID.
+- `orna publish` rewrites only the row pages a change touches. Maintenance
+  reads the path to each changed key and the pages beside it, rewrites those
+  pages and the branches above them, and keeps every other page by object ID
+  without reading it; the result is the same root a complete rebuild gives.
+  Earlier builds read and decoded every row of the table on each publish. A
+  row written back with the value it already holds is no change, so such a
+  publish reports nothing to publish.
+- `orna publish` stores rows larger than a row page holds inline. A value
+  whose stored encoding is over 8 KiB, or that holds more than 32 Blob
+  references of its own, is written to the shared overflow graph (a kind-3
+  node over an OGB-2 byte index, with a kind-7 index of the objects it
+  references) and its row names it with tag 60113. Large fields are lowered
+  first, so a row with one long text field keeps its other fields inline.
+  `orna query`, `orna history`, mounts and the REPL read such rows back as
+  ordinary values; earlier builds refused to publish them.
 - Format-3 row maps and the relation map cut pages by the exact ORP-1 rule:
   the encoded node bytes, including the domain and entry-count heads, and the
   page's distinct native refs. The same rows now give the same root as the

@@ -21,10 +21,13 @@ use orna_value_v1::{
 
 use crate::native_graph::{
     CborValue, GraphError, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId, NativeObjectKind,
-    RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor, row_fields_dependencies,
+    RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor, direct_blob_reference_count,
+    row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
+/// Direct Blob references an inline stored value may hold.
+pub const ROW_INLINE_REF_LIMIT: usize = 32;
 pub const ROW_CANONICAL_LIMIT: usize = 1_073_741_824;
 pub const KEY_CANONICAL_LIMIT: usize = 1_048_576;
 pub const MIN_PAGE_ENTRIES: usize = 16;
@@ -1014,6 +1017,10 @@ pub enum RowValue {
 }
 
 impl RowValue {
+    /// An inline stored value: at most 8 KiB encoded and at most 32 Blob
+    /// references of its own (store-3.json `row_inline_limit` and
+    /// `row_inline_ref_limit`). References inside a nested overflow value
+    /// belong to that value, so `dependencies` may also name overflow nodes.
     pub fn inline(
         encoded: Vec<u8>,
         dependencies: Vec<RowDependency>,
@@ -1021,8 +1028,9 @@ impl RowValue {
         if encoded.len() > ROW_INLINE_LIMIT {
             return Err(RowStoreError::InlineValueTooLarge(encoded.len()));
         }
-        if dependencies.len() > 32 {
-            return Err(RowStoreError::InlineDependencyFanout(dependencies.len()));
+        let blob_references = direct_blob_reference_count(&decode_canonical_cbor(&encoded)?)?;
+        if blob_references > ROW_INLINE_REF_LIMIT {
+            return Err(RowStoreError::InlineDependencyFanout(blob_references));
         }
         if dependencies
             .iter()
