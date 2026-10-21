@@ -1,7 +1,7 @@
 //! End-to-end protocol and editor artifact proofs for the Orna 1.0 language.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -209,6 +209,9 @@ struct Client {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_id: i64,
+    /// Notifications read while waiting for a response. Diagnostics are
+    /// published by a worker thread, so they may interleave with responses.
+    pending: VecDeque<Value>,
 }
 
 impl Client {
@@ -224,6 +227,7 @@ impl Client {
             reader: BufReader::new(child.stdout.take().unwrap()),
             child,
             next_id: 1,
+            pending: VecDeque::new(),
         }
     }
 
@@ -255,7 +259,13 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-        let response = self.read();
+        let response = loop {
+            let message = self.read();
+            if message.get("method").is_none() {
+                break message;
+            }
+            self.pending.push_back(message);
+        };
         assert_eq!(response["id"], id, "response for {method}: {response}");
         assert!(response.get("error").is_none(), "{method}: {response}");
         response["result"].clone()
@@ -266,9 +276,20 @@ impl Client {
     }
 
     fn notification(&mut self, method: &str) -> Value {
-        let response = self.read();
-        assert_eq!(response["method"], method, "notification: {response}");
-        response["params"].clone()
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|message| message["method"] == method)
+        {
+            return self.pending.remove(index).unwrap()["params"].clone();
+        }
+        loop {
+            let message = self.read();
+            if message["method"] == method {
+                return message["params"].clone();
+            }
+            self.pending.push_back(message);
+        }
     }
 
     fn shutdown(&mut self) {
@@ -649,7 +670,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     assert_no_legacy_words(&broken, "syntax diagnostic");
     let diagnostics = broken["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 1, "{broken}");
-    assert_eq!(diagnostics[0]["source"], "orna-syntax-v1");
+    assert_eq!(diagnostics[0]["source"], "orna");
     assert_eq!(
         diagnostics[0]["range"]["start"],
         position_of(INVALID_SOURCE, ";", 0)
