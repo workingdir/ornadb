@@ -11875,3 +11875,53 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         "staging must not alter existing bindings"
     );
 }
+
+#[test]
+fn default_limits_pass_full_collection_list_through_std_collection_operations() {
+    let rows = Value::new(Raw::Array(
+        (0..2_048).map(|value| Raw::Int(value.into())).collect(),
+    ))
+    .unwrap();
+    let descending = Value::new(Raw::Array(
+        (0..2_048).rev().map(|value| Raw::Int(value.into())).collect(),
+    ))
+    .unwrap();
+    let environment = Environment::from([
+        ("rows".into(), rows),
+        ("descending".into(), descending),
+    ]);
+    for source in [
+        "std.collection.map(rows, value => value * 10)",
+        "std.collection.filter(rows, value => value % 2 == 0)",
+        "std.collection.sort_by(rows, value => value)",
+        "std.collection.rank(rows, value => value % 10)",
+        "std.collection.rank(descending, value => value)",
+        "std.collection.group_by(rows, value => value % 2)",
+        "std.collection.sum(rows)",
+    ] {
+        evaluate_expression(source, &environment, Limits::default())
+            .unwrap_or_else(|error| panic!("{source}: {}", error.code()));
+    }
+    let mapped = evaluate_expression(
+        "std.collection.map(rows, value => value * 10)",
+        &environment,
+        Limits::default(),
+    )
+    .unwrap();
+    let Raw::Array(items) = mapped.raw() else {
+        panic!("map must return an array");
+    };
+    assert_eq!(items.len(), 2_048);
+}
+
+#[test]
+fn default_limits_still_stop_an_infinite_while_loop_with_eval_limit() {
+    assert_eq!(
+        code(evaluate_expression(
+            "while true {}",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
