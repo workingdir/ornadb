@@ -21000,7 +21000,19 @@ mod tests {
         let database_uuid = "00000000-0000-4000-8000-000000000001";
         let database =
             format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-        let schema_source = b"capture transaction test schema";
+        let schema_descriptor = orna_foundation_v1::SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(relation_id.to_vec()))),
+            ),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(Vec::new())),
+            (OvbRaw::Int(3.into()), OvbRaw::Array(Vec::new())),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap();
+        let schema_source = schema_descriptor.encode().unwrap();
+        let schema_source = schema_source.as_slice();
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
         std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
