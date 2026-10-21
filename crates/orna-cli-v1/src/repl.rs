@@ -1352,8 +1352,12 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
         assert!(output.starts_with("> error[ORNA-S021-TYPE]: "), "{output}");
-        assert!(!output.contains("private"), "{output}");
-        assert!(output.contains("\"redacted\": true"), "{output}");
+        let status_payload = output
+            .lines()
+            .find(|line| line.starts_with("> {"))
+            .expect("status binding prints its redacted payload");
+        assert!(!status_payload.contains("private"), "{output}");
+        assert!(status_payload.contains("\"redacted\": true"), "{output}");
         assert!(output.ends_with("> 42 : Int\n> null : Null\n> "), "{output}");
     }
 
@@ -1367,7 +1371,7 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: REPL preview cannot perform an effect\nhelp: evaluate a pure expression or invoke the operation through its admitted runtime entry point\n> 2 : Int\n> "
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: this input performs effects: network\nnote: the core REPL session never runs effects\nhelp: evaluate a pure expression here\nhelp: or run the input in a project repository REPL, where effects are committed\n> 2 : Int\n> "
         );
     }
 
