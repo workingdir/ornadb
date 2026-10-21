@@ -7,4 +7,4 @@ pub fn prefix(values: [Int], count: Int): [Int] =
     views.to_list(views.take(views.from_list(values), count));
 
 pub fn window_count(values: [Int], width: Int, step: Int): Int =
-    std.collection.count(views.windows(views.from_list(values), width, step));
+    count(views.windows(views.from_list(values), width, step));
