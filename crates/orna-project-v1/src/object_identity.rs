@@ -2996,7 +2996,18 @@ pub table User(id: Uuid) {
         );
 
         let row = [
-            ("username", Raw::Text("ada".into())),
+            // A refined nominal value is tag 60020 `[type_object_id,
+            // base_value]` (29-formats.md).
+            (
+                "username",
+                Raw::Tag(
+                    60020,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(&username),
+                        Raw::Text("ada".into()),
+                    ])),
+                ),
+            ),
             (
                 "email",
                 Raw::Tag(

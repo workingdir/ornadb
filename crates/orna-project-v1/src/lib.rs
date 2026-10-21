@@ -21,9 +21,9 @@ use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
     Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, StandardCatalogueError,
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_row_unit_with_owner_fields,
+    lower_data_expression, lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
+use orna_syntax_v1::{Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_row};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
@@ -32,12 +32,14 @@ use unicode_normalization::UnicodeNormalization;
 mod attachments;
 mod unicode16;
 mod object_identity;
+mod typed_row;
 
 pub use object_identity::{
     ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectIdentityRename,
     ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
     OBJECT_IDENTITY_MANIFEST_PATH,
 };
+pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 
 pub use attachments::{
     AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
@@ -511,11 +513,14 @@ pub fn admit_format3_row(
         })
         .collect::<BTreeMap<_, _>>();
 
+    // The evaluator already evaluated every omitted default once
+    // (ORNA-FIELD-001), so the completed row supplies every stored field.
     admit_stored_source_row(
         schema,
         context,
         canonical_key.to_vec(),
         &stored_row_fields,
+        &BTreeMap::new(),
         blob_bindings,
         Vec::new(),
         mutation_id,
@@ -668,26 +673,75 @@ fn admit_source_row_with_owner_fields_inner(
         .iter()
         .map(|(name, value)| (name.as_str(), value))
         .collect::<BTreeMap<_, _>>();
+    let defaults = table_constant_defaults(project, &module_name, schema.declaration_name());
     admit_stored_source_row(
         schema,
         context,
         lowered.canonical_key,
         &row_fields,
+        &defaults,
         blob_bindings,
         owner_field_values,
         mutation_id,
     )
 }
 
+/// The closed constant insert-time defaults of `table` in `module_name`, as
+/// schema-free data values (ORNA-FIELD-001, ORNA-FIELD-004). A row document
+/// that omits such a field stores the default's value. A default that needs
+/// evaluation is absent here, so a document must supply that field.
+fn table_constant_defaults(
+    project: &LoadedProject,
+    module_name: &str,
+    table: &str,
+) -> BTreeMap<String, Raw> {
+    let mut defaults = BTreeMap::new();
+    for module in project.modules() {
+        if object_identity::module_namespace(&module.logical_path).as_deref() != Some(module_name) {
+            continue;
+        }
+        let parsed = parse_module(&module.source);
+        for item in &parsed.value.items {
+            let Declaration::Table { name, members, .. } = &item.declaration else {
+                continue;
+            };
+            if name != table {
+                continue;
+            }
+            for member in members {
+                if let TableMember::Field {
+                    name,
+                    initializer: Some(FieldInitializer::Default(expression)),
+                    ..
+                } = member
+                {
+                    if let Some(value) = lower_data_expression(expression) {
+                        defaults.insert(name.clone(), value);
+                    }
+                }
+            }
+        }
+    }
+    defaults
+}
+
+/// Lowers a source row's fields against its committed descriptor and binds
+/// its Blob fields. Every stored field comes from exactly one of the row,
+/// an owner-supplied value, a Blob binding or a constant default; each value
+/// is lowered to its stored type (ORNA-FORMAT-004).
+#[allow(clippy::too_many_arguments)]
 fn admit_stored_source_row(
     schema: &ResolvedTableSchema,
     context: &Format3Context,
     canonical_key: Vec<u8>,
     row_fields: &BTreeMap<&str, &Raw>,
+    defaults: &BTreeMap<String, Raw>,
     blob_bindings: Vec<(String, OrpBlobBinding)>,
     owner_field_values: Vec<(String, Raw)>,
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
+    let stored_schema =
+        StoredSchema::new(schema.descriptor()).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     let (descriptor_table_id, fields) = source_schema_fields(schema.descriptor())?;
     if &descriptor_table_id != schema.table.table_object_id() {
         return Err(ProjectLoadError::InvalidSourceRow);
@@ -724,7 +778,6 @@ fn admit_stored_source_row(
     }) {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
-    let owner_field_count = pending_owner_fields.len();
     let mut pending_bindings = BTreeMap::new();
     for (field_name, binding) in blob_bindings {
         let field = fields
@@ -778,17 +831,37 @@ fn admit_stored_source_row(
             if pending_bindings.contains_key(&field.id) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
-            let value = pending_owner_fields
-                .remove(&field.name)
-                .or_else(|| row_fields.get(field.name.as_str()).map(|value| (**value).clone()))
+            let value = match (
+                pending_owner_fields.remove(&field.name),
+                row_fields.get(field.name.as_str()),
+            ) {
+                (Some(_), Some(_)) => return Err(ProjectLoadError::InvalidSourceRow),
+                (Some(owner_value), None) => owner_value,
+                (None, Some(value)) => (**value).clone(),
+                // ORNA-FIELD-001: an omitted defaulted field stores the
+                // default's value, evaluated once for this insertion.
+                (None, None) => defaults
+                    .get(&field.name)
+                    .cloned()
+                    .ok_or(ProjectLoadError::InvalidSourceRow)?,
+            };
+            let descriptor_field = stored_schema
+                .field(&field.name)
                 .ok_or(ProjectLoadError::InvalidSourceRow)?;
-            stored_fields.push(value);
+            stored_fields.push(
+                stored_schema
+                    .lower_field(descriptor_field, &value)
+                    .map_err(|_| ProjectLoadError::InvalidSourceRow)?,
+            );
         }
     }
     if !pending_bindings.is_empty()
         || !pending_owner_fields.is_empty()
-        || row_fields.len() + retained_bindings.len() + owner_field_count
-            != fields.iter().filter(|field| field.role == 1).count()
+        || row_fields.keys().any(|name| {
+            !fields
+                .iter()
+                .any(|field| field.name == *name && field.role == 1)
+        })
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
