@@ -1393,7 +1393,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "sys.blob.source_denied",
-                "sys.blob.bounds",
                 "sys.blob.limit",
                 "sys.blob.source_changed",
             ]
@@ -1415,6 +1414,29 @@ mod tests {
             );
             assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
         }
+        // The provider takes a `u64` bound. A bound the binding cannot narrow
+        // to it is `sys.blob.bounds`, which the portable operation declares.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        assert!(
+            portable
+                .failures
+                .iter()
+                .any(|declared| declared.as_str() == "sys.blob.bounds")
+        );
+        let negative_bound = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int((-1).into())).unwrap(),
+        ];
+        assert_eq!(
+            SysHostBindingRegistry::default()
+                .capture_file_ovb2("sys.blob.capture_file", &negative_bound, None)
+                .expect_err("a negative byte bound is out of range")
+                .code(),
+            "sys.blob.bounds"
+        );
     }
 
     /// ORNA-INGEST-002 and ORNA-SYS-008: a host that lacks part of the capture
