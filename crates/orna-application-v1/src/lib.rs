@@ -1142,6 +1142,32 @@ impl SourceMutationEffectHandler {
         self
     }
 
+    /// Raises each automatic-key table's next ID above its durable allocator
+    /// watermark, the highest ID this repository ever reserved for it, so an
+    /// ID freed by delete, reset, checkout or branch switch is never
+    /// allocated again (ORNA-AUTOID-002, ORNA-AUTOID-004).
+    fn with_automatic_id_watermarks(mut self, watermarks: &BTreeMap<String, BigInt>) -> Self {
+        for (table, watermark) in watermarks {
+            if let Some(next) = self.next_automatic_ids.get_mut(table) {
+                let successor = watermark + BigInt::from(1_u8);
+                if successor > *next {
+                    *next = successor;
+                }
+            }
+        }
+        self
+    }
+
+    /// The highest automatic ID of each automatic-key table this activation
+    /// allocated, accepted or observed; the host reserves it durably before
+    /// the activation commits (ORNA-AUTOID-004).
+    fn automatic_id_high_water(&self) -> BTreeMap<String, BigInt> {
+        self.next_automatic_ids
+            .iter()
+            .map(|(table, next)| (table.clone(), next - BigInt::from(1_u8)))
+            .collect()
+    }
+
     fn with_publication_rows(
         tables: BTreeMap<String, TableSchema>,
         publication_rows: RuntimePublicationMetadataRows,

@@ -28,6 +28,7 @@ impl ApplicationAuthority {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
+        let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
         let ids_for_storage = table_ids.clone();
         let mutations = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
@@ -35,7 +36,8 @@ impl ApplicationAuthority {
             captured_rows,
             table_ids,
         )?
-            .with_insert_defaults(defaults, functions, self.limits);
+            .with_insert_defaults(defaults, functions, self.limits)
+            .with_automatic_id_watermarks(&watermarks);
         let mut effects = ReplTransactionEffectHandler {
             bindings,
             mutations,
@@ -45,12 +47,74 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        reserve_automatic_ids(
+            scope,
+            &ids_for_storage,
+            &watermarks,
+            &effects.mutations.automatic_id_high_water(),
+        )?;
         let activation = effects
             .mutations
             .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
         let activation = normalize_repl_mutations(scope, &tables_for_storage, &ids_for_storage, activation)?;
         Ok((value, successor, activation))
     }
+}
+
+/// The durable allocator watermark of each automatic-key table: the highest
+/// ID ever reserved for it, whatever rows the checked-out snapshot holds
+/// (ORNA-AUTOID-002, ORNA-AUTOID-004).
+fn automatic_id_watermarks(
+    scope: &ReplTransactionScope<'_>,
+    tables: &BTreeMap<String, TableSchema>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+) -> Result<BTreeMap<String, BigInt>, ApplicationError> {
+    let mut watermarks = BTreeMap::new();
+    for (table, schema) in tables {
+        if !schema
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission.automatic_key)
+        {
+            continue;
+        }
+        let object_id = table_ids
+            .get(table)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        if let Some(watermark) = scope
+            .repository
+            .automatic_id_watermark(&object_id.bytes())
+            .map_err(|error| ApplicationError::Runtime(error.to_string()))?
+        {
+            watermarks.insert(table.clone(), watermark);
+        }
+    }
+    Ok(watermarks)
+}
+
+/// Reserves every automatic ID the activation allocated, accepted or
+/// observed before the activation can commit. The allocator ref advances
+/// first, so a commit that then fails leaves a gap (ORNA-AUTOID-003) and
+/// never an ID that a later allocation reuses.
+fn reserve_automatic_ids(
+    scope: &ReplTransactionScope<'_>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+    watermarks: &BTreeMap<String, BigInt>,
+    high_water: &BTreeMap<String, BigInt>,
+) -> Result<(), ApplicationError> {
+    for (table, high) in high_water {
+        let reserved = watermarks.get(table);
+        if reserved.is_none_or(|reserved| high > reserved) && *high > BigInt::from(0_u8) {
+            let object_id = table_ids
+                .get(table)
+                .ok_or(ApplicationError::InvalidTableMetadata)?;
+            scope
+                .repository
+                .advance_automatic_id_watermark(&object_id.bytes(), reserved, high)
+                .map_err(|error| ApplicationError::Runtime(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn normalize_repl_mutations(

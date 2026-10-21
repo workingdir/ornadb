@@ -12,6 +12,41 @@ been published.
   sealed system relation rather than `.orna/object-identities.cbor`, which is
   read only from older commits. `orna publish` refuses rows whose table has no
   relation in the committed store.
+- `orna commit` evolves a format-3 table whose declaration changed instead of
+  refusing it. Fields are matched by their stable ObjectId, never by name, and
+  every committed row is rewritten to the staged schema and admitted against it
+  in the same commit: a renamed field keeps its values, a new optional field is
+  absent, a new required field takes its constant default (frozen into the
+  rows at that commit), a removed field is dropped, and `T` to `T?`, `T?` to
+  `T`, `Int` to `Decimal` and exact `Int` to `Float` convert. A new required
+  field without a constant default, a changed primary key, a lossy type change
+  or a row that does not fit refuses the commit and stages nothing. A removed
+  table's relation leaves the store. Schema changes wait until unpublished
+  runtime rows are published. The commit reports each evolved and removed
+  table (ORNA-EVOL-001, ORNA-EVOL-002, ORNA-EVOL-009, ORNA-FIELD-003,
+  ORNA-FIELD-005).
+- `orna mv OLD NEW` renames a table, table field, type, type field, enum
+  variant, variant field or unit of a format-3 database by its qualified name
+  (such as `Music.title`): it edits the declaration and stages the ObjectId
+  move in the index's `.orna/store`, committing nothing, so the next
+  `orna commit` keeps the identity and the field's values (ORNA-OBJECT-003).
+  Editors can stage the same move through
+  `ObjectIdentityManifest::stage_renames`.
+- Automatic table IDs are never reused: each automatic-key table's highest
+  reserved ID lives in the hidden ref `refs/orna/ids/<table ObjectId>` outside
+  every branch, reserved before the rows that use it commit, so deleting rows,
+  `git reset`, checkout and branch switches no longer hand out an ID again
+  (ORNA-AUTOID-002, ORNA-AUTOID-004). Every `orna commit` and every
+  publication that changes rows records each automatic-key table's watermark
+  in a sealed allocator summary relation of `.orna/store` for history;
+  checking out an older commit never rewinds the allocator (ORNA-AUTOID-005,
+  ORNA-META-004).
+- Row values are stored in the encoding their declared type requires: REPL
+  inserts of optional, record and `Float` fields, and row documents naming enum
+  variants, nominal records, refined values, money, quantities or stored
+  references, now publish. A row document that omits a field with a constant
+  default stores the default. Refined nominal values are stored as tag 60020
+  `[type, base value]` (ORNA-FORMAT-004, ORNA-FIELD-001).
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
