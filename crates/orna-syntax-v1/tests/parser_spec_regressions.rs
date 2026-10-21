@@ -291,6 +291,21 @@ fn unparenthesized_header_constructor_is_rejected() {
         matches!(rhs, Expr::Group { inner, .. } if matches!(inner.as_ref(), Expr::Nominal { .. })),
         "{rhs:?}"
     );
+
+    // A record-shaped brace with no body after it is a malformed body, not a
+    // constructor, so the constructor diagnostic does not apply.
+    let parsed =
+        parse_module("pub fn pick(ready: Bool) = if ready { value: 1 } else { value: 2 };");
+    assert!(!parsed.is_ok());
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message
+                != "nominal constructors before a control body must be parenthesized"),
+        "{:?}",
+        parsed.diagnostics
+    );
 }
 
 // A01-06 (grammar `assertion_clause`, `subjectless_predicate`): a table
