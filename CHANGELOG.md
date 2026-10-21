@@ -125,6 +125,12 @@ been published.
   authority, and cross-origin writes, get 403. Smart-HTTP push now requires
   `serve --allow-push`.
 
+- `orna serve` ends live sessions in order. `DELETE /orna/session/<id>` cancels
+  and joins the session's application work and closes its socket before it
+  answers 204, including while the socket is attached; it used to answer 503
+  then, and 400 once the session had evaluated anything. A sweep ends sessions
+  whose lease has elapsed in the same way.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
