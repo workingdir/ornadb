@@ -152,6 +152,55 @@ impl fmt::Display for FormatContextError {
 
 impl std::error::Error for FormatContextError {}
 
+/// A durable runtime write refused because the format recorded at `HEAD` is
+/// 1 or 2. Legacy snapshots keep their readers but have no row writer in this
+/// build (ORNA-UPGRADE-003, ORNA-ROW-013), and runtime admission follows the
+/// recorded format, not worktree metadata (ORNA-UPGRADE-001). The refusal
+/// carries its stable code, the recorded format and the remedy, so a front
+/// end can report it without interpreting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyWriteRefused {
+    format: u8,
+}
+
+impl LegacyWriteRefused {
+    /// What a user can do. No in-place format-3 upgrade ships yet, so the
+    /// remedy names the work item that delivers it rather than a command.
+    pub const REMEDY: &'static str = "this build has no writer or in-place upgrade for format-1/2 snapshots; the format-3 upgrade is tracked as ornadb-5il1.184";
+
+    /// The format recorded at `HEAD`: 1 or 2.
+    pub const fn format(self) -> u8 {
+        self.format
+    }
+
+    /// The stable diagnostic code, shared with the read-only legacy
+    /// format-context refusal.
+    pub const fn code(self) -> &'static str {
+        FormatContextError::LegacyReadOnly(self.format).code()
+    }
+
+    /// The condition, without the format number.
+    pub const fn title(self) -> &'static str {
+        "repository HEAD is a read-only legacy snapshot"
+    }
+
+    pub const fn remedy(self) -> &'static str {
+        Self::REMEDY
+    }
+}
+
+impl fmt::Display for LegacyWriteRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository format {} at HEAD is a read-only compatibility snapshot; durable runtime writes are refused",
+            self.format
+        )
+    }
+}
+
+impl std::error::Error for LegacyWriteRefused {}
+
 /// Owner-authenticated descriptor binding for one format-3 relation in an
 /// exact repository UUID and snapshot. A qualified source identity is retained
 /// only when its module path and unique table declaration are verified against
@@ -1012,6 +1061,39 @@ impl StoreRootPin {
 }
 
 impl Repository {
+    /// Admits durable runtime writes only when the format recorded at `HEAD`
+    /// has a writer. A format-1/2 `HEAD` is refused with
+    /// [`LegacyWriteRefused`] (ORNA-UPGRADE-001, ORNA-UPGRADE-003), whatever
+    /// metadata the worktree holds.
+    ///
+    /// An unborn `HEAD`, a format-3 `HEAD` and unreadable metadata are not
+    /// decided here; the metadata checks that follow report them. A prepared
+    /// migration copy ([`Self::holds_prepared_migration`]) stays admitted so
+    /// `orna migrate copy` can carry consumer checkpoints into it.
+    pub fn require_writable_head_format(&self) -> Result<(), LegacyWriteRefused> {
+        let Ok(context) = self.open_format_context() else {
+            return Ok(());
+        };
+        if !context.is_read_only() || self.holds_prepared_migration() {
+            return Ok(());
+        }
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
+    }
+
+    /// Whether this worktree holds a prepared format migration: a readable
+    /// publication journal that records migration continuity, as
+    /// `orna migrate copy` leaves in its destination. The journal lives in the
+    /// runtime directory, so without one nothing is read and nothing, not
+    /// even a coordination lock, is created.
+    pub fn holds_prepared_migration(&self) -> bool {
+        self.runtime_paths().root().exists()
+            && self.read_publication_journal().is_ok_and(|journal| {
+                journal.is_some_and(|journal| journal.migration_continuity().is_some())
+            })
+    }
+
     /// Pins a reachable Git selector without exposing its native object ID.
     pub(crate) fn pin_snapshot(
         &self,
@@ -1354,6 +1436,47 @@ fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextEr
     Ok(DatabaseRecord::Format3(database_id))
 }
 
+/// One field value of a closed legacy `format.orna` record.
+#[derive(Clone, Copy)]
+enum LegacyRecordValue {
+    Integer(i64),
+    Text(&'static str),
+}
+
+/// The `format.orna` records the format-1/2 writers produced. They stay
+/// readable inputs (ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002), and
+/// retained format-1/2 commits are decoded by their original storage profiles
+/// (`compatibility/README.md`). OrnaDB 1.0's `orna init` wrote the format-1
+/// record. The format-2 record is the closed capability record of the
+/// previous 1.1.0 draft (its ORNA-OGB-001). Each record is closed: it holds
+/// exactly these fields with these values, so an unlisted profile is never
+/// read as a known layout.
+const LEGACY_FORMAT_RECORDS: [(RepositoryFormat, &[(&str, LegacyRecordValue)]); 2] = [
+    (
+        RepositoryFormat::Legacy1,
+        &[
+            ("repository_format", LegacyRecordValue::Integer(1)),
+            (
+                "storage_profile",
+                LegacyRecordValue::Text("compact-storage-v1"),
+            ),
+        ],
+    ),
+    (
+        RepositoryFormat::Legacy2,
+        &[
+            ("repository_format", LegacyRecordValue::Integer(2)),
+            ("row_profile", LegacyRecordValue::Text("ORR-2")),
+            ("blob_profile", LegacyRecordValue::Text("OGB-1")),
+            ("semantic_profile", LegacyRecordValue::Text("SOV-2")),
+            (
+                "compact_profile",
+                LegacyRecordValue::Text("compact-storage-v2"),
+            ),
+        ],
+    ),
+];
+
 pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
     let source = std::str::from_utf8(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
     let line = source
@@ -1368,10 +1491,32 @@ pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, Form
         _ => {}
     }
 
-    // The final publication names legacy reader coordinates as format 1/2,
-    // but does not enumerate any legacy `storage_profile` pair. Do not import
-    // historical draft/current-writer profile names into final admission.
-    Err(FormatContextError::MetadataInvalid)
+    let fields = parse_record(bytes).map_err(|()| FormatContextError::MetadataInvalid)?;
+    LEGACY_FORMAT_RECORDS
+        .iter()
+        .find(|(_, expected)| is_closed_record(&fields, expected))
+        .map(|(format, _)| *format)
+        .ok_or(FormatContextError::MetadataInvalid)
+}
+
+/// Whether `fields` holds each expected field exactly once, with its value,
+/// and nothing else.
+fn is_closed_record(fields: &[RecordField], expected: &[(&str, LegacyRecordValue)]) -> bool {
+    fields.len() == expected.len()
+        && expected.iter().all(|(name, value)| {
+            let mut named = fields.iter().filter(|field| field.name == *name);
+            let (Some(field), None) = (named.next(), named.next()) else {
+                return false;
+            };
+            match value {
+                LegacyRecordValue::Integer(expected) => {
+                    integer_literal(&field.value) == Some(*expected)
+                }
+                LegacyRecordValue::Text(expected) => {
+                    string_literal(&field.value) == Some(*expected)
+                }
+            }
+        })
 }
 
 fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
