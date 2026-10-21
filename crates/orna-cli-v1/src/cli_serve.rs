@@ -2847,9 +2847,12 @@ mod tests {
             directory.path(),
             &["init", "--quiet", "--initial-branch=keepalive"],
         );
+        // The idle bound leaves each ping more than two seconds for its
+        // answer, so a test thread descheduled for a second on a loaded CI
+        // runner is not mistaken for a silent peer.
         let keepalive = WebSocketKeepalive {
             ping_after: StdDuration::from_millis(100),
-            idle_timeout: StdDuration::from_millis(1_000),
+            idle_timeout: StdDuration::from_millis(2_500),
             write_timeout: StdDuration::from_secs(5),
         };
         let address = start_live_server(
@@ -2891,9 +2894,12 @@ mod tests {
             directory.path(),
             &["init", "--quiet", "--initial-branch=busy"],
         );
+        // The idle bound leaves the client two seconds to send its next
+        // request, so a test thread descheduled for a second is not mistaken
+        // for a silent peer. The evaluation below is held for longer than it.
         let keepalive = WebSocketKeepalive {
             ping_after: StdDuration::from_millis(100),
-            idle_timeout: StdDuration::from_millis(300),
+            idle_timeout: StdDuration::from_secs(2),
             write_timeout: StdDuration::from_secs(5),
         };
         let (address, state) = start_shared_live_server(
@@ -2912,7 +2918,7 @@ mod tests {
             let result = eval_over_socket(&mut socket, &session, [51; 16]);
             (socket, session, result)
         });
-        std::thread::sleep(keepalive.idle_timeout * 3);
+        std::thread::sleep(keepalive.idle_timeout + StdDuration::from_secs(1));
         drop(busy);
         let (mut socket, session, result) = waiting.join().expect("Eval client");
         assert_serve_entry_result(&result);
