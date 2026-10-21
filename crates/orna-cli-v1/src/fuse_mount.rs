@@ -4206,6 +4206,9 @@ fn key_component(key: &TypedKey) -> Result<String, String> {
         TypedKey::Tuple(_) => {
             return Err("tuple key must be projected component by component".into());
         }
+        TypedKey::Value(value) => value
+            .canonical_text()
+            .ok_or_else(|| "key type needs its schema to project".to_owned())?,
     };
     Ok(project_component(&canonical_text))
 }

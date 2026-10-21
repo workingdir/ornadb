@@ -8,6 +8,8 @@ description = "Git-backed repository, CWD, index, and local runtime boundary for
 
 [features]
 crash-barriers = []
+# Test-only builder for legacy compact fixtures; never enabled in production.
+legacy-fixture-writer = []
 
 [dependencies]
 bytes = "1.10.1"
