@@ -1261,6 +1261,10 @@ impl Diagnostic {
     pub fn message(&self) -> &str {
         self.message.as_str()
     }
+    /// Structured notes attached by the producer, in attachment order.
+    pub fn notes(&self) -> &[SafeText] {
+        &self.notes
+    }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
         Value::new(self.boundary_projection().raw()?)
             .map_err(FoundationError::Value)?
