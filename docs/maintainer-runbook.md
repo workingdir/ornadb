@@ -1,18 +1,24 @@
 # OrnaDB maintainer and operator runbook
 
-This runbook describes the current Orna 1.0 implementation in the v1 crates. It
-is maintained operational guidance, not a replacement for the canonical
-publication under `reference/Orna-1.0.0/`. Historical design records remain in
+This runbook describes the current implementation in the v1 crates. The
+target is Orna 1.1.0 (publication `final-2026-10-05`, repository writer format
+3). It is maintained operational guidance, not a replacement for the canonical
+publication under `reference/Orna-1.1.0/`. Historical design records remain in
 `docs/decisions/` and are not operational inputs.
 
 ## Before you start
 
-Work from the repository root. The v1 command is the `orna-cli-v1` Cargo
-binary; run it from a checked-out repository with the locked dependency graph:
+Work from the repository root. The command is `orna`. In a checkout, Cargo
+builds it as the `orna-cli-v1` binary. The Linux package installs it as
+`/usr/bin/orna`. Run it from a checked-out repository with the locked
+dependency graph:
 
 ```text
 cargo run --locked -p orna-cli-v1 -- --help
 ```
+
+The examples below write `orna`. In a checkout, use
+`cargo run --locked -p orna-cli-v1 --` in its place.
 
 The workspace declares Rust 1.95. Git and Cargo are required for project
 initialisation and source loading. Use `--offline` only after the locked
@@ -28,40 +34,60 @@ repository layer resolves the per-worktree runtime location.
 The command syntax is:
 
 ```text
-cargo run --locked -p orna-cli-v1 -- [--db PATH] COMMAND [ARGUMENTS]
+orna [--db ENDPOINT] [--color auto|always|never] [--debug] COMMAND [ARGUMENTS]
 ```
 
-`--db PATH` must precede the command and selects a local project directory. It
-is accepted by project-loading commands; `init` takes its directory as a
-positional argument and rejects `--db`.
+Global options must precede the command. `--db PATH` selects a local Git
+worktree. `init` takes its directory as a positional argument and rejects
+`--db`. `--format human|short|json` is also accepted before `status` only.
+With no command, `orna` starts the REPL.
+
+This table lists every command that the parser in
+`crates/orna-cli-v1/src/cli_args.rs` accepts. `orna --help` shows the
+options and exit statuses of each command. The table does not claim that a
+command meets every Orna 1.1.0 requirement.
 
 | Command | Behaviour |
 | --- | --- |
-| `init [DIRECTORY]` | Initialise a local Git-backed Orna repository. The current directory is the default. |
-| `status` | Show the local Git worktree status. |
-| `status --porcelain` | Emit the machine-readable status form. |
-| `status --short` | Emit the short status form. |
-| `check` | Load reachable source modules from the local Git worktree and perform the v1 checks. |
+| `repl [EXPRESSION]` | Start an ephemeral interactive session, or evaluate one expression and exit. |
+| `run [QUALIFIED_FUNCTION]` | Run a project function. With no target, run `main.main`. |
+| `check` | Load reachable source modules from the local Git worktree and check them. |
 | `invoke TARGET` | Execute a reachable zero-argument pure function. |
-| `run` | Run the default project entry point (`main.main`). |
-| `run TARGET` | Run a named project entry point. |
-| `run seed` | Run the reference seed workflow when the loaded project provides it. |
-| `run exercise` | Run the reference exercise workflow when the loaded project provides it. |
-| `run sensors.ingest` | Run the finite sensor-ingestion workflow when the loaded project provides it. |
-| `run library.lend BOOK BORROWER` | Run the bounded lending workflow with the supplied identifiers. |
-| `repl [EXPRESSION]` | Evaluate a pure expression in an ephemeral interactive session, or evaluate one expression and exit. |
 | `explain CODE` | Print guidance for a documented Orna diagnostic code. |
-| `--help`, `help`, `--version`, `-V` | Print command help or the binary version. |
+| `init [DIRECTORY]` | Initialise a local Git-backed Orna repository. The current directory is the default. |
+| `add --row TABLE KEY` | Stage one logical row into the index. |
+| `mv OLD NEW` | Rename a table in its module namespace and keep its IDs. |
+| `status [--porcelain\|--short\|--format human\|short\|json]` | Show the worktree status. |
+| `fetch [REMOTE] [BRANCH]` | Fetch a branch. The defaults are `origin` and `main`, not the current branch. |
+| `push [REMOTE] [BRANCH]` | Push the branch with its continuity refs. The default remote is `origin`. |
+| `serve [--port PORT]` | Serve the project on loopback. The default port is 8080. |
+| `mount DIR --cwd` | Mount the committed workspace as an editable view. Row saves are validated. Linux only. |
+| `mount DIR --at SELECTOR` | Mount one resolved snapshot as a read-only view. Linux only. |
+| `mount status [--json]` | Report attached views. |
+| `edit [--row] PATH` | Edit one projected row or Blob through transactional admission. |
+| `unmount DIR` | Detach the kernel mount, including an orphaned Orna mount, and release its view record. |
+| `diff [GIT_DIFF_ARGS...]` | Run Git `diff` for the worktree. |
+| `log [GIT_LOG_ARGS...]` | Run Git `log` for the worktree. |
+| `annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]` | Write an annotated Blob file. |
+| `import BUNDLE --dry-run [OPTIONS]` | Report what an import bundle contains. |
+| `export DEST --at SELECTOR [OPTIONS]` | Write, check or restore an offline archive. |
+| `migrate copy DEST --annotation-defaults N --no-persistent-consumers` | Prepare a format-3 candidate from a format-1/2 worktree. The flag confirms that consumer checkpoints are carried, not reset. |
+| `publish [--message MESSAGE]` | Commit the durable runtime tail as one publication commit. |
+| `commit -m MESSAGE` | Review and publish exactly the staged candidate. |
+| `history RELATION KEY [OPTIONS]`, `history RELATION --diff FROM TO` | List row history, or compare two snapshots without payloads. |
+| `query RELATION [OPTIONS]` | List Blob metadata of committed rows without payloads. |
+| `semantic-legend [OPTIONS]` | Print the editor semantic-token legend. |
+| `--help`, `-h`, `help`, `--version`, `-V` | Print command help or the binary version. |
 
 Examples:
 
 ```text
-cargo run --locked -p orna-cli-v1 -- init ./example-project
-cargo run --locked -p orna-cli-v1 -- --db ./example-project check
-cargo run --locked -p orna-cli-v1 -- --db ./example-project invoke main
-cargo run --locked -p orna-cli-v1 -- --db ./example-project run main.main
-cargo run --locked -p orna-cli-v1 -- repl "1 + 2"
-cargo run --locked -p orna-cli-v1 -- explain ORNA-S010-IMPORT
+orna init ./example-project
+orna --db ./example-project check
+orna --db ./example-project invoke main
+orna --db ./example-project run main.main
+orna repl "1 + 2"
+orna explain ORNA-S010-IMPORT
 ```
 
 ### Initialising a project
