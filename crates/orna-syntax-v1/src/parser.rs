@@ -4949,7 +4949,15 @@ impl Parser {
                 | TokenKind::StringStart
                 | TokenKind::ReplBinding
                 | TokenKind::Keyword(
-                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                    Keyword::SelfValue
+                        | Keyword::True
+                        | Keyword::False
+                        | Keyword::Null
+                        | Keyword::If
+                        | Keyword::Case
+                        | Keyword::For
+                        | Keyword::While
+                        | Keyword::Loop
                 )
                 | TokenKind::Punct("(" | "[" | "{" | "!" | "-" | "+")
         )
