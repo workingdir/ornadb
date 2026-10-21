@@ -377,10 +377,34 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
-    /// Builds a source-only schema from this project's committed identity manifest.
+    /// Builds a source-only schema from this project's committed identity
+    /// manifest. A table that stores a table reference records its database,
+    /// so it fails here; use [`Self::source_table_schema_in_database`].
     pub fn source_table_schema(
         &self,
         manifest: &ObjectIdentityManifest,
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
+        self.build_source_table_schema(manifest, None, module_name, declaration_name)
+    }
+
+    /// Builds a source-only schema whose stored table references bind
+    /// `database_id`, the database that owns this project's tables.
+    pub fn source_table_schema_in_database(
+        &self,
+        manifest: &ObjectIdentityManifest,
+        database_id: [u8; 16],
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
+        self.build_source_table_schema(manifest, Some(database_id), module_name, declaration_name)
+    }
+
+    fn build_source_table_schema(
+        &self,
+        manifest: &ObjectIdentityManifest,
+        database_id: Option<[u8; 16]>,
         module_name: &str,
         declaration_name: &str,
     ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
@@ -398,7 +422,14 @@ impl LoadedProject {
             None => analyze(&self.modules),
         };
         manifest
-            .source_table_schema(&analysis, module_name, source_path, declaration_name)
+            .source_table_schema(
+                &self.modules,
+                &analysis,
+                database_id,
+                module_name,
+                source_path,
+                declaration_name,
+            )
             .map_err(|_| ProjectLoadError::InvalidTableSchema)
     }
 
@@ -882,7 +913,8 @@ fn source_schema_fields(
         }
         let blob_optional = source_schema_blob_optional(ty);
         let role = role.to_string().parse::<u64>().map_err(|_| ProjectLoadError::InvalidSourceRow)?;
-        if role > 1 { return Err(ProjectLoadError::InvalidSourceRow); }
+        // Role 2 is a computed selector: never a stored column (ORNA-FIELD-006).
+        if role > 2 { return Err(ProjectLoadError::InvalidSourceRow); }
         fields.push(SourceSchemaField {
             id,
             name: name.clone(),
@@ -1362,10 +1394,6 @@ fn resolve_committed_source_table_schema_for_project(
     let snapshot_id = project
         .source_snapshot_id()
         .ok_or(ProjectLoadError::InvalidTableSchema)?;
-    let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-    if *table.table_object_id() != table_object_id.bytes() {
-        return Err(ProjectLoadError::InvalidTableSchema);
-    }
     let context = repository
         .open_pinned_format_context(commit.as_str())
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
@@ -1375,6 +1403,15 @@ fn resolve_committed_source_table_schema_for_project(
     let expected_database_id = context
         .require_database_id()
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    let table = project.source_table_schema_in_database(
+        &manifest,
+        *expected_database_id.as_bytes(),
+        module_name,
+        declaration_name,
+    )?;
+    if *table.table_object_id() != table_object_id.bytes() {
+        return Err(ProjectLoadError::InvalidTableSchema);
+    }
     let binding = context
         .bind_committed_table(
             table.module_name(),

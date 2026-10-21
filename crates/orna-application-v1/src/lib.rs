@@ -1207,8 +1207,9 @@ impl SourceMutationEffectHandler {
         let OvbRaw::Array(declared_fields) = declared_fields else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
-        let role_stored = BigInt::from(1);
         let role_key = BigInt::from(0);
+        let role_stored = BigInt::from(1);
+        let role_computed = BigInt::from(2);
         let mut stored_field_ids = Vec::new();
         for declared_field in declared_fields {
             let OvbRaw::Array(parts) = declared_field else {
@@ -1228,7 +1229,9 @@ impl SourceMutationEffectHandler {
                 Some(OvbRaw::Int(role)) if role == &role_stored => {
                     stored_field_ids.push(field_object_id);
                 }
-                Some(OvbRaw::Int(role)) if role == &role_key => {}
+                // Keys travel in the row key, and a computed selector has no
+                // stored value (ORNA-FIELD-006, ORNA-FIELD-011).
+                Some(OvbRaw::Int(role)) if role == &role_key || role == &role_computed => {}
                 _ => return Err(ApplicationError::InvalidTableMetadata),
             }
         }
