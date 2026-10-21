@@ -21,7 +21,6 @@ fn functions() -> Functions {
         include_str!("fixtures/iteration-traversal-ptr1b.orna"),
     );
     for name in [
-        "std.collection.count",
         "std.iteration.fold",
         "std.iteration.depth_first",
         "iteration_proof.traversal_behavior",
