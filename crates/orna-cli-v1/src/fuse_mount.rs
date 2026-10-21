@@ -33,7 +33,7 @@ use orna_runtime_v1::{
         EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
-        project_component, unproject_component,
+        project_component, project_key_component, unproject_component,
     },
 };
 use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
@@ -4210,7 +4210,12 @@ fn key_component(key: &TypedKey) -> Result<String, String> {
             .canonical_text()
             .ok_or_else(|| "key type needs its schema to project".to_owned())?,
     };
-    Ok(project_component(&canonical_text))
+    // A long key's `~key-` alias digests the typed component's canonical
+    // OVB-1 encoding, not its text (VFS-1, "Row/key directory mapping").
+    let canonical_encoding = key
+        .canonical_bytes()
+        .map_err(|_| "key component has no canonical encoding".to_owned())?;
+    Ok(project_key_component(&canonical_text, &canonical_encoding))
 }
 
 /// Removes projected Blob summary fields from a source row before row admission.
