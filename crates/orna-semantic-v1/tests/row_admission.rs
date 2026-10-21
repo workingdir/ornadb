@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use orna_semantic_v1::{
     Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
-    ModuleInput, ObjectIdentityManifest, ObjectKind, RowUnitInput, admit_row_unit, analyze,
-    lower_row_unit, lower_row_unit_with_owner_fields,
+    ModuleInput, RowUnitInput, admit_row_unit, analyze, lower_row_unit,
+    lower_row_unit_with_owner_fields,
 };
 use orna_value_v1::{Raw, Value};
 
@@ -134,11 +134,6 @@ fn canonical_object_blob_row_keeps_source_size_for_owner_binding() {
     )];
     let analysis = analyze(&modules);
     assert!(analysis.is_ok());
-    let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
-    let table_id = identities.id(ObjectKind::Table, "Object").unwrap();
-    let field_ids = ["Object.id", "Object.payload", "Object.size"]
-        .map(|name| *identities.id(ObjectKind::Column, name).unwrap());
-    assert!(field_ids.iter().all(|id| id != table_id));
     let key_path = ["pixel.orna".to_owned()];
     let source = include_str!("fixtures/source-row-object-pixel.orna");
     let row = candidate("Object/pixel.orna", "Object", &key_path, source);

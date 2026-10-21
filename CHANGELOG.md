@@ -8,6 +8,121 @@ been published.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
 - A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
+- `std.io.fs` operations resolve every path from the root directory handle held
+  since the host allowed it, one component at a time without following
+  symbolic links, and act on the final entry through its open parent directory.
+  Parent traversal, absolute paths, symbolic links and `.git` metadata are
+  refused as `sys.host.filesystem.denied`, while a missing target reports
+  `sys.host.filesystem.not_found`; only `symlink_metadata` still describes a
+  final link, without following it. Writes without overwrite create
+  exclusively, moves without overwrite never replace a destination, and
+  listings omit `.git`. Platforms other than Linux refuse these operations as
+  unavailable.
+- `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
+  it to its activation snapshot: the admitted project tables, plus
+  `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
+  (`orna run` and `orna serve`; the REPL serves neither yet). A query returns its
+  structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
+  row's own message as the summary (the explicit marker only when the row is
+  redacted), its causes, its help as suggestions and the objects it names.
+  `sys.explain(FunctionRef)` is dispatched, but no catalogue records function
+  object identities yet, so every function reference reports
+  `sys.object.not_found`.
+- Changed failure codes, all now taken from the portable failure table:
+  - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
+    `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
+    source or function, `sys.version.incompatible` for a stage or source the
+    planner cannot represent, and `sys.object.wrong_kind` for a reference to
+    another relation. `ORNA-EVAL-TYPE` no longer rejects function and
+    diagnostic arguments.
+  - `sys.blob.capture_file`: `ORNA-INGEST-001`, `-002` and `-003` become
+    `sys.blob.source_denied`; `ORNA-INGEST-004` becomes `sys.blob.limit`; and
+    `ORNA-INGEST-005` becomes `sys.blob.source_changed`. A negative or
+    unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
+    quota is `sys.blob.limit`. A host without a filesystem provider reports
+    `sys.blob.source_denied`, and one without a repository Blob writer reports
+    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The native
+    host operation declares `sys.blob.source_denied`, `sys.blob.bounds`,
+    `sys.blob.limit` and `sys.blob.source_changed` instead of
+    `sys.blob.capture.*`; the binding raises only these declared codes and the
+    global `sys.version.incompatible`, and the portable operation declares the
+    same set plus that global code, which every callable operation carries.
+    `orna annotate` source errors cite the portable code.
+  - `sys.blob.annotate`: an OVB-1 value is
+    `sys.codec.unsupported_value_profile`; arguments that are not annotated
+    Blobs are `ORNA-EVAL-TYPE`; a host without the generated provider is
+    `sys.version.incompatible`. No `sys.abi.*` code reaches programs.
+  - `orna serve` stream administration: `sys.admin.unavailable` becomes
+    `sys.admin.missing_object`, `sys.admin.busy`, the specific checkpoint or
+    snapshot code, or `sys.storage.unavailable`. A dispatcher without resume
+    reports `sys.admin.read_only`, unavailable publication metadata reports
+    `sys.storage.unavailable` instead of `sys.storage.metadata_unavailable`, and
+    `sys.admin.result` is gone.
+- Every portable `sys` operation now declares its failure codes explicitly
+  through `#[ornasys(failures = ...)]`, replacing the namespace-prefix guess.
+  The build checks that every published code is declared by an operation, is
+  global, or belongs to a non-callable surface (the `sys.repl` singleton or the
+  VFS).
+- Removed the unreachable duplicate explain implementations:
+  `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
+  `orna_sys_v1::explain_diagnostic` with `Explanation` and
+  `DiagnosticExplanationError`, and the `orna_foundation_v1` explanation
+  envelope (`SystemDiagnosticExplanationInput`,
+  `SystemDiagnosticExplanationOutput`, `system_diagnostic_explanation_input`
+  and `SystemDiagnosticAdapterError`). Also removed
+  `SysHostBindingRegistry::with_explain_catalogue` and
+  `CaptureFileError::code`.
+- Opening a repository format context reads only the root tree, the `.orna`
+  tree and its metadata blobs, through one long-lived `git cat-file
+  --batch-command` reader per repository handle. It no longer lists the whole
+  commit, `.orna/store` included, with a Git process per entry, so point reads
+  no longer slow down as the store grows, and a snapshot with more than 65,536
+  tree entries opens.
+- The project loader's 4,096-entry limit is now `ProjectLimits::max_source_modules`
+  (formerly `max_repository_entries`) and counts source modules only. The
+  loader never walks `.orna/store`, in the worktree or in a committed snapshot,
+  so `orna check`, `orna run` and `orna repl` load databases with large stores.
+- The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
+  active calls: function, closure and callback bodies. Expression nesting inside
+  one body no longer consumes it, so recursion depth no longer shrinks as bodies
+  nest deeper. The parser bounds expression nesting. Pattern and decoded-value
+  nesting are checked from their own roots against the same limit. Exceeding
+  any of these fails with `ORNA-EVAL-LIMIT` and never returns a partial result
+  (ORNA-CLOSURE-004).
+- An assignment inside a `case` arm now replaces the enclosing `let` slot, as
+  assignments inside blocks and loops already did (ORNA-CFLOW-005). Names bound
+  by the arm pattern stay local to the arm.
+- Counting an in-memory list costs one evaluator step instead of one step per
+  element. A plain `=` assignment no longer copies the value it replaces.
+  Callback calls no longer copy the callee's syntax tree. Block, loop and `case`
+  write-back moves values instead of copying them.
+- Evaluator list values share their elements between copies. Appending to the
+  newest list reuses spare capacity, so building a list one element at a time
+  costs amortised constant work per element instead of copying the whole list
+  each time. `union` and `__list_concat` charge steps only for the elements
+  they actually write.
+- Ordered comparisons (`<`, `<=`, `>`, `>=`) between two Decimals evaluate
+  exactly across scales (ORNA-COMPARE-002). They previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Decimal `%` evaluates as the exact truncated remainder, matching Int `%`: the
+  result keeps the dividend's sign. It previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Exponent-only Decimal numerals such as `1e3`, `1E-2` and `2e-30` evaluate as
+  exact Decimals (ORNA-LIT-002). They previously failed with `ORNA-EVAL-VALUE`.
+- Relation scans charge each streamed row to the step budget. Only values that a
+  stage or terminal keeps (sort buffers, distinct sets, collected results) count
+  against `max_collection_items`. `count`, `exists`, `every`, filtered or
+  dropped counts, `sum`, `min` and `max` now work on relations larger than the
+  item budget. Sorting more rows than the budget still fails with
+  `ORNA-EVAL-LIMIT`.
+- `sort_by`, `rank` and relation sorts use a stable merge sort, with
+  O(n log n) comparisons that each cost one step, instead of an insertion sort.
+  The default evaluator step budget is now 200 steps per item plus 10,000
+  (419,600), down from 2,516,752. The pinned std helpers stay within it at the
+  2,048-item limit. A runaway loop such as `while true {}` now fails with
+  `ORNA-EVAL-LIMIT` six times sooner. Std bodies that are inherently quadratic,
+  such as the Orna `std.collection.distinct`, reach the limit at a few hundred
+  elements.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
@@ -87,6 +202,15 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- Format-3 table schemas encode defaulted fields and keys as stored or key
+  fields, computed fields as non-stored role-2 selectors with an expression
+  digest, table-typed fields as stored references, and enum, nominal record,
+  refined, transparent-alias and `Money` field types with their closed
+  definitions. The identity manifest issues stable IDs for nominal types, enum
+  variants and their fields. Explicit type and variant renames passed to the
+  manifest reconciliation API carry those IDs; `orna mv` and LSP rename still
+  rename only tables and fields. A manifest that records these new identity
+  kinds cannot be read by older binaries, which reject unknown kinds.
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
@@ -119,6 +243,15 @@ been published.
   installed before its journal stage. New candidate objects are flushed before
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
+
+- Semantic checking types `+ - * / % ^`, unary signs and compound
+  assignment through one operator table: Int, Decimal and Float never mix,
+  Money scales only by exact numbers in one currency, declared-unit
+  quantities follow dimension and affine algebra, and other operand pairs
+  report `E2001` (`E5001` for incompatible dimensions). Every reachable
+  `return`, including inside anonymous functions, is checked against the
+  declared result or joined into the inferred one. Blocks without a final
+  expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
 
 ## 1.0.0 — release inventory (publication pending)
 

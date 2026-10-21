@@ -466,7 +466,14 @@ fn format3_repository_parts(
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
     let table = identities
-        .source_table_schema(&analysis, "", "main.orna", declaration_name)
+        .source_table_schema(
+            &modules,
+            &analysis,
+            Some(database_id),
+            "",
+            "main.orna",
+            declaration_name,
+        )
         .unwrap();
     let relation_id = *table.table_object_id();
     let schema_source = table.descriptor().encode().unwrap();

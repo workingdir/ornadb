@@ -205,6 +205,7 @@ a3465472c8c2edfdb23899f9358b0fb02565316461834fb9eca94b1ee65dbc68  crates/orna-cl
 46568370695b7289cc89502256ffd5987d9dfddaf68bbba23bf9217200687d22  crates/orna-cli-v1/tests/fixtures/serve-no-autoload.orna
 74d2e177bff6a43976f8ef6684889c68b456b1e14b9870042d003c6d954756e1  crates/orna-cli-v1/tests/fixtures/status-hyperlinks/changed path.orna
 0675c7ebc9d6cae22e8874ef6698a5bad66261e7aef2984221f4a00a106fcbca  crates/orna-cli-v1/tests/fixtures/status-short.orna
+b14a2c65fc26e977c4f1b19bc860d7fdf44edb6a5dd48c68bb5a13ddac0d0301  crates/orna-cli-v1/tests/fixtures/sys-explain-run.orna
 a6a04981ac8dc35bd4181b6517021773b5b927c37f7dcac31fde0c1c891c717d  crates/orna-cli-v1/tests/fixtures/traceability-diff-trust-secret.orna
 cd626bdd714dc3c2e1c69489ec753104ee212a829b3494f1044cff3ba849737f  crates/orna-cli-v1/tests/fixtures/unwired-watch-expression.orna
 d2da0188f59784c3742fdf346d0449f3182d1d545487ea6e21abc57b012abcfa  crates/orna-cli-v1/tests/fixtures/watch-command-expressions.orna
@@ -5105,7 +5106,7 @@ cc25f75e2deff036b3dfafc5d64e3cb777922f5eee1d8d936b6edc5cf320680e  crates/orna-sy
 7b55ccbb16058b0d6060c1f6726171b0893d1b56c3e39f5d5ea0ebf1b4f8266a  crates/orna-syntax-v1/tests/fixtures/control-expression-block-tail.orna
 a2a46cdb8e4e4dce4ff72aa29df0296d04dd0bab888af8b8ae787a4196e39a0a  crates/orna-syntax-v1/tests/fixtures/control-tail-postfix-field.orna
 757b065ff221ff761795268e097c00a21470733960c410cfea581eb743b86c16  crates/orna-syntax-v1/tests/fixtures/deep-compound-implicit-suffix.orna
-12b0698c8ebadd675c85a4f2ba542d17ad8a2fed2519ce28bf2052ab30c74c6a  crates/orna-syntax-v1/tests/fixtures/deep-nested-case-compound-suffix.orna
+885ce196e7aa9914bf44045d2e4da47c00b71543b17516f12e597f26d98377e1  crates/orna-syntax-v1/tests/fixtures/deep-nested-case-compound-suffix.orna
 5ce52cc95c76fe4186fa05b6de480555e2e915d2f0da3b9c85c5478cc3a93da8  crates/orna-syntax-v1/tests/fixtures/editor-expressions.orna
 e33ceb924626255267826882ca0afa29692c51dde909183a6b9c33be395349a3  crates/orna-syntax-v1/tests/fixtures/editor-keywords.orna
 a2b07e6b9c837daac019cfe262b3b7962bd8a10ce2001cb5ebfd065d703a75db  crates/orna-syntax-v1/tests/fixtures/empty-generic-parameters.orna
@@ -5247,15 +5248,15 @@ abd50b349b3d9fd1393d71ae125cf686ac6280e1aa6c8419e5dcf6bb6edd5614  crates/orna-sy
 2f398da07248702f26003aacb368a12ada9220e190e1b4762eb08d3da343cd38  crates/orna-syntax-v1/tests/fixtures/malformed-second-sibling-closure-before-text-tail.orna
 3634fa42811575bb03706f3e54d8816579ed0d881761edf2d8ec99bb51a6e412  crates/orna-syntax-v1/tests/fixtures/malformed-two-sibling-closures-before-text-tail.orna
 b5ad1125eff5e50ee14d42d4045a9182401f4a872bc293aed74391dbc8960d58  crates/orna-syntax-v1/tests/fixtures/missing-control-statement-terminator.orna
-12030a0b2bf3b1added2e52b0dd00b15c27f600bff82d779b8caa449acbf747e  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-compound-suffix-in-guard.orna
+dff2d0af89692c3557954c8ec2c10cef9f3464ca13ccf15ec7810564d4068687  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-compound-suffix-in-guard.orna
 68893e64f0be67cf651a4bdf5f8b238671969cf70d8953f0c23a044d76b969ec  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-diagnostics.orna
 d98c66a2286c29fcc100211fa70dcf24dbf7c5ced8684c8c2abe6955f081339d  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-guarded-list-suffix.orna
 80f31e306459f9dc44f031deb188610dcf15e802070af163416cf623dad5aa52  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-implicit-suffix-in-interpolation.orna
 0a3cbe91e6e794c5d95ec4f2d2e2a606297dab5446b0658b82cacd333c457388  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-implicit-suffix.orna
 77627025ed25c812ac34eb80ddded05ea2089a0e82444118d821cf72994ec11d  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-in-guard.orna
 f018e77004da317c9793037c191d81d0b3f7bc11f30385b5afc33f351b3eaf93  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-inside-interpolation.orna
-4a1f1cd58c6104b10ee498e4acc1b22f0876990ed981354d602028589afd5e35  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-record-suffix.orna
-a34e0ded6a6dfebbb925abd433365610452dd3be8e9ff02ece31a525cf4c1184  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-self-compound-suffix.orna
+70fb58b76f789c219ee43a63b0191a2a1657441dd74dde1e9073202903cb07a8  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-record-suffix.orna
+246b208ef8c3e81619432dc8a53a05cfb977bcbc0d973c28f3c553dbfe85869b  crates/orna-syntax-v1/tests/fixtures/nested-case-recovery-self-compound-suffix.orna
 81d0f1b6259c5d0412c0fd4fb6b875f107d35f427bca26683a23694b618dc8ac  crates/orna-syntax-v1/tests/fixtures/nesting_limits.orna
 0d9c69e03f6323aa47d8ac944ca068755f074f1a79250b580397f0862530f990  crates/orna-syntax-v1/tests/fixtures/optional-type-question.orna
 38a4827c5c53c9f49b6660dde0aaa355b04524d26b2b84a0dc6f80adbdb7e9f2  crates/orna-syntax-v1/tests/fixtures/pipeline_lambda/parenthesized.orna
