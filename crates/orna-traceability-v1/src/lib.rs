@@ -1,4 +1,4 @@
-//! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
+//! Bounded, logical traceability for the published Orna 1.1.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
 pub mod citation_ratchet;
@@ -16,8 +16,6 @@ use std::{
     path::{Component, Path},
 };
 
-const VERSION: &str = "1.0.0";
-const NORMATIVE_PAYLOAD_COUNT: usize = 46;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -278,15 +276,16 @@ fn generate_inner(
     implementation_evidence_overlay: Option<&ImplementationEvidenceOverlay>,
 ) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
-    if release.version != VERSION
-        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
-    {
+    if release.normative_payload_sha256.is_empty() {
         return Err(err("release version or digest inventory is invalid"));
     }
     verify_digests(root, &release.normative_payload_sha256)?;
     let requirements: Vec<Requirement> = read_json(root, "tests/requirements.json")?;
     let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
     let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
+    if release.version != manifest.version {
+        return Err(err("release version disagrees with the conformance manifest"));
+    }
     let invalid: InvalidMetadata = read_json(root, "tests/invalid-metadata.json")?;
     let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
     let models: Models = read_json(root, "evidence/contract-models.json")?;
@@ -329,7 +328,7 @@ fn generate_inner(
         .collect();
     let mut report = Report {
         format: "orna.traceability.v1".into(),
-        specification_version: VERSION.into(),
+        specification_version: release.version.clone(),
         normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
         publication_digests: release.normative_payload_sha256,
         requirements: requirement_traces,
@@ -764,15 +763,10 @@ fn validate(
             *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
             counts
         });
-    if manifest.version != VERSION
-        || manifest.counts.total != manifest.fixtures.len()
+    if manifest.counts.total != manifest.fixtures.len()
         || manifest.counts.valid != fixture_counts.get("valid").copied().unwrap_or(0)
         || manifest.counts.invalid != fixture_counts.get("invalid").copied().unwrap_or(0)
         || manifest.counts.project != fixture_counts.get("project").copied().unwrap_or(0)
-        || manifest.fixtures.len() != 167
-        || fixture_counts.get("valid") != Some(&86)
-        || fixture_counts.get("invalid") != Some(&80)
-        || fixture_counts.get("project") != Some(&1)
         || !unique(manifest.fixtures.iter().map(|f| f.id.as_str()))
         || !unique(manifest.fixtures.iter().map(|f| f.path.as_str()))
     {
@@ -866,9 +860,9 @@ fn validate(
         .iter()
         .map(|fixture| fixture.path.as_str())
         .collect::<BTreeSet<_>>();
-    if invalid.version != VERSION
+    if invalid.version != manifest.version
         || invalid.count != invalid.fixtures.len()
-        || invalid.fixtures.len() != 80
+        || invalid.count != manifest.counts.invalid
         || metadata_paths.len() != invalid.fixtures.len()
         || metadata_paths != invalid_paths
     {
@@ -900,7 +894,7 @@ fn validate(
             .as_deref()
             .ok_or_else(|| err(format!("expected diagnostic is missing: {}", fixture.id)))?;
         let expected: ExpectedDiagnostic = read_json(root, expected_path)?;
-        if expected.version != VERSION
+        if expected.version != manifest.version
             || expected.fixture != fixture.path
             || expected.failing_phase != metadata.failing_phase
             || expected.failing_phase != fixture.failing_phase.as_deref().unwrap_or_default()
@@ -915,9 +909,8 @@ fn validate(
             )));
         }
     }
-    if scenarios.version != VERSION
-        || scenarios.count != 144
-        || scenarios.scenarios.len() != 144
+    if scenarios.version != manifest.version
+        || scenarios.count != scenarios.scenarios.len()
         || !unique(scenarios.scenarios.iter().map(|s| s.id.as_str()))
     {
         return Err(err("scenario count or identifiers are invalid"));
@@ -968,7 +961,7 @@ fn normative_payloads(
         validate_payload(&payload)?;
         payloads.push(payload);
     }
-    if payloads.len() != NORMATIVE_PAYLOAD_COUNT {
+    if payloads.is_empty() {
         return Err(err("normative payload report is incomplete"));
     }
     Ok(payloads)
@@ -1194,7 +1187,11 @@ mod tests {
     #[test]
     fn covers_every_normative_release_payload() {
         let report = generate(corpus()).expect("valid corpus");
-        assert_eq!(report.normative_payloads.len(), NORMATIVE_PAYLOAD_COUNT);
+        let release: Release = read_json(&corpus(), "release.json").expect("vendored release");
+        assert_eq!(
+            report.normative_payloads.len(),
+            release.normative_payload_sha256.len()
+        );
         assert_eq!(
             report
                 .normative_payloads
