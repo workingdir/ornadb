@@ -1049,8 +1049,10 @@ mod beneath {
             // truncating it first would destroy them.
             return Ok(());
         }
-        truncate(&target, &opened)?;
+        // Permissions change first so a destination owned by another user is
+        // refused before its bytes are discarded.
         rustix::fs::fchmod(&target, permissions).map_err(filesystem_failure)?;
+        truncate(&target, &opened)?;
         let limit = (max_bytes as u64).saturating_add(1);
         let copied = io::copy(&mut (&source).take(limit), &mut target).map_err(io_failure)?;
         if copied > max_bytes as u64 {
