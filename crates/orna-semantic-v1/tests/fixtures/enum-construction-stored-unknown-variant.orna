@@ -1,0 +1,7 @@
+pub table Task(id: Str) {
+    level: Level,
+}
+
+pub fn bad() {
+    Task.insert({ id: "a", level: Level.medium });
+}
