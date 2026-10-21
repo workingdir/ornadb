@@ -4,9 +4,11 @@
 //! writes nothing: no commit, journal, loose row, Git object, index or
 //! worktree change, and no runtime state change.
 //!
-//! The worktree carries uncommitted format-3 metadata, so the runtime
+//! The first worktree carries uncommitted format-3 metadata, so the runtime
 //! identity is admitted and real pending rows exist: the case in which the
-//! retired loose writer used to run.
+//! retired loose writer used to run. Inside a prepared `orna migrate copy`
+//! destination the refusal instead names the unactivated format-3 candidate,
+//! because asking for another copy there would not help.
 
 use std::{
     collections::BTreeMap,
@@ -50,11 +52,9 @@ fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("Git output is UTF-8")
 }
 
-/// A repository whose committed `HEAD` is format 2, with format-3 metadata
-/// written over it in the worktree only.
-fn format_two_head_with_format_three_worktree() -> TempDir {
-    let directory = TempDir::new().expect("temporary repository");
-    let root = directory.path();
+/// Commits a format-2 snapshot in a new repository at `root`: the legacy
+/// `format.orna` coordinate beside the legacy `database.orna` sidecar.
+fn commit_format_two_snapshot(root: &Path) {
     git(root, &["init", "--quiet", "--initial-branch=main"]);
     git(root, &["config", "user.name", "Orna test"]);
     git(root, &["config", "user.email", "test@example.invalid"]);
@@ -69,6 +69,14 @@ fn format_two_head_with_format_three_worktree() -> TempDir {
     .unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "--quiet", "-m", "format 2 snapshot"]);
+}
+
+/// A repository whose committed `HEAD` is format 2, with format-3 metadata
+/// written over it in the worktree only.
+fn format_two_head_with_format_three_worktree() -> TempDir {
+    let directory = TempDir::new().expect("temporary repository");
+    let root = directory.path();
+    commit_format_two_snapshot(root);
 
     fs::remove_file(root.join(".orna/format.orna")).unwrap();
     fs::write(
@@ -158,7 +166,7 @@ async fn publish_refuses_a_format_two_head_without_writing() {
         );
         assert!(
             stderr.contains(
-                "help: migrate the repository to format 3 with `orna migrate copy` before publishing"
+                "help: this build has no writer for format-1/2 snapshots; prepare a format-3 copy with `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`; pending runtime changes in this worktree are not carried into DEST"
             ),
             "{stderr}"
         );
@@ -179,4 +187,64 @@ async fn publish_refuses_a_format_two_head_without_writing() {
         .await
         .unwrap();
     assert_eq!(reopened.pending_count().await.unwrap(), 1);
+}
+
+/// The destination of `orna migrate copy` keeps the legacy commit as `HEAD`
+/// and journals the format-3 candidate. Publishing there is still refused,
+/// but the remedy names the prepared candidate rather than another copy, and
+/// the journal, Git state and absent runtime state are left as they were.
+#[test]
+fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
+    let parent = TempDir::new().expect("temporary parent");
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    commit_format_two_snapshot(&source);
+    let destination = parent.path().join("migrated");
+    let copy = run(
+        &source,
+        &[
+            "migrate",
+            "copy",
+            destination.to_str().unwrap(),
+            "--annotation-defaults",
+            "0",
+            "--no-persistent-consumers",
+        ],
+    );
+    assert!(
+        copy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copy.stderr)
+    );
+
+    let repository = Repository::discover(&destination).unwrap();
+    let journal = repository
+        .read_publication_journal()
+        .unwrap()
+        .expect("the migration copy journals its candidate");
+    assert!(journal.migration_continuity().is_some());
+    let git_before = git_state(&destination);
+
+    let output = run(&destination, &["publish"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "{stderr}");
+    assert!(
+        stderr.contains("error[E2300]: publication target is a read-only legacy snapshot"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "help: this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("migrate copy"), "{stderr}");
+
+    assert_eq!(git_state(&destination), git_before);
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+    assert!(!repository.runtime_paths().state_db().exists());
 }

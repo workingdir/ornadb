@@ -16,6 +16,7 @@ use orna_repository_v1::{
     ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, ProtectedContentTransfer,
     RepositoryCaptureCapability,
 };
+use orna_value_v1::MimeRegistry;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1674,11 +1675,15 @@ fn hex_digest(bytes: &[u8]) -> String {
 /// Projects one stored Blob field name to its sibling content-file name:
 /// escaped field name plus the MIME-1 selected suffix. A field that would spell
 /// the reserved row document keeps its own distinct name (VFS-016).
+///
+/// Stored annotations are canonical MIME-1. A pair the registry refuses
+/// declares no suffix, so it projects as the octet-stream/null fallback does,
+/// as `bin`, instead of spelling an unchecked hint into a host name.
 pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
-    let selected = match suffix {
-        Some(hint) => hint.to_owned(),
-        None => media_suffixes(media_type),
-    };
+    let annotation = MimeRegistry::mime1()
+        .canonical_annotation(media_type, suffix)
+        .unwrap_or_default();
+    let selected = annotation.selected_suffix();
     // The suffix is part of the projected component, so VFS-016's component
     // bound covers the whole `field + "." + suffix` spelling rather than the
     // escaped field base alone. A base that leaves no room for the suffix takes
@@ -1694,72 +1699,18 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     }
     let mut name = project_field_name(field);
     name.push('.');
-    name.push_str(&selected);
+    name.push_str(selected);
     if name == VFS_ROW_DOCUMENT {
         name.replace_range(..1, &format!("%{:02X}", b'd'));
     }
     name
 }
 
-/// The MIME-1 suffix table: `(essence, preferred, compatible)`. One table
-/// serves both projection and validation, so a hint can never be accepted that
-/// the projection would not produce.
-const MIME1_SUFFIXES: &[(&str, &str, &[&str])] = &[
-    ("application/gzip", "gz", &["gz", "tar.gz", "tgz"]),
-    ("application/json", "json", &["json"]),
-    ("application/octet-stream", "bin", &["bin"]),
-    ("application/pdf", "pdf", &["pdf"]),
-    ("application/wasm", "wasm", &["wasm"]),
-    ("application/zip", "zip", &["zip"]),
-    ("audio/flac", "flac", &["flac"]),
-    ("audio/mp4", "m4a", &["m4a", "m4b", "mp4", "mpg4"]),
-    ("audio/mpeg", "mp3", &["mp1", "mp2", "mp3"]),
-    ("audio/ogg", "ogg", &["oga", "ogg", "opus"]),
-    ("audio/wav", "wav", &["wav"]),
-    ("image/gif", "gif", &["gif"]),
-    ("image/jpeg", "jpg", &["jpe", "jpeg", "jpg"]),
-    ("image/png", "png", &["png"]),
-    ("image/svg+xml", "svg", &["svg"]),
-    ("image/webp", "webp", &["webp"]),
-    ("text/css", "css", &["css"]),
-    ("text/javascript", "js", &["js", "mjs"]),
-    ("text/plain", "txt", &["text", "txt"]),
-    ("video/mp4", "mp4", &["m4v", "mp4"]),
-    ("video/webm", "webm", &["webm"]),
-];
-
-/// The MIME-1 essence of a media type, lowercased and stripped of parameters.
-fn media_essence(media_type: &str) -> String {
-    media_type
-        .split(';')
-        .next()
-        .unwrap_or(media_type)
-        .trim()
-        .to_ascii_lowercase()
-}
-
-/// The MIME-1 entry for an essence. An unknown essence keeps the profile's
-/// `bin` hint instead of guessing from the media type text.
-fn mime1_entry(media_type: &str) -> (&'static str, &'static [&'static str]) {
-    let essence = media_essence(media_type);
-    MIME1_SUFFIXES
-        .iter()
-        .find(|(name, _, _)| *name == essence)
-        .map(|(_, preferred, compatible)| (*preferred, *compatible))
-        .unwrap_or(("bin", &["bin"]))
-}
-
-/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
-/// profile's `bin` hint instead of guessing from the media type text.
-fn media_suffixes(media_type: &str) -> String {
-    mime1_entry(media_type).0.to_owned()
-}
-
-/// Whether `suffix` is a MIME-1 compatible hint for this media type. Only a
-/// compatible spelling may be selected for a field (MIME-1, VFS-012).
+/// Whether `suffix` is a hint MIME-1 admits for this media type: a compatible
+/// suffix of a registered type, or any safe suffix for octet-stream and
+/// unregistered types (MIME-1, VFS-012).
 pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
-    let suffix = suffix.trim().to_ascii_lowercase();
-    mime1_entry(media_type).1.contains(&suffix.as_str())
+    classify_content_suffix(media_type, Some(suffix)).is_ok()
 }
 
 /// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
@@ -1767,28 +1718,25 @@ pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
 /// `selected` is the suffix the sibling file now spells; `None` means the
 /// projected preferred suffix. The result is the hint to record, or `None` when
 /// the selection is the field's preferred suffix, which the profile stores as
-/// an absent hint rather than a redundant one.
+/// an absent hint rather than a redundant one. The registry's hint rules
+/// decide: a registered type takes only a compatible suffix, while
+/// octet-stream and unregistered types take any safe suffix.
 ///
 /// A rename changes only this hint: it never transcodes the stored bytes,
-/// renames a column, or rekeys the row, and an incompatible suffix is refused
-/// as a malformed candidate. The caller applies the result through the normal
-/// CAS/activation boundary.
+/// renames a column, or rekeys the row, and a refused suffix is a malformed
+/// candidate. The caller applies the result through the normal CAS/activation
+/// boundary.
 pub fn classify_content_suffix(
     media_type: &str,
     selected: Option<&str>,
 ) -> Result<Option<String>, VfsPathError> {
-    let preferred = mime1_entry(media_type).0;
     let Some(selected) = selected else {
         return Ok(None);
     };
-    let selected = selected.trim().to_ascii_lowercase();
-    if !content_suffix_is_compatible(media_type, &selected) {
-        return Err(VfsPathError::InvalidDocument);
-    }
-    if selected == preferred {
-        return Ok(None);
-    }
-    Ok(Some(selected))
+    MimeRegistry::mime1()
+        .canonical_annotation(media_type, Some(selected))
+        .map(|annotation| annotation.suffix().map(str::to_owned))
+        .map_err(|_| VfsPathError::InvalidDocument)
 }
 
 /// Splits one mount-relative path and refuses absolute paths, empty
@@ -3482,14 +3430,52 @@ mod tests {
             classify_content_suffix("image/jpeg", Some("png")),
             Err(VfsPathError::InvalidDocument)
         );
-        // An unknown essence keeps only the profile's `bin` hint.
+        // Octet-stream and unregistered essences admit any safe hint and store
+        // `bin` as no hint (MIME-1 `unknown_policy` and the normative model's
+        // `annotation()`), but never an unsafe spelling.
         assert_eq!(
             classify_content_suffix("application/x-unknown", Some("gz")),
-            Err(VfsPathError::InvalidDocument)
+            Ok(Some("gz".to_owned()))
         );
         assert_eq!(
             classify_content_suffix("application/x-unknown", Some("bin")),
             Ok(None)
+        );
+        assert_eq!(
+            classify_content_suffix("application/octet-stream", Some("dat")),
+            Ok(Some("dat".to_owned()))
+        );
+        for unsafe_suffix in ["", ".dat", "a..b", "a/b", "dat "] {
+            assert_eq!(
+                classify_content_suffix("application/octet-stream", Some(unsafe_suffix)),
+                Err(VfsPathError::InvalidDocument),
+                "{unsafe_suffix:?}"
+            );
+            assert!(!content_suffix_is_compatible(
+                "application/x-unknown",
+                unsafe_suffix
+            ));
+        }
+        assert!(content_suffix_is_compatible("application/x-unknown", "xyz"));
+        assert!(!content_suffix_is_compatible("image/jpeg", "png"));
+        assert_eq!(
+            project_content_name("content", "application/x-unknown", None),
+            "content.bin"
+        );
+        assert_eq!(
+            project_content_name("content", "application/x-unknown", Some("xyz")),
+            "content.xyz"
+        );
+        // Projection reads the registry's selected suffix, so an alias spelling
+        // projects as its canonical essence, and a hint the registry refuses is
+        // never spelled into the host name.
+        assert_eq!(
+            project_content_name("content", "Audio/X-WAV", None),
+            "content.wav"
+        );
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", Some("../mp3")),
+            "content.bin"
         );
 
         // The suffix rename never changes the stored content identity: the same
