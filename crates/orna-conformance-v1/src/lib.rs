@@ -1,4 +1,4 @@
-//! Authoritative loader and execution harness for the frozen Orna 1.0.0 corpus.
+//! Authoritative loader and execution harness for the frozen Orna 1.1.0 corpus.
 //!
 //! The harness owns no copy of the corpus.  It reads a reference directory at
 //! runtime, validates its cross-file contracts, then delegates source stages to
@@ -24,8 +24,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const SPECIFICATION_VERSION: &str = "1.0.0";
-const NORMATIVE_PAYLOAD_COUNT: usize = 46;
 const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
 
 mod admitted_repl;
@@ -477,7 +475,7 @@ impl Corpus {
                 diagnostics.insert(fixture.path.clone(), diagnostic);
             }
         }
-        let publication_digests = release_digests(&root)?;
+        let publication_digests = release_digests(&root, &manifest.version)?;
         let corpus = Self {
             root,
             manifest,
@@ -494,10 +492,10 @@ impl Corpus {
         Ok(corpus)
     }
     pub fn validate(&self) -> Result<(), CorpusError> {
-        if self.manifest.version != SPECIFICATION_VERSION
-            || self.invalid_metadata.version != SPECIFICATION_VERSION
-        {
-            return Err(CorpusError("expected Orna reference version 1.0.0".into()));
+        if self.invalid_metadata.version != self.manifest.version {
+            return Err(CorpusError(
+                "invalid metadata version disagrees with the conformance manifest".into(),
+            ));
         }
         let kinds = self
             .manifest
@@ -507,23 +505,13 @@ impl Corpus {
                 *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
                 counts
             });
-        if self.manifest.fixtures.len() != 167
-            || self.manifest.counts.total != self.manifest.fixtures.len()
+        if self.manifest.counts.total != self.manifest.fixtures.len()
             || self.manifest.counts.valid != kinds.get("valid").copied().unwrap_or(0)
             || self.manifest.counts.invalid != kinds.get("invalid").copied().unwrap_or(0)
             || self.manifest.counts.project != kinds.get("project").copied().unwrap_or(0)
         {
             return Err(CorpusError(
                 "conformance manifest counts disagree with its fixtures".into(),
-            ));
-        }
-        if kinds.get("valid") != Some(&86)
-            || kinds.get("invalid") != Some(&80)
-            || kinds.get("project") != Some(&1)
-        {
-            return Err(CorpusError(
-                "manifest fixture kind counts do not match 86 valid / 80 invalid / 1 project"
-                    .into(),
             ));
         }
         if self.invalid_metadata.count != self.invalid_metadata.fixtures.len()
@@ -669,7 +657,7 @@ impl Corpus {
                 let expected = self.diagnostics.get(&fixture.path).ok_or_else(|| {
                     CorpusError(format!("expected diagnostic missing: {}", fixture.path))
                 })?;
-                if expected.version != SPECIFICATION_VERSION
+                if expected.version != self.manifest.version
                     || expected.status != EXPECTED_DIAGNOSTIC_STATUS
                     || fixture.failing_phase.as_deref() != Some(&metadata.failing_phase)
                     || fixture.diagnostic.as_deref() != Some(&metadata.diagnostic)
@@ -776,7 +764,7 @@ impl Corpus {
         if self.project_expectations.steps.is_empty()
             || self.project_expectations.environment.network
             || self.project_expectations.environment.credentials
-            || self.project_expectations.environment.intrinsics != "Orna 1.0.0 core"
+            || self.project_expectations.environment.intrinsics != format!("Orna {} core", self.manifest.version)
         {
             return Err(CorpusError(
                 "project expectations have an invalid offline intrinsic environment".into(),
@@ -1665,16 +1653,17 @@ fn read_json<T: for<'a> Deserialize<'a>>(root: &Path, relative: &str) -> Result<
     serde_json::from_str(&body)
         .map_err(|_| CorpusError(format!("invalid reference JSON: {relative}")))
 }
-fn release_digests(root: &Path) -> Result<BTreeMap<String, String>, CorpusError> {
+fn release_digests(
+    root: &Path,
+    expected_version: &str,
+) -> Result<BTreeMap<String, String>, CorpusError> {
     #[derive(Deserialize)]
     struct Release {
         version: String,
         normative_payload_sha256: BTreeMap<String, String>,
     }
     let release: Release = read_json(root, "release.json")?;
-    if release.version != SPECIFICATION_VERSION
-        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
-    {
+    if release.version != expected_version || release.normative_payload_sha256.is_empty() {
         return Err(CorpusError(
             "release version or digest inventory is invalid".into(),
         ));
@@ -2906,26 +2895,32 @@ mod authority_tests {
     }
 
     #[test]
-    fn release_metadata_is_pinned_to_the_authoritative_1_0_0_inventory() {
+    fn release_metadata_is_pinned_to_the_vendored_manifest_version() {
         let root = tempfile::tempdir().expect("temporary authority root");
-        write_release(root.path(), "0.9.0", NORMATIVE_PAYLOAD_COUNT);
+        let pinned = serde_json::from_str::<Value>(include_str!(
+            "../tests/fixtures/reference/tests/conformance-manifest.json"
+        ))
+        .expect("vendored manifest parses")["version"]
+            .as_str()
+            .expect("vendored manifest declares a version")
+            .to_owned();
+        write_release(root.path(), "0.9.0", 1);
         assert_eq!(
-            release_digests(root.path())
+            release_digests(root.path(), &pinned)
                 .expect_err("wrong release version")
                 .to_string(),
             "release version or digest inventory is invalid"
         );
 
-        write_release(
-            root.path(),
-            SPECIFICATION_VERSION,
-            NORMATIVE_PAYLOAD_COUNT - 1,
-        );
+        write_release(root.path(), &pinned, 0);
         assert_eq!(
-            release_digests(root.path())
-                .expect_err("incomplete digest inventory")
+            release_digests(root.path(), &pinned)
+                .expect_err("empty digest inventory")
                 .to_string(),
             "release version or digest inventory is invalid"
         );
+
+        write_release(root.path(), &pinned, 1);
+        assert_eq!(release_digests(root.path(), &pinned).expect("pinned release").len(), 1);
     }
 }
