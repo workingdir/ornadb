@@ -3221,9 +3221,18 @@ impl Parser {
                             value,
                             span: statement_start.join(end),
                         }),
-                        _ => statements.push(Statement::Continue {
-                            span: statement_start,
-                        }),
+                        _ => {
+                            if let Some(value) = &value {
+                                self.errors.push(Diagnostic::error(
+                                    "ORNA-PARSE-002",
+                                    "`continue` takes no value",
+                                    value.span(),
+                                ));
+                            }
+                            statements.push(Statement::Continue {
+                                span: statement_start,
+                            });
+                        }
                     }
                     if self.is_punct(";") {
                         self.bump()
