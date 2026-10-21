@@ -84,6 +84,14 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- `Money<C>` requires a currency type: a nominal type that implements the core
+  `Currency` protocol, or a generic parameter bounded by it. A declared or
+  imported `Currency` counts only when its surface is exactly the core one.
+  `Money<Int>`, table rows, types without `Currency` and undeclared names are
+  rejected, and three-letter names are no longer assumed to be currencies.
+  Imported currencies now construct Money from `12.34.GBP`. A Float currency
+  literal such as `12.34f.GBP` is rejected with E5004.
+
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
