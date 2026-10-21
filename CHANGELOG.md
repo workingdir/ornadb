@@ -5,6 +5,16 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `std.io.fs` operations resolve every path from the root directory handle held
+  since the host allowed it, one component at a time without following
+  symbolic links, and act on the final entry through its open parent directory.
+  Parent traversal, absolute paths, symbolic links and `.git` metadata are
+  refused as `sys.host.filesystem.denied`, while a missing target reports
+  `sys.host.filesystem.not_found`; only `symlink_metadata` still describes a
+  final link, without following it. Writes without overwrite create
+  exclusively, moves without overwrite never replace a destination, and
+  listings omit `.git`. Platforms other than Linux refuse these operations as
+  unavailable.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
