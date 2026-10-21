@@ -9498,92 +9498,6 @@ fn infer_node(
                     effects,
                 };
             }
-            // Elapsed Duration arithmetic is distinct from calendar periods:
-            // it can shift an Instant or combine with another Duration.
-            let duration = Type::Named("std.DURATION".into());
-            let elapsed_result = match (op.as_str(), &left.ty, &right.ty) {
-                ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
-                ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("-", Type::Instant, Type::Instant) => Some(duration.clone()),
-                ("+" | "-", left, right) if left == &duration && right == &duration => {
-                    Some(duration)
-                }
-                // Duration scaling accepts exact numeric factors only; the
-                // runtime rejects results finer than its nanosecond grid.
-                ("*", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", Type::Int, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                ("*", Type::Decimal, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                _ => None,
-            };
-            if let Some(ty) = elapsed_result {
-                return Inferred { ty, effects };
-            }
-            if op == "-"
-                && left.ty == Type::Instant
-                && matches!(
-                    &right.ty,
-                    Type::Applied { base, arguments }
-                        if matches!(base.as_str(), "Int" | "Decimal" | "Float")
-                            && arguments.len() == 1
-                )
-            {
-                return Inferred {
-                    ty: Type::Instant,
-                    effects,
-                };
-            }
-            if op == "*" {
-                if (is_binary_float(&left.ty) && is_money_rate(&right.ty))
-                    || (is_money_rate(&left.ty) && is_binary_float(&right.ty))
-                {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "binary Float cannot enter an exact Money calculation implicitly",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-                if let Some(ty) = reduce_exact_money_rate(&left.ty, &right.ty) {
-                    return Inferred { ty, effects };
-                }
-                if matches!(left.ty, Type::MoneyPerUnit { .. })
-                    || matches!(right.ty, Type::MoneyPerUnit { .. })
-                {
-                    diagnostics.push(diag(
-                        DIAG_UNSUPPORTED,
-                        "dimensional algebra is outside this semantic slice",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-            }
-            if op == "+"
-                && let Some(message) = incompatible_addition_message(&left.ty, &right.ty)
-            {
-                diagnostics.push(diag(DIAG_TYPE, message));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            if op == "+" && left.ty == right.ty && is_absolute_affine_temperature(&left.ty) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "cannot add two absolute affine temperatures",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
             let ty = if matches!(op.as_str(), "==" | "!=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
@@ -9605,7 +9519,7 @@ fn infer_node(
                     Type::Bool
                 }
             } else {
-                infer_arithmetic_operator(op, &left.ty, &right.ty, diagnostics)
+                binary_arithmetic_type(op, &left.ty, &right.ty, diagnostics)
             };
             Inferred { ty, effects }
         }
@@ -9849,10 +9763,11 @@ fn infer_unary_operator(op: &str, operand: &Type, diagnostics: &mut Vec<Diagnost
 }
 
 /// Types `+ - * / % ^` once both operands are inferred (ORNA-INFER-001,
-/// ORNA-TYPE-008). Orna has no implicit numeric promotion and no string or
-/// calendar-date arithmetic, so every pair the table does not admit is
-/// reported. Elapsed-time and money-rate pairs are typed by the caller first.
-fn infer_arithmetic_operator(
+/// ORNA-TYPE-008). Compound assignment applies the same table, because
+/// `count += 1` means `count = count + 1` (ORNA-CFLOW-006). Orna has no
+/// implicit numeric promotion and no string or calendar-date arithmetic, so
+/// every pair the table does not admit is reported.
+fn binary_arithmetic_type(
     op: &str,
     left: &Type,
     right: &Type,
@@ -9864,6 +9779,58 @@ fn infer_arithmetic_operator(
     // A diverging operand means the operation itself never completes.
     if matches!(left, Type::Bottom) || matches!(right, Type::Bottom) {
         return Type::Bottom;
+    }
+    if let Some(ty) = elapsed_time_operator_type(op, left, right) {
+        return ty;
+    }
+    if op == "*" {
+        if (is_binary_float(left) && is_money_rate(right))
+            || (is_money_rate(left) && is_binary_float(right))
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "binary Float cannot enter an exact Money calculation implicitly",
+            ));
+            return Type::Error;
+        }
+        if let Some(ty) = reduce_exact_money_rate(left, right) {
+            return ty;
+        }
+        if matches!(left, Type::MoneyPerUnit { .. }) || matches!(right, Type::MoneyPerUnit { .. }) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            return Type::Error;
+        }
+    }
+    if op == "+"
+        && let Some(message) = incompatible_addition_message(left, right)
+    {
+        diagnostics.push(diag(DIAG_TYPE, message));
+        return Type::Error;
+    }
+    // Subtracting is adding the negation, so it needs the same conversion
+    // (ORNA-MONEY-002).
+    if op == "-"
+        && let (Some(left_currency), Some(right_currency)) =
+            (money_currency(left), money_currency(right))
+        && left_currency != right_currency
+        && !matches!(left_currency, Type::Error)
+        && !matches!(right_currency, Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "cannot subtract different currencies without conversion",
+        ));
+        return Type::Error;
+    }
+    if op == "+" && left == right && is_absolute_affine_temperature(left) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "cannot add two absolute affine temperatures",
+        ));
+        return Type::Error;
     }
     if let Some(ty) = arithmetic_operator_type(op, left, right, diagnostics) {
         return ty;
@@ -9877,6 +9844,31 @@ fn infer_arithmetic_operator(
         ),
     ));
     Type::Error
+}
+
+/// Elapsed `Duration` arithmetic is distinct from calendar periods: it can
+/// shift an `Instant` or combine with another `Duration` (ORNA-TIME-004).
+fn elapsed_time_operator_type(op: &str, left: &Type, right: &Type) -> Option<Type> {
+    let duration = Type::Named("std.DURATION".into());
+    match (op, left, right) {
+        ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
+        ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("-", Type::Instant, Type::Instant) => Some(duration),
+        ("+" | "-", left, right) if left == &duration && right == &duration => Some(duration),
+        // Duration scaling accepts exact numeric factors only; the runtime
+        // rejects results finer than its nanosecond grid.
+        ("*" | "/", left, Type::Int | Type::Decimal) if left == &duration => Some(duration),
+        ("*", Type::Int | Type::Decimal, right) if right == &duration => Some(duration),
+        // A look-back window such as `now() - 7.days`; only a Time-dimension
+        // unit can move an Instant.
+        ("-", Type::Instant, unit)
+            if numeric_unit(unit).and_then(unit_dimension) == Some("Time") =>
+        {
+            Some(Type::Instant)
+        }
+        _ => None,
+    }
 }
 
 /// The admitted arithmetic table. `None` is an undefined operand pair; a rule
@@ -10771,7 +10763,18 @@ fn infer_assignment(
             }
         }
         (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
-            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
+            Some(symbol) => {
+                // `count += 1` is `count = count + 1` (ORNA-CFLOW-006).
+                let op = match operator {
+                    AssignmentOperator::Add => "+",
+                    AssignmentOperator::Subtract => "-",
+                    AssignmentOperator::Multiply => "*",
+                    AssignmentOperator::Divide => "/",
+                    AssignmentOperator::Set => unreachable!("`=` has its own assignment arm"),
+                };
+                let result = binary_arithmetic_type(op, &symbol.ty, &value.ty, diagnostics);
+                require_same(&symbol.ty, &result, diagnostics);
+            }
             None => diagnostics.push(diag(
                 DIAG_UNRESOLVED,
                 "assignment target cannot be resolved",
