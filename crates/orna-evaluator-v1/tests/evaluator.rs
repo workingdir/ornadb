@@ -1354,7 +1354,7 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
         vec![nominal_field("secret", false, None)],
     );
     let functions = BTreeMap::from([(
-        "vault.map".into(),
+        "vault.collect".into(),
         PureFunction {
             parameters: Vec::new(),
             body: parsed_expression(include_str!(
@@ -1365,7 +1365,7 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
     )]);
 
     let result = invoke_named_with_nominals(
-        "vault.map",
+        "vault.collect",
         &functions,
         &Environment::new(),
         &definitions,
