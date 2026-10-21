@@ -10751,6 +10751,71 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         assert_eq!(update.primary_root(), &complete);
     }
 
+    /// store-format-3 §3 ("Writers may rebuild incrementally but must match
+    /// the canonical complete build"): an append, the shape the concurrent
+    /// writers in `tests/row_store_scale.rs` produce, reads only the path to
+    /// the last page and its root is the complete build of the same rows.
+    #[test]
+    fn append_maintenance_matches_the_complete_build() {
+        let (_directory, mut graph) = capture_test_context();
+        let key = |index: usize| TypedKey::Text(format!("row-{index:05}"));
+        let fields = |index: usize, label: &str| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Text(format!(
+                "{label} {index}"
+            ))]))
+        };
+        let scope = graph.open_read_scope().expect("seed scope");
+        let seeded = graph
+            .maintain_row_index(
+                &(0..6_000)
+                    .map(|index| RowIndexMutation::Insert {
+                        key: key(index),
+                        fields: fields(index, "seed"),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("seed rows");
+        let nodes = seeded.index_objects_created().len();
+        adopt_maintenance(&mut graph, &seeded);
+
+        let scope = graph.open_read_scope().expect("append scope");
+        let appended = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: key(6_000),
+                    fields: fields(6_000, "tail"),
+                }],
+                &scope,
+            )
+            .expect("append one row");
+        let append_reads = scope.objects_read();
+        assert_eq!(appended.previous_root(), seeded.primary_root());
+        assert_eq!(appended.row_count(), 6_001);
+        assert!(
+            (append_reads as usize) < nodes,
+            "an append read {append_reads} objects of {nodes} nodes"
+        );
+
+        let entries: Vec<_> = (0..=6_000)
+            .map(|index| {
+                let label = if index == 6_000 { "tail" } else { "seed" };
+                crate::row_store::RowEntry::new(
+                    key(index),
+                    RowValue::decode_canonical_fields(fields(index, label)).expect("inline row"),
+                )
+            })
+            .collect();
+        let mut sink = BTreeSet::new();
+        let complete = NativeGraphContext::build_canonical_ordered_map(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &entries,
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        )
+        .expect("complete build");
+        assert_eq!(appended.primary_root(), &complete);
+    }
+
     /// store-format-3 section 5 (A07-storage-rows-07): the row identity is
     /// `orna.row.v3` over the SOV-3 row `[database_uuid, table_uuid,
     /// typed_key, stored_fields]`. A Blob enters by length, SHA-256 and
