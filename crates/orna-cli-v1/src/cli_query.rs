@@ -550,6 +550,9 @@ fn render_key(key: &TypedKey) -> String {
             .map(render_key)
             .collect::<Vec<_>>()
             .join(","),
+        TypedKey::Value(value) => value
+            .canonical_text()
+            .unwrap_or_else(|| format!("cbor:{}", hex(value.canonical_bytes()))),
     }
 }
 
