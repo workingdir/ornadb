@@ -73,7 +73,9 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
 /// so a refused publication writes nothing: legacy snapshots keep their
 /// versioned readers but have no row writer (ORNA-UPGRADE-003). Unreadable
 /// metadata is not decided here; the format-3 validation of the frozen range
-/// reports it.
+/// reports it. A migration journal over a legacy `HEAD` means `orna migrate
+/// copy` already prepared this worktree, so the refusal names that candidate
+/// instead of asking for another copy; the journal is only read.
 fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(), Diagnostic> {
     let head = repository.head().map_err(|error| {
         publish_error("committed snapshot could not be read", format!("{error:?}"))
@@ -81,15 +83,22 @@ fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(),
     let Some(head) = head else {
         return Ok(());
     };
-    if let Err(error @ orna_storage_v1::Error::LegacyReadOnly { .. }) =
+    let Err(orna_storage_v1::Error::LegacyReadOnly { format }) =
         orna_storage_v1::writable_snapshot_context(repository, &head)
-    {
-        return Err(describe_storage_failure(
-            "publication target is a read-only legacy snapshot",
-            &error,
-        ));
-    }
-    Ok(())
+    else {
+        return Ok(());
+    };
+    // The journal lives in the runtime directory. Without one there is no
+    // journal, and reading would only create the coordination lock.
+    let migration_prepared = repository.runtime_paths().root().exists()
+        && repository.read_publication_journal().is_ok_and(|journal| {
+            journal.is_some_and(|journal| journal.migration_continuity().is_some())
+        });
+    Err(legacy_read_only_refusal(
+        "publication target is a read-only legacy snapshot",
+        format,
+        migration_prepared,
+    ))
 }
 
 /// Validates format-3 mutations against the pinned graph and committed source
@@ -494,25 +503,45 @@ fn table_row_counts(mutations: &[TableMutation]) -> BTreeMap<String, usize> {
     counts
 }
 
-/// The remedy for a format-1/2 snapshot: only format 3 has a row writer.
-const LEGACY_READ_ONLY_HELP: &str =
-    "migrate the repository to format 3 with `orna migrate copy` before publishing";
+/// The remedy for a format-1/2 snapshot: this build has no row writer for it,
+/// so its data reaches format 3 only through a migration copy.
+const LEGACY_READ_ONLY_HELP: &str = "this build has no writer for format-1/2 snapshots; prepare a format-3 copy with `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`; pending runtime changes in this worktree are not carried into DEST";
+
+/// The remedy inside a prepared migration copy: its format-3 candidate is
+/// journalled, but nothing in this build activates it.
+const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated";
+
+/// ORNA-PUB-012: names the read-only legacy format, states that nothing was
+/// written, and gives the remedy that fits the worktree's migration state.
+fn legacy_read_only_refusal(
+    title: &'static str,
+    format: u8,
+    migration_prepared: bool,
+) -> Diagnostic {
+    let (help, kept) = if migration_prepared {
+        (
+            MIGRATION_PREPARED_HELP,
+            "the migration journal and its candidate were left as they were",
+        )
+    } else {
+        (LEGACY_READ_ONLY_HELP, "the pending range was preserved")
+    };
+    Diagnostic::target_with_detail(
+        "E2300",
+        title,
+        help,
+        format!(
+            "repository format {format} is a read-only legacy snapshot: its loose and compact row writers are retired; no Git object, ref, index or worktree change was made and {kept}"
+        ),
+    )
+}
 
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
 fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
     use orna_storage_v1::Error as E;
     let detail = match error {
-        E::LegacyReadOnly { format } => {
-            return Diagnostic::target_with_detail(
-                "E2300",
-                title,
-                LEGACY_READ_ONLY_HELP,
-                format!(
-                    "repository format {format} is a read-only legacy snapshot: its loose and compact row writers are retired; no Git object, ref, index or worktree change was made and the pending range was preserved"
-                ),
-            );
-        }
+        E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
         E::ManagedWorktreeConflict => {
             "a managed path was edited after capture; keep or discard that edit, then retry"
                 .to_owned()
@@ -616,9 +645,41 @@ mod tests {
         assert_eq!(diagnostic.help, LEGACY_READ_ONLY_HELP);
         assert!(
             diagnostic
+                .help
+                .starts_with("this build has no writer for format-1/2 snapshots;")
+        );
+        assert!(diagnostic.help.contains(
+            "`orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`"
+        ));
+        assert!(
+            diagnostic
+                .help
+                .ends_with("pending runtime changes in this worktree are not carried into DEST")
+        );
+        assert!(
+            diagnostic
                 .detail
                 .as_deref()
                 .is_some_and(|detail| detail.starts_with("repository format 2 is a read-only"))
         );
+    }
+
+    #[test]
+    fn prepared_migration_refusal_names_the_unactivated_candidate() {
+        let diagnostic =
+            legacy_read_only_refusal("publication target is a read-only legacy snapshot", 1, true);
+        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.help, MIGRATION_PREPARED_HELP);
+        assert!(
+            diagnostic
+                .help
+                .ends_with("a format-3 migration candidate is prepared here but not activated")
+        );
+        assert!(!diagnostic.help.contains("migrate copy"));
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("repository format 1 is a read-only")
+                && detail
+                    .ends_with("the migration journal and its candidate were left as they were")
+        }));
     }
 }
