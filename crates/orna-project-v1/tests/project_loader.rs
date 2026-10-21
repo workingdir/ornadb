@@ -454,6 +454,53 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
 }
 
 #[test]
+fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        include_str!("fixtures/captured-standard-parent.orna"),
+    )]);
+    let module_path = repository.worktree().join("stdlib/std");
+    fs::create_dir_all(module_path.join("io")).unwrap();
+    orna_repository_v1::initialize_repository(&module_path).unwrap();
+    fs::write(
+        module_path.join("collection.orna"),
+        "use std.io;\npub fn answer(): Int = 41 + 1;\n",
+    )
+    .unwrap();
+    fs::write(module_path.join("io/main.orna"), "use fs;\npub fn read(): Int = 1;\n").unwrap();
+    fs::write(module_path.join("io/fs.orna"), "pub fn open(): Int = 2;\n").unwrap();
+    commit_directory(&module_path, "standard");
+    let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        repository.worktree().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+    git_output_at(repository.worktree(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(repository.worktree(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
+    let link = format!("160000,{module_commit},stdlib/std");
+    git_output_at(repository.worktree(), &["update-index", "--add", "--cacheinfo", &link]);
+    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std"]);
+    let parent_commit = repository.head().unwrap().unwrap();
+
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &parent_commit)
+        .unwrap();
+    let profile = project.standard_profile().expect("attached std profile");
+    assert_eq!(profile.snapshot(), module_commit);
+    assert_eq!(
+        project
+            .standard_sources()
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["std/collection.orna", "std/io/fs.orna", "std/io/main.orna", "std/main.orna"]
+    );
+}
+
+#[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let directory = tempfile::tempdir().unwrap();
     for (name, source) in [

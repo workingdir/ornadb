@@ -995,6 +995,9 @@ fn render_key(key: &TypedKey) -> String {
         TypedKey::Null => "-".to_owned(),
         TypedKey::Bytes(bytes) => render_bytes(bytes),
         TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
+        TypedKey::Value(value) => value
+            .canonical_text()
+            .unwrap_or_else(|| format!("cbor:{}", hex(value.canonical_bytes()))),
     }
 }
 
