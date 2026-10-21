@@ -56,6 +56,36 @@ fn git_line(directory: &Path, arguments: &[&str]) -> String {
         .to_owned()
 }
 
+/// Runs one Git command with `input` on stdin and returns its trimmed stdout.
+fn git_with_input(directory: &Path, arguments: &[&str], input: &str) -> String {
+    use std::io::Write as _;
+
+    let mut child = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run git");
+    child
+        .stdin
+        .take()
+        .expect("git stdin")
+        .write_all(input.as_bytes())
+        .expect("write git stdin");
+    let output = child.wait_with_output().expect("wait for git");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git stdout is UTF-8")
+        .trim()
+        .to_owned()
+}
+
 fn commit_database(directory: &Path, database: &str) {
     fs::write(directory.join(".orna/database.orna"), database).expect("update database metadata");
     git(directory, &["add", ".orna/database.orna"]);
@@ -323,6 +353,116 @@ fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
         .open_format_context()
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+}
+
+/// Format admission reads the root tree, the `.orna` tree and the metadata
+/// blobs only. A store wider than the 65,536 entries the old recursive
+/// diagnostic could list, whose nodes are not even present locally (as in a
+/// partial clone), must not affect it.
+#[test]
+fn opens_metadata_beside_a_wide_store_whose_nodes_are_absent() {
+    let directory = repository(Some(CANONICAL_DATABASE), None, false);
+    let root = directory.path();
+    let head = git_line(root, &["rev-parse", "HEAD"]);
+    let absent_node = "1".repeat(head.len());
+    let mut store = String::new();
+    for index in 0..70_000 {
+        store.push_str(&format!("040000 tree {absent_node}\tnode{index:05}\n"));
+    }
+    let store = git_with_input(root, &["mktree", "--missing"], &store);
+    let database = git_line(root, &["rev-parse", "HEAD:.orna/database.orna"]);
+    let metadata = git_with_input(
+        root,
+        &["mktree"],
+        &format!("100644 blob {database}\tdatabase.orna\n040000 tree {store}\tstore\n"),
+    );
+    let source = git_line(root, &["rev-parse", "HEAD:main.orna"]);
+    let tree = git_with_input(
+        root,
+        &["mktree"],
+        &format!("040000 tree {metadata}\t.orna\n100644 blob {source}\tmain.orna\n"),
+    );
+    let commit = git_line(
+        root,
+        &["commit-tree", &tree, "-p", "HEAD", "-m", "wide store"],
+    );
+    git(root, &["update-ref", "HEAD", &commit]);
+
+    let repository = Repository::discover(root).expect("discover repository");
+    let context = repository
+        .open_format_context()
+        .expect("metadata opens without listing the store");
+    assert_eq!(context.repository_format_number(), 3);
+    assert_eq!(context.database_id().unwrap().to_string(), DATABASE_ID);
+    assert!(context.validate_schema_root().is_ok());
+    assert!(context.validate_store_root().is_ok());
+    let head = repository.head().expect("read HEAD").expect("HEAD is born");
+    assert!(
+        repository.list_committed_tree(&head, usize::MAX).is_err(),
+        "a recursive listing cannot read this store"
+    );
+}
+
+/// A metadata path that holds something other than a regular file is
+/// present but invalid; a `.orna` that is not a directory records nothing.
+#[test]
+fn metadata_entries_that_are_not_regular_files_fail_closed() {
+    let symlinked = repository(Some(CANONICAL_DATABASE), None, false);
+    let target = git_with_input(
+        symlinked.path(),
+        &["hash-object", "-w", "--stdin"],
+        "../main.orna",
+    );
+    git(
+        symlinked.path(),
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("120000,{target},.orna/database.orna"),
+        ],
+    );
+    git(
+        symlinked.path(),
+        &["commit", "--quiet", "-m", "symlink database"],
+    );
+    let error = Repository::discover(symlinked.path())
+        .unwrap()
+        .open_format_context()
+        .unwrap_err();
+    assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+
+    let legacy_directory = repository(Some(CANONICAL_DATABASE), None, false);
+    fs::create_dir_all(legacy_directory.path().join(".orna/format.orna"))
+        .expect("create legacy directory");
+    fs::write(
+        legacy_directory.path().join(".orna/format.orna/nested"),
+        LEGACY_FORMAT_ONE,
+    )
+    .expect("write nested legacy entry");
+    git(legacy_directory.path(), &["add", "--all"]);
+    git(
+        legacy_directory.path(),
+        &["commit", "--quiet", "-m", "legacy directory"],
+    );
+    let error = Repository::discover(legacy_directory.path())
+        .unwrap()
+        .open_format_context()
+        .unwrap_err();
+    assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
+
+    let metadata_file = repository(None, None, false);
+    fs::write(metadata_file.path().join(".orna"), CANONICAL_DATABASE)
+        .expect("write a file where the metadata directory belongs");
+    git(metadata_file.path(), &["add", ".orna"]);
+    git(
+        metadata_file.path(),
+        &["commit", "--quiet", "-m", "metadata file"],
+    );
+    let error = Repository::discover(metadata_file.path())
+        .unwrap()
+        .open_format_context()
+        .unwrap_err();
+    assert_eq!(error.code(), "ORNA-REPO-CONTEXT-001");
 }
 
 #[test]

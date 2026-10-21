@@ -47,23 +47,18 @@ pub enum CaptureFileError {
 }
 
 impl CaptureFileError {
+    /// The portable failure code of the system reference's failure table
+    /// (ORNA-SYS-096/097). A root, path or target that is not an authorised
+    /// regular safe input is `sys.blob.source_denied`; exceeding the capture
+    /// quota is `sys.blob.limit`; a detected change is
+    /// `sys.blob.source_changed` (ORNA-INGEST-002, ORNA-INGEST-003).
     pub const fn failure_code(self) -> &'static str {
         match self {
-            Self::UnauthorizedRoot => "sys.blob.capture.unauthorized_root",
-            Self::InvalidPath => "sys.blob.capture.invalid_path",
-            Self::SourceUnavailable => "sys.blob.capture.source_unavailable",
-            Self::LimitExceeded => "sys.blob.capture.limit_exceeded",
-            Self::SourceChanged => "sys.blob.capture.source_changed",
-        }
-    }
-
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::UnauthorizedRoot => "ORNA-INGEST-001",
-            Self::InvalidPath => "ORNA-INGEST-002",
-            Self::SourceUnavailable => "ORNA-INGEST-003",
-            Self::LimitExceeded => "ORNA-INGEST-004",
-            Self::SourceChanged => "ORNA-INGEST-005",
+            Self::UnauthorizedRoot | Self::InvalidPath | Self::SourceUnavailable => {
+                "sys.blob.source_denied"
+            }
+            Self::LimitExceeded => "sys.blob.limit",
+            Self::SourceChanged => "sys.blob.source_changed",
         }
     }
 }
@@ -223,7 +218,7 @@ impl FilesystemProvider {
     /// `max_bytes` above the provider limit is not itself a failure, because
     /// the contract bounds the source and the captured Blob, not the request.
     #[sys_host_operation(
-        r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.capture.unauthorized_root","sys.blob.capture.invalid_path","sys.blob.capture.source_unavailable","sys.blob.capture.limit_exceeded","sys.blob.capture.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
+        r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.source_denied","sys.blob.bounds","sys.blob.limit","sys.blob.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
     )]
     pub fn capture_file(
         &self,
@@ -1315,8 +1310,13 @@ mod capture_tests {
         result.err().expect("capture should fail")
     }
 
+    /// ORNA-INGEST-002: capture requires an authorised root and a safe relative
+    /// path, rejects directory inputs and enforces the byte bound, and missing
+    /// permission and quota exhaustion have distinct typed outcomes carrying
+    /// the portable `sys.blob.source_denied` and `sys.blob.limit` codes
+    /// (ORNA-SYS-097).
     #[test]
-    fn capture_file_reports_each_ingestion_outcome_with_a_distinct_code() {
+    fn capture_file_reports_each_ingestion_outcome_with_its_portable_code() {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("small.bin"), [0, 255, 1]).unwrap();
         fs::create_dir(directory.path().join("directory")).unwrap();
@@ -1326,29 +1326,38 @@ mod capture_tests {
             failure(provider.capture_file("/not/authorized", "small.bin", 10)),
             CaptureFileError::UnauthorizedRoot
         );
-        assert_eq!(CaptureFileError::UnauthorizedRoot.code(), "ORNA-INGEST-001");
+        assert_eq!(
+            CaptureFileError::UnauthorizedRoot.failure_code(),
+            "sys.blob.source_denied"
+        );
         assert_eq!(
             failure(provider.capture_file(directory.path().to_str().unwrap(), "../small.bin", 10)),
             CaptureFileError::InvalidPath
         );
-        assert_eq!(CaptureFileError::InvalidPath.code(), "ORNA-INGEST-002");
+        assert_eq!(
+            CaptureFileError::InvalidPath.failure_code(),
+            "sys.blob.source_denied"
+        );
         assert_eq!(
             failure(provider.capture_file(directory.path().to_str().unwrap(), "missing", 10)),
             CaptureFileError::SourceUnavailable
-        );
-        assert_eq!(
-            CaptureFileError::SourceUnavailable.code(),
-            "ORNA-INGEST-003"
         );
         assert_eq!(
             failure(provider.capture_file(directory.path().to_str().unwrap(), "directory", 10)),
             CaptureFileError::SourceUnavailable
         );
         assert_eq!(
+            CaptureFileError::SourceUnavailable.failure_code(),
+            "sys.blob.source_denied"
+        );
+        assert_eq!(
             failure(provider.capture_file(directory.path().to_str().unwrap(), "small.bin", 2)),
             CaptureFileError::LimitExceeded
         );
-        assert_eq!(CaptureFileError::LimitExceeded.code(), "ORNA-INGEST-004");
+        assert_eq!(
+            CaptureFileError::LimitExceeded.failure_code(),
+            "sys.blob.limit"
+        );
     }
 
     /// The host contract bounds "the source and captured Blob" by `max_bytes`
@@ -1407,6 +1416,8 @@ mod capture_tests {
         );
     }
 
+    /// ORNA-INGEST-003: a detected change after the streamed read is rejected
+    /// as `sys.blob.source_changed`.
     #[test]
     fn capture_reader_detects_path_replacement_after_streaming() {
         let directory = tempfile::tempdir().unwrap();
@@ -1425,7 +1436,10 @@ mod capture_tests {
             source.verify_unchanged(),
             Err(CaptureFileError::SourceChanged)
         );
-        assert_eq!(CaptureFileError::SourceChanged.code(), "ORNA-INGEST-005");
+        assert_eq!(
+            CaptureFileError::SourceChanged.failure_code(),
+            "sys.blob.source_changed"
+        );
     }
 
     #[test]
