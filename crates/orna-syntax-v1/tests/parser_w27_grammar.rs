@@ -55,3 +55,12 @@ fn lambda_is_only_a_complete_expression() {
         expression_is_accepted(source);
     }
 }
+
+// W27-04 (grammar continue_statement = "continue" ";"): `continue` takes no
+// value, unlike `return` and `break`.
+#[test]
+fn continue_statement_takes_no_value() {
+    expression_is_rejected("loop { continue 1; }");
+    expression_is_accepted("loop { continue; }");
+    expression_is_accepted("loop { break 1; }");
+}
