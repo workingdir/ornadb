@@ -1,1 +1,1 @@
-std.collection.exists(1, value => true)
+exists(1, value => true)
