@@ -13,6 +13,15 @@ been published.
   read only from older commits. `orna publish` refuses rows whose table has no
   relation in the committed store.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
+- `orna publish` says what happened when every pending runtime mutation
+  already matched the committed snapshot: it reports how many mutations made
+  no visible change and were cleared, per table, instead of calling them
+  already committed.
+- The CLI test suite runs the Orna 1.1.0 release scenario oracles from the
+  release's own `tests/scenarios.json`: every FINAL and V110 oracle and the
+  mandatory behavioural scenarios start from `orna init` and use only product
+  commands. Each is an executor that must pass or a known gap that names its
+  blocking work item and a probe that still reproduces the blocker.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - Remounted writable workspace views capture one runtime activation and project
