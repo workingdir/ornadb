@@ -4576,18 +4576,15 @@ impl Context<'_, '_> {
                 }
                 self.index(base, index)
             }
-            Expr::Field { base, name, .. } => match payload_free_enum_variant(
-                base,
-                name,
-                scope,
-                self.namespace.as_deref(),
-            ) {
-                Some(variant) => variant,
-                None => {
-                    let base = self.evaluate(base, scope, depth + 1)?;
-                    self.field_value(base, name, scope, depth)
+            Expr::Field { base, name, .. } => {
+                match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
+                    Some(variant) => variant,
+                    None => {
+                        let base = self.evaluate(base, scope, depth + 1)?;
+                        self.field_value(base, name, scope, depth)
+                    }
                 }
-            },
+            }
             Expr::Control {
                 kind: ControlKind::If,
                 condition: Some(condition),
@@ -13383,17 +13380,17 @@ fn bind_constructor(
     let qualified_name = context.string(format!("{owner}.{variant}"))?;
     let Some((expected_type, expected_variant)) =
         enum_variant_identity(scope, context.namespace.as_deref(), &owner, &variant)
-        .map(|(type_id, candidate)| (type_id, &candidate.variant_id))
-        .or_else(|| {
-            scope.0.get(&qualified_name).and_then(|value| match value {
-                Value::Enum {
-                    type_id,
-                    variant_id,
-                    ..
-                } => Some((type_id, variant_id)),
-                _ => None,
+            .map(|(type_id, candidate)| (type_id, &candidate.variant_id))
+            .or_else(|| {
+                scope.0.get(&qualified_name).and_then(|value| match value {
+                    Value::Enum {
+                        type_id,
+                        variant_id,
+                        ..
+                    } => Some((type_id, variant_id)),
+                    _ => None,
+                })
             })
-        })
     else {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     };

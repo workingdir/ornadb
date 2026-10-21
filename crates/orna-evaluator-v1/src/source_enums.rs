@@ -29,15 +29,26 @@ pub fn source_enum_definitions(namespace: Option<&str>, items: &[Item]) -> Nomin
             continue;
         }
         let namespace = namespace.filter(|namespace| !namespace.is_empty());
-        let identity = namespace.map_or_else(|| name.clone(), |namespace| format!("{namespace}.{name}"));
+        let identity =
+            namespace.map_or_else(|| name.clone(), |namespace| format!("{namespace}.{name}"));
         let variants = variants
             .iter()
             .map(|variant| {
                 NominalVariant::new(
-                    derived_id(&[b"orna.enum.variant", identity.as_bytes(), variant.name.as_bytes()]),
+                    derived_id(&[
+                        b"orna.enum.variant",
+                        identity.as_bytes(),
+                        variant.name.as_bytes(),
+                    ]),
                     variant.name.clone(),
                 )
-                .with_payload_fields(variant.fields.iter().map(|field| field.name.clone()).collect())
+                .with_payload_fields(
+                    variant
+                        .fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect(),
+                )
             })
             .collect();
         let definition = NominalDefinition::new(
@@ -74,8 +85,14 @@ mod tests {
         );
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let main = source_enum_definitions(Some("main"), &parsed.value.items);
-        assert_eq!(main.keys().collect::<Vec<_>>(), ["main.Level", "main.SyncResult"]);
-        assert_eq!(main, source_enum_definitions(Some("main"), &parsed.value.items));
+        assert_eq!(
+            main.keys().collect::<Vec<_>>(),
+            ["main.Level", "main.SyncResult"]
+        );
+        assert_eq!(
+            main,
+            source_enum_definitions(Some("main"), &parsed.value.items)
+        );
 
         let other = source_enum_definitions(Some("other"), &parsed.value.items);
         assert_ne!(main["main.Level"], other["other.Level"]);

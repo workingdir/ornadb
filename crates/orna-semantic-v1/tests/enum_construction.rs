@@ -64,7 +64,10 @@ fn invalid_constructions_report_one_precise_diagnostic() {
         (
             "unknown payload variant",
             include_str!("fixtures/enum-construction-unknown-payload-variant.orna"),
-            (DIAG_UNRESOLVED, "enum `SyncResult` has no variant `pending`"),
+            (
+                DIAG_UNRESOLVED,
+                "enum `SyncResult` has no variant `pending`",
+            ),
         ),
         (
             "unknown payload field",
@@ -141,7 +144,10 @@ fn imported_constructions_check_variants_and_payload_rows() {
         diagnostics(&analysis),
         [
             (DIAG_MISSING_FIELD, "missing required field `count`"),
-            (DIAG_UNRESOLVED, "enum `shared.Level` has no variant `medium`"),
+            (
+                DIAG_UNRESOLVED,
+                "enum `shared.Level` has no variant `medium`"
+            ),
         ],
         "{source}"
     );

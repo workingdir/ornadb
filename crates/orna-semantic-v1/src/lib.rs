@@ -11667,7 +11667,10 @@ fn infer_enum_payload_construction(
         if !supplied.insert(field.name.as_str()) {
             diagnostics.push(diag(
                 DIAG_DUPLICATE,
-                format!("duplicate payload field `{}`", diagnostic_field_name(&field.name)),
+                format!(
+                    "duplicate payload field `{}`",
+                    diagnostic_field_name(&field.name)
+                ),
             ));
             valid = false;
             continue;

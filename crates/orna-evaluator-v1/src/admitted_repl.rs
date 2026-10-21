@@ -635,10 +635,8 @@ fn admitted_runtime_sources(
         if !standard {
             // ORNA-ENUM-001..003: project enums execute as construction plans
             // shared by every evaluation in the session.
-            nominal_definitions.extend(source_enum_definitions(
-                namespace.as_deref(),
-                &module.items,
-            ));
+            nominal_definitions
+                .extend(source_enum_definitions(namespace.as_deref(), &module.items));
         }
         for item in module.items {
             match item.declaration {
