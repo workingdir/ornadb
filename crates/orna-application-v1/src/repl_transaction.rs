@@ -1,5 +1,5 @@
 use super::*;
-use orna_project_v1::{admit_format3_row, ProjectLoader};
+use orna_project_v1::{admit_format3_row, ProjectLoader, StoredSchema};
 use orna_repository_v1::{KeyRange, OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
 use orna_syntax_v1::Expr;
@@ -62,7 +62,7 @@ fn normalize_repl_mutations(
     let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
         activation.into_parts();
     let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
-    let mut field_names_by_table = BTreeMap::<String, Vec<String>>::new();
+    let mut descriptors_by_table = BTreeMap::<String, orna_value_v1::SchemaDescriptor>::new();
     let mut normalized = Vec::with_capacity(mutations.len());
     for mutation in mutations {
         let table = mutation.table().to_owned();
@@ -94,23 +94,31 @@ fn normalize_repl_mutations(
             continue;
         };
         let object_id = table_ids.get(&table).copied().ok_or(ApplicationError::InvalidTableMetadata)?;
-        if !field_names_by_table.contains_key(&table) {
+        if !descriptors_by_table.contains_key(&table) {
             let schema = ProjectLoader::default()
                 .resolve_committed_source_table_schema(scope.repository, commit, object_id)
                 .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            let (_, field_names) = stored_field_names(schema.binding().descriptor().raw())?;
-            field_names_by_table.insert(table.clone(), field_names);
+            descriptors_by_table.insert(table.clone(), schema.binding().descriptor().clone());
         }
+        let stored_schema = StoredSchema::new(&descriptors_by_table[&table])
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let decoded = CanonicalValue::decode(&row_value).map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let OvbRaw::Map(entries) = decoded.raw() else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
-        let stored_values = field_names_by_table[&table].iter().map(|name| {
-            entries.iter().find_map(|(key, field_value)| match key {
-                OvbRaw::Text(field_name) if field_name == name => Some(field_value.clone()),
-                _ => None,
-            }).ok_or(ApplicationError::InvalidTableMetadata)
-        }).collect::<Result<Vec<_>, _>>()?;
+        let mut fields = BTreeMap::new();
+        for (name, field_value) in entries {
+            let OvbRaw::Text(name) = name else {
+                return Err(ApplicationError::InvalidTableMetadata);
+            };
+            fields.insert(name.as_str(), field_value);
+        }
+        // The evaluator's row map carries optional absence as `null` and
+        // records as name maps; the committed descriptor directs their
+        // stored encoding (ORNA-FORMAT-004).
+        let stored_values = stored_schema
+            .lower_stored_fields(&fields)
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let encoded = CanonicalValue::new(OvbRaw::Array(stored_values))
             .and_then(|row| row.encode())
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
@@ -154,7 +162,13 @@ fn committed_table_rows(
         let graph = scope.format_context.open_native_graph(&row_map)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let read_scope = graph.open_read_scope().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let (field_names, _) = stored_field_names(binding.descriptor().raw())?;
+        let field_names = StoredSchema::new(binding.descriptor())
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?
+            .fields()
+            .iter()
+            .filter(|field| field.role() == 1)
+            .map(|field| (*field.id(), field.name().to_owned()))
+            .collect::<BTreeMap<_, _>>();
         let admission = table_schema.admission.as_ref().ok_or(ApplicationError::InvalidTableMetadata)?;
         let mut committed = BTreeMap::<Vec<u8>, Vec<u8>>::new();
         let mut lower = None;
@@ -207,29 +221,6 @@ fn committed_table_rows(
         result.insert(table_name.clone(), committed.into_iter().collect());
     }
     Ok(result)
-}
-
-fn stored_field_names(descriptor: &OvbRaw) -> Result<(BTreeMap<[u8; 16], String>, Vec<String>), ApplicationError> {
-    let OvbRaw::Map(entries) = descriptor else { return Err(ApplicationError::InvalidTableMetadata); };
-    let fields = entries.iter().find_map(|(key, value)| (key == &OvbRaw::Int(BigInt::from(3))).then_some(value))
-        .ok_or(ApplicationError::InvalidTableMetadata)?;
-    let OvbRaw::Array(fields) = fields else { return Err(ApplicationError::InvalidTableMetadata); };
-    let mut by_id = BTreeMap::new();
-    let mut in_storage_order = Vec::new();
-    for field in fields {
-        let OvbRaw::Array(parts) = field else { return Err(ApplicationError::InvalidTableMetadata); };
-        let Some(OvbRaw::Tag(37, id)) = parts.first() else { return Err(ApplicationError::InvalidTableMetadata); };
-        let OvbRaw::Bytes(id) = id.as_ref() else { return Err(ApplicationError::InvalidTableMetadata); };
-        let id: [u8; 16] = id.as_slice().try_into().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let Some(OvbRaw::Text(name)) = parts.get(1) else { return Err(ApplicationError::InvalidTableMetadata); };
-        if matches!(parts.get(3), Some(OvbRaw::Int(role)) if role == &BigInt::from(1)) {
-            if by_id.insert(id, name.clone()).is_some() {
-                return Err(ApplicationError::InvalidTableMetadata);
-            }
-            in_storage_order.push(name.clone());
-        }
-    }
-    Ok((by_id, in_storage_order))
 }
 
 fn canonical_text_key_order(left: &str, right: &str) -> std::cmp::Ordering {
