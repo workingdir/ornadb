@@ -227,7 +227,7 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
     let mapper = PositionMapper::new(&invalid.text);
     let diagnostics = check_document(&invalid, &mapper);
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].source.as_deref(), Some("orna-syntax-v1"));
+    assert_eq!(diagnostics[0].source.as_deref(), Some("orna"));
     assert_eq!(
         diagnostics[0].severity,
         Some(lsp_types::DiagnosticSeverity::ERROR)
@@ -250,7 +250,7 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
     assert!(
         diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.source.as_deref() == Some("orna-syntax-v1"))
+            .all(|diagnostic| diagnostic.source.as_deref() == Some("orna"))
     );
 }
 
@@ -479,7 +479,7 @@ fn reserved_word_declaration_name_reports_a_syntax_v1_error_anchor() {
     let keyword_start = document.text.find("in(").unwrap();
     let keyword_end = keyword_start + "in".len();
     for diagnostic in &diagnostics {
-        assert_eq!(diagnostic.source.as_deref(), Some("orna-syntax-v1"));
+        assert_eq!(diagnostic.source.as_deref(), Some("orna"));
         let Some(lsp_types::NumberOrString::String(code)) = &diagnostic.code else {
             panic!("syntax diagnostics carry the ORNA error code: {diagnostic:?}");
         };
@@ -522,7 +522,7 @@ fn every_syntax_v1_error_maps_to_an_error_severity_diagnostic() {
             Some(lsp_types::DiagnosticSeverity::ERROR),
             "{diagnostic:?}"
         );
-        assert_eq!(diagnostic.source.as_deref(), Some("orna-syntax-v1"));
+        assert_eq!(diagnostic.source.as_deref(), Some("orna"));
     }
 }
 

@@ -1,6 +1,7 @@
 //! Protocol proofs for the Orna 1.0 language server.
 
 use std::{
+    collections::VecDeque,
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
@@ -68,6 +69,9 @@ struct Client {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_id: i64,
+    /// Notifications read while waiting for a response. Diagnostics are
+    /// published by a worker thread, so they may interleave with responses.
+    pending: VecDeque<Value>,
 }
 
 impl Client {
@@ -83,6 +87,7 @@ impl Client {
             reader: BufReader::new(child.stdout.take().unwrap()),
             child,
             next_id: 1,
+            pending: VecDeque::new(),
         }
     }
 
@@ -114,9 +119,14 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-        let response = self.read();
-        assert_eq!(response["id"], id, "response for {method}: {response}");
-        response["result"].clone()
+        loop {
+            let message = self.read();
+            if message.get("method").is_none() {
+                assert_eq!(message["id"], id, "response for {method}: {message}");
+                return message["result"].clone();
+            }
+            self.pending.push_back(message);
+        }
     }
 
     fn notify(&mut self, method: &str, params: Value) {
@@ -124,9 +134,20 @@ impl Client {
     }
 
     fn notification(&mut self, method: &str) -> Value {
-        let response = self.read();
-        assert_eq!(response["method"], method, "notification: {response}");
-        response["params"].clone()
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|message| message["method"] == method)
+        {
+            return self.pending.remove(index).unwrap()["params"].clone();
+        }
+        loop {
+            let message = self.read();
+            if message["method"] == method {
+                return message["params"].clone();
+            }
+            self.pending.push_back(message);
+        }
     }
 
     fn shutdown(&mut self) {
@@ -228,7 +249,7 @@ fn initialize(client: &mut Client) {
     );
     assert_eq!(
         result["capabilities"]["diagnosticProvider"]["identifier"],
-        "orna-syntax-v1"
+        "orna"
     );
     assert_eq!(
         result["capabilities"]["documentLinkProvider"]["resolveProvider"],
@@ -1107,7 +1128,7 @@ fn legacy_sql_is_rejected_and_parser_diagnostic_range_is_precise() {
     let diagnostics = open(&mut client, uri, source)["diagnostics"].clone();
     assert_eq!(diagnostics.as_array().unwrap().len(), 1);
     let diagnostic = &diagnostics[0];
-    assert_eq!(diagnostic["source"], "orna-syntax-v1");
+    assert_eq!(diagnostic["source"], "orna");
     assert_eq!(diagnostic["range"]["start"], position_of(source, ";", 0));
 
     let legacy = "CREATE SCHEMA app;";
@@ -1119,7 +1140,7 @@ fn legacy_sql_is_rejected_and_parser_diagnostic_range_is_precise() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|diagnostic| diagnostic["source"] == "orna-syntax-v1")
+            .all(|diagnostic| diagnostic["source"] == "orna")
     );
     client.shutdown();
 }
