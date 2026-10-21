@@ -1,0 +1,366 @@
+# Tests and checks that fail on main today.
+#
+# The nightly gates workflow (`scripts/gate_evidence.py run`) fails a job only
+# when a failure is not listed here. A listed failure still makes its evidence
+# record `failed`; this file only stops it from failing the job.
+#
+# Each entry names the bead that owns the fix. Delete the entry in the change
+# that makes the test pass; the nightly summary reports entries whose test now
+# passes. Never add an entry to hide a regression.
+#
+#   package       Cargo package, or "workspace" for a whole-workspace check
+#   target        lib, doc, bin:NAME, test:NAME or check:NAME
+#   test          exact libtest name, or "*" when the test binary aborts
+#   bead          bead that owns the fix
+#   reason        why it fails, and where the failure was observed
+#   intermittent  optional; true when the failure does not happen on every run
+#   record        optional record ID or glob the entry is limited to (default: every record)
+
+[[failure]]
+package = "workspace"
+target = "check:fmt"
+test = "fmt"
+bead = "ornadb-5il1.224"
+reason = "cargo fmt --all -- --check reports diffs in 216+ files at cf1c6aa82."
+
+[[failure]]
+package = "orna-repository-v1"
+target = "test:row_store_scale"
+test = "*"
+record = "gate-c-million-rows"
+bead = "ornadb-5il1.6"
+reason = "The one-million-row case has never finished; a local run was killed after 1,800 s with no result."
+
+[[failure]]
+package = "orna-sys-v1"
+target = "test:planner_predicate_decorrelation_cost_identity_sodmd"
+test = "changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain"
+bead = "ornadb-5il1.30"
+reason = "The pinned join-fold identity is not reproduced by current fold composition (bead reproduction on main)."
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:req_vfs"
+test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
+bead = "ornadb-9aj6"
+reason = "Fails intermittently in a full req_vfs run on main."
+intermittent = true
+
+[[failure]]
+package = "orna-repository-v1"
+target = "lib"
+test = "tests::runtime_owner_chain_survives_repeated_startup_crashes"
+bead = "ornadb-mmsa.37"
+reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite."
+intermittent = true
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:publication_crash_matrix"
+test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary"
+bead = "ornadb-aflz"
+reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:284)."
+intermittent = true
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:publication_crash_matrix"
+test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work"
+bead = "ornadb-aflz"
+reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520."
+intermittent = true
+
+[[failure]]
+package = "workspace"
+target = "check:clippy"
+test = "clippy"
+bead = "ornadb-5il1.256"
+reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."
+
+[[failure]]
+package = "orna-application-v1"
+target = "test:async_source_effect"
+test = "live_application_reads_publication_relations_from_durable_runtime_rows"
+bead = "ornadb-5il1.255"
+reason = "Fails on main at cf1c6aa82; CI never ran this crate."
+
+[[failure]]
+package = "orna-application-v1"
+target = "test:system_administration_conformance"
+test = "explicit_admin_capability_returns_host_outcome_for_fixture_source"
+bead = "ornadb-5il1.255"
+reason = "Fails on main at cf1c6aa82; CI never ran this crate."
+
+[[failure]]
+package = "orna-project-v1"
+target = "test:project_loader"
+tests = [
+  "committed_project_carries_verified_source_snapshot_identity",
+  "legacy_database_sidecar_does_not_hide_committed_source_rows",
+]
+bead = "ornadb-5il1.171"
+reason = "Fails on main at cf1c6aa82; the fixtures load a module-level `pub let`, which is not a 1.1.0 top-level item."
+
+[[failure]]
+package = "orna-runtime-v1"
+target = "lib"
+tests = [
+  "tests::durable_stream_control_reopens_paused_and_resets_opaque_position",
+  "tests::query_adjacent_filter_storm_terminal_observation_reaches_unknown_union_tail",
+  "tests::query_adjacent_filter_storm_terminal_observation_stops_before_unknown_union",
+  "tests::query_cascade_storm_merge_reaches_unknown_batch_after_known_leaves",
+  "tests::query_cascade_storm_merge_stops_before_unknown_batch_tail",
+  "tests::query_chained_filter_storm_selectivity_reaches_tail_failure",
+  "tests::query_chained_filter_storm_selectivity_stops_at_second_lookup_match",
+  "tests::query_cloned_prefix_fast_path_keeps_deep_unknown_unions_ordered",
+  "tests::query_cloned_prefix_repeated_flushes_keep_nested_union_ordered",
+  "tests::query_cloned_unknown_operands_keep_shared_filter_batches_ordered",
+  "tests::query_equal_prefixes_keep_nested_unknown_union_batches_ordered",
+  "tests::query_equal_suffix_continuations_share_cloned_nested_prefixes",
+  "tests::query_filter_storm_cascade_exhausts_after_single_late_match",
+  "tests::query_filter_storm_cascade_exhausts_sparse_no_match_tail",
+  "tests::query_filter_storm_cascade_preserves_tail_failure",
+  "tests::query_filter_storm_cascade_stops_after_second_selected_row",
+  "tests::query_filter_storm_compiles_cascade_into_union_before_take_stop",
+  "tests::query_filter_storm_compiles_cascade_into_union_preserving_failure",
+  "tests::query_filter_storm_pushes_through_zero_drop_and_surfaces_unknown_union_tail",
+  "tests::query_filter_storm_pushes_through_zero_drop_before_unknown_union_tail",
+  "tests::query_four_tail_rejects_follow_thirteen_matches",
+  "tests::query_four_trailing_rejects_follow_thirteen_interleaved_rejects",
+  "tests::query_leaf_chain_conjunct_resplits_preserve_short_take_failure",
+  "tests::query_leaf_chain_conjunct_resplits_sustained_pressure_stop_at_two_matches",
+  "tests::query_leaf_chain_sustained_mixed_pressure_preserves_short_take_failure",
+  "tests::query_leaf_chain_sustained_mixed_pressure_stops_at_two_matches",
+  "tests::query_nested_cloned_unknown_operands_keep_shared_batches_ordered",
+  "tests::query_nested_union_filter_batches_preserve_unknown_cascade_failure",
+  "tests::query_nested_union_filter_batches_stop_before_unknown_cascade_tail",
+  "tests::query_projection_failures_recover_at_the_outer_boundary",
+  "tests::query_relation_projection_effects_read_staged_insert_update_and_delete",
+  "tests::query_reused_unknown_union_keeps_shared_filter_batches_ordered",
+  "tests::query_shared_filter_batches_keep_order_through_unknown_union_compilation",
+  "tests::query_split_conjunct_mixed_limits_preserve_failure_before_outer_take_fills",
+  "tests::query_split_conjunct_tighter_inner_take_caps_larger_outer_demand",
+  "tests::query_split_conjunct_tighter_outer_take_closes_within_wider_inner_limit",
+  "tests::query_split_pressure_mixed_leaf_limits_preserve_failure_while_take_is_short",
+  "tests::query_split_pressure_mixed_leaf_limits_stop_after_two_matches",
+  "tests::query_split_pressure_mixed_limits_preserve_failure_while_take_is_short",
+  "tests::query_split_pressure_mixed_limits_stop_after_two_matches",
+  "tests::query_storm_split_pressure_across_chained_leaf_takes_preserves_short_failure",
+  "tests::query_storm_split_pressure_across_chained_leaf_takes_stops_at_two",
+  "tests::query_sustained_leaf_chain_take_two_conjunct_split_forms_match_on_closure",
+  "tests::query_sustained_leaf_chain_take_two_conjunct_split_forms_match_on_short_failure",
+  "tests::query_sustained_split_pressure_leaf_chains_preserve_short_take_failure",
+  "tests::query_sustained_split_pressure_leaf_chains_stop_after_two_matches",
+  "tests::query_sustained_split_pressure_mixed_leaf_limits_preserve_short_take_failure",
+  "tests::query_sustained_split_pressure_mixed_leaf_limits_stop_at_two_matches",
+  "tests::query_take_four_reaches_lookup_failure_after_reject_after_seven_six_split",
+  "tests::query_take_three_closes_after_seven_six_third_match_before_four_tail_rejects",
+  "tests::query_take_three_closes_after_seven_six_third_match_before_one_tail_reject",
+  "tests::query_take_three_closes_before_reject_then_lookup_failure_after_seven_six_split",
+  "tests::query_take_three_closes_before_tail_lookup_failure_after_seven_six_split",
+  "tests::query_take_three_continues_after_seven_six_split_through_four_tail_rejects",
+  "tests::query_take_three_stops_before_immediate_fourth_match",
+  "tests::query_take_three_stops_before_trailing_reject_and_fourth_match",
+  "tests::query_take_two_closes_after_chained_leaf_limit_storm_resplits",
+  "tests::query_take_two_closes_after_seven_leading_and_six_intermatch_rejects_before_four_tail",
+  "tests::query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_four_tail",
+  "tests::query_take_two_closes_after_six_leading_and_seven_intermatch_rejects_before_twenty_nine_tail",
+  "tests::query_take_two_closes_after_thirteen_intermatch_rejects_before_four_tail_rejects",
+  "tests::query_take_two_closes_after_thirteen_split_rejects_before_four_tail_rejects",
+  "tests::query_take_two_closes_before_reject_then_lookup_failure_after_seven_six_split",
+  "tests::query_take_two_counts_filtered_rows_before_child_leaf_cap",
+  "tests::query_take_two_preserves_failure_across_chained_leaf_limit_storm_resplits",
+  "tests::query_take_two_preserves_failure_across_mixed_leaf_run_storm",
+  "tests::query_take_two_preserves_failures_across_conjunct_filter_splits",
+  "tests::query_take_two_preserves_lookup_failure_across_assigned_union_tail",
+  "tests::query_take_two_preserves_lookup_failure_across_deeper_nested_union_tail",
+  "tests::query_take_two_preserves_lookup_failure_across_eight_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_eight_split_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_eleven_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_fifteen_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_filter_assignment_tail",
+  "tests::query_take_two_preserves_lookup_failure_across_five_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_five_split_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_four_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_four_split_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_fourteen_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_late_match_assigned_union_tail",
+  "tests::query_take_two_preserves_lookup_failure_across_nine_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_projected_union_tail",
+  "tests::query_take_two_preserves_lookup_failure_across_seven_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_seven_split_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_six_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_six_split_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_sixteen_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_2_6",
+  "tests::query_take_two_preserves_lookup_failure_across_split_distribution_eight_rejects_4_4",
+  "tests::query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_2_7",
+  "tests::query_take_two_preserves_lookup_failure_across_split_distribution_nine_rejects_7_2",
+  "tests::query_take_two_preserves_lookup_failure_across_ten_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_thirteen_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_three_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_across_twelve_nested_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_leading_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_and_one_match",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eight_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eighteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_eleven_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fifteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_five_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_four_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_fourteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nine_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_nineteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_reject",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seven_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_seventeen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_six_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_sixteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_ten_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_thirteen_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_three_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twelve_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_eight_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_five_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_four_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_nine_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_one_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_seven_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_six_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_three_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_twenty_two_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_four_rejects_match_and_two_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_one_reject",
+  "tests::query_take_two_preserves_lookup_failure_after_prefiltered_match_and_tail",
+  "tests::query_take_two_preserves_lookup_failure_after_split_three_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_three_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_twenty_nine_leading_rejects",
+  "tests::query_take_two_preserves_lookup_failure_after_two_rejects",
+  "tests::query_take_two_preserves_lookup_failure_through_nested_union_tail",
+  "tests::query_take_two_preserves_results_across_conjunct_filter_splits",
+  "tests::query_take_two_reaches_lookup_failure_after_reject_tail",
+  "tests::query_take_two_respects_child_leaf_cap_before_outer_union_demand",
+  "tests::query_take_two_surfaces_failure_inside_child_leaf_cap",
+  "tests::query_take_two_survives_storm_across_mixed_leaf_run_limits",
+  "tests::query_unknown_operand_batches_preserve_outer_cascade_exhaustion_order",
+  "tests::query_unknown_operand_batches_stay_lazy_under_outer_cascade_storm",
+  "tests::query_unknown_operand_batches_survive_shared_union_composition",
+  "tests::replaying_an_already_durable_vfs_save_does_not_commit_twice",
+  "tests::stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen",
+  "tests::terminal_failure_reopens_with_its_stable_identity_after_reset_and_restart",
+  "tests::typed_table_activation_rejects_a_missing_delete_without_advancing_state",
+  "tests::validated_table_activation_commits_protected_blob_transfer_atomically",
+]
+bead = "ornadb-5il1.253"
+reason = "Fails on main at cf1c6aa82 (CI never ran this library); most query storm tests now report ORNA-EVAL-QUERY-PAGE."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:publication_metadata"
+test = "storage_and_maintenance_expose_effective_publication_state"
+bead = "ornadb-5il1.138"
+reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+tests = [
+  "authoritative_fixture_resolves_attached_tables_connectors_and_modules",
+  "chained_extension_omissions_keep_sibling_depth_labels_scoped",
+  "checkpoint_and_failure_cas_admission_requires_typed_versions",
+  "closed_literal_addition_diagnostics_preserve_published_meaning",
+  "finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_names",
+  "late_paired_omission_rolls_back_only_crossed_nested_sibling_depths",
+  "multi_level_paired_boundary_depths_stay_stable_through_selector_storms",
+  "multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions",
+  "nested_bottom_cascade_preserves_tuple_pin_identity_by_capture_depth_wave",
+  "nested_container_omission_rolls_back_only_the_conflicting_depth",
+  "nested_extension_list_rollbacks_preserve_unaffected_depth_identities",
+  "nested_extension_omissions_preserve_sibling_depth_identities",
+  "nested_omission_checkpoint_storms_preserve_depth_labels_transactionally",
+  "nested_paired_boundary_depths_stay_stable_through_selector_storms",
+  "nested_paired_omissions_keep_each_reconciled_fold_depth_identity",
+  "nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves",
+  "nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes",
+  "omitted_nested_fold_rolls_back_only_the_rejected_depth_scope",
+  "omitted_sibling_preserves_width_of_paired_tuple_rebinds",
+  "paired_boundary_depth_topology_accumulates_through_selector_storms",
+  "paired_checkpoint_outputs_keep_lane_to_snapshot_mapping",
+  "paired_checkpoints_retain_their_selected_lane_contexts",
+  "paired_collapse_rebinds_preserve_global_depth_label_topology",
+  "paired_depth_omissions_restore_each_crossed_anchor",
+  "paired_nested_omission_reset_replay_restores_lane_pin_maps",
+  "paired_pin_identities_survive_omissions_at_outer_and_middle_depths",
+  "paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses",
+  "paired_reproductions_remain_stable_across_alternating_storm_orders",
+  "paired_rollback_omissions_keep_extension_depth_identities",
+  "paired_tuple_identity_survives_sequential_three_way_omission_chains",
+  "qualified_integer_aggregate_admission_requires_compatible_pinned_exports",
+  "sequential_three_way_tuple_folds_anchor_late_rebound_widths",
+  "sparse_paired_rebind_chains_preserve_identity_across_omitted_rows",
+  "table_rows_reject_overlapping_protocol_implementations",
+  "tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms",
+  "unknown_paired_width_suppresses_sibling_pin_promotion",
+  "while_requires_a_boolean_condition_preserves_body_effects_and_validates_transfers",
+]
+bead = "ornadb-5il1.138"
+reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:system_storage_contract"
+tests = [
+  "storage_profile_and_preference_are_independently_typed",
+  "storage_profile_and_preference_cannot_be_conflated",
+]
+bead = "ornadb-5il1.138"
+reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:v1_review_regressions"
+tests = [
+  "generic_calls_retain_callee_effect_and_failure_summaries",
+  "nominal_from_requires_a_nominal_constructor_result",
+  "undeclared_table_and_nominal_field_types_require_unresolved_diagnostic",
+]
+bead = "ornadb-5il1.138"
+reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
+
+[[failure]]
+package = "orna-storage-v1"
+target = "lib"
+tests = [
+  "compact::tests::non_permitted_key_types_fail_at_profile_admission",
+  "tests::compact_ref_drift_after_runtime_commit_preserves_journal_and_tail",
+  "tests::coordinator_publishes_and_completes_a_real_runtime_prefix",
+  "tests::coordinator_recovery_consumes_only_the_frozen_prefix",
+  "tests::coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending",
+  "tests::coordinator_recovery_is_idempotent_after_runtime_completion",
+  "tests::coordinator_recovery_preserves_a_candidate_byte_binding_failure",
+  "tests::coordinator_recovery_rejects_native_head_drift_before_runtime_cleanup",
+  "tests::coordinator_rejects_runtime_cleanup_after_native_head_drift",
+  "tests::coordinator_rejects_runtime_cleanup_before_reconciliation",
+]
+bead = "ornadb-5il1.254"
+reason = "Fails on main at cf1c6aa82; CI never ran this crate."
+
+[[failure]]
+package = "orna-storage-v1"
+target = "test:compact_runtime_receipt_crash"
+test = "compact_ref_advance_after_runtime_commit_preserves_branch_update"
+bead = "ornadb-5il1.254"
+reason = "Fails on main at cf1c6aa82; CI never ran this crate."
+
+[[failure]]
+package = "orna-storage-v1"
+target = "test:three_way_merge"
+tests = [
+  "nested_handoff_identity_survives_paired_compaction_rewind_fold_chains_p38rq",
+  "paired_mixed_mode_priority_survives_completed_depth_restore_waves",
+  "paired_tombstone_position_priority_is_shared_by_both_submission_modes",
+]
+bead = "ornadb-5il1.254"
+reason = "Fails on main at cf1c6aa82; CI never ran this crate."
