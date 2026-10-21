@@ -319,6 +319,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             reuse: CallReuse::default(),
             cancellation,
         };
@@ -451,6 +452,7 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
             reuse: CallReuse::default(),
             cancellation,
         };
