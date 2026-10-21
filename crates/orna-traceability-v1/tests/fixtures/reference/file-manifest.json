@@ -1,0 +1,1979 @@
+{
+  "version": "1.1.0",
+  "excludes": [
+    "file-manifest.json",
+    "SHA256SUMS"
+  ],
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "bytes": 1569,
+      "sha256": "871c5ede5c807a0168f233f35dcd4f51e5599ebf3b430591614a17a544de465a"
+    },
+    {
+      "path": "GLOSSARY.md",
+      "bytes": 2300,
+      "sha256": "dd1cc78ed3c4af109b59c611ee0fda2aa3dde21d02476aa84734961d2a1b9ab8"
+    },
+    {
+      "path": "MIGRATION.md",
+      "bytes": 1990,
+      "sha256": "712eaf1cbfaa90fe55fefd22d774106748630b0ae12dbb8c4bf791c6ff3fa795"
+    },
+    {
+      "path": "Orna-1.1.0.md",
+      "bytes": 498688,
+      "sha256": "f2847c9090ea2360118ec4a00dfa9a0480ff18de051c590047b37c98b33d5f73"
+    },
+    {
+      "path": "PLAN.md",
+      "bytes": 6821,
+      "sha256": "352a9e552634543043e66f36c9e555db962f0b4cdefdaf16037ea7fa7d608c91"
+    },
+    {
+      "path": "README.md",
+      "bytes": 1668,
+      "sha256": "568fda32efd0c6a1ef6a4a124ec6b0104a616dfae459084308f17a398fb1f991"
+    },
+    {
+      "path": "START-HERE.md",
+      "bytes": 2173,
+      "sha256": "b49ff9e018e8136462734cb49b7337578f14374ff167a7bdf9a24f046af49d88"
+    },
+    {
+      "path": "WALKTHROUGH.md",
+      "bytes": 4580,
+      "sha256": "86b9420b2e0f449c53757e9ca9437a618badd5d4f0e35646894f0f3a2e077f05"
+    },
+    {
+      "path": "api/additions-1.1.json",
+      "bytes": 8606,
+      "sha256": "8c291cd655c173d09714032c5f1e4d0e8bf19093921baeb31ecd9168f71682a1"
+    },
+    {
+      "path": "api/retired.json",
+      "bytes": 1149,
+      "sha256": "d7ba9093afc5e2cb9e60335a24ae9e5fe1a5da9313857050ed0479c47076864f"
+    },
+    {
+      "path": "api/sys.json",
+      "bytes": 168272,
+      "sha256": "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e"
+    },
+    {
+      "path": "compatibility/README.md",
+      "bytes": 971,
+      "sha256": "cbc1c66304f6431adfb6971c2a1fd23948ea93133a8cc0b0c3233883a9834ae2"
+    },
+    {
+      "path": "compatibility/previous-1.1.0-draft.zip",
+      "bytes": 1128581,
+      "sha256": "096273779e0ce773ef5ede4eb9b1fe0af4817776fb78097fb58fadb366449e59"
+    },
+    {
+      "path": "evidence/VALIDATION.md",
+      "bytes": 1781,
+      "sha256": "ba86eb3e21f89d5b8d80aa897f9bab0ff8cb4a36a0b1e077d8a03bf1fb39edde"
+    },
+    {
+      "path": "evidence/checks.json",
+      "bytes": 2577,
+      "sha256": "a742a1095601b6f2ca007269833ebd0af1c4f7e55fe3182830b771e2e821c866"
+    },
+    {
+      "path": "evidence/current-format-model.log",
+      "bytes": 836,
+      "sha256": "a9b61ce9ef8a4d63a9cc44d36063d86fe3674681e5791cf4d12c620a4bce774f"
+    },
+    {
+      "path": "evidence/group-results.json",
+      "bytes": 2150,
+      "sha256": "6f1fbff5d661e0dfc0415559d266150a3ededf22ba86f54d645c58bc6ff53b31"
+    },
+    {
+      "path": "evidence/language-syntax.log",
+      "bytes": 203,
+      "sha256": "03bdd2ca7a0ed25c92c7d1035ab78938b90d4977201dc6cd5f1189fa1ec7b95d"
+    },
+    {
+      "path": "evidence/legacy-float-vectors.log",
+      "bytes": 85,
+      "sha256": "8a9cf6509101c2534e2c75a56092b58d4ff6f0ef9c9d3c6170b4e1440559381c"
+    },
+    {
+      "path": "evidence/legacy-live-model.log",
+      "bytes": 1345,
+      "sha256": "2607c052152700518ea1309a5ce94eb45dd6f10e55bdd669058e31f60cdbd515"
+    },
+    {
+      "path": "evidence/legacy-path-vectors.log",
+      "bytes": 55,
+      "sha256": "e331e639e0da0b95826baffefb4d03ad9990285e3f3fa68272f12beeda5a7514"
+    },
+    {
+      "path": "evidence/model-results.json",
+      "bytes": 21843,
+      "sha256": "9b07773273250e74c6994fea64b48fe2e47d25782f598fd41cff56fd655a22f9"
+    },
+    {
+      "path": "evidence/probe-grammar.lark",
+      "bytes": 10025,
+      "sha256": "3d86f2b8bfd8afa5ce5ba8b9820d74e168b98521b28d04c99127de313c0c61ff"
+    },
+    {
+      "path": "evidence/protocol-models.json",
+      "bytes": 1345,
+      "sha256": "2607c052152700518ea1309a5ce94eb45dd6f10e55bdd669058e31f60cdbd515"
+    },
+    {
+      "path": "evidence/static-publication.log",
+      "bytes": 54,
+      "sha256": "3e22acc9c1d87bea1a5a06eaedfc83ec25d6791ffef29aae0424f839f9d57680"
+    },
+    {
+      "path": "evidence/static-results.json",
+      "bytes": 23437,
+      "sha256": "4479d8b8dbd0ce256c8f72e496ae9db5eee396a091b51a9c5181dae2773615ed"
+    },
+    {
+      "path": "evidence/syntax-probe.json",
+      "bytes": 45634,
+      "sha256": "18ba3cc5a63fc10536e4de84a906ae452661c272556411b86a1ccec723f8e8a1"
+    },
+    {
+      "path": "examples/blob-library/README.md",
+      "bytes": 1237,
+      "sha256": "84f45b6123d2c4f356a6b873f506f2dfb9538f38ee7762c106bb62cc26873ce1"
+    },
+    {
+      "path": "examples/blob-library/inputs/pixel.png",
+      "bytes": 73,
+      "sha256": "137630611e28a270c44bfa2947877bb3f739af22a4e3f6e6b28a2f2df342a528"
+    },
+    {
+      "path": "examples/blob-library/inputs/tone.wav",
+      "bytes": 4044,
+      "sha256": "c3a9237224f5d1f5d26acb76c80c9618dcd53b2f4ff295f0c4c0c2a7f553d891"
+    },
+    {
+      "path": "examples/blob-library/main.orna",
+      "bytes": 11,
+      "sha256": "9d5a9a395d22ca278f2051bdcdb8ca2f260ed4488dd9bc1c8cac8fffb85bf285"
+    },
+    {
+      "path": "examples/blob-library/manifest.json",
+      "bytes": 1229,
+      "sha256": "f3c1eb2ebec24131ac89caa8f362ec76807e26237909be4393ca3f9da9cf03fe"
+    },
+    {
+      "path": "examples/blob-library/music.orna",
+      "bytes": 530,
+      "sha256": "3d29c361f9d27d1b716a4ebbec47ec3e8738ea96cf0a64d38e1e258ab94facff"
+    },
+    {
+      "path": "examples/final/README.md",
+      "bytes": 491,
+      "sha256": "2062a8449a7f27c956e17cb9c458a7185e4ea1e5ae12ac6eddc515459e666694"
+    },
+    {
+      "path": "examples/final/data.orna",
+      "bytes": 138,
+      "sha256": "3778c50266c682abc2dd7966c27ca3372d9b573be3afb3184b867830e5736450"
+    },
+    {
+      "path": "examples/final/database.orna",
+      "bytes": 87,
+      "sha256": "6214cdc92bb24f032cb0fc14d7011a25bffa1ab828c35aea7f5aabe0738d71c0"
+    },
+    {
+      "path": "examples/final/main.orna",
+      "bytes": 320,
+      "sha256": "838e1b07c7f7dadbccd822c097e84f960e0a36aeed0d61603ec72ce4cb8a38b3"
+    },
+    {
+      "path": "examples/invalid/affine-addition.orna",
+      "bytes": 27,
+      "sha256": "bebdbc4af308a7ebaea4013b27a9098dca6071a1ffb96c0ceb868eeaa4db53d5"
+    },
+    {
+      "path": "examples/invalid/affine-sum.orna",
+      "bytes": 47,
+      "sha256": "69cdfd45338a7233ee8ece55f03e54624c8b7f0e472fcb9f67a52aa9423163a2"
+    },
+    {
+      "path": "examples/invalid/ambiguous-consumer.orna",
+      "bytes": 64,
+      "sha256": "8068ca238aeac42f923c212c5afbd43a8d378bf0f7cedb01ae85a26a8bb9cf65"
+    },
+    {
+      "path": "examples/invalid/assert-effectful-table.orna",
+      "bytes": 96,
+      "sha256": "5d7e022dadd7fd1d631f76751dfd9212749a2d503c0cf677d9b57f218a71eaad"
+    },
+    {
+      "path": "examples/invalid/assert-empty.orna",
+      "bytes": 25,
+      "sha256": "8082cb86835120dfa48848419ebec9625cb06cd22f0ecd5bf6115d1c1b716369"
+    },
+    {
+      "path": "examples/invalid/assert-missing-semicolon.orna",
+      "bytes": 44,
+      "sha256": "2740b5f3a803f6d720f219a42a61b6d35ad16a9f270bacb06027e68c1b5633f3"
+    },
+    {
+      "path": "examples/invalid/assert-owner-type-mismatch.orna",
+      "bytes": 53,
+      "sha256": "f7a55e00a8361b1ba3633017bef26a74fad9f3a2b2c7e2834459e4b65baf6fc9"
+    },
+    {
+      "path": "examples/invalid/assignment-expression.orna",
+      "bytes": 59,
+      "sha256": "9aad49ab664f743ac445a1d488061e3da657e0a6e8999ae6f7871003a1fff472"
+    },
+    {
+      "path": "examples/invalid/calendar-bucket-no-zone.orna",
+      "bytes": 50,
+      "sha256": "e0d50d0687c3bdec23f591e1d8a737364915e7718ee4c8bbdaa4e751b56db3e3"
+    },
+    {
+      "path": "examples/invalid/comparison-chain.orna",
+      "bytes": 48,
+      "sha256": "ce43ab2d019887d6f84906f52a2c420b08bef7d5d621321bf5c496655adad674"
+    },
+    {
+      "path": "examples/invalid/computed-field-effect.orna",
+      "bytes": 106,
+      "sha256": "75803a57f9f0f231580c8a5de3e31cb05cb23ede901574abdde3be28e5651184"
+    },
+    {
+      "path": "examples/invalid/computed-field-insert.orna",
+      "bytes": 122,
+      "sha256": "e2dd8513f507d7c9b9ee5c642a66e1010fb593876d84e603d6d704522ee8dfd2"
+    },
+    {
+      "path": "examples/invalid/computed-field-update.orna",
+      "bytes": 75,
+      "sha256": "906f751939e38f84ca6c6488fa8bd3a659deaf67a94bc6d3695d8cf8f8293812"
+    },
+    {
+      "path": "examples/invalid/cross-database-write.orna",
+      "bytes": 55,
+      "sha256": "d950f32bcbae1ea88affd4465f12f7672ed4a35860b32f6ec1cd0eb803788b82"
+    },
+    {
+      "path": "examples/invalid/currency-addition.orna",
+      "bytes": 31,
+      "sha256": "b4e9785e6c6949e338aac87f74be614dc2e416c5498363802c1f26c8d7a394f3"
+    },
+    {
+      "path": "examples/invalid/currency-static-symbol.orna",
+      "bytes": 90,
+      "sha256": "c4d5f1fc44d38e1f89732ebc77c0b8a50e1807085568f44b8b3bbb524810f36b"
+    },
+    {
+      "path": "examples/invalid/duplicate-key.orna",
+      "bytes": 105,
+      "sha256": "e57e5a35b9f351cbf15adb44d6b58e328151b502231f512944cf32b579e42bc6"
+    },
+    {
+      "path": "examples/invalid/effectful-display.orna",
+      "bytes": 215,
+      "sha256": "c702b8c8b6f50b1aaeb58b5417913dd8b7ff29d5a63c0786b1cc0cfebd35754e"
+    },
+    {
+      "path": "examples/invalid/float-key.orna",
+      "bytes": 43,
+      "sha256": "4b27fb868f6b3a143ac3a9e0e79477fa7e0c496f63dc439ae1735a130a3791c3"
+    },
+    {
+      "path": "examples/invalid/float-money-implicit.orna",
+      "bytes": 76,
+      "sha256": "ff3f519220b364eccf080f2f5d05e58b2c71cf38c229ba54eea19da5583f140b"
+    },
+    {
+      "path": "examples/invalid/implicit-conversion-chain.orna",
+      "bytes": 68,
+      "sha256": "4c38034cf90c80c3c5325a9a37fe88dcdea09a7113ab333353b1092b69d3fb18"
+    },
+    {
+      "path": "examples/invalid/incompatible-dimensions.orna",
+      "bytes": 32,
+      "sha256": "c326a909b1b683a9c3fb81ac954ab0dfee7f8456d0ebdfb492e24c2c6c095faa"
+    },
+    {
+      "path": "examples/invalid/key-update.orna",
+      "bytes": 55,
+      "sha256": "9bb74cfecbb245894f9f62c202c10523c1f0693ab388118fc7a3f530bddb4ca7"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-else.orna",
+      "bytes": 66,
+      "sha256": "73a2e47e64e2997012d6138a54a2c5ed74296fe97e388cc436967976a2a1944a"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-owner-pipe.orna",
+      "bytes": 93,
+      "sha256": "07977548cfbdba18f16632c16cafe0bf18c21891e4a0e6c45a7cb41a0a045104"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-pipe-bang.orna",
+      "bytes": 57,
+      "sha256": "51d5df5d256a84d4d5c52958531d1727aafdf68a08ee1f1bd95ee4d993f55f5f"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-self-pipe.orna",
+      "bytes": 93,
+      "sha256": "d145df1fd119830febdac07ad860fb219a543f777e210b8c2ee9e8a9e00b3d47"
+    },
+    {
+      "path": "examples/invalid/legacy-checkpoint-reset-method.orna",
+      "bytes": 111,
+      "sha256": "53d2fe54f703b09686f7618c6c1a8c0fd25047446af14a79921418c433215af5"
+    },
+    {
+      "path": "examples/invalid/legacy-colon-bound.orna",
+      "bytes": 61,
+      "sha256": "6778a1c0ec7318199f6bd0a0b177342d0c68174924edcb896d6b041e7f4f96f6"
+    },
+    {
+      "path": "examples/invalid/legacy-constraints-block.orna",
+      "bytes": 70,
+      "sha256": "803066265b24fb6b6fece010874cc7a12a88edff52a7644d7083ebf92e503c8e"
+    },
+    {
+      "path": "examples/invalid/legacy-currency-declaration.orna",
+      "bytes": 64,
+      "sha256": "f13f042d50069b3989332d3072c7ba384dc8bf9a3181f389d4247dc5aece2959"
+    },
+    {
+      "path": "examples/invalid/legacy-empty-closure.orna",
+      "bytes": 39,
+      "sha256": "edf1a19fe19f98431f50b52b84cf25f8f8c945becb9aa7806c0cf25030877974"
+    },
+    {
+      "path": "examples/invalid/legacy-ensure.orna",
+      "bytes": 47,
+      "sha256": "bc3a685bb2ea337e97d6734ebaa6021ea6147172d174c1502a8ee18511138cb7"
+    },
+    {
+      "path": "examples/invalid/legacy-fact.orna",
+      "bytes": 77,
+      "sha256": "cde01ad3dfe1e7db5283f6c15af70e7884b3cd8d2811e1e1c5cf6043fa2d6f42"
+    },
+    {
+      "path": "examples/invalid/legacy-failure-replay-method.orna",
+      "bytes": 57,
+      "sha256": "4812b2aa30bf9f19c73ffe095ef6a1c9f86fc29cde42992715af998ecbfc9982"
+    },
+    {
+      "path": "examples/invalid/legacy-failure-resolve-method.orna",
+      "bytes": 58,
+      "sha256": "6fb11c57fa8e5480994dcf7ac4580ce65a9f8200eb41acc8601c20377ef984e5"
+    },
+    {
+      "path": "examples/invalid/legacy-field-check.orna",
+      "bytes": 55,
+      "sha256": "06738a37b67fd1824304de3bb1f79edd37401d78028e36fe72d04ddead9cac6f"
+    },
+    {
+      "path": "examples/invalid/legacy-field-unique.orna",
+      "bytes": 51,
+      "sha256": "662ecc2cbe008b59065f3bcc89253654253d77efb3da0bae56f140dea6698c71"
+    },
+    {
+      "path": "examples/invalid/legacy-ingest.orna",
+      "bytes": 49,
+      "sha256": "7463411d48a2de67fa81382570647e0a67b56e1fff7bf844e6b03c30a07177a2"
+    },
+    {
+      "path": "examples/invalid/legacy-log.orna",
+      "bytes": 34,
+      "sha256": "e28a95a527b3884920e1eb73ca59f890d71a5c87a45009e0542672317eb7ce82"
+    },
+    {
+      "path": "examples/invalid/legacy-match.orna",
+      "bytes": 80,
+      "sha256": "558b36abcad8729b0fc187ce5007b18a141cc1469cdf186c7e65f09ad9e3460c"
+    },
+    {
+      "path": "examples/invalid/legacy-opaque.orna",
+      "bytes": 31,
+      "sha256": "04e900d8604ffb59b97fe6de94a75cac6a10e91902e1d7a1955d5845855930d9"
+    },
+    {
+      "path": "examples/invalid/legacy-pipe-lambda.orna",
+      "bytes": 53,
+      "sha256": "a4e2d7f7e67d5a446d7ec3d9d0a678d2e351ae373bbe785fe8da6200f0e684f5"
+    },
+    {
+      "path": "examples/invalid/legacy-postfix-question.orna",
+      "bytes": 46,
+      "sha256": "b461441c417b22cade3c20b9ad6c10f7bc91f6001780a0a73a4156625c292995"
+    },
+    {
+      "path": "examples/invalid/legacy-refined-where.orna",
+      "bytes": 33,
+      "sha256": "8281e9f6343c15af7941d640d981ce9399b046d999f9a2e1f971f148642da0df"
+    },
+    {
+      "path": "examples/invalid/legacy-result.orna",
+      "bytes": 70,
+      "sha256": "edf3fcdb47cd9d2c10b0b76fc1a1cd2c45850de1b4ac4a2b2c10da99209ee8fa"
+    },
+    {
+      "path": "examples/invalid/legacy-return-arrow.orna",
+      "bytes": 38,
+      "sha256": "bdb2c66197b2d34de126bbec85daf5f4704a448ccc1b3de95a410118004d18c6"
+    },
+    {
+      "path": "examples/invalid/legacy-store.orna",
+      "bytes": 37,
+      "sha256": "3a96ea1fb11809415dfff04fe5a60be58c794537134a1b51529b734416084954"
+    },
+    {
+      "path": "examples/invalid/legacy-stream-retry-method.orna",
+      "bytes": 53,
+      "sha256": "8a7c53f25bf6f246fb95928b3034cb97729c29a98084bb4140cbd1577aaeda2e"
+    },
+    {
+      "path": "examples/invalid/legacy-stream-skip-method.orna",
+      "bytes": 69,
+      "sha256": "b8f716bb752322d1374bfa0a73b114d8109e0279f66632b5e42235077a84f193"
+    },
+    {
+      "path": "examples/invalid/legacy-sys-runtime.orna",
+      "bytes": 48,
+      "sha256": "68340c93a697cfa5153d2e9644211db4c5682a27ac3e7db68a9d20d54d420ade"
+    },
+    {
+      "path": "examples/invalid/legacy-sys-storage-call.orna",
+      "bytes": 50,
+      "sha256": "714d5140d98570f1adf3a4b06090342848f0bd1d6c3d2587b6b35efd5e1a0ccd"
+    },
+    {
+      "path": "examples/invalid/legacy-top-level-impl.orna",
+      "bytes": 77,
+      "sha256": "6d5d56cd8dd5f8cd5cf281ac0b81f9abab6a7df6d9c45bd4a43d4c2a8b8fa3e9"
+    },
+    {
+      "path": "examples/invalid/legacy-tryfrom.orna",
+      "bytes": 80,
+      "sha256": "0ff026072f45697afe60b1b03f748f9aefcb947915a48a5158081d57b489ccda"
+    },
+    {
+      "path": "examples/invalid/legacy-var.orna",
+      "bytes": 51,
+      "sha256": "646652f2f9a2ba7df02066a0207a16a12fae285e9cf9b2bb0fde5ffbd29089a4"
+    },
+    {
+      "path": "examples/invalid/legacy-view.orna",
+      "bytes": 36,
+      "sha256": "ef723de8c6edef1db06f1f019af2b273379e19ac006769cf559277e11676a6cb"
+    },
+    {
+      "path": "examples/invalid/missing-required-field.orna",
+      "bytes": 47,
+      "sha256": "60365ba4ea92ec113b5942a900e056a3dc947ccee5667cfb3e4f354fb1bd7944"
+    },
+    {
+      "path": "examples/invalid/module-single-table-assertion.orna",
+      "bytes": 85,
+      "sha256": "a4e70548a6c461a6662f6a80dbbe1fffaff0906928bd360296f8e3749b91d672"
+    },
+    {
+      "path": "examples/invalid/module-zero-table-assertion.orna",
+      "bytes": 19,
+      "sha256": "e2b289719246e44873dfdf9d41349e3f837c923327d6d174f721821d479073c2"
+    },
+    {
+      "path": "examples/invalid/money-float.orna",
+      "bytes": 46,
+      "sha256": "b3b255ef26c723924c0cb6028a3acf751740bd8a6c96d7219cb224b8afd92f42"
+    },
+    {
+      "path": "examples/invalid/mutate-sys-commit.orna",
+      "bytes": 49,
+      "sha256": "69bfbf767b855489258b82b3ba1203b29590f0b3a98483ccc9b0511c8d90fb5d"
+    },
+    {
+      "path": "examples/invalid/question-coalesce-adjacent.orna",
+      "bytes": 48,
+      "sha256": "e99b4bad44f1c5f309b87650de9dc1ec1bbe007e5b8b2ba7e885ac8044f46404"
+    },
+    {
+      "path": "examples/invalid/question-on-int.orna",
+      "bytes": 20,
+      "sha256": "c492190cc07e45906a1d4791e110e18a242d6af4f2f5616e75fc8d0fcb99f7c9"
+    },
+    {
+      "path": "examples/invalid/range-key-overlap-magic.orna",
+      "bytes": 55,
+      "sha256": "0b15cb8fd36f2afa5c9bd9dcd0c1b7ca4c377bb4e8fba249a7d839d3908d9090"
+    },
+    {
+      "path": "examples/invalid/record-punning.orna",
+      "bytes": 39,
+      "sha256": "61556dc109ddaacc753b7803b2660385eeec747fb099b93d94391bddd94bb843"
+    },
+    {
+      "path": "examples/invalid/rekey-auto-id.orna",
+      "bytes": 68,
+      "sha256": "c1363200537f634581bd67eb1cef41adff8b3bd7fd3be63a7d8c8c886faa4ca3"
+    },
+    {
+      "path": "examples/invalid/relation-equality.orna",
+      "bytes": 66,
+      "sha256": "abbad949b1bab8d15946870b83e09b0da7cbd6fc16d82574264a94ee420b6cba"
+    },
+    {
+      "path": "examples/invalid/reserved-std.orna",
+      "bytes": 30,
+      "sha256": "fc07cdc91227ee3886ae3d06d2fb6c324e7c9d52444f1dcbf5e9da801ceb2213"
+    },
+    {
+      "path": "examples/invalid/reserved-sys.orna",
+      "bytes": 30,
+      "sha256": "03c03b8cadbcfd0ce79132cff4c818e20c3a00cc0dd742f208b0864791f0f8e2"
+    },
+    {
+      "path": "examples/invalid/row-declaration.orna",
+      "bytes": 28,
+      "sha256": "bb56860f773b7bec5b2245bbbe6bca8c893e19df8bdc4241a1bcb048634bcb10"
+    },
+    {
+      "path": "examples/invalid/secret-display.orna",
+      "bytes": 72,
+      "sha256": "6e42a8b9b4bfaa588c1147c8efd5eaaf2628e0ad0724df882ea6cbafae7343de"
+    },
+    {
+      "path": "examples/invalid/static-protocol-function.orna",
+      "bytes": 49,
+      "sha256": "f0c8a80c4fe3f9d67b5e23b4902e86afcd1a4426320fe5342b554bf44b919635"
+    },
+    {
+      "path": "examples/invalid/top-level-expression.orna",
+      "bytes": 33,
+      "sha256": "7421c5fd51213ecaacb7f852fae0091a5e40e990ff85afcc76094b4ded4cf25b"
+    },
+    {
+      "path": "examples/invalid/top-level-on.orna",
+      "bytes": 49,
+      "sha256": "308142a7addc894cfa0148b0ff137850b5310f74650226dd47263014f85c06cd"
+    },
+    {
+      "path": "examples/invalid/transaction-block.orna",
+      "bytes": 44,
+      "sha256": "d5f30a253176f9e73560b98a9c909fec3cee875ff10e8fc20bad3263a354c5f8"
+    },
+    {
+      "path": "examples/invalid/two-durable-sources.orna",
+      "bytes": 152,
+      "sha256": "70a830b02fac7b03164207cee17607fba5763586d81650b9ffb19d9697a7faae"
+    },
+    {
+      "path": "examples/invalid/unknown-field.orna",
+      "bytes": 62,
+      "sha256": "589b98e5eaf63b9c8194df6ae3e940a4af5ceda33fa74166c08a5b2645df578a"
+    },
+    {
+      "path": "examples/invalid/unparenthesized-lambda-stage.orna",
+      "bytes": 64,
+      "sha256": "9eb30d4673b0255399e200d377dbe15ee221266805ee45e77dd3cab027fb6806"
+    },
+    {
+      "path": "examples/invalid/unsafe-row-key-repeat.orna",
+      "bytes": 31,
+      "sha256": "939b6730e39a61832cfe64ff58cbab311a4340e2cb0e40829c52f6eccb8ba483"
+    },
+    {
+      "path": "examples/invalid/wrong-field-type.orna",
+      "bytes": 88,
+      "sha256": "3b8b66f46e0182c245a5569b98cbe49325bdb4b3afd6926165a05f14272f2882"
+    },
+    {
+      "path": "examples/reference/README.md",
+      "bytes": 889,
+      "sha256": "23825d49641e19f42155fb5750fc165506f7fce82403f17e3af10cf01a65f87b"
+    },
+    {
+      "path": "examples/reference/expectations.json",
+      "bytes": 1972,
+      "sha256": "171792128b8e29155ebc6f950a40fd266dfffd15121b731fc80ba49e16a08097"
+    },
+    {
+      "path": "examples/reference/library.orna",
+      "bytes": 683,
+      "sha256": "efaba490271b197f215c700a8a5e7aeaad0d4d222512e8d81511d734961a2a1e"
+    },
+    {
+      "path": "examples/reference/main.orna",
+      "bytes": 232,
+      "sha256": "9c75a77db0ed8fb1d7b9e8e11e7a62b848711d3c877a2c605cf760f1a5a62ce0"
+    },
+    {
+      "path": "examples/reference/sensors.orna",
+      "bytes": 691,
+      "sha256": "5990194150d9bd904b382828990c0513ddb766e3f6d0a1c250edd04399e95bbe"
+    },
+    {
+      "path": "examples/reference/values.orna",
+      "bytes": 439,
+      "sha256": "18ff0bf2b41001095dd9767c25bb855dc7f45a88462ca490e35910f39d59fcf5"
+    },
+    {
+      "path": "examples/reference/warehouse.orna",
+      "bytes": 852,
+      "sha256": "01d195023139825c30ff104417d08ea1ea2b2dc2138c4d39e880b4dfa9e3a463"
+    },
+    {
+      "path": "examples/valid/affine-max.orna",
+      "bytes": 51,
+      "sha256": "983a930c68c3a0c8598b8f19b63f045f6c37008b2056cef78a99fc91939beff2"
+    },
+    {
+      "path": "examples/valid/affine-mean.orna",
+      "bytes": 64,
+      "sha256": "efae5abc79b06dfae8954a0941a905a4a972684a1872b2649494e8bd4d8110a4"
+    },
+    {
+      "path": "examples/valid/affine-unit.orna",
+      "bytes": 103,
+      "sha256": "955b667a5be680e2ddf5548c7fdc68e5f00d96dc8439416167dfa24181779e11"
+    },
+    {
+      "path": "examples/valid/assignment-statement.orna",
+      "bytes": 122,
+      "sha256": "35619849b631d01f1fa31936fc6df711ce237976506fb262278233c061aef3dd"
+    },
+    {
+      "path": "examples/valid/associated-display.orna",
+      "bytes": 134,
+      "sha256": "8fdeb2515d856503e870bd9a0be385b4c2de44a4d377a39427d5d7cd03d4dafb"
+    },
+    {
+      "path": "examples/valid/automatic-failure-propagation.orna",
+      "bytes": 137,
+      "sha256": "6a16c518226c5ed1773c74d6f4c1eeef21968a2a4f8a790463f497008464f5b1"
+    },
+    {
+      "path": "examples/valid/blob-column.orna",
+      "bytes": 176,
+      "sha256": "ac88fc735eb4bb6619919d1600fdd15eea8fd39510ec1d5dde06ba7ae7729b0e"
+    },
+    {
+      "path": "examples/valid/blob-import.orna",
+      "bytes": 265,
+      "sha256": "ee2808435500decc2ad41cc1e99a0bc57d85f120d30c6bcaf71925e326749037"
+    },
+    {
+      "path": "examples/valid/blob-nested.orna",
+      "bytes": 148,
+      "sha256": "a33dfbd6193e4bd0bfd7d5cbae751d7a1fa1c754c276f16178357fbbb7c2fa2d"
+    },
+    {
+      "path": "examples/valid/blob-range.orna",
+      "bytes": 125,
+      "sha256": "34f6e8da8aa8cc9457675294a7250fa86a759591a3325cb6ac8f4cc9dcdcbca1"
+    },
+    {
+      "path": "examples/valid/blob-vs-information.orna",
+      "bytes": 71,
+      "sha256": "913f7081a766eede1d895f3f7fffff9a858147dbbcb0d4bc41a4fb7f4d6af785"
+    },
+    {
+      "path": "examples/valid/blob-writer.orna",
+      "bytes": 183,
+      "sha256": "08c4a6ddd372c75729f28f68daca85c1ee782a2225114ee384f7c1ff46c1b781"
+    },
+    {
+      "path": "examples/valid/calendar-bucket.orna",
+      "bytes": 76,
+      "sha256": "3a6e71e5b16de4de5cbbf0a4515a6256c9a8dff7a0bec12ce965c96534518f45"
+    },
+    {
+      "path": "examples/valid/case-record-and-block-arms.orna",
+      "bytes": 296,
+      "sha256": "0f8bde21c0bae4de72e9270538004bdecc10c43a5df2a2b277b256baea238799"
+    },
+    {
+      "path": "examples/valid/case.orna",
+      "bytes": 229,
+      "sha256": "a70a7f88edd10a1de97a7738992a9bfa8878f6200c2342f34c9c55601719ea64"
+    },
+    {
+      "path": "examples/valid/coalesce-precedence.orna",
+      "bytes": 112,
+      "sha256": "8e1dbfd3afc7e289b3840da084e1a41d85b19861778e77467a5abecc012cfad3"
+    },
+    {
+      "path": "examples/valid/codec-json.orna",
+      "bytes": 137,
+      "sha256": "8cfdffe29964c052d9458be46cce5906414c4c2a0e015c47e48bf1929173972b"
+    },
+    {
+      "path": "examples/valid/codec-orna.orna",
+      "bytes": 68,
+      "sha256": "c820b06f05384b9b51fb1082dd4e00df9072d0a98aa2dc549c0867ede67d75a0"
+    },
+    {
+      "path": "examples/valid/computed-and-defaulted-fields.orna",
+      "bytes": 187,
+      "sha256": "e94486730dd4899fe71c7c988227b3df633925302d711c00208cf7bb8cd07df9"
+    },
+    {
+      "path": "examples/valid/computed-field.orna",
+      "bytes": 187,
+      "sha256": "e94486730dd4899fe71c7c988227b3df633925302d711c00208cf7bb8cd07df9"
+    },
+    {
+      "path": "examples/valid/control-flow.orna",
+      "bytes": 196,
+      "sha256": "12aa4495bd1dd84f8de8a7a29d4f90afaf36f5f8a56aaa1a0af3b3e63b41441e"
+    },
+    {
+      "path": "examples/valid/cross-table-assertion.orna",
+      "bytes": 233,
+      "sha256": "d30dca0baad1fcc64d8227334db35ec390bbd880638b0e01387ac1ba64908999"
+    },
+    {
+      "path": "examples/valid/currency-locale-format.orna",
+      "bytes": 109,
+      "sha256": "6cbec42af97db5571ff84ea537a404a4eff66dca924b8f59bbcf24130011c726"
+    },
+    {
+      "path": "examples/valid/currency.orna",
+      "bytes": 227,
+      "sha256": "c1421caa1537824d647ddaa60f46f6350724b2a587b098687e9ea1fad31e3ff0"
+    },
+    {
+      "path": "examples/valid/cwd-head.orna",
+      "bytes": 117,
+      "sha256": "aec2f69953d29e71a9861d0a46e7194c29c0a333520a9b87ae13357bcba9d3e2"
+    },
+    {
+      "path": "examples/valid/decimal-division.orna",
+      "bytes": 168,
+      "sha256": "9834f8bf6e0eb4a9c671134296dd140747e4292b98f765012b6fdb9103f19059"
+    },
+    {
+      "path": "examples/valid/default-and-computed-fields.orna",
+      "bytes": 244,
+      "sha256": "acfb0dee52b91347a7c956a5b112300757fd1fd63517f7fccdcbf19f38a48180"
+    },
+    {
+      "path": "examples/valid/dependency-query.orna",
+      "bytes": 74,
+      "sha256": "b0457fa3099758f91aa437ad8e10aa5aa0711243f977051252a40f13131b915d"
+    },
+    {
+      "path": "examples/valid/duration-format.orna",
+      "bytes": 254,
+      "sha256": "c225a831fb0cffea67f2c5e16848e348a139ba2abd6f827073cdb6fce951494e"
+    },
+    {
+      "path": "examples/valid/effectful-expression.orna",
+      "bytes": 50,
+      "sha256": "1e50a69aee59e92b716e73924e56caf0e357ddc9ed7c69956011e2372bceceee"
+    },
+    {
+      "path": "examples/valid/empty-record-lambda.orna",
+      "bytes": 67,
+      "sha256": "8bce5a3ee0ce81e9af145bedb4a7c2ec4bd603d71dae4e30649176d77857ffe7"
+    },
+    {
+      "path": "examples/valid/enum.orna",
+      "bytes": 256,
+      "sha256": "0401f6a23927fac9d0085e965d7545dfd3311645b4259ee4f0f04b1b8f062167"
+    },
+    {
+      "path": "examples/valid/executable-assertion.orna",
+      "bytes": 148,
+      "sha256": "7b4e922fa92015175d702f24887da0e65a8ce423f59579febe109ea251bd0f1b"
+    },
+    {
+      "path": "examples/valid/explicit-rekey.orna",
+      "bytes": 118,
+      "sha256": "fbf7c6cf30d392fc207a6cda669ff5cb2762b600b5bdb5f49a45e9ee88aae6b1"
+    },
+    {
+      "path": "examples/valid/failure-natural-key.orna",
+      "bytes": 598,
+      "sha256": "f1e0c71848f6b06e8113b7394cb29ca4f7ec19335a362e0b2403ac94763733e5"
+    },
+    {
+      "path": "examples/valid/finite-stream.orna",
+      "bytes": 119,
+      "sha256": "68915a150870aa7395687511e07d50969d77f39dc08a52a57ac2e8b81b7a7a09"
+    },
+    {
+      "path": "examples/valid/formatting-does-not-serialize.orna",
+      "bytes": 143,
+      "sha256": "0c1055044efbbfc66cd9f604a858935fc09041fac91bd77072a11f1b43002281"
+    },
+    {
+      "path": "examples/valid/function-block.orna",
+      "bytes": 103,
+      "sha256": "ef97b7b487754c1c82802e1d019e4db9940cd943e10b4db739ebf34aa6e9fe78"
+    },
+    {
+      "path": "examples/valid/function-default.orna",
+      "bytes": 97,
+      "sha256": "714ee2baa7fd5fe962d4e18dd0880f063ab44a908e007b4006e9198541b580a2"
+    },
+    {
+      "path": "examples/valid/function-expression.orna",
+      "bytes": 43,
+      "sha256": "b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052"
+    },
+    {
+      "path": "examples/valid/function-values-and-pipelines.orna",
+      "bytes": 258,
+      "sha256": "b19ae761ec12179b2317a6754f72185001e5ef21cc55c632fc36411ec9cdec95"
+    },
+    {
+      "path": "examples/valid/generic-protocol.orna",
+      "bytes": 164,
+      "sha256": "9eb319bd78a0647d605284ca38ce8988021a32915b73320118b7f181e5293cb5"
+    },
+    {
+      "path": "examples/valid/historical-program.orna",
+      "bytes": 234,
+      "sha256": "58c3c27a23acb26f8c797e2276fe39a51d77d39e626fe3fe0add36d22d25b1a5"
+    },
+    {
+      "path": "examples/valid/historical-query.orna",
+      "bytes": 73,
+      "sha256": "eb0ab108bd985a291db881ad0f9ab6809bad9586bbebbe26f134fbd2e0d0c447"
+    },
+    {
+      "path": "examples/valid/imports.orna",
+      "bytes": 102,
+      "sha256": "2a18e025c1a947f62b8bb1553f29db27fda3d4fbc59676e707fc8cc422026285"
+    },
+    {
+      "path": "examples/valid/inference-first.orna",
+      "bytes": 77,
+      "sha256": "7c1a182a2f5201cac5abaeed30e4f6c8f9da2ad37ffc28880108e7f026381b56"
+    },
+    {
+      "path": "examples/valid/key-default-allocated-once.orna",
+      "bytes": 84,
+      "sha256": "846bc244fa502ce81128b86153b2154fcf98088677c970dc17494504fd5739bd"
+    },
+    {
+      "path": "examples/valid/lambda-empty-record.orna",
+      "bytes": 53,
+      "sha256": "b6f6f994f9df639a46f3380bdf3eb8e8b73ea8d44980e09e3daa48089544c878"
+    },
+    {
+      "path": "examples/valid/lambda.orna",
+      "bytes": 248,
+      "sha256": "4dd9feece95fc1c75ef705b508166ca1176fd35ad1e6e4b7b5846b92863b7046"
+    },
+    {
+      "path": "examples/valid/live-page-fallback.orna",
+      "bytes": 87,
+      "sha256": "e6135068b302f92669fd75bd3cf324c9ae96acb1a58e44a72678ff971f8361c7"
+    },
+    {
+      "path": "examples/valid/minimal-root.orna",
+      "bytes": 67,
+      "sha256": "8aac96ef8404da7188820f8a6c20c6ae4651c447dc10a72dfba8f953953eb9a7"
+    },
+    {
+      "path": "examples/valid/money-rate.orna",
+      "bytes": 150,
+      "sha256": "94c820db20326d35f86e20ae845681be20d643a6b2b85e0e32809d1d862a60f6"
+    },
+    {
+      "path": "examples/valid/money-serialization.orna",
+      "bytes": 68,
+      "sha256": "5e76b4eb3d0a4ee1a168e49fbd30a5c9e47f913326d9ae0730e05adef54e8259"
+    },
+    {
+      "path": "examples/valid/nested-lambda.orna",
+      "bytes": 44,
+      "sha256": "9d2861de7ffff99b45e3902aa600a9e53bf794ca015b23ca3a30c01848f9c500"
+    },
+    {
+      "path": "examples/valid/nominal-type-nested-impl.orna",
+      "bytes": 533,
+      "sha256": "1e835c3b777135ba40a498f9d8c516ed0e8419149c0695356dd93a7d5e90f7f2"
+    },
+    {
+      "path": "examples/valid/numeric-literal-context.orna",
+      "bytes": 106,
+      "sha256": "4a8e1a46ef6e3c72890aff6c6cc340f0f27d056c9df4db38db0e0d43fd3e9f31"
+    },
+    {
+      "path": "examples/valid/page.orna",
+      "bytes": 123,
+      "sha256": "66cc78266af6c83c440160c24296bc3e5d8dc941bcefba5a833e7fc8da3a6c6b"
+    },
+    {
+      "path": "examples/valid/parallel-function-values.orna",
+      "bytes": 168,
+      "sha256": "f4650e34a5eb4417297b5a5a419d2b0d220120688f478088f73ad586309cf73c"
+    },
+    {
+      "path": "examples/valid/parallel-streams.orna",
+      "bytes": 153,
+      "sha256": "140a1d4e8a3dcf4c47ab45d93b1eedf797e5c0a7d9ffffa2c355228432259eda"
+    },
+    {
+      "path": "examples/valid/parenthesized-lambda-stage.orna",
+      "bytes": 116,
+      "sha256": "4f248320afe42c381f292aa401829f7a836e2a985bc3804c0aa238e8e5f8af50"
+    },
+    {
+      "path": "examples/valid/pipe-first-argument.orna",
+      "bytes": 143,
+      "sha256": "a21da922cd67ea3eedd770c9c8ed1803aaf1ce8eca5cb9adf65c3183f691a164"
+    },
+    {
+      "path": "examples/valid/pipeline-precedence.orna",
+      "bytes": 219,
+      "sha256": "d01174215bc3eefb04f4eb02257a5462215b146931704aa2997882c02a3c0988"
+    },
+    {
+      "path": "examples/valid/pipeline.orna",
+      "bytes": 160,
+      "sha256": "3a6916c266b3ebe06e0cc7987ac3efd35229f9c4c07afaf27ac9b5d44f69cedd"
+    },
+    {
+      "path": "examples/valid/presentation-watch.orna",
+      "bytes": 78,
+      "sha256": "d2503c6e1a53a11e716c00431f42702a32da8dc07d71852b81f190723546f86e"
+    },
+    {
+      "path": "examples/valid/programmable-watch-expression.orna",
+      "bytes": 120,
+      "sha256": "dd7048b4c7b32deecdcf78909510b8a32de1585359ac5b05e8ce7b96777aaf0f"
+    },
+    {
+      "path": "examples/valid/question-coalesce-parenthesized.orna",
+      "bytes": 49,
+      "sha256": "aa483c75db823aef0f2ff8248f4fd93555fc2215c617e3f80d08881610765a43"
+    },
+    {
+      "path": "examples/valid/ranges.orna",
+      "bytes": 100,
+      "sha256": "532a84972da68e513ea5d8c458667a570f7dd5c56284598c9d89dcdd7911a650"
+    },
+    {
+      "path": "examples/valid/record-pattern-shorthand.orna",
+      "bytes": 264,
+      "sha256": "1ea95815ec98903f837725c695aff86ba78ca93be12e78e04d522e9a194ad787"
+    },
+    {
+      "path": "examples/valid/recovery-pipeline.orna",
+      "bytes": 136,
+      "sha256": "758c6386ada8c37125ef3a94a23b5587d4268071b97ce5acadaaa96b41b3dddd"
+    },
+    {
+      "path": "examples/valid/refined-type-assertions.orna",
+      "bytes": 107,
+      "sha256": "da2b3b6f26c9e542c6d46eba089a0cd5b01c7c6793a5566f3da4ce4eeb36c31d"
+    },
+    {
+      "path": "examples/valid/reviewed-commit.orna",
+      "bytes": 120,
+      "sha256": "b2aca8909969e39f1089e467db0df4b2b6f4d670b96e93b2d5575356de6d2448"
+    },
+    {
+      "path": "examples/valid/row-body.orna",
+      "bytes": 90,
+      "sha256": "cd6c4e188cb2ae83c83071057d5447770434ae539429ddb43bab00a2b3981207"
+    },
+    {
+      "path": "examples/valid/secret-reference.orna",
+      "bytes": 78,
+      "sha256": "501a9da3c0e952720ad2bc5abe0cde4b0a6d581b932132f38b1b0840638bd1ce"
+    },
+    {
+      "path": "examples/valid/stream-admin-repl.orna",
+      "bytes": 413,
+      "sha256": "aa98c899c869d5458aaaa5618fdb6a32e07842f36d6a55a2f81504b0450ff1ce"
+    },
+    {
+      "path": "examples/valid/sys-checkpoint.orna",
+      "bytes": 49,
+      "sha256": "eb14abaa10e39327531ec736800fdca6a2a1c29ad7d23bc5eaaa99db9eb2798a"
+    },
+    {
+      "path": "examples/valid/sys-definition-file.orna",
+      "bytes": 196,
+      "sha256": "aa5302188712cd58e2a83f64efa237b95791c68e74d8d016cab434b5f447a7f0"
+    },
+    {
+      "path": "examples/valid/sys-file-history.orna",
+      "bytes": 66,
+      "sha256": "6ad2f8b9e7488e16ef92529a481740c3b9023de7ce2254d3a0b7c31e2c77f05b"
+    },
+    {
+      "path": "examples/valid/sys-run-history.orna",
+      "bytes": 78,
+      "sha256": "f1304bc7e3d8d0561fcd162163ba4570d72a5e98ecce67a2c697ab538b388086"
+    },
+    {
+      "path": "examples/valid/sys-storage.orna",
+      "bytes": 78,
+      "sha256": "02236fdb776749ba9ccbda541c1129214af7ea6845cfd2a387fe549b94246261"
+    },
+    {
+      "path": "examples/valid/sys-table-query.orna",
+      "bytes": 187,
+      "sha256": "b2b7055ebfa021a7d40e9cd778044fc22658d1949501f170c0e48abaaee9a35b"
+    },
+    {
+      "path": "examples/valid/table-assertions.orna",
+      "bytes": 159,
+      "sha256": "7836c28d207ddc27bf47b9694a997d346c681906dde3bdae299923dd07125664"
+    },
+    {
+      "path": "examples/valid/table-automatic-key.orna",
+      "bytes": 56,
+      "sha256": "2f0896fbf9452d759dcf656f292635df9e7c1de493238d92b4d9137f394fa951"
+    },
+    {
+      "path": "examples/valid/table-composite-key.orna",
+      "bytes": 89,
+      "sha256": "b9908b2c0cb593bccd781feac8529134208987ca9ea207e0177781d9d8060d1b"
+    },
+    {
+      "path": "examples/valid/table-explicit-key.orna",
+      "bytes": 63,
+      "sha256": "649f59e7e5c747fd8399b9b3cd920acd835a33349262ba0e18aaf3a385be8815"
+    },
+    {
+      "path": "examples/valid/table-key-default.orna",
+      "bytes": 131,
+      "sha256": "b4d869d226c6cfe7ee83f40fb1b288de408ff62e912dc89eff6d2a49298d57cb"
+    },
+    {
+      "path": "examples/valid/table-reference.orna",
+      "bytes": 143,
+      "sha256": "d37f5951a58e1aed95c020bd75294ad950e18476b66837236b8a49997ae9b91d"
+    },
+    {
+      "path": "examples/valid/transactional-scope.orna",
+      "bytes": 233,
+      "sha256": "d2ca070b6d019e501e8008f91e5a4e22b80160afa96f059ad8f71b2ef27bfada"
+    },
+    {
+      "path": "examples/valid/transparent-alias.orna",
+      "bytes": 63,
+      "sha256": "95875dc1de9f1f1bcdada1446eeddb544cf0e4fe32c33e9e18920894fefc2fcf"
+    },
+    {
+      "path": "examples/valid/unbounded-stream.orna",
+      "bytes": 412,
+      "sha256": "55c6b1814dee343c845b9eb3d34e2e573d94d913ed0ff7c6cdf9d81e144e93bb"
+    },
+    {
+      "path": "examples/valid/unit-cross-database.orna",
+      "bytes": 81,
+      "sha256": "d257a043fadbd9317da8f01513080376627af89ea705e7e861b3a97cfe111f42"
+    },
+    {
+      "path": "examples/valid/unit-postfix.orna",
+      "bytes": 77,
+      "sha256": "1b1da2405560a61e49e4f7b1c92bda143288edc7617f7775f8e264963ab03d88"
+    },
+    {
+      "path": "examples/valid/units.orna",
+      "bytes": 211,
+      "sha256": "d9a7501cf44347b23a9474c54015d59c0ce54c4fca500f68f901f3f9ea4b3e10"
+    },
+    {
+      "path": "grammar/orna.ebnf",
+      "bytes": 15875,
+      "sha256": "cb42b88bf387a76bc2c7f42858fedcb30b8d8373273066636691e0e8151ff6db"
+    },
+    {
+      "path": "implementation/ACCEPTANCE.md",
+      "bytes": 5180,
+      "sha256": "2b88906920ec094e28b2a1a975581b4821810eeabc564aefa4a7d0cb0aa40de6"
+    },
+    {
+      "path": "implementation/INTERFACES.md",
+      "bytes": 2370,
+      "sha256": "c7b5df3d668ae4777a87f4e77d3aa8a39b1ad43c1588d487e5e73d7391ad96e5"
+    },
+    {
+      "path": "implementation/ORCHESTRATOR.md",
+      "bytes": 7001,
+      "sha256": "a4e9217ddb02a9f540a1cec89062e4ead5026bd9b5bfc2c06e0d67ccdf1ee573"
+    },
+    {
+      "path": "implementation/SOURCES.md",
+      "bytes": 1528,
+      "sha256": "060a91489cc32f2ca2c88716d30f5058e946080b6a1285217ead0e33edba3821"
+    },
+    {
+      "path": "index.html",
+      "bytes": 699311,
+      "sha256": "e382cac9d1cedd130159256c25c6432637d545ef44bec662be330a88bcf591c5"
+    },
+    {
+      "path": "profiles/conformance-1.1.json",
+      "bytes": 1161,
+      "sha256": "b398dcd280b6ca16b8ee1f538c5c91175adb5793e5aea55a11d6379d7365ad79"
+    },
+    {
+      "path": "profiles/coordinates.json",
+      "bytes": 648,
+      "sha256": "57dc557c87c7e731f1d002d44572a004f5e8e9ea4f35c9c3a63dd3c74969c1d2"
+    },
+    {
+      "path": "profiles/database.schema.json",
+      "bytes": 477,
+      "sha256": "2737bb5f82000c0db1e0565a5ea447ca79723988fa97945bceeef5c8be9c57c8"
+    },
+    {
+      "path": "profiles/live-messages.json",
+      "bytes": 5200,
+      "sha256": "69e4a9d3628fa5b844d277400fb8be1655d5dcff454192c3498631bf78cdfbca"
+    },
+    {
+      "path": "profiles/live-protocol.md",
+      "bytes": 244,
+      "sha256": "309f5f20927093801158994c03199d546a1665bf22f11efc434918e4c15f9cea"
+    },
+    {
+      "path": "profiles/media-1.json",
+      "bytes": 3351,
+      "sha256": "7b232d68b7e4a6a2e9c225339639165569896b7ee8e1b8bd06e3331af2f73120"
+    },
+    {
+      "path": "profiles/session.schema.json",
+      "bytes": 3430,
+      "sha256": "a155e9aab4dc9e70f0ef1249cd491d1bee30088c385170ad3e01edea1293b4f2"
+    },
+    {
+      "path": "profiles/store-3.json",
+      "bytes": 1372,
+      "sha256": "60e98458a18a4cb043a03b7343aaf6df766e66fa507817148e4d4d4b88666455"
+    },
+    {
+      "path": "profiles/store-format-3.md",
+      "bytes": 11250,
+      "sha256": "486036ffab1c71be0e31a9a4f3673b0efd7b8a591c223a6271b3f63268534775"
+    },
+    {
+      "path": "profiles/vfs-1.md",
+      "bytes": 8818,
+      "sha256": "3f9e96bd0fc7327248566b9631380346860950f57a0597f70c45743dafaae35b"
+    },
+    {
+      "path": "provenance/inputs.json",
+      "bytes": 708,
+      "sha256": "2589ab8d613783146ad9110dd0896fe38341df87192de34e08fa16761d3193f9"
+    },
+    {
+      "path": "provenance/requirement-changes.json",
+      "bytes": 107706,
+      "sha256": "f75c1e7645bdda2a0fb5b12c124e40ebd2c7cc1a30b1f2653e9a2a114513022b"
+    },
+    {
+      "path": "provenance/scenario-dispositions.json",
+      "bytes": 4926,
+      "sha256": "3563cc366d918a14efea0f64c2186d985476c6d354145ce72cbc63d1ab742cf4"
+    },
+    {
+      "path": "publication/spec.css",
+      "bytes": 749,
+      "sha256": "31cb7f71c2e5d35ea8b50e75b217e6ac898b409ab657acea01c813ea46fbe812"
+    },
+    {
+      "path": "release.json",
+      "bytes": 7515,
+      "sha256": "66e5a221c8314c998240e6dbe1f4ec07df0ea5fd782f0fb87e04a06e0e13be9c"
+    },
+    {
+      "path": "source/01-scope.md",
+      "bytes": 7479,
+      "sha256": "6e32ad0e2bd20e4f151272e0eefc00e11fd8e0de73c0dd08e885d5a3b7a17fe1"
+    },
+    {
+      "path": "source/02-concepts.md",
+      "bytes": 4779,
+      "sha256": "3fb44949e3bcf6e45ad8d071b2c2efa14031752ac18c434abd5e22f8d8102e0e"
+    },
+    {
+      "path": "source/03-source-modules.md",
+      "bytes": 3060,
+      "sha256": "e60dc119e3d63cb1b1726f344ba681c92a80ac3d595bcbf1dbb9bb639aad9a24"
+    },
+    {
+      "path": "source/04-lexical.md",
+      "bytes": 10792,
+      "sha256": "3c679cd5a5d056beea1139c152e260446a426ecaeaaeab540045a4e0ec64c5c4"
+    },
+    {
+      "path": "source/05-types.md",
+      "bytes": 23665,
+      "sha256": "6848c3e80706b753f3a4d4f629c842e8adb8593673f25d243bc6581830bba620"
+    },
+    {
+      "path": "source/06-expressions.md",
+      "bytes": 22570,
+      "sha256": "84394e9994ad1766274c1d1db568b4792955b23d62e247ea960af752c27c7937"
+    },
+    {
+      "path": "source/07-tables.md",
+      "bytes": 25257,
+      "sha256": "9c3cda9afd547a7214885487897a742d00a33b015808edde7ea5ea453bd11ff1"
+    },
+    {
+      "path": "source/08-relations.md",
+      "bytes": 7679,
+      "sha256": "6f5e7f88e099a84d0350cd4c74fab9680c6393a3d748b9667d3930ff08cbba1f"
+    },
+    {
+      "path": "source/09-standard-library.md",
+      "bytes": 20724,
+      "sha256": "38b0e98617b7108c583663b60da2cb1582dfa1b3613807c83ad2d338660416c9"
+    },
+    {
+      "path": "source/10-execution.md",
+      "bytes": 9977,
+      "sha256": "2af5ed8e2fd641d1059244a6fd133ee630dd16aaef6e9caba5e3c7bcf0c9a1de"
+    },
+    {
+      "path": "source/11-streams.md",
+      "bytes": 4591,
+      "sha256": "7b760c491827194fc5fb04a536fc60ae978e1e73d782949bd0a9e4acfc75780d"
+    },
+    {
+      "path": "source/12-checkpoints.md",
+      "bytes": 10687,
+      "sha256": "274835c1416cdda8483a0a0048d475a53fb490ac3e2286bf632c65b41a046166"
+    },
+    {
+      "path": "source/13-presentation.md",
+      "bytes": 5900,
+      "sha256": "0b382e1a1dc6173b64403905f8de4b0a951a0091f66dc94f2a15414c229bfdd1"
+    },
+    {
+      "path": "source/14-pages.md",
+      "bytes": 8628,
+      "sha256": "5bd97c283cdb1f50fc11556b5c6081d35b9338d04be10d13af45772362831397"
+    },
+    {
+      "path": "source/15-system.md",
+      "bytes": 34044,
+      "sha256": "00169c88f781b52f41a08c84df79f0c3c3b1b564184d298aa71bbeedb96d7561"
+    },
+    {
+      "path": "source/16-administration.md",
+      "bytes": 14716,
+      "sha256": "ed9a0cc80e145f38d508c3a38cd196672e94be0e3c19c1b9f9c41b0d2059ef0c"
+    },
+    {
+      "path": "source/17-repl.md",
+      "bytes": 2739,
+      "sha256": "0d75766d21727a40037915b20be6c93032cc4112101ac973d69839198fd91699"
+    },
+    {
+      "path": "source/18-cli.md",
+      "bytes": 4649,
+      "sha256": "a87c5729ec76f7b1f14c5ce4c604db983e87bc1f9d288c60c5f79e3e8da4ffa2"
+    },
+    {
+      "path": "source/19-repository.md",
+      "bytes": 6141,
+      "sha256": "8d894e61fbd0b0b0053100d446b4af570291b3c75e018cadf9202ce8a68c406d"
+    },
+    {
+      "path": "source/20-embedded.md",
+      "bytes": 3794,
+      "sha256": "b9532e40518d8991acd680ef74677b840d87c653f9aa06d226cf767daacfde5d"
+    },
+    {
+      "path": "source/21-branching.md",
+      "bytes": 4053,
+      "sha256": "2c7a4748eb3f746d848f8b846ad125ee140bb13e5f24f8d0b46ca4041e0fa00d"
+    },
+    {
+      "path": "source/22-publication.md",
+      "bytes": 11745,
+      "sha256": "d0d5310aaa71cf9755d6ed7b887803591e762902356c41d4e79f4842c4750cfc"
+    },
+    {
+      "path": "source/23-storage.md",
+      "bytes": 3914,
+      "sha256": "12ac88f6ee42cc0ca5c82c4a0cf8474f0bb13d8cd6daca1a65a74316a772953e"
+    },
+    {
+      "path": "source/24-git-history.md",
+      "bytes": 3187,
+      "sha256": "2be30c91848639168f2c6b051dba8b6c2cff2327ab2a7de580e288475038665f"
+    },
+    {
+      "path": "source/25-evolution.md",
+      "bytes": 2182,
+      "sha256": "a059b11c2ac6bcf60c5cee0ebf62d31123b6dac675f3ac1d52100ed6073788f9"
+    },
+    {
+      "path": "source/26-security.md",
+      "bytes": 2757,
+      "sha256": "87e34a4b8f78323bb60b69bd328fe90d33b23adf6224c37b95e73640c3761b47"
+    },
+    {
+      "path": "source/27-secrets.md",
+      "bytes": 1330,
+      "sha256": "9ad85e3500181a83362d5c88ea2af151b06f941bb7af00c09e7d8fcf2d58905d"
+    },
+    {
+      "path": "source/28-serving.md",
+      "bytes": 3011,
+      "sha256": "7b2a870cf7232350faa3ac279bd885289db723da7ea232f53d18863b55979e70"
+    },
+    {
+      "path": "source/29-formats.md",
+      "bytes": 20087,
+      "sha256": "eca13fb3435b277fb6944058e3f25c70d0332d67ecdd4153e3d7256e03718a8c"
+    },
+    {
+      "path": "source/30-protocol.md",
+      "bytes": 18569,
+      "sha256": "40de45f6cf42ccc80f7b6c41f816ecc1c87b9adc14a7d46c7586cb89604bb4e1"
+    },
+    {
+      "path": "source/31-examples.md",
+      "bytes": 7693,
+      "sha256": "dac569892a7da37b4c72ec3bc52eadf2be4ae9a64d9988fe9b2dbcf11b129969"
+    },
+    {
+      "path": "source/32-conformance.md",
+      "bytes": 7221,
+      "sha256": "69800e912df56cce224329e615461815ded7f52b33f1d7c4bfa7a85dc94935d8"
+    },
+    {
+      "path": "source/33-diagnostics.md",
+      "bytes": 5405,
+      "sha256": "43d34970496ce7d133af85bc954bbf8f3281b218a0ad7f81d9703d70016003af"
+    },
+    {
+      "path": "source/34-grammar.md",
+      "bytes": 16245,
+      "sha256": "3bcbbc4d8fb190530dfd33327900cc4c051910aba895655a74ad91d264874aa4"
+    },
+    {
+      "path": "source/34-system-reference.md",
+      "bytes": 113692,
+      "sha256": "769a86978ca604e624d71004aa2a8326c52178e226317ea1ff9e254dd30d379f"
+    },
+    {
+      "path": "source/35-references.md",
+      "bytes": 5573,
+      "sha256": "a405dd0c38f18a40c4319053196204e1bc9a6eca8b8144ae4b7f9e35d9f716b5"
+    },
+    {
+      "path": "source/36-blob-values.md",
+      "bytes": 5767,
+      "sha256": "158e367cb27a1443cd090de88391842a820d74e20268a08bda281652139aa049"
+    },
+    {
+      "path": "source/37-git-native-blobs.md",
+      "bytes": 4616,
+      "sha256": "699102d40aed98150ee6330ec905044d8bd146044b68e6b8f6ff7d0c6accbb93"
+    },
+    {
+      "path": "source/38-ingestion-inspection.md",
+      "bytes": 7703,
+      "sha256": "dd6cee32c24a45aeaf7a30ee333c03bc3587ccb7a4640637f92a91e3aaf82907"
+    },
+    {
+      "path": "source/39-source-hosted-apps.md",
+      "bytes": 5506,
+      "sha256": "3e2f9ab15a9350f56e0f65ccdcff1a0ff45398f9d2f909cad6548a54149d7557"
+    },
+    {
+      "path": "source/40-upgrade-contract.md",
+      "bytes": 4854,
+      "sha256": "33b78b3b23af3c341ed51d367357c6c12291c60cb6d2d2684c173c39a78ba900"
+    },
+    {
+      "path": "source/41-vfs.md",
+      "bytes": 8139,
+      "sha256": "7c3d2f10e70b9742e0f593473883317ecfc92d634b2af6b3d9fe7be7f79b63bb"
+    },
+    {
+      "path": "source/42-media.md",
+      "bytes": 2826,
+      "sha256": "ca5be69aa9e7d17c0bceea3a29a7fb7bc5bb2086170b966683ee912c89561157"
+    },
+    {
+      "path": "source/manifest.json",
+      "bytes": 6235,
+      "sha256": "b379a135f5ff3538718ed7f94c040db52ad315779461f04d3604f380593a3e71"
+    },
+    {
+      "path": "tests/conformance-manifest.json",
+      "bytes": 87953,
+      "sha256": "b403f86d47cebdaa76a905e52a843e3ae661eb89c32603017415b32a7a455c74"
+    },
+    {
+      "path": "tests/expected-diagnostics/affine-addition.orna.json",
+      "bytes": 250,
+      "sha256": "ddd95852dba4b54c352d928beb25f4d675b4483b87252c22988412e672e35399"
+    },
+    {
+      "path": "tests/expected-diagnostics/affine-sum.orna.json",
+      "bytes": 239,
+      "sha256": "589398b78b105181b73e959b5d46a4a1900ff82bb1d01cbafdcf621092536ab4"
+    },
+    {
+      "path": "tests/expected-diagnostics/ambiguous-consumer.orna.json",
+      "bytes": 279,
+      "sha256": "771bf5bb54f647d507764f13257e3e58aab1afb4ac4efa65ce3f3f82dba5c884"
+    },
+    {
+      "path": "tests/expected-diagnostics/assert-effectful-table.orna.json",
+      "bytes": 273,
+      "sha256": "123a8f6c635c0be60b7fdfc7b924f59a470972b906d0de1064f576b43f024500"
+    },
+    {
+      "path": "tests/expected-diagnostics/assert-empty.orna.json",
+      "bytes": 251,
+      "sha256": "b02445d9c5b0b5630d97250589c2cb28d2a35829a59734058a7efeb2ca80602a"
+    },
+    {
+      "path": "tests/expected-diagnostics/assert-missing-semicolon.orna.json",
+      "bytes": 254,
+      "sha256": "c16ec2668156ebc5dfe45754e28a170ed22f043c7ef382476464d40134e20abe"
+    },
+    {
+      "path": "tests/expected-diagnostics/assert-owner-type-mismatch.orna.json",
+      "bytes": 281,
+      "sha256": "43be8ac1daa04158e95b8e50ab73fc454999cc2e351d3ca51eeb7e944c8e08cc"
+    },
+    {
+      "path": "tests/expected-diagnostics/assignment-expression.orna.json",
+      "bytes": 253,
+      "sha256": "29a1d92737c0187335ceadf79c5ed8d7f34921f98bee47dd44f924452c0f9f02"
+    },
+    {
+      "path": "tests/expected-diagnostics/calendar-bucket-no-zone.orna.json",
+      "bytes": 265,
+      "sha256": "7ee37da46e0e857882c97f2f7017b372178e1934ed4b8f765aa44e3909d3cd68"
+    },
+    {
+      "path": "tests/expected-diagnostics/comparison-chain.orna.json",
+      "bytes": 268,
+      "sha256": "ee5421bcd61ee62511ba2482fdb9f0d7acfc7ef32bff9795713f7d4c7e0d23d4"
+    },
+    {
+      "path": "tests/expected-diagnostics/computed-field-effect.orna.json",
+      "bytes": 263,
+      "sha256": "0973f48cd8bbc56cf964c2d274fea452b5a9b42924343ddfedc2cfc13d92b5e3"
+    },
+    {
+      "path": "tests/expected-diagnostics/computed-field-insert.orna.json",
+      "bytes": 272,
+      "sha256": "c7d00c4a2525c49a39abfee94dd7cfa9fb61a7a046c2c7ae93ab35c847d16e49"
+    },
+    {
+      "path": "tests/expected-diagnostics/computed-field-update.orna.json",
+      "bytes": 266,
+      "sha256": "ae3a4af6709eaf035b32c6337885c04633b500f467cbc84a1a450cb358f2398f"
+    },
+    {
+      "path": "tests/expected-diagnostics/cross-database-write.orna.json",
+      "bytes": 258,
+      "sha256": "3bbefb0c1c85f10b6bf88447e0f42c68e6810fba0a929e97fdf4b9cef09b11ee"
+    },
+    {
+      "path": "tests/expected-diagnostics/currency-addition.orna.json",
+      "bytes": 259,
+      "sha256": "e48e0e18efebb85276910e2bd832e4051490c0dee1bd90bd9ee7b306a0c724f3"
+    },
+    {
+      "path": "tests/expected-diagnostics/currency-static-symbol.orna.json",
+      "bytes": 307,
+      "sha256": "31f567cfd2edf47e319d64e61e5db14fdb7d0d54a373c374db2182040313b793"
+    },
+    {
+      "path": "tests/expected-diagnostics/duplicate-key.orna.json",
+      "bytes": 225,
+      "sha256": "ec5587b08fd32a8195a1703cae193fe404b619a3cf5a71d745164a5a93ee50f4"
+    },
+    {
+      "path": "tests/expected-diagnostics/effectful-display.orna.json",
+      "bytes": 262,
+      "sha256": "4cd404d2cd1a140549df898453c4507c786b4e46c21508681c5de215dabd06d1"
+    },
+    {
+      "path": "tests/expected-diagnostics/float-key.orna.json",
+      "bytes": 238,
+      "sha256": "1806cb1417f39d1ffb84ee43f84145da4c04e603d445733efe019399bd557525"
+    },
+    {
+      "path": "tests/expected-diagnostics/float-money-implicit.orna.json",
+      "bytes": 275,
+      "sha256": "859cb49e17cd97da8a73ecdc3dda59e629ce464c2838b6c8a3f8067d701592fa"
+    },
+    {
+      "path": "tests/expected-diagnostics/implicit-conversion-chain.orna.json",
+      "bytes": 314,
+      "sha256": "f6060a8db01c1c05fc2fccade29605f0661b37f577005059dc05657be85fd947"
+    },
+    {
+      "path": "tests/expected-diagnostics/incompatible-dimensions.orna.json",
+      "bytes": 241,
+      "sha256": "66ee597e60e52dc4ddbf5f4a97269d030657d06b797fc5612e3d827f67fc595f"
+    },
+    {
+      "path": "tests/expected-diagnostics/key-update.orna.json",
+      "bytes": 243,
+      "sha256": "119833900e59d9de1246c84b1c98d67eb2cb928859bf77e5b35d5177553f4974"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-assert-else.orna.json",
+      "bytes": 257,
+      "sha256": "4987bb9160d8d66c3ce08e7778b6619e291aba1dd3470d4dc2cd8dd205b76a74"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-assert-owner-pipe.orna.json",
+      "bytes": 286,
+      "sha256": "948ffa33340f1a5f3c18af6ee1d3ee5ffdc23c6a8a46b19c9add33f2409cb867"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-assert-pipe-bang.orna.json",
+      "bytes": 261,
+      "sha256": "37c067724426a0db6f8ec32bbaf105612e8e3bb1c72402283e0486b9d17755d7"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-assert-self-pipe.orna.json",
+      "bytes": 289,
+      "sha256": "54b2d50a19451b4e50e57696fb22c2b62f16d2ab732bdfc7b674d3d87f78911c"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-checkpoint-reset-method.orna.json",
+      "bytes": 333,
+      "sha256": "3fa37ac3f514655d6222b5ca85e5e9bdcf974a715e4c95769e6a38261ae56c29"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-colon-bound.orna.json",
+      "bytes": 261,
+      "sha256": "a0385ad2ba6de4bf4599d0c529efa8d830eb62ea1b4c8a0f71f682998e00fcf9"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-constraints-block.orna.json",
+      "bytes": 280,
+      "sha256": "ee94ab703ac9d69fdf408ad60e0d94156a11996e86ad06704bddddc9e0798787"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-currency-declaration.orna.json",
+      "bytes": 298,
+      "sha256": "c2209b3cfefe4348fd75ada6442504d10f37c6d852beee6fb1720220b22e5de9"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-empty-closure.orna.json",
+      "bytes": 253,
+      "sha256": "c92e7a8f8a50ee75371cae43500d316ca467b9ac5fa8605bd1922a30ada8c47a"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-ensure.orna.json",
+      "bytes": 257,
+      "sha256": "f84293ca98358c51bc5af5624449f0e55e40bf76d8d859ff119ae616a43197b3"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-fact.orna.json",
+      "bytes": 253,
+      "sha256": "95d9d6845940dc84b30a3deb67aae056d4c4d56eea5f1eaf71fc7c349d8a1e39"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-failure-replay-method.orna.json",
+      "bytes": 322,
+      "sha256": "8a7c9ebfc8378cab7d603b997fe4147adef26f4837469b8e175f941e64a328c9"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-failure-resolve-method.orna.json",
+      "bytes": 324,
+      "sha256": "b0167017c0e5247f4f1d28f0615a0fd31a924482a912ebc9dad0bb239296dc04"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-field-check.orna.json",
+      "bytes": 282,
+      "sha256": "f1088f5314b6cd1d5e5bde47b43fa31befe0b2bb6046ee12cc52bb29107315ae"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-field-unique.orna.json",
+      "bytes": 295,
+      "sha256": "b0c2fae47cda9a56b0e4cb409f6cbb2146014bdfecc59e711258167675799486"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-ingest.orna.json",
+      "bytes": 230,
+      "sha256": "40e96058b10e0087c396f01a1e209f0508b26bae60f913dbe0948f632d9b6071"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-log.orna.json",
+      "bytes": 236,
+      "sha256": "6cca495c5978318b452bd494aec35f6bcf8e03fa20ec66fb713c0955094f35a2"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-match.orna.json",
+      "bytes": 246,
+      "sha256": "4765a069fea4a354cca1531f568440d139164a38ef169ffcdc0150f1172290c5"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-opaque.orna.json",
+      "bytes": 246,
+      "sha256": "20f5b6f40ded0d0e8b74c6a157616acfdd9c96cc0bcc27c3407f80e09996595c"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-pipe-lambda.orna.json",
+      "bytes": 264,
+      "sha256": "6686cde1567286dc0eb009912773acc9a4ef69c4ad9f9d9bd54db244c0eecb37"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-postfix-question.orna.json",
+      "bytes": 284,
+      "sha256": "a77e4467dfe2adf616fb8e445a1b49f8b158019e2037dc29ee6d28137f8e2984"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-refined-where.orna.json",
+      "bytes": 266,
+      "sha256": "4e4137fe3568cea7fbe87553fe540dbcf6abc9b615889b861a9289838e48ab73"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-result.orna.json",
+      "bytes": 292,
+      "sha256": "922de22409cbc95fd7be96d029e64a0537fc312a57445b204dc2bdf8f1e6248b"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-return-arrow.orna.json",
+      "bytes": 264,
+      "sha256": "775a982dedbef0e0623c61c6ae6ab1d1518c5a0556ab32f283c3441306672294"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-store.orna.json",
+      "bytes": 236,
+      "sha256": "355e363a72a040acb9d19ef4d64b8186315708fb57a29732c335c08ac6cf0a84"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-stream-retry-method.orna.json",
+      "bytes": 317,
+      "sha256": "66e6a520549fb5d0a97340d3c9bdcc8c5e5ebe92cf435e7bcd098b0e7bc0f2bf"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-stream-skip-method.orna.json",
+      "bytes": 315,
+      "sha256": "ed7a85a70cda35438138de9e09119e307d70b66e2cee8e1bbbe01516c1e73132"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-sys-runtime.orna.json",
+      "bytes": 261,
+      "sha256": "7e137aece5fce701c36140923d19be7e5d5dca479fb279fab41611bc83b6b1a0"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-sys-storage-call.orna.json",
+      "bytes": 325,
+      "sha256": "74928719a0fe12bc2a80ce2cee0c4612dee35e34c2f6bc2b00cded0f20e0c742"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-top-level-impl.orna.json",
+      "bytes": 291,
+      "sha256": "e9cf26a712a7a25e871cc9b32353223e9180e472a05fb7da603739ae2526a595"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-tryfrom.orna.json",
+      "bytes": 255,
+      "sha256": "9f335c037bd83f8a982d4abb5557064fc22b8d000ded6cdd0b730837226c0041"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-var.orna.json",
+      "bytes": 254,
+      "sha256": "639957c30a23bb3cfabe2a39e249715819df87d194783b14609d1417ab79534d"
+    },
+    {
+      "path": "tests/expected-diagnostics/legacy-view.orna.json",
+      "bytes": 241,
+      "sha256": "1a56b964758ee758f361f83fcc8b48f665dd5cdf11a2ec31f3a3f8e9ec980036"
+    },
+    {
+      "path": "tests/expected-diagnostics/missing-required-field.orna.json",
+      "bytes": 243,
+      "sha256": "16a598c26134e89b913fd7ba826c8a04837a628281568a3c29c90cae7d3c1271"
+    },
+    {
+      "path": "tests/expected-diagnostics/module-single-table-assertion.orna.json",
+      "bytes": 276,
+      "sha256": "a24cd1ceced299365c06cbc8cb7bd77d733e67706d2030d079a9011eb7e83644"
+    },
+    {
+      "path": "tests/expected-diagnostics/module-zero-table-assertion.orna.json",
+      "bytes": 288,
+      "sha256": "0debe2a60bfbbeabd4900f0f0bf67cc323f6f34c42fc1296f4845b069ee09727"
+    },
+    {
+      "path": "tests/expected-diagnostics/money-float.orna.json",
+      "bytes": 278,
+      "sha256": "cf1441eedd95d3924ed84ca6f225da5da9f7c003ef845bfcd1c6c600685a0bd5"
+    },
+    {
+      "path": "tests/expected-diagnostics/mutate-sys-commit.orna.json",
+      "bytes": 232,
+      "sha256": "e15800742812302d764dd53e8847c222555dc865ca64f63eaefce363e82a0475"
+    },
+    {
+      "path": "tests/expected-diagnostics/question-coalesce-adjacent.orna.json",
+      "bytes": 295,
+      "sha256": "8ab25df8bb7f73bdd7236a16866e49cfdb375b91ec3b4a53832d93e753ea79f6"
+    },
+    {
+      "path": "tests/expected-diagnostics/question-on-int.orna.json",
+      "bytes": 293,
+      "sha256": "efb468ad72d883bd863ce8a66f137f1c768029db3e89f136087554371e8573e4"
+    },
+    {
+      "path": "tests/expected-diagnostics/range-key-overlap-magic.orna.json",
+      "bytes": 264,
+      "sha256": "97498786b193a4955c55c36eb6aec6f374ed38ac859abd73eb03dcc66aafaacb"
+    },
+    {
+      "path": "tests/expected-diagnostics/record-punning.orna.json",
+      "bytes": 242,
+      "sha256": "18c9fb4cd77153997d9350f48a16d2e047c76ff17cf0032ba10c40f6772528e6"
+    },
+    {
+      "path": "tests/expected-diagnostics/rekey-auto-id.orna.json",
+      "bytes": 257,
+      "sha256": "0bd3cc464193cbe96bcee1c0de980c4bec21e98c438a4e6beaae9592dc5de0e7"
+    },
+    {
+      "path": "tests/expected-diagnostics/relation-equality.orna.json",
+      "bytes": 289,
+      "sha256": "bc10c91eaa6872c01a5dc97023402ff274ae85b867f0ea2dd4f6d1592586d62c"
+    },
+    {
+      "path": "tests/expected-diagnostics/reserved-std.orna.json",
+      "bytes": 221,
+      "sha256": "12a7c903bd7fc089a5f7fc2368b682f4bafb3e992877cafc5871addf1557e6c3"
+    },
+    {
+      "path": "tests/expected-diagnostics/reserved-sys.orna.json",
+      "bytes": 221,
+      "sha256": "de43371608d5aac8b254cdac4932c1495a88ca6734a057ada3adbe90d85a7125"
+    },
+    {
+      "path": "tests/expected-diagnostics/row-declaration.orna.json",
+      "bytes": 246,
+      "sha256": "8566798cdb3cbf2cfc0fae1cd225feafe3b02ca06b5bed67b6e4dcf6615b2b4b"
+    },
+    {
+      "path": "tests/expected-diagnostics/secret-display.orna.json",
+      "bytes": 239,
+      "sha256": "f64840362c684a5d29ace56415ec4c6645e5b8a9f6cdbaa920434a5dcc3401b3"
+    },
+    {
+      "path": "tests/expected-diagnostics/static-protocol-function.orna.json",
+      "bytes": 302,
+      "sha256": "2b5808b41d9125ec43d96099b92a203b9e922cfc7dce8c70f65752e57cde2ba1"
+    },
+    {
+      "path": "tests/expected-diagnostics/top-level-expression.orna.json",
+      "bytes": 250,
+      "sha256": "9f26cc74dfc0c716fb689bacff94d530264f267357b204a906fd250ab81f33a4"
+    },
+    {
+      "path": "tests/expected-diagnostics/top-level-on.orna.json",
+      "bytes": 225,
+      "sha256": "80ec87fb184ea7200d535d6ded619fc55f4e83ec5884e8a495c887c84cdcdd01"
+    },
+    {
+      "path": "tests/expected-diagnostics/transaction-block.orna.json",
+      "bytes": 281,
+      "sha256": "734e4afd376093515355117e1ff22b019dd25aeb69d9513f81b607c75a9789f6"
+    },
+    {
+      "path": "tests/expected-diagnostics/two-durable-sources.orna.json",
+      "bytes": 280,
+      "sha256": "81c571db7c9b84bbffce8d544485fc0050aafae5bea341fe270d405b84edba3a"
+    },
+    {
+      "path": "tests/expected-diagnostics/unknown-field.orna.json",
+      "bytes": 227,
+      "sha256": "bcad6024e86a041c461109dc482b41b0df525c6010d28af14ecb6c89bc9c239e"
+    },
+    {
+      "path": "tests/expected-diagnostics/unparenthesized-lambda-stage.orna.json",
+      "bytes": 276,
+      "sha256": "7e4fbf31a57bff16129b2e476022fbe31d92c1a3421679015ae5831499da03a2"
+    },
+    {
+      "path": "tests/expected-diagnostics/unsafe-row-key-repeat.orna.json",
+      "bytes": 257,
+      "sha256": "27d115baf00435bda4e46dcd05a5a3a4e484f3bd8ef2c06ad20c577e4e9ab8d6"
+    },
+    {
+      "path": "tests/expected-diagnostics/wrong-field-type.orna.json",
+      "bytes": 238,
+      "sha256": "7349e4bf411ddbd620262e6350680e7dc101e4aaf49e9c3ec4b1eec6402c2b0f"
+    },
+    {
+      "path": "tests/final-scenarios.json",
+      "bytes": 90039,
+      "sha256": "3c9d688b995ccd79464edadb33aa635ac27bd095da73db83a4d8e5694992bd4c"
+    },
+    {
+      "path": "tests/final-vectors.json",
+      "bytes": 6326,
+      "sha256": "985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d"
+    },
+    {
+      "path": "tests/float-vectors.json",
+      "bytes": 2541,
+      "sha256": "2719675ea3dfa68d5b710bc238c1ac66e73588a74e8814b720c2232c9343c015"
+    },
+    {
+      "path": "tests/invalid-metadata.json",
+      "bytes": 17929,
+      "sha256": "99e398a7b874532cc12512cb382b2886b99cfc37c32e3037029721fb316cb03c"
+    },
+    {
+      "path": "tests/legacy-scenarios.json",
+      "bytes": 120161,
+      "sha256": "d1e3fa03b417dbe0442ac8522591312b1cc91d45c222f85cc7b47fe559a4d247"
+    },
+    {
+      "path": "tests/media-fixtures.json",
+      "bytes": 899,
+      "sha256": "f88266945b6c6310240090a79ae1bcf3f628ba0a622489bd951d005c2201e28f"
+    },
+    {
+      "path": "tests/numeric-vectors.json",
+      "bytes": 111,
+      "sha256": "16b73a224efe971fa9b6190a860dac80611e987416872d1f6035c2994d247c12"
+    },
+    {
+      "path": "tests/path-vectors.json",
+      "bytes": 4453,
+      "sha256": "1b3e0be29c662f0eaed9d7ad849da4acd7237979fb68c43749a42bc7c401f054"
+    },
+    {
+      "path": "tests/project-manifest.json",
+      "bytes": 301,
+      "sha256": "84c5bf635614a64185f756d40a63876d129b1ea3fafc2bb0c24b4847c214739b"
+    },
+    {
+      "path": "tests/protocol-vectors.json",
+      "bytes": 3397,
+      "sha256": "beebf327b31fcc6e35413f9839af09849c4ca528f2736c118b9abed73ff12aa7"
+    },
+    {
+      "path": "tests/requirement-evidence.json",
+      "bytes": 524671,
+      "sha256": "7b89e4fe29b585e397146e55dbdb7a4f7534f1b85ea8dd4de0610205ee24d6d0"
+    },
+    {
+      "path": "tests/requirements.json",
+      "bytes": 267992,
+      "sha256": "c479d2f6a510fb2e817ddd2d9834b87a008c0f9f8e05dc9761946d020fa2ff76"
+    },
+    {
+      "path": "tests/scenarios.json",
+      "bytes": 203520,
+      "sha256": "93b8edb858bc0a674cd0256c6350bd7286062eb3e2a01accc964e135fdc24ff1"
+    },
+    {
+      "path": "tests/snapshot-vectors.json",
+      "bytes": 478,
+      "sha256": "1facde5fb2faae65d5ff121811d14c826647086a504dcbd0de3ccb1a3b0e1b2a"
+    },
+    {
+      "path": "tests/value-vectors.json",
+      "bytes": 1542,
+      "sha256": "b48369756a137544a9d3888f17ad10a97e7a2010618ec084a5b8b3b603844095"
+    },
+    {
+      "path": "tools/blob_model.py",
+      "bytes": 11540,
+      "sha256": "fba09c3f2dac00f5341d3a225bc3d1de7dd38b7640aaf5a977b80ef51c5c4acf"
+    },
+    {
+      "path": "tools/build_publication.py",
+      "bytes": 5841,
+      "sha256": "d84793136313e512a10b431df4a0ea8063902ce29380adad8bb8b841aa42113b"
+    },
+    {
+      "path": "tools/check_float_vectors.py",
+      "bytes": 3701,
+      "sha256": "06f060dcbce5f1cbaa28d7e6ec6ab0ccf8a92ff35c999e39614c68e2d060ad90"
+    },
+    {
+      "path": "tools/check_path_vectors.py",
+      "bytes": 5795,
+      "sha256": "22b0b92055611c2ffceba3c53af8eeb51ec5cbd10b35d2ed1c0586173aafe5a2"
+    },
+    {
+      "path": "tools/final_model.py",
+      "bytes": 16487,
+      "sha256": "9b09d609f85254303e72b246a40745120edb088962e32a5503945918fe5cb09d"
+    },
+    {
+      "path": "tools/generate_api_reference.py",
+      "bytes": 11752,
+      "sha256": "bb944e5d642fc80ff270dd5ad0eab9c8ed3373e2bf69a5932cb576ca38837e73"
+    },
+    {
+      "path": "tools/git_model.py",
+      "bytes": 4346,
+      "sha256": "bda567942318fbe7d56c3b3f31a40ad509d0dc5908ae7c9ef3f21f9002316583"
+    },
+    {
+      "path": "tools/model_checks.py",
+      "bytes": 13142,
+      "sha256": "ae40b414afbc4920ad467ae2d8715a02127baa40fa076e6920d3ba871577832f"
+    },
+    {
+      "path": "tools/package_release.py",
+      "bytes": 3413,
+      "sha256": "e4e8aedab1ba59f29aed3892d6a9ed3d057bcb22b773c9b7de92fdcd6596b29c"
+    },
+    {
+      "path": "tools/protocol_model.py",
+      "bytes": 9263,
+      "sha256": "0374c8efe46f1d8529ce4d0fcb8bd1daa19e76d70e4501a1cff6493d022c51a6"
+    },
+    {
+      "path": "tools/requirements.txt",
+      "bytes": 31,
+      "sha256": "e7f259d35b0d9f410255b10156fe3a43bb69e4fb0af98db8dfff83ec6144d8bb"
+    },
+    {
+      "path": "tools/run_checks.py",
+      "bytes": 5164,
+      "sha256": "c02a5f955b56b20f2b5ab809c6e727d67084a4c3948a94c995e92a097aa3615c"
+    },
+    {
+      "path": "tools/syntax_probe.py",
+      "bytes": 4542,
+      "sha256": "e61f9006f51d20d321dc011e26b7c45bcef7c7fe5d226b513a9a7a19079db14d"
+    },
+    {
+      "path": "tools/validate.py",
+      "bytes": 6471,
+      "sha256": "7ef8db7b0d8877cb86fa9a600ef9856cb4e9c144cb49788ac4f535dbc3d539e4"
+    },
+    {
+      "path": "tools/value_model.py",
+      "bytes": 6599,
+      "sha256": "e4b80917780c26a3e54ada43061c73d25a2da4e2dcd4427617136959f4ac66a2"
+    },
+    {
+      "path": "tools/verify_release.py",
+      "bytes": 2228,
+      "sha256": "a788679b15de3ff9646683c07f496347de75a2e25ce4c4321d25650454f84da9"
+    },
+    {
+      "path": "tools/write_vectors.py",
+      "bytes": 2180,
+      "sha256": "a8e0401be1b6714dbe282c9752100b473cf6a776585478e042bf89d4f21f24af"
+    }
+  ]
+}
