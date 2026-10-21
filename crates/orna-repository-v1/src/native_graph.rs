@@ -4802,15 +4802,26 @@ pub(crate) fn sync_object_files<'a>(
 
 /// Persists `reference` after a ref transaction wrote it: the loose ref
 /// file, each directory from it up to the common Git directory, and
-/// `packed-refs`.
+/// `packed-refs`. A ref that `git pack-refs` has since moved has no loose
+/// file and is persisted through `packed-refs`, so recovery after a `git gc`
+/// is not refused.
 pub(crate) fn sync_git_ref_durably(
     repository: &crate::Repository,
     reference: &str,
 ) -> Result<(), GraphError> {
-    PrivateRefCleanupOwner {
+    let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
+    };
+    let output = owner.git_output(&["rev-parse", "--git-path", reference])?;
+    let path = resolve_git_path(repository.worktree(), &output)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => File::open(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| GraphError::DurabilityFailed)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(GraphError::DurabilityFailed),
     }
-    .sync_ref_file(reference)
+    owner.sync_ref_directories(reference)
 }
 
 pub(crate) fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
