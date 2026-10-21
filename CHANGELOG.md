@@ -29,13 +29,23 @@ been published.
 
 - `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
   any freeze, with `E2300`; it writes nothing and the pending range stays. The
-  help says this build has no writer for format-1/2 snapshots and gives the
-  full `orna migrate copy DEST --annotation-defaults N --no-persistent-consumers`
-  command, noting that pending runtime changes are not carried into `DEST`.
-  Inside a prepared migration copy it says the format-3 candidate is prepared
-  but not activated instead. The loose and compact (Parquet) row writers, their
-  recovery paths and the CLI compact-journal recovery are retired; format-1/2
-  commits keep their readers (ORNA-UPGRADE-003, ORNA-ROW-013).
+  help says this build has no writer or in-place upgrade for format-1/2
+  snapshots and names the upgrade work item, ornadb-5il1.184. Inside a prepared
+  migration copy it says the format-3 candidate is prepared but not activated,
+  and that activation is tracked as ornadb-5il1.192. The loose and compact
+  (Parquet) row writers, their recovery paths and the CLI compact-journal
+  recovery are retired. Format-1/2 commits keep their library readers, but no
+  CLI verb reads them yet (ORNA-UPGRADE-003, ORNA-ROW-013).
+
+- The `format.orna` records that the legacy writers produced are now read as
+  read-only format-1/2 inputs: OrnaDB 1.0's `{repository_format: 1,
+  storage_profile: "compact-storage-v1"}` and the previous draft's closed
+  format-2 record. They were rejected as malformed, so `orna migrate copy`
+  failed on every real legacy repository. Runtime writes now follow the format
+  recorded at `HEAD`. A format-1/2 `HEAD` refuses them with
+  `ORNA-REPO-CONTEXT-015` even when the worktree holds format-3 metadata, and
+  `orna run` and the other write verbs exit with `E2200`. The one exception is
+  a prepared migration copy (ORNA-UPGRADE-001).
 
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
