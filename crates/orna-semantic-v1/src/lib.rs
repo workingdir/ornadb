@@ -6730,14 +6730,14 @@ struct ReturnFrame {
     owned: Vec<usize>,
     /// The declared result type, when the signature has one.
     expected: Option<Type>,
-    /// Return-path types of an unannotated function, in source order.
+    /// Types of the owned `return` values, in source order.
     returned: Vec<Type>,
 }
 
-/// Infers a declared function body (ORNA-FN-009). With a declared result,
-/// each owned `return` value is checked where it occurs and the body's own
-/// tail type is returned (`Bottom` when every path returns). Without one,
-/// the result joins the tail with every reachable return path.
+/// Infers a function or anonymous-function body (ORNA-FN-009). With a known
+/// result, each owned `return` value is checked where it occurs; a body that
+/// completes only through `return` produces that result. Without one, the
+/// result joins the tail with every reachable return path.
 fn infer_function_body(
     body: &Expr,
     expected: Option<&Type>,
@@ -6767,7 +6767,13 @@ fn infer_function_body(
         .borrow_mut()
         .pop()
         .expect("function return frames are pushed and popped in pairs");
-    if expected.is_some() {
+    if let Some(expected) = expected {
+        if inferred.ty == Type::Bottom && !frame.returned.is_empty() {
+            return Inferred {
+                ty: expected.clone(),
+                effects: inferred.effects,
+            };
+        }
         return inferred;
     }
     Inferred {
@@ -6878,8 +6884,9 @@ fn collect_owned_returns(expression: &Expr, owned: &mut Vec<usize>) {
 }
 
 /// Types one `return` statement against the function body that owns it. A
-/// bare `return;` completes with `Unit` (ORNA-CFLOW-001). A statement owned by
-/// no frame, such as one inside an anonymous function, is only inferred.
+/// bare `return;` completes with `Unit` (ORNA-CFLOW-001). A `return` outside
+/// every inferred body, such as one in a nested `From` conversion, has no
+/// result to check and is only inferred.
 fn infer_return_statement(
     statement: &Statement,
     value: Option<&Expr>,
@@ -6908,12 +6915,13 @@ fn infer_return_statement(
             effects: EffectSummary::default(),
         },
     };
-    match (owner, &expected) {
-        (Some(_), Some(expected)) => require_same(expected, &returned.ty, diagnostics),
-        (Some(index), None) => scope.return_frames.borrow_mut()[index]
+    if let Some(index) = owner {
+        if let Some(expected) = &expected {
+            require_same(expected, &returned.ty, diagnostics);
+        }
+        scope.return_frames.borrow_mut()[index]
             .returned
-            .push(returned.ty.clone()),
-        (None, _) => {}
+            .push(returned.ty.clone());
     }
     returned
 }
@@ -8402,11 +8410,13 @@ fn infer_contextual_lambda(
         );
         types.push(ty);
     }
-    let inferred = if matches!(expected_result, Type::Error) {
-        infer(body, scope, &callback_locals, diagnostics)
-    } else {
-        infer_contextual(body, expected_result, scope, &callback_locals, diagnostics)
-    };
+    let inferred = infer_function_body(
+        body,
+        (!matches!(expected_result, Type::Error)).then_some(expected_result),
+        scope,
+        &callback_locals,
+        diagnostics,
+    );
     require_same(expected_result, &inferred.ty, diagnostics);
     Inferred {
         ty: Type::Function {
@@ -8977,7 +8987,7 @@ fn infer_node(
                     effects: EffectSummary::default(),
                 }
             } else {
-                infer(body, scope, &locals, diagnostics)
+                infer_function_body(body, None, scope, &locals, diagnostics)
             };
             Inferred {
                 ty: Type::Function {
@@ -13589,7 +13599,7 @@ fn infer_finite_list_predicate(
         };
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-        let inferred = infer(body, scope, &callback_locals, diagnostics);
+        let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
         require_same(&Type::Bool, &inferred.ty, diagnostics);
         return Inferred {
             ty: inferred.ty,
@@ -15906,7 +15916,7 @@ fn infer_recovery_pipeline(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
-    let recovered = infer(body, scope, &callback_locals, diagnostics);
+    let recovered = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
     effects
         .effects
@@ -16080,7 +16090,7 @@ fn infer_lambda_pipeline_stage(
     require_same(&parameter_type, &input.ty, diagnostics);
     let mut lambda_locals = local.clone();
     insert_local_binding(name, parameter_type, &mut lambda_locals, diagnostics);
-    let body = infer(body, scope, &lambda_locals, diagnostics);
+    let body = infer_function_body(body, None, scope, &lambda_locals, diagnostics);
     let mut effects = input.effects;
     effects.join(&body.effects);
     Inferred {
@@ -16418,7 +16428,7 @@ fn infer_callback(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-    let inferred = infer(body, scope, &callback_locals, diagnostics);
+    let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
 }
