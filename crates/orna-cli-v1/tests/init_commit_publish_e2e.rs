@@ -288,7 +288,8 @@ fn publish_refuses_a_row_whose_table_the_committed_store_lacks() {
     assert_ne!(refused.status.code(), Some(0), "{}", transcript(&refused));
     let message = transcript(&refused);
     assert!(
-        message.contains("source row table has no relation in the committed store")
+        message.contains("error[E2300]")
+            && message.contains("source row table has no relation in the committed store")
             && message.contains("orna commit"),
         "{message}"
     );
@@ -301,6 +302,108 @@ fn publish_refuses_a_row_whose_table_the_committed_store_lacks() {
         "{}",
         transcript(&status)
     );
+}
+
+/// After the first `orna commit` a product-made database is a complete
+/// format-3 snapshot: `orna export` writes and verifies a complete copy, and
+/// restoring it yields the same commit and source (W09-11).
+#[test]
+fn the_first_commit_exports_and_restores_a_complete_copy() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+    let head = git(&root, &["rev-parse", "HEAD"]).trim().to_owned();
+    let archive = directory.path().join("archive");
+    let archive = archive.to_str().expect("UTF-8 test path");
+
+    let exported = orna(&root, &["export", archive, "--at", "HEAD"]);
+    assert_success(&exported, "orna export");
+    assert!(
+        String::from_utf8_lossy(&exported.stdout).starts_with(&format!("exported {head} ")),
+        "{}",
+        transcript(&exported)
+    );
+    let checked = orna(&root, &["export", archive, "--check"]);
+    assert_success(&checked, "orna export --check");
+    assert!(
+        String::from_utf8_lossy(&checked.stdout).starts_with(&format!("complete copy of {head} ")),
+        "{}",
+        transcript(&checked)
+    );
+
+    let restored = directory.path().join("restored");
+    let restore = orna(
+        directory.path(),
+        &[
+            "export",
+            archive,
+            "--restore",
+            restored.to_str().expect("UTF-8 test path"),
+            "--worktree",
+        ],
+    );
+    assert_success(&restore, "orna export --restore");
+    assert_eq!(git(&restored, &["rev-parse", "HEAD"]).trim(), head);
+    assert_eq!(
+        fs::read_to_string(restored.join("main.orna")).expect("restored source"),
+        MUSIC_SOURCE
+    );
+}
+
+/// A commit that fails after staging admitted its tables committed nothing,
+/// so the staged relations bind no rows: the user may drop one table and
+/// change another, and the next `orna commit` admits exactly the edited
+/// source (ORNA-ADMIN-003). `admitted table` is printed only for a commit
+/// that exists.
+#[test]
+fn a_failed_first_commit_leaves_its_tables_free_to_change() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, &format!("{MUSIC_SOURCE}{NOTE_SOURCE}"));
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    // The local runtime cannot be opened, so the commit fails after staging.
+    let runtime_state = root.join(".git/orna/state.db");
+    fs::create_dir_all(&runtime_state).expect("block the runtime state file");
+    let failed = orna(&root, &["commit", "-m", "Declare tables"]);
+    assert_ne!(failed.status.code(), Some(0), "{}", transcript(&failed));
+    assert!(
+        transcript(&failed).contains("local runtime could not be opened")
+            && !transcript(&failed).contains("admitted table"),
+        "{}",
+        transcript(&failed)
+    );
+    assert!(
+        git_fails(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]),
+        "the branch is still unborn"
+    );
+
+    fs::remove_dir(&runtime_state).expect("unblock the runtime state file");
+    fs::write(
+        root.join("main.orna"),
+        "pub table Music(id: Str) { title: Int, }\n",
+    )
+    .expect("edit main.orna");
+    let admitted = commit_source(&root, "Declare Music");
+    let [(table, relation)] = admitted.as_slice() else {
+        panic!("orna commit admits exactly the edited Music table: {admitted:?}");
+    };
+    assert_eq!(table, "Music");
+    assert_eq!(git(&root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(
+        query_rows(&root, &["query", relation, "--format", "json"]),
+        0
+    );
+}
+
+fn git_fails(root: &Path, arguments: &[&str]) -> bool {
+    let mut command = Command::new("git");
+    isolate_git(&mut command);
+    !command
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("the git process starts")
+        .status
+        .success()
 }
 
 fn git_with_input(root: &Path, arguments: &[&str], input: &str) -> String {
