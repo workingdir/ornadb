@@ -7,10 +7,8 @@
 
 use std::{
     cmp::Ordering,
-    collections::BTreeMap,
     fmt,
     hash::{Hash, Hasher},
-    ops::Range,
     sync::Arc,
 };
 
@@ -22,9 +20,8 @@ use orna_value_v1::{
 };
 
 use crate::native_graph::{
-    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId,
-    NativeObjectKind, RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor,
-    row_fields_dependencies,
+    CborValue, GraphError, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId, NativeObjectKind,
+    RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor, row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -544,48 +541,6 @@ impl RowMapSnapshot {
         context
             .range_rows(range, scope)
             .map_err(RowStoreError::from)
-    }
-}
-
-/// The identity carried across the row-root/key boundary.  A key is never
-/// looked up against a schema or store root different from this identity.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RowMapBoundary {
-    database_id: [u8; 16],
-    store_root: NativeObjectId,
-    schema_digest: [u8; 32],
-    relation_id: [u8; 16],
-}
-
-impl RowMapBoundary {
-    pub fn new(
-        database_id: [u8; 16],
-        store_root: NativeObjectId,
-        schema_digest: [u8; 32],
-        relation_id: [u8; 16],
-    ) -> Self {
-        Self {
-            database_id,
-            store_root,
-            schema_digest,
-            relation_id,
-        }
-    }
-
-    pub fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    pub fn store_root(&self) -> &NativeObjectId {
-        &self.store_root
-    }
-
-    pub fn schema_digest(&self) -> &[u8; 32] {
-        &self.schema_digest
-    }
-
-    pub fn relation_id(&self) -> &[u8; 16] {
-        &self.relation_id
     }
 }
 
@@ -1153,23 +1108,6 @@ impl RowValue {
         Ok(output)
     }
 
-    pub fn encoded_metadata_len(&self) -> usize {
-        match self {
-            Self::Inline { encoded, .. } => encoded.len(),
-            Self::Overflow(reference) => {
-                1 + 8
-                    + 32
-                    + reference
-                        .native_root()
-                        .map_or(0, |root| root.as_bytes().len())
-                    + reference.byte_root().as_bytes().len()
-                    + reference
-                        .dependency_root()
-                        .map_or(1, |root| root.as_bytes().len())
-            }
-        }
-    }
-
     /// The canonical encoded field tuple of an inline row value.
     ///
     /// This is the stored representation a metadata projection decodes: row
@@ -1221,497 +1159,6 @@ impl RowEntry {
     pub fn value(&self) -> &RowValue {
         &self.value
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct RowPage {
-    entries: Arc<[RowEntry]>,
-    range: Range<usize>,
-    height: u8,
-    encoded_size: usize,
-    direct_refs: usize,
-}
-
-impl RowPage {
-    pub fn height(&self) -> u8 {
-        self.height
-    }
-    pub fn entries(&self) -> &[RowEntry] {
-        &self.entries[self.range.clone()]
-    }
-    pub const fn encoded_size(&self) -> usize {
-        self.encoded_size
-    }
-
-    pub const fn direct_refs(&self) -> usize {
-        self.direct_refs
-    }
-}
-
-impl PartialEq for RowPage {
-    fn eq(&self, other: &Self) -> bool {
-        self.entries() == other.entries()
-            && self.height == other.height
-            && self.encoded_size == other.encoded_size
-            && self.direct_refs == other.direct_refs
-    }
-}
-
-impl Eq for RowPage {}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OrderedRowMap {
-    boundary: RowMapBoundary,
-    entries: Arc<[RowEntry]>,
-    pages: Vec<RowPage>,
-}
-
-impl OrderedRowMap {
-    pub fn boundary(&self) -> &RowMapBoundary {
-        &self.boundary
-    }
-
-    pub fn entries(&self) -> &[RowEntry] {
-        &self.entries
-    }
-
-    pub fn pages(&self) -> &[RowPage] {
-        &self.pages
-    }
-
-    /// The boundary identity is part of lookup, so a row map cannot be used
-    /// with a different store root or schema pin by accident.
-    pub fn lookup(
-        &self,
-        boundary: &RowMapBoundary,
-        key: &TypedKey,
-    ) -> Result<Option<&RowEntry>, RowStoreError> {
-        if boundary != &self.boundary {
-            return Err(RowStoreError::BoundaryMismatch);
-        }
-        Ok(self
-            .entries
-            .binary_search_by(|entry| entry.key.cmp(key))
-            .ok()
-            .map(|index| &self.entries[index]))
-    }
-    /// Iterates a bounded key range directly over the existing leaf pages.
-    /// The cursor seeks to the first page and entry at or after the inclusive
-    /// lower bound, and never clones rows or scans pages before that position.
-    pub fn range<'a>(&'a self, range: &'a KeyRange) -> impl Iterator<Item = &'a RowEntry> + 'a {
-        let page_index = range.lower_inclusive.as_ref().map_or(0, |lower| {
-            self.pages.partition_point(|page| {
-                page.entries()
-                    .last()
-                    .is_some_and(|entry| entry.key < *lower)
-            })
-        });
-        let entry_index = range
-            .lower_inclusive
-            .as_ref()
-            .and_then(|lower| {
-                self.pages
-                    .get(page_index)
-                    .map(|page| page.entries().partition_point(|entry| entry.key < *lower))
-            })
-            .unwrap_or(0);
-        OrderedRowRange {
-            pages: &self.pages,
-            page_index,
-            entry_index,
-            upper_exclusive: range.upper_exclusive(),
-            remaining: range.limit(),
-        }
-    }
-}
-
-struct OrderedRowRange<'a> {
-    pages: &'a [RowPage],
-    page_index: usize,
-    entry_index: usize,
-    upper_exclusive: Option<&'a TypedKey>,
-    remaining: usize,
-}
-
-impl<'a> Iterator for OrderedRowRange<'a> {
-    type Item = &'a RowEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        loop {
-            let page = self.pages.get(self.page_index)?;
-            let entries = page.entries();
-            if self.entry_index == entries.len() {
-                self.page_index += 1;
-                self.entry_index = 0;
-                continue;
-            }
-            let entry = &entries[self.entry_index];
-            self.entry_index += 1;
-            if self
-                .upper_exclusive
-                .is_some_and(|upper| entry.key >= *upper)
-            {
-                self.remaining = 0;
-                return None;
-            }
-            self.remaining -= 1;
-            return Some(entry);
-        }
-    }
-}
-
-pub struct RowMapBuilder {
-    boundary: RowMapBoundary,
-    entries: BTreeMap<TypedKey, RowValue>,
-}
-
-impl RowMapBuilder {
-    pub fn new(boundary: RowMapBoundary) -> Self {
-        Self {
-            boundary,
-            entries: BTreeMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, key: TypedKey, value: RowValue) -> Result<(), RowStoreError> {
-        let key_size = key.canonical_bytes()?.len();
-        if key_size > KEY_CANONICAL_LIMIT {
-            return Err(RowStoreError::KeyTooLarge(key_size));
-        }
-        if value.encoded_metadata_len() > ROW_CANONICAL_LIMIT {
-            return Err(RowStoreError::ValueTooLarge(
-                value.encoded_metadata_len() as u64
-            ));
-        }
-        match self.entries.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(value);
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(_) => Err(RowStoreError::DuplicateKey),
-        }
-    }
-
-    pub fn build(self) -> Result<OrderedRowMap, RowStoreError> {
-        let entries: Arc<[RowEntry]> = self
-            .entries
-            .into_iter()
-            .map(|(key, value)| RowEntry::new(key, value))
-            .collect::<Vec<_>>()
-            .into();
-        let pages = partition_pages_shared(Arc::clone(&entries), 0)?;
-        Ok(OrderedRowMap {
-            boundary: self.boundary,
-            entries,
-            pages,
-        })
-    }
-}
-
-/// One entry's cost in the pinned ORP-1 page-boundary algorithm: its canonical
-/// logical boundary token (the key itself, never a storage OID) plus the
-/// encoded node bytes and distinct native refs the entry contributes.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BoundaryToken {
-    key: Vec<u8>,
-    size: usize,
-    refs: usize,
-}
-
-impl BoundaryToken {
-    pub(crate) fn new(key: Vec<u8>, size: usize, refs: usize) -> Self {
-        Self { key, size, refs }
-    }
-}
-
-/// Groups ordered entries into page ranges with the exact ORP-1 rule: cut
-/// before an entry that would push the page past 64 KiB, 256 entries or 256
-/// distinct native refs, and cut after an entry whose height-specific boundary
-/// anchor is set once the page holds at least 16 entries, or at exactly 256
-/// entries. The final nonempty tail is always emitted. `node_overhead` is the
-/// encoded node header, domain and entry-count cost charged to every page, so
-/// a caller that passes the real overhead gets pages that fit the node bound.
-///
-/// The same call serves successive branch levels: a branch level's entries are
-/// its children, whose token is that child's last logical key.
-pub(crate) fn partition_token_ranges(
-    tokens: &[BoundaryToken],
-    height: u8,
-    node_overhead: usize,
-) -> Result<Vec<std::ops::Range<usize>>, RowStoreError> {
-    if height > MAX_PAGE_HEIGHT {
-        return Err(RowStoreError::PageHeightExceeded(height));
-    }
-
-    if node_overhead >= NODE_DATA_LIMIT {
-        return Err(RowStoreError::EntryTooLarge(node_overhead));
-    }
-    Ok(
-        partition_token_ranges_from_iter(tokens.iter().cloned().map(Ok), height, node_overhead)?
-            .into_iter()
-            .map(|group| group.range)
-            .collect(),
-    )
-}
-
-struct PartitionGroup {
-    range: Range<usize>,
-    encoded_size: usize,
-    direct_refs: usize,
-}
-
-fn partition_token_ranges_from_iter(
-    tokens: impl Iterator<Item = Result<BoundaryToken, RowStoreError>>,
-    height: u8,
-    node_overhead: usize,
-) -> Result<Vec<PartitionGroup>, RowStoreError> {
-    if height > MAX_PAGE_HEIGHT {
-        return Err(RowStoreError::PageHeightExceeded(height));
-    }
-
-    if node_overhead >= NODE_DATA_LIMIT {
-        return Err(RowStoreError::EntryTooLarge(node_overhead));
-    }
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    let mut processed = 0usize;
-    let mut size = node_overhead;
-    let mut refs = 0usize;
-    for (index, token) in tokens.enumerate() {
-        let token = token?;
-        processed = index + 1;
-        if token.refs > MAX_REFS {
-            return Err(RowStoreError::PageFanoutExceeded(token.refs));
-        }
-        if token
-            .size
-            .checked_add(node_overhead)
-            .map_or(true, |size| size > NODE_DATA_LIMIT)
-        {
-            return Err(RowStoreError::EntryTooLarge(token.size));
-        }
-        let count = index - start;
-        if count > 0
-            && (count == MAX_PAGE_ENTRIES
-                || refs + token.refs > MAX_REFS
-                || size + token.size > NODE_DATA_LIMIT)
-        {
-            groups.push(PartitionGroup {
-                range: start..index,
-                encoded_size: size,
-                direct_refs: refs,
-            });
-            start = index;
-            size = node_overhead;
-            refs = 0;
-        }
-        size += token.size;
-        refs += token.refs;
-        let count = index - start + 1;
-        if count >= MIN_PAGE_ENTRIES
-            && (count == MAX_PAGE_ENTRIES || boundary_anchor_bytes(height, &token.key)?)
-        {
-            groups.push(PartitionGroup {
-                range: start..index + 1,
-                encoded_size: size,
-                direct_refs: refs,
-            });
-            start = index + 1;
-            size = node_overhead;
-            refs = 0;
-        }
-    }
-    if start < processed {
-        groups.push(PartitionGroup {
-            range: start..processed,
-            encoded_size: size,
-            direct_refs: refs,
-        });
-    }
-    Ok(groups)
-}
-
-/// Encoded node header and domain cost charged to every height-0 page when the
-/// caller does not supply an exact one. It covers the `[1, 1, domain, entries]`
-/// tuple head, the domain itself and the widest definite entry-count head, so
-/// the charged cost never understates a real page.
-pub(crate) fn leaf_node_overhead(domain: &[u8]) -> usize {
-    domain
-        .len()
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(3)
-}
-
-/// Encoded node header, domain and count cost charged to every branch page.
-/// It covers the `[1, 2, domain, height, entries]` tuple head.
-pub(crate) fn branch_node_overhead(domain: &[u8]) -> usize {
-    domain
-        .len()
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(3)
-}
-
-/// Encoded cost of one branch entry `[inclusive_max_key, child_oid, row_count]`
-/// for a native object width of `oid_width` bytes. Counts are bounded by the
-/// signed-length limit, so the integer head is charged at its widest definite
-/// form and the estimate never understates the encoded entry.
-pub(crate) fn branch_entry_size(fence: usize, oid_width: usize) -> usize {
-    fence
-        .saturating_add(oid_width)
-        .saturating_add(3)
-        .saturating_add(9)
-}
-
-/// The canonical ORP-1 shape of one ordered map: the page ranges at every
-/// level, level 0 the leaves and the final level the root. Every level's
-/// ranges are in logical key order and cover its whole input exactly once.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowMapLevels {
-    levels: Vec<Vec<std::ops::Range<usize>>>,
-}
-
-impl RowMapLevels {
-    /// The root height. An empty or single-leaf map is height 0.
-    pub fn height(&self) -> u8 {
-        self.levels.len().saturating_sub(1) as u8
-    }
-
-    pub fn levels(&self) -> &[Vec<std::ops::Range<usize>>] {
-        &self.levels
-    }
-
-    /// The page ranges at one height, or nothing above the root.
-    pub fn level(&self, height: u8) -> &[std::ops::Range<usize>] {
-        self.levels
-            .get(height as usize)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-}
-
-/// Plans every ORP-1 level of one ordered map with the pinned boundary rule:
-/// partition the leaves, then partition each successive level by its children's
-/// last logical keys until a single root remains. Child ranges are
-/// nonoverlapping and exhaustive; a root with one child collapses to that child
-/// at the next lower height. The final physical root is therefore a pure
-/// function of the ordered entries, the domain and the native object width.
-pub(crate) fn partition_levels(
-    entries: &[RowEntry],
-    domain: &[u8],
-    oid_width: usize,
-) -> Result<RowMapLevels, RowStoreError> {
-    if oid_width != 20 && oid_width != 32 {
-        return Err(RowStoreError::VersionIdentityMismatch);
-    }
-    let mut tokens = Vec::with_capacity(entries.len());
-    for entry in entries {
-        tokens.push(BoundaryToken::new(
-            entry.key.canonical_bytes()?,
-            entry_encoded_size(entry)?,
-            entry.value.dependencies().len(),
-        ));
-    }
-    let leaves = partition_token_ranges(&tokens, 0, leaf_node_overhead(domain))?;
-    let mut levels = vec![leaves];
-    let branch_overhead = branch_node_overhead(domain);
-    while levels.last().is_some_and(|level| level.len() > 1) {
-        let height =
-            u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
-        if height > MAX_PAGE_HEIGHT {
-            return Err(RowStoreError::PageHeightExceeded(height));
-        }
-        let children = levels.last().ok_or(RowStoreError::InvalidKeyRange)?;
-        let mut child_tokens = Vec::with_capacity(children.len());
-        for range in children {
-            let last = range
-                .clone()
-                .next_back()
-                .and_then(|index| tokens.get(index))
-                .ok_or(RowStoreError::InvalidKeyRange)?;
-            child_tokens.push(BoundaryToken::new(
-                last.key.clone(),
-                branch_entry_size(last.key.len(), oid_width),
-                1,
-            ));
-        }
-        levels.push(partition_token_ranges(
-            &child_tokens,
-            height,
-            branch_overhead,
-        )?);
-    }
-    Ok(RowMapLevels { levels })
-}
-
-/// The pinned format-3 height bound shared with the native graph.
-pub const MAX_PAGE_HEIGHT: u8 = 64;
-
-/// Encoded node header and domain cost charged to every height-0 page when the
-/// caller does not supply an exact one.
-const PAGE_NODE_OVERHEAD: usize = 16;
-
-pub(crate) fn partition_pages(
-    entries: &[RowEntry],
-    height: u8,
-) -> Result<Vec<RowPage>, RowStoreError> {
-    partition_pages_shared(Arc::from(entries.to_vec()), height)
-}
-
-fn partition_pages_shared(
-    entries: Arc<[RowEntry]>,
-    height: u8,
-) -> Result<Vec<RowPage>, RowStoreError> {
-    let tokens = entries.iter().map(|entry| {
-        Ok(BoundaryToken::new(
-            entry.key.canonical_bytes()?,
-            entry_encoded_size(entry)?,
-            entry.value.dependencies().len(),
-        ))
-    });
-    let groups = partition_token_ranges_from_iter(tokens, height, PAGE_NODE_OVERHEAD)?;
-    Ok(groups
-        .into_iter()
-        .map(|group| RowPage {
-            entries: Arc::clone(&entries),
-            range: group.range,
-            height,
-            encoded_size: group.encoded_size,
-            direct_refs: group.direct_refs,
-        })
-        .collect())
-}
-
-fn entry_encoded_size(entry: &RowEntry) -> Result<usize, RowStoreError> {
-    let key = entry.key.canonical_bytes()?;
-    let size = key
-        .len()
-        .checked_add(entry.value.encoded_metadata_len())
-        .and_then(|size| size.checked_add(8))
-        .ok_or(RowStoreError::EntryTooLarge(usize::MAX))?;
-    Ok(size)
-}
-
-fn boundary_anchor(height: u8, key: &TypedKey) -> Result<bool, RowStoreError> {
-    boundary_anchor_bytes(height, &key.canonical_bytes()?)
-}
-
-/// The anchor test over an already-encoded logical boundary token, so a builder
-/// that has the canonical bytes never pays for a second encoding pass.
-pub(crate) fn boundary_anchor_bytes(height: u8, canonical: &[u8]) -> Result<bool, RowStoreError> {
-    let mut hasher = Sha256::new();
-    hasher.update(ORP_DOMAIN);
-    hasher.update(u32::from(height).to_be_bytes());
-    hasher.update(canonical);
-    let digest = hasher.finalize();
-    Ok(digest[31] & ((1 << ORP_ANCHOR_BITS) - 1) == 0)
 }
 
 fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError> {
@@ -1882,7 +1329,6 @@ fn cbor_head_bytes(major: u8, value: u64) -> ([u8; 9], usize) {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowStoreError {
-    DuplicateKey,
     DuplicateDependency,
     KeyTooLarge(usize),
     InlineValueTooLarge(usize),
@@ -1890,7 +1336,6 @@ pub enum RowStoreError {
     ValueTooLarge(u64),
     EntryTooLarge(usize),
     PageFanoutExceeded(usize),
-    PageHeightExceeded(u8),
     BoundaryMismatch,
     VersionIdentityMismatch,
     RowCountExceeded,
@@ -1911,7 +1356,6 @@ pub enum RowStoreError {
 impl fmt::Display for RowStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DuplicateKey => f.write_str("duplicate typed row key"),
             Self::DuplicateDependency => f.write_str("duplicate direct row dependency"),
             Self::KeyTooLarge(size) => write!(f, "canonical key is {size} bytes, over 1 MiB"),
             Self::InlineValueTooLarge(size) => {
@@ -1923,9 +1367,6 @@ impl fmt::Display for RowStoreError {
             Self::ValueTooLarge(length) => write!(f, "overflow value length {length} is too large"),
             Self::EntryTooLarge(size) => write!(f, "row entry is {size} bytes, over node bound"),
             Self::PageFanoutExceeded(count) => write!(f, "row page fanout is {count}, over 256"),
-            Self::PageHeightExceeded(height) => {
-                write!(f, "row page height {height} is over the format-3 bound")
-            }
             Self::BoundaryMismatch => {
                 f.write_str("row lookup boundary does not match map identity")
             }
@@ -2042,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_range_seeks_across_page_boundary_and_keeps_snapshot_pin() {
+    fn materialized_range_reads_a_bounded_interval_and_keeps_snapshot_pin() {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
         let version = RowMapVersion::issue(
             [0x11; 16],
@@ -2054,35 +1495,19 @@ mod tests {
             Some(600),
         )
         .expect("coherent row-map version");
-        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
-        let mut builder = RowMapBuilder::new(boundary);
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        for key in 0..600 {
-            builder
-                .insert(TypedKey::Int(key), value.clone())
-                .expect("insert ordered row");
-        }
-        let map = builder.build().expect("build paged row map");
-        assert!(map.pages().len() > 1, "fixture must span row pages");
-        let first_page_last_key = map.pages()[0]
-            .entries()
-            .last()
-            .expect("nonempty first page")
-            .key()
-            .clone();
-        let start = match first_page_last_key {
-            TypedKey::Int(value) => value,
-            _ => unreachable!("test keys are integers"),
-        };
-        let entries = map.entries().to_vec();
+        let entries = (0..600)
+            .map(|key| RowEntry::new(TypedKey::Int(key), value.clone()))
+            .collect::<Vec<_>>();
         let snapshot = RowMapSnapshot::issue(version.clone(), [0x77; 32], entries)
             .expect("seal materialized snapshot");
+        let start = 63;
         let range = KeyRange::new(
             Some(TypedKey::Int(start)),
             Some(TypedKey::Int(start + 4)),
             3,
         )
-        .expect("valid page-crossing range");
+        .expect("valid bounded range");
 
         let rows = snapshot.range(&range).expect("read bounded range");
         assert_eq!(
@@ -2094,23 +1519,6 @@ mod tests {
                 TypedKey::Int(start),
                 TypedKey::Int(start + 1),
                 TypedKey::Int(start + 2),
-            ]
-        );
-        let cursor_range = KeyRange::new(
-            Some(TypedKey::Int(start)),
-            Some(TypedKey::Int(start + 4)),
-            10,
-        )
-        .expect("valid cursor interval");
-        assert_eq!(
-            map.range(&cursor_range)
-                .map(|entry| entry.key().clone())
-                .collect::<Vec<_>>(),
-            [
-                TypedKey::Int(start),
-                TypedKey::Int(start + 1),
-                TypedKey::Int(start + 2),
-                TypedKey::Int(start + 3),
             ]
         );
         assert!(rows.iter().all(|row| row.version() == &version));
@@ -2218,29 +1626,21 @@ mod tests {
         keys.insert(TypedKey::UInt(3));
         assert!(keys.contains(&TypedKey::Int(3)));
 
-        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
-        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        let mut builder = RowMapBuilder::new(boundary.clone());
+        let mut map = std::collections::BTreeSet::new();
         for key in [
             TypedKey::UInt(3),
             TypedKey::Int(-2),
             TypedKey::Int(5),
             TypedKey::UInt(4),
         ] {
-            builder
-                .insert(key, value.clone())
-                .expect("distinct Int keys");
+            assert!(map.insert(key), "distinct Int keys");
         }
-        assert!(matches!(
-            builder.insert(TypedKey::Int(3), value),
-            Err(RowStoreError::DuplicateKey)
-        ));
-        let map = builder.build().expect("build an Int-keyed map");
+        assert!(
+            !map.insert(TypedKey::Int(3)),
+            "Int(3) is the key UInt(3) already holds"
+        );
         assert_eq!(
-            map.entries()
-                .iter()
-                .map(|entry| entry.key().clone())
-                .collect::<Vec<_>>(),
+            map.iter().cloned().collect::<Vec<_>>(),
             [
                 TypedKey::Int(-2),
                 TypedKey::Int(3),
@@ -2248,11 +1648,7 @@ mod tests {
                 TypedKey::Int(5)
             ]
         );
-        assert!(
-            map.lookup(&boundary, &TypedKey::Int(4))
-                .expect("matching boundary")
-                .is_some()
-        );
+        assert!(map.contains(&TypedKey::Int(4)));
     }
 
     /// A07-storage-rows-02, ORNA-ROW-002: every permitted tagged key decodes
@@ -2497,86 +1893,5 @@ mod tests {
             RepositoryVfsFieldIdentity::new(row_identity, vec![[0; 16]]),
             Err(RowStoreError::VersionIdentityMismatch)
         ));
-    }
-    #[test]
-    fn duplicate_row_map_insert_preserves_first_value() {
-        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
-        let key = TypedKey::Text("song".to_owned());
-        let mut builder = RowMapBuilder::new(boundary.clone());
-
-        builder
-            .insert(
-                key.clone(),
-                RowValue::decode_canonical_fields(vec![0x81, 0x01]).expect("first row value"),
-            )
-            .expect("first insertion");
-        assert!(matches!(
-            builder.insert(
-                key.clone(),
-                RowValue::decode_canonical_fields(vec![0x81, 0x02]).expect("duplicate row value"),
-            ),
-            Err(RowStoreError::DuplicateKey)
-        ));
-
-        let map = builder.build().expect("build original row map");
-        let row = map
-            .lookup(&boundary, &key)
-            .expect("matching boundary")
-            .expect("original row remains");
-        assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
-    }
-    #[test]
-    fn row_page_equality_uses_only_visible_entries_and_page_metadata() {
-        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        let before = RowEntry::new(TypedKey::Text("before".to_owned()), value.clone());
-        let visible = RowEntry::new(TypedKey::Text("visible".to_owned()), value.clone());
-        let after = RowEntry::new(TypedKey::Text("after".to_owned()), value);
-        let left = RowPage {
-            entries: Arc::from(vec![before, visible.clone(), after]),
-            range: 1..2,
-            height: 2,
-            encoded_size: 48,
-            direct_refs: 1,
-        };
-        let right = RowPage {
-            entries: Arc::from(vec![visible]),
-            range: 0..1,
-            height: 2,
-            encoded_size: 48,
-            direct_refs: 1,
-        };
-
-        assert_eq!(left.entries(), right.entries());
-        assert_eq!(left, right);
-    }
-
-    #[test]
-    fn partition_token_ranges_rejects_heights_above_format_bound() {
-        assert_eq!(
-            partition_token_ranges(&[], MAX_PAGE_HEIGHT, 0).expect("height 64 is allowed"),
-            Vec::<std::ops::Range<usize>>::new()
-        );
-        for height in [MAX_PAGE_HEIGHT + 1, u8::MAX] {
-            assert!(matches!(
-                partition_token_ranges(&[], height, 0),
-                Err(RowStoreError::PageHeightExceeded(actual)) if actual == height
-            ));
-        }
-    }
-    #[test]
-    fn partition_token_ranges_enforces_node_size_boundary() {
-        let at_limit = BoundaryToken::new(vec![0], NODE_DATA_LIMIT - 1, 0);
-        assert_eq!(
-            partition_token_ranges(&[at_limit], 0, 1).expect("exact node limit is valid"),
-            vec![0..1]
-        );
-
-        for size in [NODE_DATA_LIMIT, usize::MAX] {
-            let token = BoundaryToken::new(vec![0], size, 0);
-            assert!(matches!(
-                partition_token_ranges(&[token], 0, 1),
-                Err(RowStoreError::EntryTooLarge(actual)) if actual == size
-            ));
-        }
     }
 }
