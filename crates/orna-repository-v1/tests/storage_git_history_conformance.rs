@@ -155,7 +155,8 @@ fn fetch_synchronizes_advertised_internal_refs_with_the_requested_branch() {
     let old = git(&fixture.source, &["rev-parse", "HEAD"]);
     let next = fixture.advance();
     let internal = format!("{INTERNAL_REF}:{INTERNAL_REF}");
-    let allocator = format!("{ALLOCATOR_REF}:{ALLOCATOR_REF}");
+    // A watermark blob is not a commit, so plain Git needs `+` to replace it.
+    let allocator = format!("+{ALLOCATOR_REF}:{ALLOCATOR_REF}");
     git(
         &fixture.source,
         &[
