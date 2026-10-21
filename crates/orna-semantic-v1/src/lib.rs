@@ -8,11 +8,12 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
-use orna_value_v1::{Decimal, Raw, SchemaDescriptor, path_decode_key_components};
+use orna_value_v1::{Decimal, path_decode_key_components};
 use orna_syntax_v1::{
     AssignmentOperator, AssignmentTarget, ControlKind, Declaration, DimensionExpr, Expr,
     FieldInitializer, Item, LambdaParameter, LiteralKind, Pattern, ProtocolMember, SyntaxSpan,
@@ -26,10 +27,7 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
-mod object_identity;
 mod source_row;
-
-pub use object_identity::{ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectKind};
 
 pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
 
@@ -59,6 +57,9 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Portable failure code for a required `sys` member that has no linked
+/// production provider (ORNA-SYS-008, `api/sys.json` `failure_codes`).
+pub const DIAG_SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModuleInput {
@@ -1562,496 +1563,48 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Whether `sys` members were admitted against production providers.
+    production_sys_providers: bool,
 }
 impl Analysis {
     pub fn is_ok(&self) -> bool {
         self.diagnostics.is_empty()
     }
+
+    /// The provider linkage this analysis admitted `sys` members against.
+    pub(crate) fn system_providers(&self) -> SystemProviders {
+        if self.production_sys_providers {
+            SystemProviders::Production
+        } else {
+            SystemProviders::DeclaredSurface
+        }
+    }
 }
 
-/// Failures while producing a source-owned table descriptor from checked
-/// semantics and already-issued identities.
+/// The provider linkage that analysis admits portable `sys` members against.
+///
+/// A member's static type comes from the declared `api/sys.json` surface;
+/// whether it can execute depends on the providers of the host that evaluates
+/// the program. Every caller that evaluates analysed source passes
+/// [`SystemProviders::Production`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SourceTableSchemaError {
-    AnalysisFailed,
-    ModuleNotFound,
-    AmbiguousModule,
-    DeclarationNotFound,
-    NotTable,
-    MissingTableSchema,
-    MissingTableAdmission,
-    MissingIdentity,
-    IdentityMapMismatch,
-    DuplicateIdentity,
-    UnsupportedDefault,
-    UnsupportedComputed,
-    UnsupportedType,
-    InvalidSourceSchema,
-    InvalidDescriptor,
+pub enum SystemProviders {
+    /// Every member of the declared surface counts as linked, so analysis
+    /// checks typing only. For source that is not admitted for evaluation.
+    DeclaredSurface,
+    /// Only members a production host links a provider for are admitted;
+    /// every other member is rejected with `sys.version.incompatible`
+    /// (ORNA-SYS-008).
+    Production,
 }
 
-/// A table schema artifact owned by source semantic analysis.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceTableSchemaArtifact {
-    declaration_name: String,
-    table_id: [u8; 16],
-    descriptor: SchemaDescriptor,
-}
-
-impl SourceTableSchemaArtifact {
-    pub fn declaration_name(&self) -> &str {
-        &self.declaration_name
-    }
-
-    pub fn table_id(&self) -> &[u8; 16] {
-        &self.table_id
-    }
-
-    pub fn descriptor(&self) -> &SchemaDescriptor {
-        &self.descriptor
-    }
-}
-
-/// Builds a storage descriptor from one exact source declaration and its
-/// already-persisted object identities. This is a read-only operation: it
-/// never reconciles or creates identities.
-pub fn source_table_schema(
-    analysis: &Analysis,
-    manifest: &ObjectIdentityManifest,
-    module_name: &str,
-    declaration_name: &str,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    let (table_schema, admission) =
-        source_table_schema_parts(analysis, module_name, declaration_name)?;
-    let table_name = source_table_qualified_name(module_name, declaration_name);
-    let table_id = *manifest
-        .id(ObjectKind::Table, &table_name)
-        .ok_or(SourceTableSchemaError::MissingIdentity)?;
-    let mut field_ids = BTreeMap::new();
-    for name in table_schema.fields.keys() {
-        let qualified_name = format!("{table_name}.{name}");
-        let id = *manifest
-            .id(ObjectKind::Column, &qualified_name)
-            .ok_or(SourceTableSchemaError::MissingIdentity)?;
-        field_ids.insert(name.clone(), id);
-    }
-    build_source_table_schema(
-        declaration_name,
-        table_id,
-        &field_ids,
-        table_schema,
-        admission,
-    )
-}
-
-/// Builds a storage descriptor from exact source semantics and IDs extracted
-/// from a pinned repository binding. The map must contain exactly one active
-/// committed field ID for every source schema field, including key fields.
-pub fn source_table_schema_with_ids(
-    analysis: &Analysis,
-    module_name: &str,
-    declaration_name: &str,
-    table_id: [u8; 16],
-    field_ids: &BTreeMap<String, [u8; 16]>,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    let (table_schema, admission) =
-        source_table_schema_parts(analysis, module_name, declaration_name)?;
-    build_source_table_schema(
-        declaration_name,
-        table_id,
-        field_ids,
-        table_schema,
-        admission,
-    )
-}
-
-fn source_table_schema_parts<'a>(
-    analysis: &'a Analysis,
-    module_name: &str,
-    declaration_name: &str,
-) -> Result<(&'a TableSchema, &'a TableAdmission), SourceTableSchemaError> {
-    if !analysis.is_ok() {
-        return Err(SourceTableSchemaError::AnalysisFailed);
-    }
-    let mut module = None;
-    for (namespace, candidate) in &analysis.modules {
-        if namespace.display() == module_name && analysis.assertions.contains_key(namespace) {
-            if module.is_some() {
-                return Err(SourceTableSchemaError::AmbiguousModule);
-            }
-            module = Some(candidate);
+impl SystemProviders {
+    /// A fresh admission record, or `None` when only typing is checked.
+    fn admission_record(self) -> Option<Rc<RefCell<BTreeSet<String>>>> {
+        match self {
+            Self::DeclaredSurface => None,
+            Self::Production => Some(Rc::default()),
         }
-    }
-    let module = module.ok_or(SourceTableSchemaError::ModuleNotFound)?;
-    let symbol = module
-        .symbols
-        .get(declaration_name)
-        .ok_or(SourceTableSchemaError::DeclarationNotFound)?;
-    if symbol.kind != SymbolKind::Table {
-        return Err(SourceTableSchemaError::NotTable);
-    }
-    let table_schema = symbol
-        .table_schema
-        .as_ref()
-        .ok_or(SourceTableSchemaError::MissingTableSchema)?;
-    let admission = table_schema
-        .admission
-        .as_ref()
-        .ok_or(SourceTableSchemaError::MissingTableAdmission)?;
-    Ok((table_schema, admission))
-}
-
-fn source_table_qualified_name(module_name: &str, declaration_name: &str) -> String {
-    if module_name.is_empty() {
-        declaration_name.to_owned()
-    } else {
-        format!("{module_name}.{declaration_name}")
-    }
-}
-
-fn build_source_table_schema(
-    declaration_name: &str,
-    table_id: [u8; 16],
-    field_ids: &BTreeMap<String, [u8; 16]>,
-    table_schema: &TableSchema,
-    admission: &TableAdmission,
-) -> Result<SourceTableSchemaArtifact, SourceTableSchemaError> {
-    if !table_schema.conversions.is_empty() {
-        return Err(SourceTableSchemaError::UnsupportedType);
-    }
-    if !admission.computed.is_empty() {
-        return Err(SourceTableSchemaError::UnsupportedComputed);
-    }
-    if admission.private_required
-        || admission.keys.is_empty()
-        || admission.required.iter().any(|name| !table_schema.fields.contains_key(name))
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-    if field_ids.len() != table_schema.fields.len()
-        || table_schema
-            .fields
-            .keys()
-            .any(|name| !field_ids.contains_key(name))
-    {
-        return Err(SourceTableSchemaError::IdentityMapMismatch);
-    }
-
-    let mut identities = BTreeSet::from([table_id]);
-    for id in field_ids.values() {
-        if !identities.insert(*id) {
-            return Err(SourceTableSchemaError::DuplicateIdentity);
-        }
-    }
-
-    let mut key_names = BTreeSet::new();
-    let mut key_ids = Vec::with_capacity(admission.keys.len());
-    for (name, key_type) in &admission.keys {
-        if !key_names.insert(name.as_str()) {
-            return Err(SourceTableSchemaError::InvalidSourceSchema);
-        }
-        let field_type = table_schema
-            .fields
-            .get(name)
-            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
-        if field_type != key_type {
-            return Err(SourceTableSchemaError::InvalidSourceSchema);
-        }
-        key_ids.push(
-            *field_ids
-                .get(name)
-                .ok_or(SourceTableSchemaError::IdentityMapMismatch)?,
-        );
-    }
-    if admission.automatic_key
-        && (admission.keys.len() != 1
-            || admission.keys[0].0 != "id"
-            || admission.keys[0].1 != Type::Int)
-    {
-        return Err(SourceTableSchemaError::InvalidSourceSchema);
-    }
-
-    let mut fields = Vec::with_capacity(table_schema.fields.len());
-    for (name, ty) in &table_schema.fields {
-        let is_automatic_id = admission.automatic_key && name == "id";
-        if !admission.required.contains(name) && !is_automatic_id {
-            return Err(SourceTableSchemaError::UnsupportedDefault);
-        }
-        let id = *field_ids
-            .get(name)
-            .ok_or(SourceTableSchemaError::IdentityMapMismatch)?;
-        let role = if key_names.contains(name.as_str()) { 0 } else { 1 };
-        fields.push((
-            id,
-            Raw::Array(vec![
-                source_schema_uuid(&id),
-                Raw::Text(name.clone()),
-                source_schema_type_node(ty)?,
-                Raw::Int(role.into()),
-                Raw::Array(vec![Raw::Int(0.into())]),
-            ]),
-        ));
-    }
-    fields.sort_by_key(|(id, _)| *id);
-    let field_descriptors = fields
-        .into_iter()
-        .map(|(_, descriptor)| descriptor)
-        .collect();
-    let raw = Raw::Map(vec![
-        (Raw::Int(0.into()), Raw::Int(1.into())),
-        (Raw::Int(1.into()), source_schema_uuid(&table_id)),
-        (
-            Raw::Int(2.into()),
-            Raw::Array(key_ids.into_iter().map(|id| source_schema_uuid(&id)).collect()),
-        ),
-        (Raw::Int(3.into()), Raw::Array(field_descriptors)),
-        (Raw::Int(4.into()), Raw::Array(Vec::new())),
-    ]);
-    let descriptor =
-        SchemaDescriptor::new(raw).map_err(|_| SourceTableSchemaError::InvalidDescriptor)?;
-    Ok(SourceTableSchemaArtifact {
-        declaration_name: declaration_name.to_owned(),
-        table_id,
-        descriptor,
-    })
-}
-
-fn source_schema_uuid(id: &[u8; 16]) -> Raw {
-    Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
-}
-
-fn source_schema_type_node(ty: &Type) -> Result<Raw, SourceTableSchemaError> {
-    let primitive = match ty {
-        Type::Int => Some("Int"),
-        Type::Decimal => Some("Decimal"),
-        Type::Float => Some("Float"),
-        Type::Date => Some("Date"),
-        Type::Instant => Some("Instant"),
-        Type::Text => Some("Str"),
-        Type::Bool => Some("Bool"),
-        Type::Unit => Some("Unit"),
-        _ => None,
-    };
-    if let Some(name) = primitive {
-        return Ok(Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.into())]));
-    }
-    match ty {
-        Type::List(element) => Ok(Raw::Array(vec![
-            Raw::Int(1.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Optional(element) => Ok(Raw::Array(vec![
-            Raw::Int(2.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Tuple(elements) => Ok(Raw::Array(vec![
-            Raw::Int(3.into()),
-            Raw::Array(
-                elements
-                    .iter()
-                    .map(source_schema_type_node)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ])),
-        Type::Record(fields) => Ok(Raw::Array(vec![
-            Raw::Int(4.into()),
-            Raw::Array(
-                fields
-                    .iter()
-                    .map(|(name, ty)| {
-                        Ok(Raw::Array(vec![
-                            Raw::Text(name.clone()),
-                            source_schema_type_node(ty)?,
-                        ]))
-                    })
-                    .collect::<Result<Vec<_>, SourceTableSchemaError>>()?,
-            ),
-        ])),
-        Type::Range(element) => Ok(Raw::Array(vec![
-            Raw::Int(9.into()),
-            source_schema_type_node(element)?,
-        ])),
-        Type::Named(name) => {
-            let primitive = match name.as_str() {
-                "Blob" | "std.BINARY_LARGE_OBJECT" => "Blob",
-                "std.UUID" => "Uuid",
-                "std.TIME" => "TimeOfDay",
-                "std.DURATION" => "Duration",
-                _ => return Err(SourceTableSchemaError::UnsupportedType),
-            };
-            Ok(Raw::Array(vec![
-                Raw::Int(0.into()),
-                Raw::Text(primitive.into()),
-            ]))
-        }
-        _ => Err(SourceTableSchemaError::UnsupportedType),
-    }
-}
-
-#[cfg(test)]
-mod source_table_schema_tests {
-    use super::*;
-
-    fn descriptor_value(raw: &Raw, key: u64) -> &Raw {
-        let Raw::Map(entries) = raw else {
-            panic!("descriptor is not a map");
-        };
-        entries
-            .iter()
-            .find_map(|(candidate, value)| match candidate {
-                Raw::Int(candidate_key) if candidate_key.to_string() == key.to_string() => Some(value),
-                _ => None,
-            })
-            .expect("descriptor contains the requested key")
-    }
-
-    fn descriptor_field<'a>(raw: &'a Raw, name: &str) -> &'a [Raw] {
-        let Raw::Array(fields) = raw else {
-            panic!("descriptor field list is not an array");
-        };
-        fields
-            .iter()
-            .find_map(|field| match field {
-                Raw::Array(parts)
-                    if matches!(parts.get(1), Some(Raw::Text(field_name)) if field_name == name) =>
-                {
-                    Some(parts.as_slice())
-                }
-                _ => None,
-            })
-            .expect("descriptor contains the requested field")
-    }
-
-    #[test]
-    fn primitive_table_descriptor_uses_committed_manifest_ids() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { name: Str, active: Bool, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
-            .expect("writer-issued manifest");
-
-        let artifact = source_table_schema(&analysis, &manifest, "", "Contact")
-            .expect("source table descriptor");
-        assert_eq!(artifact.declaration_name(), "Contact");
-        assert_eq!(
-            artifact.table_id(),
-            manifest.id(ObjectKind::Table, "Contact").expect("table identity"),
-        );
-        assert_eq!(
-            descriptor_value(artifact.descriptor().raw(), 1),
-            &Raw::Tag(37, Box::new(Raw::Bytes(artifact.table_id().to_vec()))),
-        );
-        assert_eq!(
-            descriptor_value(artifact.descriptor().raw(), 2),
-            &Raw::Array(vec![Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.id")
-                        .expect("key identity")
-                        .to_vec(),
-                )),
-            )]),
-        );
-        let fields = descriptor_value(artifact.descriptor().raw(), 3);
-        let key = descriptor_field(fields, "id");
-        assert_eq!(
-            key[0],
-            Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.id")
-                        .expect("key identity")
-                        .to_vec(),
-                )),
-            ),
-        );
-        assert_eq!(key[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())]));
-        assert_eq!(key[3], Raw::Int(0.into()));
-        let name = descriptor_field(fields, "name");
-        assert_eq!(
-            name[0],
-            Raw::Tag(
-                37,
-                Box::new(Raw::Bytes(
-                    manifest
-                        .id(ObjectKind::Column, "Contact.name")
-                        .expect("field identity")
-                        .to_vec(),
-                )),
-            ),
-        );
-        assert_eq!(name[2], Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]));
-        assert_eq!(name[3], Raw::Int(1.into()));
-    }
-
-    #[test]
-    fn source_table_descriptor_maps_declared_portable_scalar_aliases() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Media(id: Int) { blob: Blob, uuid: UUID, time: TIME, duration: DURATION, bytes: BYTES, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&input), None)
-            .expect("writer-issued manifest");
-        let artifact = source_table_schema(&analysis, &manifest, "", "Media")
-            .expect("portable scalar table descriptor");
-        let fields = descriptor_value(artifact.descriptor().raw(), 3);
-
-        for (field_name, primitive) in [
-            ("blob", "Blob"),
-            ("uuid", "Uuid"),
-            ("time", "TimeOfDay"),
-            ("duration", "Duration"),
-            ("bytes", "Blob"),
-        ] {
-            assert_eq!(
-                descriptor_field(fields, field_name)[2],
-                Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.into())]),
-            );
-        }
-    }
-
-    #[test]
-    fn source_table_descriptor_rejects_missing_ids_and_unsupported_types() {
-        let input = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { name: Str, }",
-        );
-        let analysis = analyze(std::slice::from_ref(&input));
-        assert!(analysis.is_ok());
-        assert_eq!(
-            source_table_schema(&analysis, &ObjectIdentityManifest::default(), "", "Contact"),
-            Err(SourceTableSchemaError::MissingIdentity),
-        );
-        assert_eq!(
-            source_table_schema_with_ids(
-                &analysis,
-                "",
-                "Contact",
-                [1; 16],
-                &BTreeMap::new(),
-            ),
-            Err(SourceTableSchemaError::IdentityMapMismatch),
-        );
-
-        let unsupported = ModuleInput::new(
-            "main.orna",
-            "pub table Contact(id: Int) { relation: Relation<Int>, }",
-        );
-        let unsupported_analysis = analyze(std::slice::from_ref(&unsupported));
-        assert!(unsupported_analysis.is_ok());
-        let manifest = ObjectIdentityManifest::reconcile(std::slice::from_ref(&unsupported), None)
-            .expect("writer-issued manifest");
-        assert_eq!(
-            source_table_schema(&unsupported_analysis, &manifest, "", "Contact"),
-            Err(SourceTableSchemaError::UnsupportedType),
-        );
     }
 }
 
@@ -2274,14 +1827,21 @@ pub fn admit_row_unit_with_owner_fields(
         }
     }
     let mut inferred = Vec::new();
+    let scope = Scope {
+        unlinked_system_members: analysis.system_providers().admission_record(),
+        ..Scope::default()
+    };
     let input_type = infer_table_row_input(
         &parsed.value,
         &source_schema_fields,
-        &Scope::default(),
+        &scope,
         &BTreeMap::new(),
         &mut inferred,
         true,
     );
+    if let Some(record) = &scope.unlinked_system_members {
+        report_unlinked_system_members(record, &mut inferred);
+    }
     result.diagnostics.extend(inferred);
     if let Type::Record(fields) = input_type.ty {
         result.fields = fields;
@@ -2302,26 +1862,58 @@ pub fn admit_row_unit_with_owner_fields(
 
 /// Load and check caller-provided modules.  `sys` is a built-in namespace,
 /// while `std` remains absent unless an adapter supplies it separately; source
-/// modules may not define either reserved root.
+/// modules may not define either reserved root. Portable `sys` members are
+/// checked against the declared surface only; see [`analyze_with_providers`].
 pub fn analyze(inputs: &[ModuleInput]) -> Analysis {
     analyze_with_catalogue(inputs, &Catalogue::empty())
 }
 
 /// Load source modules with an explicit declaration catalogue.  Names not in
 /// source or this catalogue remain unresolved; no profile is installed by
-/// default.
+/// default. Portable `sys` members are checked against the declared surface
+/// only; see [`analyze_with_providers`].
 pub fn analyze_with_catalogue(inputs: &[ModuleInput], catalogue: &Catalogue) -> Analysis {
-    analyze_retaining_context(inputs, catalogue, false).0
+    analyze_with_providers(inputs, catalogue, SystemProviders::DeclaredSurface)
 }
 
+/// Load source modules with an explicit declaration catalogue and admit each
+/// portable `sys` member against `providers`. A host that evaluates the
+/// analysed program passes [`SystemProviders::Production`], so a member with
+/// no linked provider fails here with `sys.version.incompatible` rather than
+/// mid-evaluation.
+pub fn analyze_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    providers: SystemProviders,
+) -> Analysis {
+    analyze_retaining_context_with_providers(inputs, catalogue, false, providers).0
+}
+
+/// Semantic payload derivation describes declarations rather than admitting
+/// a program for evaluation, so it checks the declared `sys` surface only.
 fn analyze_retaining_context(
     inputs: &[ModuleInput],
     catalogue: &Catalogue,
     retain_context: bool,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    analyze_retaining_context_with_providers(
+        inputs,
+        catalogue,
+        retain_context,
+        SystemProviders::DeclaredSurface,
+    )
+}
+
+fn analyze_retaining_context_with_providers(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+    providers: SystemProviders,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
+        production_sys_providers: providers == SystemProviders::Production,
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
@@ -2395,6 +1987,9 @@ fn analyze_retaining_context(
         &catalogue.attached_symbols,
         &mut dependency_summaries,
     );
+    // Every module of one analysis belongs to a single admission, so each
+    // unlinked `sys` member is reported once.
+    let unlinked_system_members = providers.admission_record();
     for (namespace, tree) in &parsed {
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
@@ -2410,6 +2005,7 @@ fn analyze_retaining_context(
             &mut result.diagnostics,
         );
         scope.current_namespace = Some(namespace.clone());
+        scope.unlinked_system_members = unlinked_system_members.clone();
         let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
         visible_unit_namespaces.extend(scope.modules.values().cloned());
         scope.source_units = result
@@ -2464,6 +2060,9 @@ fn analyze_retaining_context(
         if retain_context {
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
+    }
+    if let Some(record) = &unlinked_system_members {
+        report_unlinked_system_members(record, &mut result.diagnostics);
     }
     result
         .diagnostics
@@ -3115,6 +2714,13 @@ fn declared_enum_variants(item: &Item) -> BTreeSet<String> {
         .map(|variant| variant.name.clone())
         .collect()
 }
+/// Converts one declared source type expression to the unresolved semantic
+/// type recorded by table and nominal declarations. Named types keep their
+/// source spelling; callers resolve them against the analysed module scope.
+pub fn declared_type(ty: &TypeExpr) -> Type {
+    type_of(ty)
+}
+
 fn type_of(ty: &TypeExpr) -> Type {
     match ty {
         TypeExpr::Name {
@@ -3736,6 +3342,13 @@ struct Scope {
     /// pure helper calls. This remains semantic-loader state rather than a
     /// public Symbol field so existing catalogue/value contracts stay stable.
     function_dependencies: RefCell<BTreeMap<String, BTreeSet<String>>>,
+    /// Diagnostic messages for the portable `sys` members a production
+    /// admission requires without a linked provider; `None` when only the
+    /// declared surface is checked. Inference only records them and the
+    /// admission boundary reports them after checking, so provider linkage
+    /// never alters inferred types or other diagnostics. Clones share the
+    /// record: nested scopes belong to the same admission.
+    unlinked_system_members: Option<Rc<RefCell<BTreeSet<String>>>>,
     ambiguous: BTreeSet<String>,
     /// Source spellings mapped to compiler-local nominal identities. The
     /// values are qualified by defining module and are never a substitute for
@@ -3848,6 +3461,7 @@ fn resolve_imports_with_dependencies(
         current_namespace: None,
         source_units: BTreeMap::new(),
         function_dependencies: RefCell::new(BTreeMap::new()),
+        unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
@@ -5017,6 +4631,33 @@ fn is_builtin_protocol_without_local_surface(name: &str) -> bool {
     matches!(name, "Display" | "Present")
 }
 
+/// `Currency` is a core protocol so `Money<C>` stays meaningful without `std`
+/// (09-standard-library.md). Its member surface is fixed by ORNA-MONEY-004:
+/// the stable static properties `code: Str` and `minor_digits: Int`
+/// (05-types.md, "Money and currencies"). A module may implement it without
+/// declaring it.
+const CORE_CURRENCY_PROTOCOL: &str =
+    "pub protocol Currency {\n    static code: Str;\n    static minor_digits: Int;\n}\n";
+
+static CORE_CURRENCY_SURFACE: std::sync::LazyLock<Vec<ProtocolMember>> =
+    std::sync::LazyLock::new(|| {
+        parse_module_with_file(CORE_CURRENCY_PROTOCOL, "core/Currency.orna".to_owned())
+            .value
+            .items
+            .into_iter()
+            .find_map(|item| match item.declaration {
+                Declaration::Protocol { members, .. } => Some(members),
+                _ => None,
+            })
+            .expect("the core Currency protocol surface parses")
+    });
+
+/// The specified member surface of a core protocol that source need not
+/// declare.
+fn core_protocol_surface(name: &str) -> Option<&'static [ProtocolMember]> {
+    (name == "Currency").then(|| CORE_CURRENCY_SURFACE.as_slice())
+}
+
 /// Resolve a transparent local type alias to a locally declared, non-generic
 /// protocol.  This intentionally does not cross imported module boundaries
 /// or substitute generic protocol parameters: those identities remain the
@@ -5043,7 +4684,8 @@ fn resolve_local_protocol_name(name: &str, scope: &Scope) -> Option<String> {
 /// imported-member conformance, complete callable semantics, and full runtime
 /// conversion dispatch remain outside this validator. Unsupported generic,
 /// qualified, imported, unresolved, and non-protocol identities fail closed.
-/// Only the builtin Display/Present names retain a missing-member-surface
+/// The core `Currency` protocol is checked against its specified surface;
+/// only the builtin Display/Present names retain a missing-member-surface
 /// residual. Mixed protocols check generic and non-generic members alike.
 /// `From<Source>` checks the closed source/member shape below, but does not
 /// implement conversion selection or runtime dispatch.
@@ -5185,39 +4827,48 @@ fn validate_nested_implementation_members(
         ));
         return;
     }
-    let Some(protocol_name) = resolve_local_protocol_name(&path[0], scope) else {
-        match scope.names.get(&path[0]) {
+    let required_members = match resolve_local_protocol_name(&path[0], scope) {
+        Some(protocol_name) => {
+            let Some(required_members) = local_protocols.get(&protocol_name) else {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "protocol implementation identity cannot be resolved",
+                ));
+                return;
+            };
+            required_members.as_slice()
+        }
+        None => match scope.names.get(&path[0]) {
             Some(symbol) if symbol.kind == SymbolKind::Protocol => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "imported protocol identity cannot be resolved",
                 ));
+                return;
             }
             Some(_) => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "protocol implementation identity is not a protocol",
                 ));
+                return;
             }
             None if is_builtin_protocol_without_local_surface(&path[0]) => {
                 // Display and Present are the two presentation protocol names
                 // supplied by the frozen surface without a local member AST.
+                return;
             }
-            None => {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "unresolved protocol implementation identity",
-                ));
-            }
-        }
-        return;
-    };
-    let Some(required_members) = local_protocols.get(&protocol_name) else {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "protocol implementation identity cannot be resolved",
-        ));
-        return;
+            None => match core_protocol_surface(&path[0]) {
+                Some(surface) => surface,
+                None => {
+                    diagnostics.push(diag(
+                        DIAG_TYPE,
+                        "unresolved protocol implementation identity",
+                    ));
+                    return;
+                }
+            },
+        },
     };
 
     let mut implemented_names = BTreeSet::new();
@@ -8638,7 +8289,7 @@ fn infer_node(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
-                && let Some(inferred) = infer_system_path(&path, diagnostics)
+                && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
             {
                 return inferred;
             }
@@ -17014,16 +16665,20 @@ enum DescriptorPathInference {
 /// Resolves only the JSON-described, read-only descriptor surface. The
 /// descriptor is metadata, not a runtime-value factory: a schema-known member
 /// that has no implementation route fails explicitly instead of acquiring a
-/// guessed type or effect.
+/// guessed type or effect, and a resolved member without a linked production
+/// provider is rejected with `sys.version.incompatible`.
 fn infer_descriptor_system_path(
     path: &[&str],
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> DescriptorPathInference {
-    use system_api::PathResolution;
+    use system_api::{PathResolution, SystemMember};
 
     let api = system_api::embedded_system_api();
     let name = path.join(".");
     if let Some(relation) = api.historical_relation(path) {
+        let view = name.strip_suffix(".as_of").unwrap_or(&name);
+        require_linked_system_member(SystemMember::HistoricalView(view), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17033,6 +16688,7 @@ fn infer_descriptor_system_path(
         });
     }
     if path == ["sys", "database", "as_of"] {
+        require_linked_system_member(SystemMember::HistoricalView("sys.database"), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17042,6 +16698,7 @@ fn infer_descriptor_system_path(
         });
     }
     if let Some(singleton) = api.historical_singleton(path) {
+        require_linked_system_member(SystemMember::HistoricalView(&singleton.name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: function(
                 vec![Type::Named("sys.SnapshotRef".into())],
@@ -17056,12 +16713,14 @@ fn infer_descriptor_system_path(
             .find(|function| descriptor_function_is_staticly_supported(function))
     }) && let Some(ty) = descriptor_function_type(function)
     {
+        require_linked_system_member(SystemMember::Callable(&function.label), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty,
             effects: descriptor_effects(function.effect),
         });
     }
     if let Some(relation) = api.relation(&name) {
+        require_linked_system_member(SystemMember::Relation(&name), scope);
         return DescriptorPathInference::Resolved(Inferred {
             ty: Type::Relation(Box::new(Type::Named(relation.name.clone()))),
             effects: descriptor_effects(system_api::SystemEffect::Read),
@@ -17074,10 +16733,15 @@ fn infer_descriptor_system_path(
         });
     }
     match api.resolve(path) {
-        PathResolution::ReadOnly(ty) => DescriptorPathInference::Resolved(Inferred {
-            ty: descriptor_type(ty),
-            effects: EffectSummary::default(),
-        }),
+        PathResolution::ReadOnly(ty) => {
+            if let Some(singleton) = api.singleton_view(path) {
+                require_linked_system_member(SystemMember::Singleton(singleton), scope);
+            }
+            DescriptorPathInference::Resolved(Inferred {
+                ty: descriptor_type(ty),
+                effects: EffectSummary::default(),
+            })
+        }
         PathResolution::Removed(removed) => {
             diagnostics.push(diag(
                 if removed.diagnostic == DIAG_LEGACY_SYS_RUNTIME {
@@ -17103,10 +16767,41 @@ fn infer_descriptor_system_path(
     }
 }
 
+/// Admission requires a linked production provider for every portable member
+/// a program uses. The member keeps its descriptor type and inference carries
+/// on unchanged; the record only feeds `report_unlinked_system_members`.
+fn require_linked_system_member(member: system_api::SystemMember<'_>, scope: &Scope) {
+    if let Some(record) = &scope.unlinked_system_members
+        && !system_api::embedded_system_api().provider_linked(member)
+    {
+        record
+            .borrow_mut()
+            .insert(format!("{member} has no provider linked in this implementation"));
+    }
+}
+
+/// Reports each member in an admission record that has no linked production
+/// provider once, as `sys.version.incompatible`. The program is rejected
+/// before evaluation can perform writes (ORNA-SYS-008) instead of failing
+/// mid-evaluation.
+pub(crate) fn report_unlinked_system_members(
+    record: &RefCell<BTreeSet<String>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    diagnostics.extend(
+        record
+            .take()
+            .into_iter()
+            .map(|message| diag(DIAG_SYS_VERSION_INCOMPATIBLE, message)),
+    );
+}
+
 fn descriptor_function_is_staticly_supported(function: &system_api::FunctionDescriptor) -> bool {
-    // Semantic admission can model every concrete portable signature and its
+    // Semantic admission can type every concrete portable signature and its
     // declared effect. Generic functions remain explicitly unsupported unless
     // a dedicated descriptor-driven admission path handles their type args.
+    // Typing is not execution: each selected overload must still pass
+    // `require_linked_system_member`.
     function.type_parameters.is_empty()
 }
 
@@ -17289,6 +16984,7 @@ fn infer_descriptor_system_call(
             effects,
         });
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     effects.join(&descriptor_effects(function.effect));
     let result = descriptor_call_type(&function.result, &function.type_parameters)
         .expect("supported descriptor functions have concrete types");
@@ -17358,6 +17054,7 @@ fn infer_invoke_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = invoke_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.invoke overload");
 
@@ -17564,6 +17261,7 @@ fn infer_start_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     let parameter = start_typed_descriptor(function)
         .expect("the selected descriptor is a typed sys.start overload");
 
@@ -17969,6 +17667,10 @@ fn infer_query_explain_system_call(
     let wants_query = query_shape && (query_named || is_query || generic_requested);
 
     if wants_query {
+        require_linked_system_member(
+            system_api::SystemMember::Callable(&query_descriptor.label),
+            scope,
+        );
         effects.join(&descriptor_effects(query_descriptor.effect));
         if query_value.is_some_and(|ty| matches!(ty, Type::Error)) {
             return Some(Inferred {
@@ -18060,6 +17762,10 @@ fn infer_query_explain_system_call(
                     && types_match(&descriptor_type(&function.parameters[0].ty), &values[0])
             })
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -18075,6 +17781,10 @@ fn infer_query_explain_system_call(
             })
             .find(|function| descriptor_arguments_match(function, arguments, &values))
         {
+            require_linked_system_member(
+                system_api::SystemMember::Callable(&function.label),
+                scope,
+            );
             effects.join(&descriptor_effects(function.effect));
             return Some(Inferred {
                 ty: descriptor_type(&function.result),
@@ -18141,6 +17851,7 @@ fn infer_meta_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if !valid_shape {
         diagnostics.push(diag(
             DIAG_TYPE,
@@ -18318,6 +18029,7 @@ fn infer_cancel_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -18477,6 +18189,7 @@ fn infer_await_system_call(
             effects,
         };
     };
+    require_linked_system_member(system_api::SystemMember::Callable(&function.label), scope);
     if values.iter().any(|value| matches!(value, Type::Error)) {
         return Inferred {
             ty: Type::Error,
@@ -18756,11 +18469,15 @@ fn descriptor_type(ty: &system_api::SystemType) -> Type {
     }
 }
 
-fn infer_system_path(path: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Option<Inferred> {
+fn infer_system_path(
+    path: &[&str],
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
     if path.first() != Some(&"sys") {
         return None;
     }
-    match infer_descriptor_system_path(path, diagnostics) {
+    match infer_descriptor_system_path(path, scope, diagnostics) {
         DescriptorPathInference::Resolved(inferred) => Some(inferred),
         DescriptorPathInference::Rejected => Some(Inferred {
             ty: Type::Error,
@@ -23389,19 +23106,27 @@ fn infer_historical_member(
 
     // The portable system surface is descriptor-backed rather than a source
     // ModuleHeader.  Project only relations explicitly present in api/sys.json
-    // and keep unknown historical system members unresolved.
-    if namespace == "sys"
-        && system_api::embedded_system_api()
-            .relation(&format!("sys.{name}"))
+    // and keep unknown historical system members unresolved. Reading one
+    // through a database snapshot is its historical view, which needs its own
+    // linked provider.
+    if namespace == "sys" {
+        let relation = format!("sys.{name}");
+        if system_api::embedded_system_api()
+            .relation(&relation)
             .is_some()
-    {
-        return Some(Inferred {
-            ty: historical_table_type(snapshot, &format!("sys.{name}")),
-            effects: EffectSummary {
-                effects: BTreeSet::from(["database read".into()]),
-                may_fail: true,
-            },
-        });
+        {
+            require_linked_system_member(
+                system_api::SystemMember::HistoricalView(&relation),
+                scope,
+            );
+            return Some(Inferred {
+                ty: historical_table_type(snapshot, &relation),
+                effects: EffectSummary {
+                    effects: BTreeSet::from(["database read".into()]),
+                    may_fail: true,
+                },
+            });
+        }
     }
 
     let module = scope.historical_modules.get(&Namespace(
@@ -26308,8 +26033,27 @@ mod tests {
     fn checked(inputs: &[ModuleInput]) -> Analysis {
         analyze(inputs)
     }
+    /// Analysis as an evaluating host admits it: against production providers.
+    fn admitted(inputs: &[ModuleInput]) -> Analysis {
+        analyze_with_providers(inputs, &Catalogue::empty(), SystemProviders::Production)
+    }
     fn has(analysis: &Analysis, code: &str) -> bool {
         analysis.diagnostics.iter().any(|d| d.code() == code)
+    }
+    /// Every diagnostic as `code: message`. Diagnostic `Debug` output is
+    /// redacted, so tests compare these texts instead.
+    fn diagnostic_texts(diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+            .collect()
+    }
+    /// The admission diagnostic for a portable member without a linked
+    /// production provider.
+    fn unlinked(member: &str) -> String {
+        format!(
+            "{DIAG_SYS_VERSION_INCOMPATIBLE}: {member} has no provider linked in this implementation"
+        )
     }
     #[test]
     fn boolean_case_is_exhaustive_only_with_unguarded_coverage() {
@@ -26678,6 +26422,18 @@ mod tests {
                 ),
             )]);
             assert!(valid.is_ok(), "{operation}: {:#?}", valid.diagnostics);
+            // The call types, but no production provider is linked for the
+            // failure administration callables (ORNA-SYS-008).
+            let admitted_call = admitted(&[ModuleInput::new(
+                "failure-cas.orna",
+                format!(
+                    "fn action(failure: sys.Failure) = sys.admin.{operation}(failure.reference, expected_version: failure.version, expected_status: sys.FailureStatus.{status});"
+                ),
+            )]);
+            assert_eq!(
+                diagnostic_texts(&admitted_call.diagnostics),
+                [unlinked(&format!("portable system callable `sys.admin.{operation}`"))],
+            );
 
             let missing_version = checked(&[ModuleInput::new(
                 "failure-cas.orna",
@@ -26691,6 +26447,129 @@ mod tests {
                 missing_version.diagnostics
             );
         }
+    }
+
+    #[test]
+    fn unlinked_sys_members_are_rejected_with_version_incompatible() {
+        for (source, member) in [
+            (
+                "pub fn info() = sys.rt.info();",
+                "portable system callable `sys.rt.info`",
+            ),
+            (
+                "pub fn head() = sys.snapshot(\"HEAD~1\");",
+                "portable system callable `sys.snapshot(Str)`",
+            ),
+            (
+                "pub fn metadata() = sys.meta(1);",
+                "portable system callable `sys.meta`",
+            ),
+            (
+                "pub fn plan(function: sys.FunctionRef) = sys.explain(function);",
+                "portable system callable `sys.explain(FunctionRef)`",
+            ),
+            ("pub fn plans() = sys.Plan;", "portable system relation `sys.Plan`"),
+            ("pub fn runs() = sys.Run;", "portable system relation `sys.Run`"),
+            (
+                "pub fn objects() = sys.storage.objects;",
+                "portable system relation `sys.storage.objects`",
+            ),
+            ("pub fn owner() = sys.rt.id;", "portable system singleton `sys.rt`"),
+            (
+                "pub fn published() = sys.Storage.as_of(HEAD);",
+                "historical view `sys.Storage.as_of`",
+            ),
+            (
+                "pub fn old() = sys.database.as_of(HEAD);",
+                "historical view `sys.database.as_of`",
+            ),
+        ] {
+            let declared = checked(&[ModuleInput::new("main.orna", source)]);
+            assert!(declared.is_ok(), "{source}: {:#?}", diagnostic_texts(&declared.diagnostics));
+            let analysis = admitted(&[ModuleInput::new("main.orna", source)]);
+            assert_eq!(
+                diagnostic_texts(&analysis.diagnostics),
+                [unlinked(member)],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_sys_members_are_admitted() {
+        let analysis = admitted(&[ModuleInput::new(
+            "linked.orna",
+            "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");
+            pub fn capture(): Blob = sys.blob.capture_file(\"data\", \"input.bin\", 1024);
+            pub fn pause(stream: sys.StreamRef): Bool = sys.admin.pause_stream(stream);
+            pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
+            pub fn storage() = sys.Storage;
+            pub fn maintenance() = sys.MaintenanceJob;
+            pub fn plan() = sys.Storage | sys.explain();",
+        )]);
+        assert!(
+            analysis.is_ok(),
+            "{:#?}",
+            diagnostic_texts(&analysis.diagnostics)
+        );
+    }
+
+    #[test]
+    fn each_unlinked_sys_member_is_reported_once_per_analysis() {
+        let analysis = admitted(&[
+            ModuleInput::new(
+                "a.orna",
+                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+            ),
+            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+        ]);
+        assert_eq!(
+            diagnostic_texts(&analysis.diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+    }
+
+    #[test]
+    fn provider_linkage_leaves_type_checking_unchanged() {
+        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let declared = diagnostic_texts(&checked(&source).diagnostics);
+        let mut production = diagnostic_texts(&admitted(&source).diagnostics);
+        assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
+        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        assert!(production.contains(&unlinked_member), "{production:#?}");
+        production.retain(|text| *text != unlinked_member);
+        assert_eq!(production, declared);
+    }
+
+    #[test]
+    fn repl_admission_rejects_unlinked_sys_members() {
+        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        assert!(rejected.is_ok());
+        let diagnostics = ReplContext::with_providers(SystemProviders::Production)
+            .stage(&rejected.value)
+            .expect_err("no production provider is linked for sys.rt.info");
+        assert_eq!(
+            diagnostic_texts(&diagnostics),
+            [unlinked("portable system callable `sys.rt.info`")]
+        );
+
+        assert!(ReplContext::empty().stage(&rejected.value).is_ok());
+        let project = admitted(&[ModuleInput::new("main.orna", "pub fn one(): Int = 1;")]);
+        assert!(
+            ReplContext::from_analysis(&project)
+                .unwrap()
+                .stage(&rejected.value)
+                .is_err(),
+            "a REPL built from a production analysis keeps its provider linkage"
+        );
+
+        let admitted_input = orna_syntax_v1::parse_repl("sys.Storage");
+        assert!(admitted_input.is_ok());
+        assert!(
+            ReplContext::with_providers(SystemProviders::Production)
+                .stage(&admitted_input.value)
+                .is_ok()
+        );
     }
 
     #[test]
