@@ -38,7 +38,7 @@ use orna_runtime_v1::{
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
-    StandardDependencyProfile, analyze_with_catalogue,
+    StandardDependencyProfile, SystemProviders, analyze_with_providers,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
@@ -156,7 +156,7 @@ impl SemanticAdapter {
                 ModuleInput::new(logical_path, unit.source.clone())
             })
             .collect::<Vec<_>>();
-        analyze_with_catalogue(&inputs, &self.catalogue)
+        analyze_with_providers(&inputs, &self.catalogue, SystemProviders::Production)
     }
 
     fn analyze_units(
@@ -168,7 +168,7 @@ impl SemanticAdapter {
             .into_iter()
             .map(|unit| ModuleInput::new(unit.source_id, unit.source))
             .collect::<Vec<_>>();
-        let analysis = analyze_with_catalogue(&inputs, &self.catalogue);
+        let analysis = analyze_with_providers(&inputs, &self.catalogue, SystemProviders::DeclaredSurface);
         select_diagnostic(analysis.diagnostics, phase)
     }
 
@@ -6262,9 +6262,10 @@ fn admit_transaction_source_inner(
     // The single-source seam admits one standalone program, so it is the root
     // module: its tables keep bare identities, matching the keys below and
     // the assertion dependencies semantic analysis plans for them.
-    let analysis = analyze_with_catalogue(
+    let analysis = analyze_with_providers(
         &[ModuleInput::new("main.orna", unit.source.clone())],
         &Catalogue::authoritative_fixture(),
+        SystemProviders::Production,
     );
     if let Some(summary) = analysis
         .modules
@@ -6372,7 +6373,7 @@ fn admit_transaction_project(
         .iter()
         .filter(|unit| !is_standard_source(unit))
         .collect::<Vec<_>>();
-    let analysis = analyze_with_catalogue(
+    let analysis = analyze_with_providers(
         &application_modules
             .iter()
             .map(|unit| {
@@ -6386,6 +6387,7 @@ fn admit_transaction_project(
             })
             .collect::<Vec<_>>(),
         &catalogue,
+        SystemProviders::Production,
     );
     if let Some(diagnostic) = analysis.diagnostics.first() {
         return Err(Box::new(StageOutcome::Failed(
