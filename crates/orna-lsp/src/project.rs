@@ -40,6 +40,10 @@ impl Project {
         &self.root
     }
 
+    pub(crate) fn repository(&self) -> &Repository {
+        &self.repository
+    }
+
     /// The file URI of one module of this project.
     pub(crate) fn module_uri(&self, logical_path: &str) -> Option<Uri> {
         path_uri(&self.root.join(logical_path))

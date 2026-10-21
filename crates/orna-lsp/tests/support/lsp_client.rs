@@ -192,6 +192,30 @@ pub fn range_of(source: &str, needle: &str) -> Value {
     json!({"start":position_at(source, start),"end":position_at(source, start + needle.len())})
 }
 
+/// The byte offset of an LSP position (UTF-16 columns) in `source`.
+pub fn byte_at(source: &str, position: &Value) -> usize {
+    let line = position["line"].as_u64().unwrap() as usize;
+    let character = position["character"].as_u64().unwrap() as usize;
+    let line_start = source
+        .split_inclusive('\n')
+        .take(line)
+        .map(str::len)
+        .sum::<usize>();
+    let mut units = 0;
+    for (offset, ch) in source[line_start..].char_indices() {
+        if units >= character || ch == '\n' {
+            return line_start + offset;
+        }
+        units += ch.len_utf16();
+    }
+    source.len()
+}
+
+/// The text an LSP range covers in `source`.
+pub fn text_at<'a>(source: &'a str, range: &Value) -> &'a str {
+    &source[byte_at(source, &range["start"])..byte_at(source, &range["end"])]
+}
+
 /// An Orna project in a temporary Git worktree, initialised by the same
 /// library call `orna init` makes.
 pub struct Project {

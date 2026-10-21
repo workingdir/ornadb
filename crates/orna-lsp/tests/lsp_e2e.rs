@@ -180,6 +180,12 @@ fn initialize(client: &mut Client) {
     );
     assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
     assert_eq!(result["capabilities"]["textDocumentSync"]["change"], 2);
+    assert_eq!(result["serverInfo"]["name"], "orna-lsp", "{result}");
+    assert_eq!(
+        result["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{result}"
+    );
     assert_eq!(result["capabilities"]["hoverProvider"], true);
     assert_eq!(
         result["capabilities"]["documentHighlightProvider"], true,
@@ -228,11 +234,12 @@ fn initialize(client: &mut Client) {
             .iter()
             .any(|token_type| token_type == "parameter")
     );
-    assert!(
-        token_types
-            .iter()
-            .any(|token_type| token_type == "function")
-    );
+    for token_type in ["function", "namespace", "enumMember", "property", "interface"] {
+        assert!(
+            token_types.iter().any(|advertised| advertised == token_type),
+            "missing semantic token type {token_type}: {token_types:?}"
+        );
+    }
     let modifiers = result["capabilities"]["semanticTokensProvider"]["legend"]["tokenModifiers"]
         .as_array()
         .unwrap();
@@ -241,7 +248,7 @@ fn initialize(client: &mut Client) {
             .iter()
             .map(|modifier| modifier.as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["declaration", "readonly", "modification"]
+        ["declaration", "readonly", "modification", "defaultLibrary"]
     );
     assert_eq!(
         result["capabilities"]["inlayHintProvider"]["resolveProvider"],

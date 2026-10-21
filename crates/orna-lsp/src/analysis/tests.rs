@@ -1,11 +1,14 @@
-use lsp_types::CompletionItemKind;
+use std::sync::Arc;
+
+use lsp_types::{CompletionItemKind, Diagnostic};
 use orna_syntax_v1::Keyword;
 
 use super::{
-    check_document, completion_at, declaration_symbols, definition, document_symbols, hover,
-    lsp_diagnostic_message, parse_document, references, signature_help,
+    completion_at, declaration_symbols, definition, document_symbols, hover,
+    lsp_diagnostic_message, references, signature_help, syntax_diagnostics,
 };
 use crate::documents::{Document, PositionMapper};
+use crate::workspace::{FileAnalysis, Workspace};
 
 const LEXICAL_SOURCE: &str = include_str!("../../tests/fixtures/lexical-v1.orna");
 const EXPRESSIONS_SOURCE: &str = include_str!("../../tests/fixtures/expressions-v1.orna");
@@ -22,6 +25,21 @@ fn document(text: &str) -> Document {
     )
 }
 
+/// One detached document; its module is 0.
+fn workspace(text: &str) -> Workspace {
+    Workspace::detached(vec![Arc::new(FileAnalysis::new(document(text)))])
+}
+
+fn check(text: &str) -> Vec<Diagnostic> {
+    let document = document(text);
+    let mapper = PositionMapper::new(&document.text);
+    syntax_diagnostics(
+        &document.uri,
+        &orna_syntax_v1::parse_module(&document.text),
+        &mapper,
+    )
+}
+
 #[test]
 fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
     for source in [LEXICAL_SOURCE, EXPRESSIONS_SOURCE, CALL_SOURCE] {
@@ -32,8 +50,7 @@ fn in_crate_fixtures_parse_with_the_frozen_1_0_frontend() {
 
 #[test]
 fn nested_document_symbol_model_keeps_enum_variants_and_payload_fields() {
-    let document = document(DOCUMENT_SYMBOLS_SOURCE);
-    let parse = parse_document(&document);
+    let parse = orna_syntax_v1::parse_module(DOCUMENT_SYMBOLS_SOURCE);
     assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
     let orna_syntax_v1::Declaration::Enum { variants, .. } = &parse.value.items[0].declaration
     else {
@@ -49,7 +66,7 @@ fn nested_document_symbol_model_keeps_enum_variants_and_payload_fields() {
     );
     assert_eq!(variants[0].fields[0].name, "value");
     assert_eq!(variants[1].fields[0].name, "reason");
-    let symbols = declaration_symbols(&parse, &document.text);
+    let symbols = declaration_symbols(&parse, DOCUMENT_SYMBOLS_SOURCE);
     assert_eq!(symbols[0].name, "Outcome");
     assert_eq!(
         symbols[0]
@@ -84,14 +101,15 @@ fn keyword_completion_vocabulary_matches_lex_007_exactly() {
 
 #[test]
 fn model_drives_function_completions_hover_signature_navigation_and_rename_ranges() {
-    let document = document(EXPRESSIONS_SOURCE);
-    let parse = parse_document(&document);
-    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let mapper = PositionMapper::new(&document.text);
-    let symbols = document_symbols(&parse, &document.text, &mapper);
+    let workspace = workspace(EXPRESSIONS_SOURCE);
+    let file = workspace.file(0);
+    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    let text = file.text();
+    let mapper = PositionMapper::new(text);
+    let symbols = document_symbols(&file.symbols, &mapper);
     assert!(symbols.iter().any(|symbol| symbol.name == "add"));
 
-    let completions = completion_at(&parse, &document.text, None, None);
+    let completions = completion_at(&workspace, 0, None, None);
     let add = completions
         .iter()
         .find(|item| item.label == "add")
@@ -107,19 +125,17 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
         Some("add(${1:left}, ${2:right})")
     );
 
-    let call_start = document.text.find("add(value, 2)").unwrap();
+    let call_start = text.find("add(value, 2)").unwrap();
     let call_name_byte = call_start + 1;
-    let call_position = mapper.position(call_name_byte);
-    let definition =
-        definition(&document, &parse, call_position, &mapper).expect("go to definition");
+    let definition = definition(&workspace, 0, call_name_byte).expect("go to definition");
     assert_eq!(
         mapper.byte_offset(definition.range.start),
-        document.text.find("add").unwrap()
+        text.find("add").unwrap()
     );
-    let refs = references(&document, &parse, call_position, &mapper, true);
+    let refs = references(&workspace, 0, call_name_byte, true);
     assert_eq!(refs.len(), 2, "declaration and call reference");
 
-    let hover_card = hover(&document, &parse, call_position, &mapper).expect("function hover");
+    let hover_card = hover(&workspace, 0, call_name_byte).expect("function hover");
     let hover_text = match hover_card.contents {
         lsp_types::HoverContents::Markup(content) => content.value,
         _ => panic!("expected markdown hover"),
@@ -127,9 +143,8 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
     assert!(hover_text.contains("Add two integer values."));
     assert!(hover_text.contains("fn add(left: Int, right: Int): Int"));
 
-    let parameter_position = mapper.position(document.text.find("left: Int").unwrap() + 1);
-    let parameter_hover =
-        hover(&document, &parse, parameter_position, &mapper).expect("parameter hover");
+    let parameter_byte = text.find("left: Int").unwrap() + 1;
+    let parameter_hover = hover(&workspace, 0, parameter_byte).expect("parameter hover");
     let parameter_hover = match parameter_hover.contents {
         lsp_types::HoverContents::Markup(content) => content.value,
         _ => panic!("expected markdown parameter hover"),
@@ -137,9 +152,8 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
     assert!(parameter_hover.contains("**parameter** `left`"));
     assert!(parameter_hover.contains("left: Int"));
 
-    let argument_cursor = document.text.find("add(value, 2)").unwrap() + "add(value, ".len();
-    let signature = signature_help(&document, &parse, mapper.position(argument_cursor), &mapper)
-        .expect("signature help");
+    let argument_cursor = text.find("add(value, 2)").unwrap() + "add(value, ".len();
+    let signature = signature_help(&workspace, 0, argument_cursor).expect("signature help");
     assert_eq!(signature.active_parameter, Some(1));
     assert!(
         signature.signatures[0]
@@ -150,13 +164,13 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
 
 #[test]
 fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
-    let document = document(STANDARD_MATH_SOURCE);
-    let parse = parse_document(&document);
-    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let mapper = PositionMapper::new(&document.text);
+    let workspace = workspace(STANDARD_MATH_SOURCE);
+    let file = workspace.file(0);
+    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    let text = file.text();
 
-    let import_offset = document.text.find("increment};").unwrap() + "inc".len();
-    let import_completions = completion_at(&parse, &document.text, Some(import_offset), None);
+    let import_offset = text.find("increment};").unwrap() + "inc".len();
+    let import_completions = completion_at(&workspace, 0, Some(import_offset), None);
     let increment = import_completions
         .iter()
         .find(|item| item.label == "increment")
@@ -181,19 +195,13 @@ fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
             })
     );
 
-    let qualified_offset =
-        document.text.find("std.math.increment(value)").unwrap() + "std.math.inc".len();
-    let qualified_completions = completion_at(&parse, &document.text, Some(qualified_offset), None);
+    let qualified_offset = text.find("std.math.increment(value)").unwrap() + "std.math.inc".len();
+    let qualified_completions = completion_at(&workspace, 0, Some(qualified_offset), None);
     assert!(qualified_completions.iter().any(|item| {
         item.label == "increment" && item.insert_text.as_deref() == Some("increment(${1:value})")
     }));
-    let qualified_hover = hover(
-        &document,
-        &parse,
-        mapper.position(qualified_offset - 1),
-        &mapper,
-    )
-    .expect("qualified standard export hover");
+    let qualified_hover =
+        hover(&workspace, 0, qualified_offset - 1).expect("qualified standard export hover");
     let lsp_types::HoverContents::Markup(qualified_hover) = qualified_hover.contents else {
         panic!("expected standard-library markdown hover")
     };
@@ -204,16 +212,16 @@ fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
     );
     assert!(qualified_hover.value.contains("exact successor"));
 
-    let imported_offset = document.text.find("increment(value)").unwrap() + 1;
-    let imported_hover = hover(&document, &parse, mapper.position(imported_offset), &mapper)
-        .expect("imported standard export hover");
+    let imported_offset = text.find("increment(value)").unwrap() + 1;
+    let imported_hover =
+        hover(&workspace, 0, imported_offset).expect("imported standard export hover");
     let lsp_types::HoverContents::Markup(imported_hover) = imported_hover.contents else {
         panic!("expected standard-library markdown hover")
     };
     assert!(imported_hover.value.contains("exact successor"));
 
-    let module_offset = document.text.find("std.math.increment").unwrap() + "std.ma".len();
-    let module_completions = completion_at(&parse, &document.text, Some(module_offset), None);
+    let module_offset = text.find("std.math.increment").unwrap() + "std.ma".len();
+    let module_completions = completion_at(&workspace, 0, Some(module_offset), None);
     assert!(
         module_completions
             .iter()
@@ -223,9 +231,9 @@ fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
 
 #[test]
 fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
-    let invalid = document("pub fn broken(value: Int): Int = value + ;");
-    let mapper = PositionMapper::new(&invalid.text);
-    let diagnostics = check_document(&invalid, &mapper);
+    let invalid = "pub fn broken(value: Int): Int = value + ;";
+    let mapper = PositionMapper::new(invalid);
+    let diagnostics = check(invalid);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].source.as_deref(), Some("orna"));
     assert_eq!(
@@ -237,12 +245,10 @@ fn diagnostics_are_exact_parser_errors_and_legacy_create_is_not_accepted() {
         diagnostics[0].data.as_ref().unwrap()["title"].as_str(),
         Some(diagnostics[0].message.as_str())
     );
-    let semicolon = invalid.text.find(';').unwrap();
+    let semicolon = invalid.find(';').unwrap();
     assert_eq!(mapper.byte_offset(diagnostics[0].range.start), semicolon);
 
-    let legacy = document("CREATE SCHEMA app;");
-    let mapper = PositionMapper::new(&legacy.text);
-    let diagnostics = check_document(&legacy, &mapper);
+    let diagnostics = check("CREATE SCHEMA app;");
     assert!(
         !diagnostics.is_empty(),
         "legacy SQL syntax must be rejected"
@@ -272,72 +278,50 @@ fn diagnostic_help_and_notes_are_visible_in_the_lsp_message() {
 
 #[test]
 fn local_definitions_and_references_respect_shadowing_scopes() {
-    let document = document(LOCAL_SCOPES_SOURCE);
-    let parse = parse_document(&document);
-    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let mapper = PositionMapper::new(&document.text);
+    let workspace = workspace(LOCAL_SCOPES_SOURCE);
+    let file = workspace.file(0);
+    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    let text = file.text();
+    let mapper = PositionMapper::new(text);
 
-    let parameter = document.text.find("shadow(input").unwrap() + "shadow(".len();
-    let outer_use =
-        document.text.find("let copied: Int = input").unwrap() + "let copied: Int = ".len();
+    let parameter = text.find("shadow(input").unwrap() + "shadow(".len();
+    let outer_use = text.find("let copied: Int = input").unwrap() + "let copied: Int = ".len();
     let parameter_definition =
-        definition(&document, &parse, mapper.position(outer_use + 1), &mapper)
-            .expect("outer parameter definition");
+        definition(&workspace, 0, outer_use + 1).expect("outer parameter definition");
     assert_eq!(
         mapper.byte_offset(parameter_definition.range.start),
         parameter
     );
     assert_eq!(
-        references(
-            &document,
-            &parse,
-            mapper.position(outer_use + 1),
-            &mapper,
-            true
-        )
-        .len(),
+        references(&workspace, 0, outer_use + 1, true).len(),
         4,
         "parameter declaration, condition, initializer, and shadow initializer"
     );
 
-    let inner_declaration = document.text.find("let input").unwrap() + "let ".len();
-    let inner_use = document.text.rfind("input\n").unwrap();
-    let inner_definition = definition(&document, &parse, mapper.position(inner_use + 1), &mapper)
-        .expect("inner local definition");
+    let inner_declaration = text.find("let input").unwrap() + "let ".len();
+    let inner_use = text.rfind("input\n").unwrap();
+    let inner_definition =
+        definition(&workspace, 0, inner_use + 1).expect("inner local definition");
     assert_eq!(
         mapper.byte_offset(inner_definition.range.start),
         inner_declaration
     );
     assert_eq!(
-        references(
-            &document,
-            &parse,
-            mapper.position(inner_use + 1),
-            &mapper,
-            true
-        )
-        .len(),
+        references(&workspace, 0, inner_use + 1, true).len(),
         2,
         "inner local declaration and use"
     );
 
-    let copied_declaration = document.text.find("copied:").unwrap();
-    let copied_use = document.text.rfind("copied\n").unwrap();
-    let copied_definition = definition(&document, &parse, mapper.position(copied_use + 1), &mapper)
-        .expect("local let definition");
+    let copied_declaration = text.find("copied:").unwrap();
+    let copied_use = text.rfind("copied\n").unwrap();
+    let copied_definition =
+        definition(&workspace, 0, copied_use + 1).expect("local let definition");
     assert_eq!(
         mapper.byte_offset(copied_definition.range.start),
         copied_declaration
     );
     assert_eq!(
-        references(
-            &document,
-            &parse,
-            mapper.position(copied_use + 1),
-            &mapper,
-            true
-        )
-        .len(),
+        references(&workspace, 0, copied_use + 1, true).len(),
         2,
         "local declaration and use"
     );
@@ -347,25 +331,17 @@ fn local_definitions_and_references_respect_shadowing_scopes() {
         ("for item", "for ".len(), "item }", 2),
         ("value =>", 0, "value + value", 3),
     ] {
-        let declaration_start = document.text.find(declaration_text).unwrap() + declaration_offset;
-        let use_start = document.text.rfind(use_text).unwrap();
+        let declaration_start = text.find(declaration_text).unwrap() + declaration_offset;
+        let use_start = text.rfind(use_text).unwrap();
         let selected_definition =
-            definition(&document, &parse, mapper.position(use_start + 1), &mapper)
-                .expect("scoped binding definition");
+            definition(&workspace, 0, use_start + 1).expect("scoped binding definition");
         assert_eq!(
             mapper.byte_offset(selected_definition.range.start),
             declaration_start,
             "declaration for {declaration_text}"
         );
         assert_eq!(
-            references(
-                &document,
-                &parse,
-                mapper.position(use_start + 1),
-                &mapper,
-                true
-            )
-            .len(),
+            references(&workspace, 0, use_start + 1, true).len(),
             expected_references,
             "references for {declaration_text}"
         );
@@ -376,16 +352,13 @@ const KEYWORD_COVERAGE_SOURCE: &str = include_str!("../../tests/fixtures/keyword
 
 #[test]
 fn every_lex_007_keyword_hovers_from_the_lexer_table() {
-    let document = document(KEYWORD_COVERAGE_SOURCE);
-    let parse = parse_document(&document);
-    let mapper = PositionMapper::new(&document.text);
+    let workspace = workspace(KEYWORD_COVERAGE_SOURCE);
     let mut hovered = Vec::new();
-    for token in orna_syntax_v1::lex(&document.text).expect("keyword fixture lexes") {
+    for token in orna_syntax_v1::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
         let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
             continue;
         };
-        let position = mapper.position(token.span.start);
-        let card = hover(&document, &parse, position, &mapper).expect("keyword hover");
+        let card = hover(&workspace, 0, token.span.start).expect("keyword hover");
         let text = match card.contents {
             lsp_types::HoverContents::Markup(content) => content.value,
             _ => panic!("expected markdown hover"),
@@ -402,12 +375,10 @@ fn every_lex_007_keyword_hovers_from_the_lexer_table() {
 
 #[test]
 fn keyword_completion_documentation_matches_the_keyword_hover_card() {
-    let document = document(KEYWORD_COVERAGE_SOURCE);
-    let parse = parse_document(&document);
-    let mapper = PositionMapper::new(&document.text);
-    let completions = completion_at(&parse, &document.text, None, None);
+    let workspace = workspace(KEYWORD_COVERAGE_SOURCE);
+    let completions = completion_at(&workspace, 0, None, None);
     let mut checked = Vec::new();
-    for token in orna_syntax_v1::lex(&document.text).expect("keyword fixture lexes") {
+    for token in orna_syntax_v1::lex(KEYWORD_COVERAGE_SOURCE).expect("keyword fixture lexes") {
         let orna_syntax_v1::TokenKind::Keyword(keyword) = token.kind else {
             continue;
         };
@@ -423,8 +394,7 @@ fn keyword_completion_documentation_matches_the_keyword_hover_card() {
         };
         assert!(documentation.contains("ORNA-LEX-007"), "{documentation}");
 
-        let card = hover(&document, &parse, mapper.position(token.span.start), &mapper)
-            .expect("keyword hover");
+        let card = hover(&workspace, 0, token.span.start).expect("keyword hover");
         let lsp_types::HoverContents::Markup(content) = card.contents else {
             panic!("expected markdown hover");
         };
@@ -443,16 +413,16 @@ const SIGNATURE_KEYWORD_ARGS_SOURCE: &str =
 
 #[test]
 fn signature_help_round_trips_through_a_reserved_word_argument() {
-    let document = document(SIGNATURE_KEYWORD_ARGS_SOURCE);
-    let parse = parse_document(&document);
-    assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
-    let mapper = PositionMapper::new(&document.text);
+    let workspace = workspace(SIGNATURE_KEYWORD_ARGS_SOURCE);
+    let file = workspace.file(0);
+    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    let text = file.text();
+    let mapper = PositionMapper::new(text);
 
-    let keyword_byte = document.text.find("true").unwrap();
-    let keyword_position = mapper.position(keyword_byte);
-    assert_eq!(mapper.byte_offset(keyword_position), keyword_byte);
-    let help = signature_help(&document, &parse, keyword_position, &mapper)
-        .expect("signature help inside the call");
+    let keyword_byte = text.find("true").unwrap();
+    assert_eq!(mapper.byte_offset(mapper.position(keyword_byte)), keyword_byte);
+    let help =
+        signature_help(&workspace, 0, keyword_byte).expect("signature help inside the call");
     assert_eq!(help.active_parameter, Some(0));
     assert!(
         help.signatures[0].label.contains("choose"),
@@ -460,9 +430,9 @@ fn signature_help_round_trips_through_a_reserved_word_argument() {
         help.signatures[0].label
     );
 
-    let literal_byte = document.text.find("2)").unwrap();
-    let literal_help = signature_help(&document, &parse, mapper.position(literal_byte), &mapper)
-        .expect("signature help on the second argument");
+    let literal_byte = text.find("2)").unwrap();
+    let literal_help =
+        signature_help(&workspace, 0, literal_byte).expect("signature help on the second argument");
     assert_eq!(literal_help.active_parameter, Some(1));
 }
 
@@ -471,12 +441,11 @@ const DIAGNOSTIC_KEYWORD_NAME_SOURCE: &str =
 
 #[test]
 fn reserved_word_declaration_name_reports_a_syntax_v1_error_anchor() {
-    let document = document(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = check_document(&document, &mapper);
+    let mapper = PositionMapper::new(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
+    let diagnostics = check(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
     assert!(!diagnostics.is_empty(), "a reserved word cannot name a declaration");
 
-    let keyword_start = document.text.find("in(").unwrap();
+    let keyword_start = DIAGNOSTIC_KEYWORD_NAME_SOURCE.find("in(").unwrap();
     let keyword_end = keyword_start + "in".len();
     for diagnostic in &diagnostics {
         assert_eq!(diagnostic.source.as_deref(), Some("orna"));
@@ -497,9 +466,7 @@ const DIAGNOSTIC_CLEAN_SOURCE: &str = include_str!("../../tests/fixtures/diagnos
 
 #[test]
 fn clean_syntax_v1_fixture_renders_an_empty_diagnostic_list() {
-    let document = document(DIAGNOSTIC_CLEAN_SOURCE);
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = check_document(&document, &mapper);
+    let diagnostics = check(DIAGNOSTIC_CLEAN_SOURCE);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(
         serde_json::to_value(&diagnostics).unwrap(),
@@ -512,9 +479,7 @@ const DIAGNOSTIC_SEVERITY_SOURCE: &str =
 
 #[test]
 fn every_syntax_v1_error_maps_to_an_error_severity_diagnostic() {
-    let document = document(DIAGNOSTIC_SEVERITY_SOURCE);
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = check_document(&document, &mapper);
+    let diagnostics = check(DIAGNOSTIC_SEVERITY_SOURCE);
     assert!(!diagnostics.is_empty(), "the fixture has a syntax error");
     for diagnostic in &diagnostics {
         assert_eq!(
@@ -531,11 +496,9 @@ const SIGNATURE_OVERLOADS_SOURCE: &str =
 
 #[test]
 fn signature_help_lists_every_same_name_declaration_as_a_signature() {
-    let document = document(SIGNATURE_OVERLOADS_SOURCE);
-    let parse = super::parse_document(&document);
-    let mapper = PositionMapper::new(&document.text);
+    let workspace = workspace(SIGNATURE_OVERLOADS_SOURCE);
     let argument_byte = SIGNATURE_OVERLOADS_SOURCE.find("scale(1, 2)").unwrap() + "scale(1, ".len();
-    let help = super::signature_help(&document, &parse, mapper.position(argument_byte), &mapper)
+    let help = signature_help(&workspace, 0, argument_byte)
         .expect("the overloaded call resolves to its declarations");
     let mut counts = help
         .signatures
