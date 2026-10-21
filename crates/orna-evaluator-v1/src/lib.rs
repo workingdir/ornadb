@@ -509,6 +509,28 @@ impl NominalDefinition {
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
 
+/// A closed `sys.<Enum>.<variant>` constant, unless a local binding shadows
+/// the `sys` root. Enum constants are pure values, so no host is consulted.
+fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, String)> {
+    let mut segments = Vec::new();
+    let mut current = expression;
+    loop {
+        match current {
+            Expr::Field { base, name, .. } => {
+                segments.push(name.as_str());
+                current = base;
+            }
+            Expr::Name { text, .. } if text == "sys" && !scope.0.contains_key("sys") => {
+                segments.push("sys");
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    orna_semantic_v1::system_enum_constant(&segments)
+}
+
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -4601,6 +4623,13 @@ impl Context<'_, '_> {
                 self.index(base, index)
             }
             Expr::Field { base, name, .. } => {
+                if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
+                    return Ok(Value::Enum {
+                        type_id: Raw::Text(enum_name),
+                        variant_id: Raw::Text(variant),
+                        payload: None,
+                    });
+                }
                 let base = self.evaluate(base, scope, depth + 1)?;
                 self.field_value(base, name, scope)
             }
