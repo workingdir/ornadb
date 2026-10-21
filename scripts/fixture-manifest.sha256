@@ -205,6 +205,7 @@ a3465472c8c2edfdb23899f9358b0fb02565316461834fb9eca94b1ee65dbc68  crates/orna-cl
 46568370695b7289cc89502256ffd5987d9dfddaf68bbba23bf9217200687d22  crates/orna-cli-v1/tests/fixtures/serve-no-autoload.orna
 74d2e177bff6a43976f8ef6684889c68b456b1e14b9870042d003c6d954756e1  crates/orna-cli-v1/tests/fixtures/status-hyperlinks/changed path.orna
 0675c7ebc9d6cae22e8874ef6698a5bad66261e7aef2984221f4a00a106fcbca  crates/orna-cli-v1/tests/fixtures/status-short.orna
+b14a2c65fc26e977c4f1b19bc860d7fdf44edb6a5dd48c68bb5a13ddac0d0301  crates/orna-cli-v1/tests/fixtures/sys-explain-run.orna
 a6a04981ac8dc35bd4181b6517021773b5b927c37f7dcac31fde0c1c891c717d  crates/orna-cli-v1/tests/fixtures/traceability-diff-trust-secret.orna
 cd626bdd714dc3c2e1c69489ec753104ee212a829b3494f1044cff3ba849737f  crates/orna-cli-v1/tests/fixtures/unwired-watch-expression.orna
 d2da0188f59784c3742fdf346d0449f3182d1d545487ea6e21abc57b012abcfa  crates/orna-cli-v1/tests/fixtures/watch-command-expressions.orna
