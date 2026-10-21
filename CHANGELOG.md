@@ -89,7 +89,10 @@ been published.
   digest, table-typed fields as stored references, and enum, nominal record,
   refined, transparent-alias and `Money` field types with their closed
   definitions. The identity manifest issues stable IDs for nominal types, enum
-  variants and their fields, and explicit type renames carry those IDs.
+  variants and their fields. Explicit type and variant renames passed to the
+  manifest reconciliation API carry those IDs; `orna mv` and LSP rename still
+  rename only tables and fields. A manifest that records these new identity
+  kinds cannot be read by older binaries, which reject unknown kinds.
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
