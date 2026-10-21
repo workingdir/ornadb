@@ -42,3 +42,16 @@ fn pipeline_stage_is_a_postfix_expression() {
         expression_is_accepted(source);
     }
 }
+
+// W27-03 (grammar: lambda is an expression-level production, not an operand):
+// a lambda may only begin a complete expression, never the right operand of an
+// infix operator.
+#[test]
+fn lambda_is_only_a_complete_expression() {
+    for source in ["1 + x => x", "a == (b) => b", "1 + (a) => a", "f(1 + x => x)"] {
+        expression_is_rejected(source);
+    }
+    for source in ["x => x + 1", "(a) => a", "f(x => x)"] {
+        expression_is_accepted(source);
+    }
+}
