@@ -31,7 +31,7 @@ pub fn deep_chain(flag: Bool): String {
                                                                                                                             true:
                                                                                                                                 case flag {
                                                                                                                                     true 0
-                                                                                                                                    Deep{items: [false, true], point: Point{x: false}} if flag: "deep recovered"
+                                                                                                                                    Geo.Deep{items: [false, true], point: Geo.Point{x: false}} if flag: "deep recovered"
                                                                                                                                     false: "deep fallback"
                                                                                                                                 }
                                                                                                                             false: "level 14 fallback"

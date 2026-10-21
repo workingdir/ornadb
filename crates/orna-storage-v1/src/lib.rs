@@ -1339,9 +1339,28 @@ impl RuntimePublicationCoordinator {
             .read_publication_journal()
             .map_err(map_publication_repository_error)?
         else {
-            return Ok(None);
+            // Without a journal, an Orna-marked lock may still have been left
+            // before Prepared; the repository reclaims it before reporting none.
+            return repository
+                .recover_publication()
+                .map_err(map_publication_repository_error);
         };
         refuse_retired_writer_journal(repository, &journal)?;
+        if repository
+            .publication_journal_is_reviewed(&journal)
+            .map_err(map_publication_repository_error)?
+        {
+            // A reviewed commit is completed by `commit_reviewed_candidate`,
+            // which records its runtime intent with `mark_runtime_complete`.
+            // It never had a runtime freeze, so none is requested here.
+            return match repository.recover_publication() {
+                Ok(index) => Ok(index),
+                Err(RepositoryError::PublicationPending | RepositoryError::RuntimeCompletionRequired) => {
+                    Err(Error::PublicationPending)
+                }
+                Err(error) => Err(map_publication_repository_error(error)),
+            };
+        }
         let intent_id = journal
             .runtime_intent_id()
             .ok_or(Error::InvalidTransition)?;
@@ -1570,6 +1589,17 @@ mod tests {
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
+    /// Coordinator fixtures publish through the format-probing path, which
+    /// requires tracked format metadata; a legacy format 2 record declares it.
+    fn legacy_coordinator_repository() -> (TempDir, Repository) {
+        let (temp, repository) = repository();
+        fs::create_dir(temp.path().join(".orna")).unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "format 2\n").unwrap();
+        git(temp.path(), &["add", ".orna/format.orna"]);
+        git(temp.path(), &["commit", "-m", "legacy format metadata"]);
         (temp, repository)
     }
 
