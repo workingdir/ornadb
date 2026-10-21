@@ -15,6 +15,47 @@ been published.
   exclusively, moves without overwrite never replace a destination, and
   listings omit `.git`. Platforms other than Linux refuse these operations as
   unavailable.
+- The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
+  active calls: function, closure and callback bodies. Expression nesting inside
+  one body no longer consumes it, so recursion depth no longer shrinks as bodies
+  nest deeper. The parser bounds expression nesting. Pattern and decoded-value
+  nesting are checked from their own roots against the same limit. Exceeding
+  any of these fails with `ORNA-EVAL-LIMIT` and never returns a partial result
+  (ORNA-CLOSURE-004).
+- An assignment inside a `case` arm now replaces the enclosing `let` slot, as
+  assignments inside blocks and loops already did (ORNA-CFLOW-005). Names bound
+  by the arm pattern stay local to the arm.
+- Counting an in-memory list costs one evaluator step instead of one step per
+  element. A plain `=` assignment no longer copies the value it replaces.
+  Callback calls no longer copy the callee's syntax tree. Block, loop and `case`
+  write-back moves values instead of copying them.
+- Evaluator list values share their elements between copies. Appending to the
+  newest list reuses spare capacity, so building a list one element at a time
+  costs amortised constant work per element instead of copying the whole list
+  each time. `union` and `__list_concat` charge steps only for the elements
+  they actually write.
+- Ordered comparisons (`<`, `<=`, `>`, `>=`) between two Decimals evaluate
+  exactly across scales (ORNA-COMPARE-002). They previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Decimal `%` evaluates as the exact truncated remainder, matching Int `%`: the
+  result keeps the dividend's sign. It previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Exponent-only Decimal numerals such as `1e3`, `1E-2` and `2e-30` evaluate as
+  exact Decimals (ORNA-LIT-002). They previously failed with `ORNA-EVAL-VALUE`.
+- Relation scans charge each streamed row to the step budget. Only values that a
+  stage or terminal keeps (sort buffers, distinct sets, collected results) count
+  against `max_collection_items`. `count`, `exists`, `every`, filtered or
+  dropped counts, `sum`, `min` and `max` now work on relations larger than the
+  item budget. Sorting more rows than the budget still fails with
+  `ORNA-EVAL-LIMIT`.
+- `sort_by`, `rank` and relation sorts use a stable merge sort, with
+  O(n log n) comparisons that each cost one step, instead of an insertion sort.
+  The default evaluator step budget is now 200 steps per item plus 10,000
+  (419,600), down from 2,516,752. The pinned std helpers stay within it at the
+  2,048-item limit. A runaway loop such as `while true {}` now fails with
+  `ORNA-EVAL-LIMIT` six times sooner. Std bodies that are inherently quadratic,
+  such as the Orna `std.collection.distinct`, reach the limit at a few hundred
+  elements.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
@@ -94,6 +135,15 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- Format-3 table schemas encode defaulted fields and keys as stored or key
+  fields, computed fields as non-stored role-2 selectors with an expression
+  digest, table-typed fields as stored references, and enum, nominal record,
+  refined, transparent-alias and `Money` field types with their closed
+  definitions. The identity manifest issues stable IDs for nominal types, enum
+  variants and their fields. Explicit type and variant renames passed to the
+  manifest reconciliation API carry those IDs; `orna mv` and LSP rename still
+  rename only tables and fields. A manifest that records these new identity
+  kinds cannot be read by older binaries, which reject unknown kinds.
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
@@ -126,6 +176,15 @@ been published.
   installed before its journal stage. New candidate objects are flushed before
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
+
+- Semantic checking types `+ - * / % ^`, unary signs and compound
+  assignment through one operator table: Int, Decimal and Float never mix,
+  Money scales only by exact numbers in one currency, declared-unit
+  quantities follow dimension and affine algebra, and other operand pairs
+  report `E2001` (`E5001` for incompatible dimensions). Every reachable
+  `return`, including inside anonymous functions, is checked against the
+  declared result or joined into the inferred one. Blocks without a final
+  expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
 
 ## 1.0.0 — release inventory (publication pending)
 
