@@ -70,10 +70,17 @@ pub trait ExplainCatalogue: Send + Sync + Debug {
     /// Pins a relation source to the catalogue snapshot and its object.
     fn resolve_source(&self, source: &str) -> Option<(SnapshotRef, ObjectRef)>;
 
+    /// Whether the catalogue holds function object identities at all. Without
+    /// them no `sys.FunctionRef` can be described, so a function explain fails
+    /// with the unavailable coordinate `sys.version.incompatible`
+    /// (ORNA-SYS-008) instead of claiming the function is absent.
+    fn resolves_functions(&self) -> bool {
+        false
+    }
+
     /// Describes the function a `sys.FunctionRef` names at the reference's
     /// pinned snapshot, together with the function's direct statically known
-    /// dependencies. A catalogue without function object identities resolves
-    /// no function.
+    /// dependencies. Called only when [`Self::resolves_functions`] holds.
     fn describe_function(&self, _function: &FunctionRef) -> Option<FunctionPlanDescription> {
         None
     }
@@ -160,7 +167,9 @@ pub(crate) fn explain_query_plan(
 }
 
 /// Explains one function (`sys.explain(FunctionRef)`) through the function
-/// description the catalogue supplies for the reference.
+/// description the catalogue supplies for the reference. A reference to another
+/// relation is `sys.object.wrong_kind`; a catalogue that holds no function
+/// identities cannot describe any function, so the coordinate is unavailable.
 pub(crate) fn explain_function_plan(
     function: &CanonicalValue,
     catalogue: Option<&dyn ExplainCatalogue>,
@@ -173,6 +182,9 @@ pub(crate) fn explain_function_plan(
         .ok_or_else(|| failure(OBJECT_NOT_FOUND))?;
     if reference.table_id != SYS_FUNCTION_TABLE_ID {
         return Err(failure(OBJECT_WRONG_KIND));
+    }
+    if !catalogue.resolves_functions() {
+        return Err(failure(VERSION_INCOMPATIBLE));
     }
     let description = catalogue
         .describe_function(&TypedRowRef::from_row_ref(reference))

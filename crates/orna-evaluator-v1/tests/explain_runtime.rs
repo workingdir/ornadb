@@ -584,6 +584,10 @@ impl ExplainCatalogue for FunctionCatalogue {
         None
     }
 
+    fn resolves_functions(&self) -> bool {
+        true
+    }
+
     fn describe_function(&self, function: &FunctionRef) -> Option<FunctionPlanDescription> {
         (*function == self.function).then(report_function_description)
     }
@@ -634,11 +638,12 @@ fn explain_function_returns_catalogue_function_plan() {
     );
 }
 
-/// A function reference the catalogue does not hold is `sys.object.not_found`.
-/// The production activation catalogue holds no function object identity, so
-/// it resolves no function reference.
+/// A function reference a resolving catalogue does not hold is
+/// `sys.object.not_found`. The production activation catalogue holds no
+/// function object identity, so it cannot describe any function reference: the
+/// function coordinate is unavailable (`sys.version.incompatible`), not absent.
 #[test]
-fn explain_unresolved_function_is_object_not_found() {
+fn explain_unresolved_function_is_version_incompatible() {
     let mut effects = function_effects();
     let other = canonical_reference(function_ref(8).as_row_ref());
     assert_eq!(
@@ -659,7 +664,7 @@ fn explain_unresolved_function_is_object_not_found() {
         invoke_with_binding("sys.explain(target)", "target", target, &mut production)
             .expect_err("the activation catalogue resolves no function")
             .code(),
-        "sys.object.not_found"
+        "sys.version.incompatible"
     );
 }
 

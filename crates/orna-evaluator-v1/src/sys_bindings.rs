@@ -1393,6 +1393,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "sys.blob.source_denied",
+                "sys.blob.bounds",
                 "sys.blob.limit",
                 "sys.blob.source_changed",
             ]
@@ -1437,6 +1438,13 @@ mod tests {
                 .code(),
             "sys.blob.bounds"
         );
+        assert!(
+            operation
+                .failures
+                .iter()
+                .any(|failure| failure == "sys.blob.bounds"),
+            "capture_file must declare the negative-bound failure"
+        );
     }
 
     /// ORNA-INGEST-002 and ORNA-SYS-008: a host that lacks part of the capture
@@ -1465,6 +1473,22 @@ mod tests {
                 .code(),
             "sys.version.incompatible"
         );
+        // Each branch code the binding can emit must be in the portable
+        // operation's vocabulary. `sys.version.incompatible` is a global code
+        // that the portable table chains into every callable operation, so it
+        // is not declared per operation on the host side.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        for code in ["sys.blob.source_denied", "sys.version.incompatible"] {
+            assert!(
+                portable
+                    .failures
+                    .iter()
+                    .any(|declared| declared.as_str() == code),
+                "capture_file must declare `{code}`"
+            );
+        }
     }
 
     #[test]

@@ -122,6 +122,7 @@ const SPEC_FAILURES: &[(&str, &[&str])] = &[
         "sys.blob.capture_file",
         &[
             "sys.blob.source_denied",
+            "sys.blob.bounds",
             "sys.blob.limit",
             "sys.blob.source_changed",
         ],
