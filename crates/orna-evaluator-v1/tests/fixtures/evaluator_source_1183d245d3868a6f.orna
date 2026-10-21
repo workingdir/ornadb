@@ -1,1 +1,1 @@
-rows | std.collection.sum
+rows | sum

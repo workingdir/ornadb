@@ -1,1 +1,1 @@
-rows | std.collection.max()
+rows | max()
