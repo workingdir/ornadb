@@ -87,6 +87,12 @@ been published.
 - Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
   Instant, Decimal, enum, reference or tuple values store and order rows by
   logical key, and Int and UInt spellings of one integer are one key.
+- MIME and file-name code reads one MIME-1 registry pinned to the Orna 1.1.0
+  `profiles/media-1.json`. Octet-stream and unregistered media types accept any
+  safe suffix hint, and stored Blob annotations with quoted parameters or `_`
+  hints read back. `sys.blob.capture_file` now supplies the
+  `application/octet-stream` annotation with no suffix instead of guessing from
+  the file extension; declare the media type with `sys.blob.annotate`.
 
 - The parser no longer changes valid source silently: a comparison followed
   later by `> (` keeps all of its tokens; a braced control statement (`if`,
