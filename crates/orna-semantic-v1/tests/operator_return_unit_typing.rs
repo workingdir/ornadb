@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use orna_semantic_v1::{
-    Analysis, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_TYPE, DIAG_TYPE_MISMATCH, ModuleInput, Type,
-    analyze,
+    Analysis, DIAG_AFFINE_ADDITION, DIAG_FLOAT_MONEY, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_TYPE,
+    DIAG_TYPE_MISMATCH, ModuleInput, Type, analyze,
 };
 
 fn analysis(source: &str) -> Analysis {
@@ -91,6 +91,8 @@ pub fn shout(text: Str): Str {
 fn operators_reject_operand_types_outside_the_operator_table() {
     let analysis = analysis(
         r#"
+pub dim Energy;
+pub unit kWh : Energy base;
 pub fn strings(left: Str, right: Str) = left + right;
 pub fn booleans(left: Bool, right: Bool) = left + right;
 pub fn dates(left: Date, right: Date) = left + right;
@@ -132,7 +134,7 @@ pub fn energy_ago(at: Instant) = at - 5.kWh;
         (DIAG_TYPE_MISMATCH, "operator `-` is not defined for Str"),
         (
             DIAG_TYPE_MISMATCH,
-            "operator `-` is not defined for Instant and Int<kWh>",
+            "operator `-` is not defined for Instant and <type>",
         ),
     ];
     expected.sort_unstable();
@@ -208,7 +210,7 @@ pub fn converted(left: Money<GBP>, right: Money<EUR>) = left - right;
     assert_eq!(
         found[1],
         (
-            DIAG_TYPE,
+            DIAG_FLOAT_MONEY,
             "binary Float cannot enter an exact Money calculation implicitly"
         )
     );
@@ -330,11 +332,11 @@ pub fn absolute(left: Float<C>, right: Float<C>) = left + right;
     assert_eq!(
         found,
         vec![
+            (DIAG_INCOMPATIBLE_DIMENSIONS, "cannot add Length and Time"),
             (
-                DIAG_INCOMPATIBLE_DIMENSIONS,
-                "cannot add quantities with incompatible dimensions"
+                DIAG_AFFINE_ADDITION,
+                "cannot add two absolute affine temperatures"
             ),
-            (DIAG_TYPE, "cannot add two absolute affine temperatures"),
         ]
     );
 }
