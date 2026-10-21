@@ -134,6 +134,11 @@ been published.
 - `orna serve` serves at most 64 connections at once. The accept loop answers
   any further connection with 503 straight away, without reading its request.
 
+- `orna serve` bounds each HTTP request body and each response with one
+  deadline for the whole transfer, 15 s plus the time it takes at 64 KiB/s,
+  instead of bounding each blocked read or write. A peer that sends or reads a
+  few bytes at a time can no longer keep a connection busy.
+
 ## 1.0.0 — release inventory (publication pending)
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
