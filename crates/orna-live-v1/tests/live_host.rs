@@ -4289,6 +4289,205 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
     );
 }
 
+fn created_session(
+    transport: &mut LiveTransport,
+    authority: &mut Authority,
+    issuer: &mut Issuer,
+    deletion: &mut Delete,
+) -> String {
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(created.status, 201);
+    token(&created)
+}
+
+fn session_delete(session: u8, token: &str) -> WireRequest {
+    let mut request = wire("DELETE", &format!("/orna/session/{}", uuid(session)), "");
+    request
+        .headers
+        .push(("authorization".into(), format!("Bearer {token}")));
+    request
+}
+
+/// 30-protocol §Session creation and ownership (W20-04): 400 is for
+/// malformed requests. A session that has run application work is deleted
+/// through the child-aware route, which joins that work and answers 204.
+/// The child-free route cannot prove that the work has stopped, so it
+/// answers 503 (temporarily unavailable) rather than 400.
+#[test]
+fn deleting_a_session_that_ran_application_work_is_never_malformed() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let session_token = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1)).status,
+        101
+    );
+    let mut socket = WebSocketState::new([5; 16]);
+    let preparation = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .unwrap();
+    let WebSocketApplicationPreparation::Work(ticket) = preparation else {
+        panic!("the fixture-backed evaluation should be admitted as async work");
+    };
+    drop(ticket.reject(Error::UnsupportedOperation));
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 2)),
+        Ok(FrameOutcome::Closed)
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+
+    let refused = block_on(transport.handle(
+        session_delete(1, &session_token),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(refused.status, 503);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.unavailable","message":"request rejected"}"#
+    );
+    let mut children = transport.application_work_supervisor();
+    let deleted = block_on(transport.handle_with_children(
+        session_delete(1, &session_token),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+        &mut children,
+    ));
+    assert_eq!(deleted.status, 204);
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): DELETE needs the
+/// session's current token. A live session refuses any other token as
+/// unauthenticated (401) and stays deletable with its current token. 410 is
+/// left for sessions that have ended.
+#[test]
+fn deleting_a_live_session_with_another_token_is_unauthenticated() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let current = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    let wrong = "A".repeat(current.len());
+    assert_ne!(wrong, current);
+
+    let refused = block_on(transport.handle(
+        session_delete(1, &wrong),
+        1,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(refused.status, 401);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.unauthenticated","message":"request rejected"}"#
+    );
+    let deleted = block_on(transport.handle(
+        session_delete(1, &current),
+        2,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(deleted.status, 204);
+    let unknown = block_on(transport.handle(
+        session_delete(2, &current),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(unknown.status, 410);
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): a WebSocket upgrade
+/// from another origin is prohibited (403) even with the session's cookie,
+/// rather than reported as an expired session (410). The session is
+/// untouched, and its own origin can still upgrade.
+#[test]
+fn an_upgrade_from_another_origin_is_prohibited() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let credential = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    let mut foreign = websocket_upgrade(1, &credential);
+    foreign.headers[0].1 = "https://other.example".into();
+
+    let refused = transport
+        .begin_websocket_upgrade(&foreign, [5; 16], 1)
+        .unwrap_err();
+    assert_eq!(refused.status, 403);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.origin_denied","message":"request rejected"}"#
+    );
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [6; 16], 1)).status,
+        101
+    );
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): session requests
+/// are `application/json`. The media type matches in any case and may carry
+/// `charset=utf-8`; another media type, another charset or any other
+/// parameter is malformed.
+#[test]
+fn session_requests_accept_json_with_a_utf8_charset() {
+    for (content_type, status) in [
+        ("application/json; charset=utf-8", 201),
+        ("Application/JSON;charset=\"UTF-8\"", 201),
+        ("application/json; charset=iso-8859-1", 400),
+        ("application/json; profile=orna", 400),
+        ("text/json", 400),
+    ] {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut issuer = Issuer(1, None);
+        let mut authority = Authority;
+        let mut deletion = Delete(true);
+        let mut request = wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        );
+        request.headers.retain(|(name, _)| name != "content-type");
+        request
+            .headers
+            .push(("content-type".into(), content_type.into()));
+        let response =
+            block_on(transport.handle(request, 0, &mut authority, &mut issuer, &mut deletion));
+        assert_eq!(response.status, status, "{content_type}");
+    }
+}
+
 #[test]
 fn async_rejection_keeps_watch_correlation_after_session_resume() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
