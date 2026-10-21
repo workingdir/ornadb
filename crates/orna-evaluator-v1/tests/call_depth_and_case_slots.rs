@@ -54,12 +54,16 @@ fn functions(source: &str) -> Functions {
 }
 
 fn call(expression: &str, limits: Limits) -> Result<Value, String> {
+    call_in(RECURSIVE_MODULE, expression, limits)
+}
+
+fn call_in(module: &str, expression: &str, limits: Limits) -> Result<Value, String> {
     let parsed = orna_syntax_v1::parse_expression(expression);
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     evaluate_with_functions(
         &parsed.value,
         &Environment::new(),
-        &functions(RECURSIVE_MODULE),
+        &functions(module),
         limits,
     )
     .map_err(|error| error.code().to_owned())
@@ -136,7 +140,7 @@ fn closure_calls_count_against_the_call_budget() {
     );
 }
 
-const CASE_ARM_ASSIGNMENT: &str = "{
+const TALLY: &str = "fn tally(): Int {
     let total = 0;
     for item in [Some(1), null, Some(3)] {
         case item {
@@ -149,7 +153,7 @@ const CASE_ARM_ASSIGNMENT: &str = "{
     total
 }";
 
-const CASE_ARM_SHADOWING: &str = "{
+const SHADOWING: &str = "fn shadowing(): (Int, Int) {
     let value = 10;
     let seen = 0;
     case Some(4) {
@@ -161,7 +165,7 @@ const CASE_ARM_SHADOWING: &str = "{
     (value, seen)
 }";
 
-const GUARDED_CASE_ARM_ASSIGNMENT: &str = "{
+const GUARDED: &str = "fn guarded(): Int {
     let label = 0;
     case 5 {
         n if n > 10: {
@@ -174,19 +178,24 @@ const GUARDED_CASE_ARM_ASSIGNMENT: &str = "{
     label
 }";
 
+fn call_case(expression: &str) -> Result<Value, String> {
+    call_in(
+        &[TALLY, SHADOWING, GUARDED].join("\n"),
+        expression,
+        Limits::default(),
+    )
+}
+
 #[test]
 fn case_arm_assignment_replaces_the_enclosing_slot() {
-    assert_eq!(evaluate(CASE_ARM_ASSIGNMENT, Limits::default()), Ok(int(4)));
-    assert_eq!(
-        evaluate(GUARDED_CASE_ARM_ASSIGNMENT, Limits::default()),
-        Ok(int(2)),
-    );
+    assert_eq!(call_case("tally()"), Ok(int(4)));
+    assert_eq!(call_case("guarded()"), Ok(int(2)));
 }
 
 #[test]
 fn case_pattern_bindings_stay_local_to_their_arm() {
     assert_eq!(
-        evaluate(CASE_ARM_SHADOWING, Limits::default()).map(|value| value.raw().clone()),
+        call_case("shadowing()").map(|value| value.raw().clone()),
         Ok(Raw::Tag(
             60015,
             Box::new(Raw::Array(vec![Raw::Int(10.into()), Raw::Int(4.into())])),
@@ -199,7 +208,13 @@ fn admitted_session_keeps_case_arm_assignments() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         session
-            .submit(CASE_ARM_ASSIGNMENT)
+            .submit(TALLY)
+            .map_err(|error| error.code().to_owned()),
+        Ok(None)
+    );
+    assert_eq!(
+        session
+            .submit("tally()")
             .map_err(|error| error.code().to_owned()),
         Ok(Some(
             CanonicalValue::new(Raw::Int(4.into())).expect("integer is canonical")
