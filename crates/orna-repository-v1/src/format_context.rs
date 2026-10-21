@@ -37,11 +37,13 @@ const METADATA_DIRECTORY: &str = ".orna";
 const DATABASE_FILE: &str = "database.orna";
 const LEGACY_FORMAT_FILE: &str = "format.orna";
 pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
+const DATABASE_PATH: &str = ".orna/database.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
 /// The bound on the fixed `main.orna` schema root a format-3 snapshot admits.
 const MAX_SCHEMA_ROOT_BYTES: usize = 64 * 1024;
 /// The fixed position of the format-3 native store root inside a snapshot.
 pub(crate) const STORE_PATH: &str = ".orna/store";
+const MAX_METADATA_READ_BYTES: usize = FORMAT_CONTEXT_MAX_METADATA_BYTES * 2;
 
 /// Repository-format dispatch selected from tracked metadata.
 ///
