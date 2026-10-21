@@ -86,6 +86,39 @@ pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
 pub const DIAG_FIELD_TYPE: &str = "E2001";
 pub const DIAG_MISSING_FIELD: &str = "E2002";
 pub const DIAG_UNKNOWN_FIELD: &str = "E2003";
+pub const DIAG_ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
+/// Spec diagnostic codes (`33-diagnostics.md`) emitted directly at the rule
+/// that detects the violation; the message text never selects the code.
+pub const DIAG_RESERVED_SYS: &str = "E1008";
+pub const DIAG_RESERVED_STD: &str = "E1009";
+pub const DIAG_PRIMARY_KEY_IMMUTABLE: &str = "E3002";
+pub const DIAG_PRIMARY_KEY_FLOAT: &str = "E3003";
+pub const DIAG_PRIMARY_KEY_RANGE: &str = "E3010";
+pub const DIAG_COMPUTED_INSERT: &str = "E3010";
+pub const DIAG_COMPUTED_DIRECT_WRITE: &str = "E3011";
+pub const DIAG_COMPUTED_NONDETERMINISTIC: &str = "E3012";
+pub const DIAG_AUTOMATIC_KEY_REKEY: &str = "E3013";
+pub const DIAG_RELATION_EQUALITY_AMBIGUOUS: &str = "E4107";
+pub const DIAG_TIME_ENERGY_ADD: &str = "E5001";
+pub const DIAG_AFFINE_TEMPERATURE_ADD: &str = "E5002";
+pub const DIAG_ABSOLUTE_QUANTITY_SUM: &str = "E5003";
+pub const DIAG_CURRENCY_MISMATCH: &str = "E5003";
+pub const DIAG_MONEY_FROM_FLOAT: &str = "E5004";
+pub const DIAG_MONEY_BINARY_FLOAT: &str = "E5103";
+pub const DIAG_CALENDAR_BUCKET_ZONE: &str = "E6001";
+pub const DIAG_SYS_COMMIT_READ_ONLY: &str = "E7001";
+pub const DIAG_SECRET_DISPLAY: &str = "E7002";
+pub const DIAG_DISPLAY_READ_ONLY: &str = "E7201";
+pub const DIAG_CROSS_DATABASE_WRITE: &str = "E9001";
+pub const DIAG_AMBIGUOUS_DURABLE_CONSUMER: &str = "E9101";
+pub const DIAG_DURABLE_CONSUMER_SOURCE_ROOTS: &str = "E9102";
+pub const DIAG_CURRENCY_SYMBOL: &str = "ORNA091-E-CURRENCY-SYMBOL";
+pub const DIAG_CONVERSION_CHAIN: &str = "ORNA091-E-CONVERSION-CHAIN";
+pub const DIAG_SYS_ADMIN_METHOD: &str = "ORNA100-E-SYS-ADMIN-METHOD";
+pub const DIAG_SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
+pub const DIAG_TABLE_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_REQUIRED_FIELD: &str = "E2002";
+pub const DIAG_TABLE_UNKNOWN_FIELD: &str = "E2003";
 /// Published typecheck classification for an operand whose static type does
 /// not fit its operator (the spec's "expected X, found Y" type mismatch).
 pub const DIAG_TYPE_MISMATCH: &str = "E2001";
@@ -1906,7 +1939,7 @@ pub fn admit_row_unit_with_owner_fields(
         {
             result
                 .diagnostics
-                .push(diag(DIAG_TYPE, "project row omits a required stored field"));
+                .push(diag(DIAG_MISSING_REQUIRED_FIELD, "project row omits a required stored field"));
         }
     }
     result
@@ -4327,7 +4360,7 @@ fn check_item(
                     && name == "symbol"
                 {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_CURRENCY_SYMBOL,
                         "currency symbols belong to locale-aware formatting, not Currency identity",
                     ));
                 }
@@ -4352,9 +4385,9 @@ fn check_item(
             ..
         } => {
             if name == "std" {
-                diagnostics.push(diag(DIAG_TYPE, "`std` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_STD, "`std` is reserved"));
             } else if name == "sys" {
-                diagnostics.push(diag(DIAG_TYPE, "`sys` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_SYS, "`sys` is reserved"));
             }
             let mut key_names = BTreeSet::new();
             for key in keys {
@@ -4385,8 +4418,10 @@ fn check_item(
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
-                    diagnostics.push(diag(DIAG_TYPE, message));
+                if let Some((code, message)) =
+                    primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+                {
+                    diagnostics.push(diag(code, message));
                 }
             }
             // Keep the catalogue's key encoding types transparent through
@@ -4547,7 +4582,7 @@ fn check_item(
                             && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
                         {
                             diagnostics.push(diag(
-                                DIAG_TYPE,
+                                DIAG_COMPUTED_NONDETERMINISTIC,
                                 "computed field must be deterministic and row-local",
                             ));
                         }
@@ -5942,7 +5977,7 @@ fn validate_implementation_restrictions(
                 && implementation_has_write(implementation, scope) =>
         {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_DISPLAY_READ_ONLY,
                 "Display and Present implementations must be read-only",
             ));
         }
@@ -8601,7 +8636,7 @@ fn infer_node(
                 };
             }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
-                diagnostics.push(diag(DIAG_TYPE, message));
+                diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8626,7 +8661,7 @@ fn infer_node(
                 };
             }
             if name == "display" && contains_secret_value_type(&base.ty) {
-                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
+                diagnostics.push(diag(DIAG_SECRET_DISPLAY, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8827,7 +8862,7 @@ fn infer_node(
                 .is_some_and(|path| path == ["work", "Contact", "insert"])
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_CROSS_DATABASE_WRITE,
                     "cross-database writes are not atomic/supported",
                 ));
                 return Inferred {
@@ -8845,7 +8880,7 @@ fn infer_node(
                         && !consumers.insert(path.join("."))
                     {
                         diagnostics.push(diag(
-                            DIAG_TYPE,
+                            DIAG_AMBIGUOUS_DURABLE_CONSUMER,
                             "same durable source consumed twice without distinct consumer identity",
                         ));
                         break;
@@ -8858,7 +8893,7 @@ fn infer_node(
                 && elements.len() > 1
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_DURABLE_CONSUMER_SOURCE_ROOTS,
                     "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
                 ));
             }
@@ -8879,7 +8914,7 @@ fn infer_node(
             }
             if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_SYS_STORAGE_CALL,
                     "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
                 ));
                 return Inferred {
@@ -8888,7 +8923,7 @@ fn infer_node(
                 };
             }
             if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
-                diagnostics.push(diag(DIAG_TYPE, "sys.Commit is read-only"));
+                diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
                 return Inferred {
                     ty: Type::Error,
                     effects: EffectSummary::default(),
@@ -9225,7 +9260,7 @@ fn infer_node(
                 && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_RELATION_EQUALITY_AMBIGUOUS,
                     "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
                 ));
                 return Inferred {
@@ -9291,6 +9326,7 @@ fn infer_node(
                     && !types_match(&right.ty, &left.ty)
                 {
                     diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
                         "static types are incompatible",
                         &left.ty,
                         &right.ty,
@@ -9304,6 +9340,7 @@ fn infer_node(
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
                     diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
                         "static types are incompatible",
                         &left.ty,
                         &right.ty,
@@ -9582,7 +9619,7 @@ fn binary_arithmetic_type(
             || (is_money_rate(left) && is_binary_float(right))
         {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_MONEY_BINARY_FLOAT,
                 "binary Float cannot enter an exact Money calculation implicitly",
             ));
             return Type::Error;
@@ -9599,9 +9636,9 @@ fn binary_arithmetic_type(
         }
     }
     if op == "+"
-        && let Some(message) = incompatible_addition_message(left, right)
+        && let Some((code, message)) = incompatible_addition_message(left, right)
     {
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(diag(code, message));
         return Type::Error;
     }
     // Subtracting is adding the negation, so it needs the same conversion
@@ -9614,14 +9651,14 @@ fn binary_arithmetic_type(
         && !matches!(right_currency, Type::Error)
     {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_CURRENCY_MISMATCH,
             "cannot subtract different currencies without conversion",
         ));
         return Type::Error;
     }
     if op == "+" && left == right && is_absolute_affine_temperature(left) {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_AFFINE_TEMPERATURE_ADD,
             "cannot add two absolute affine temperatures",
         ));
         return Type::Error;
@@ -9705,7 +9742,7 @@ fn money_operator_type(
     };
     if binary_float(left) || binary_float(right) {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_MONEY_BINARY_FLOAT,
             "binary Float cannot enter an exact Money calculation implicitly",
         ));
         return Some(Type::Error);
@@ -9818,7 +9855,7 @@ fn quantity_sum_type(
     match (op, *affine, *right_affine) {
         ("+", true, true) => {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_AFFINE_TEMPERATURE_ADD,
                 "cannot add two absolute affine temperatures",
             ));
             Some(Type::Error)
@@ -13271,7 +13308,7 @@ fn infer_finite_list_numeric_aggregate(
     if !valid {
         if matches!(&rows, Type::List(element) if is_absolute_affine_temperature(element)) {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_ABSOLUTE_QUANTITY_SUM,
                 format!("cannot {operation} absolute affine quantities"),
             ));
         } else {
@@ -15767,18 +15804,27 @@ fn infer_success_pipeline(
             && arguments[1].name.as_deref() == Some("zone")
             && values[1] == Type::Named("std.TimeZone".into());
         let message = if !instant {
-            Some("bucket_by requires Instant values or rows with an Instant time field")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires Instant values or rows with an Instant time field",
+            ))
         } else if !positional_period || !(calendar || elapsed) {
-            Some("bucket_by requires an elapsed Duration or calendar-day period")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires an elapsed Duration or calendar-day period",
+            ))
         } else if calendar && arguments.len() == 1 {
-            Some("calendar bucketing of Instant requires a time zone")
+            Some((
+                DIAG_CALENDAR_BUCKET_ZONE,
+                "calendar bucketing of Instant requires a time zone",
+            ))
         } else if !(zone || elapsed && arguments.len() == 1) {
-            Some("bucket_by requires a named TimeZone argument")
+            Some((DIAG_TYPE, "bucket_by requires a named TimeZone argument"))
         } else {
             None
         };
-        if let Some(message) = message {
-            diagnostics.push(diag(DIAG_TYPE, message));
+        if let Some((code, message)) = message {
+            diagnostics.push(diag(code, message));
             return Inferred {
                 ty: Type::Error,
                 effects,
@@ -16322,7 +16368,7 @@ fn infer_affine_collection_aggregate(
         "mean" => Some(Type::Optional(Box::new(element.clone()))),
         "min" | "max" => Some(Type::Optional(Box::new(element.clone()))),
         "sum" => {
-            diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+            diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
             Some(Type::Error)
         }
         _ => None,
@@ -16340,7 +16386,7 @@ fn infer_relation_sum(
         return None;
     }
     if is_absolute_affine_temperature(element) {
-        diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+        diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
         return Some(Type::Error);
     }
     if is_sum_numeric(element) {
@@ -16602,7 +16648,7 @@ fn infer_table_operation(
     );
     if name == "rekey" && automatic_key {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_AUTOMATIC_KEY_REKEY,
             "an automatic-key table cannot be explicitly re-keyed",
         ));
     }
@@ -16680,7 +16726,7 @@ fn infer_table_operation(
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -16699,7 +16745,7 @@ fn infer_table_operation(
                                 && !supplied.contains_key(field)
                             {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -16713,7 +16759,11 @@ fn infer_table_operation(
                         for field in &schema.computed {
                             if supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    if insertion_like {
+                                        DIAG_COMPUTED_INSERT
+                                    } else {
+                                        DIAG_COMPUTED_DIRECT_WRITE
+                                    },
                                     if authoritative_contact {
                                         if insertion_like {
                                             format!(
@@ -16742,7 +16792,7 @@ fn infer_table_operation(
                     {
                         diagnostics
                             .push(diag(
-                                DIAG_TYPE,
+                                DIAG_PRIMARY_KEY_IMMUTABLE,
                                 if authoritative_contact {
                                     "primary keys are immutable through update"
                                 } else {
@@ -16818,7 +16868,7 @@ fn infer_table_row_input(
         for (name, actual) in actual {
             match fields.get(name) {
                 None => diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_TABLE_UNKNOWN_FIELD,
                     format!(
                         "table write contains an unknown field `{}`",
                         if diagnostic_identifier(name) {
@@ -16830,7 +16880,7 @@ fn infer_table_row_input(
                 )),
                 Some(expected) if !types_match(expected, actual) => {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_TABLE_FIELD_TYPE,
                         format!(
                             "table write field has an incompatible type: expected {}, found {}",
                             diagnostic_type_name(expected),
@@ -17021,20 +17071,21 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
-        let message = match (expected, actual) {
-            (Type::Named(expected), Type::Named(actual)) if expected != actual => {
-                "implicit conversion chains are not searched; name each conversion explicitly"
-            }
-            _ => "static types are incompatible",
+        let (code, message) = match (expected, actual) {
+            (Type::Named(expected), Type::Named(actual)) if expected != actual => (
+                DIAG_CONVERSION_CHAIN,
+                "implicit conversion chains are not searched; name each conversion explicitly",
+            ),
+            _ => (DIAG_TYPE, "static types are incompatible"),
         };
-        diagnostics.push(type_mismatch(message, expected, actual));
+        diagnostics.push(type_mismatch(code, message, expected, actual));
     }
 }
 
 /// A static type mismatch that names both types, so the person can see which
 /// side has which type. The message stays stable; the types ride in a note.
-fn type_mismatch(message: &str, expected: &Type, actual: &Type) -> Diagnostic {
-    diag(DIAG_TYPE, message).with_note(
+fn type_mismatch(code: &'static str, message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(code, message).with_note(
         SafeText::new(format!(
             "expected {}, found {}",
             type_label(expected),
@@ -24257,11 +24308,14 @@ fn infer_numeric_postfix(base: &Type, name: &str) -> Option<Type> {
     }
 }
 
-fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static str> {
+fn incompatible_addition_message(left: &Type, right: &Type) -> Option<(&'static str, &'static str)> {
     if let (Some(left), Some(right)) = (money_currency(left), money_currency(right))
         && left != right
     {
-        return Some("cannot add different currencies without conversion");
+        return Some((
+            DIAG_CURRENCY_MISMATCH,
+            "cannot add different currencies without conversion",
+        ));
     }
     let (Some(left), Some(right)) = (numeric_unit(left), numeric_unit(right)) else {
         return None;
@@ -24270,7 +24324,7 @@ fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static s
         return None;
     };
     (matches!((left, right), ("Time", "Energy") | ("Energy", "Time")))
-        .then_some("cannot add Time and Energy")
+        .then_some((DIAG_TIME_ENERGY_ADD, "cannot add Time and Energy"))
 }
 
 fn money_currency(ty: &Type) -> Option<&Type> {
@@ -24395,7 +24449,7 @@ fn infer_money_constructor_type(
     let value_is_float = is_binary_float(value);
     if value_is_float {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_MONEY_FROM_FLOAT,
             "Money cannot be constructed from an inexact Float without explicit rounding",
         ));
     }
@@ -24687,7 +24741,7 @@ fn infer_table_assertion(
             _ => None,
         };
         if let Some(message) = message {
-            diagnostics.push(diag(DIAG_ASSERTION, message));
+            diagnostics.push(diag(DIAG_ASSERTION_OWNER_PIPE, message));
             return Inferred {
                 ty: Type::Bool,
                 effects: EffectSummary::default(),
@@ -25357,34 +25411,41 @@ fn table_row_type(item: &Item) -> Type {
     Type::Record(fields)
 }
 
+/// Returns the spec diagnostic code and message for a primary-key type
+/// violation. Other primary-key rejections keep the generic type code.
 fn primary_key_type_error(
     ty: &Type,
     scope: &Scope,
     visiting_tables: &mut BTreeSet<String>,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'static str)> {
     let resolved = resolve_type_aliases(ty, &scope.type_aliases, &mut BTreeSet::new());
     if &resolved != ty {
         return primary_key_type_error(&resolved, scope, visiting_tables);
     }
     match ty {
         Type::Int | Type::Decimal | Type::Date | Type::Instant | Type::Text | Type::Bool => None,
-        Type::Tuple(elements) if elements.is_empty() => {
-            Some("Unit is not a primary-key type in version 1.0")
-        }
+        Type::Tuple(elements) if elements.is_empty() => Some((
+            DIAG_TYPE,
+            "Unit is not a primary-key type in version 1.0",
+        )),
         Type::Tuple(elements) => elements
             .iter()
             .find_map(|element| primary_key_type_error(element, scope, visiting_tables)),
         Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => None,
-        Type::Named(name) if scope.payload_enum_types.contains(name) => {
-            Some("payload-bearing enums cannot be primary-key types")
-        }
+        Type::Named(name) if scope.payload_enum_types.contains(name) => Some((
+            DIAG_TYPE,
+            "payload-bearing enums cannot be primary-key types",
+        )),
         Type::Named(name) => {
             let symbol = scope_named_symbol(name, scope);
             match symbol {
                 Some(symbol) if symbol.kind == SymbolKind::Enum => None,
                 Some(symbol) if symbol.kind == SymbolKind::Table => {
                     if !visiting_tables.insert(name.clone()) {
-                        return Some("table reference key type is recursively defined");
+                        return Some((
+                            DIAG_TYPE,
+                            "table reference key type is recursively defined",
+                        ));
                     }
                     let result = match symbol
                         .table_schema
@@ -25393,33 +25454,39 @@ fn primary_key_type_error(
                     {
                         Some(admission) => {
                             if admission.keys.is_empty() {
-                                Some("table reference has no canonical primary key")
+                                Some((DIAG_TYPE, "table reference has no canonical primary key"))
                             } else {
                                 admission.keys.iter().find_map(|(_, key_type)| {
                                     primary_key_type_error(key_type, scope, visiting_tables)
                                 })
                             }
                         }
-                        None => Some("table reference has no canonical primary key"),
+                        None => Some((DIAG_TYPE, "table reference has no canonical primary key")),
                     };
                     visiting_tables.remove(name);
                     result
                 }
-                _ => Some("type has no canonical primary-key encoding"),
+                _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
             }
         }
-        Type::Float => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Applied { base, .. } if base == "Float" => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Range(_) => Some("Range<T> is not a primary-key type in version 1.0"),
-        Type::Applied { base, .. } if base == "Range" => {
-            Some("Range<T> is not a primary-key type in version 1.0")
-        }
+        Type::Float => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Applied { base, .. } if base == "Float" => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Range(_) => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
+        Type::Applied { base, .. } if base == "Range" => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
         Type::Error => None,
-        _ => Some("type has no canonical primary-key encoding"),
+        _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
     }
 }
 
@@ -27181,7 +27248,7 @@ mod tests {
             analysis.diagnostics
         );
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }));
         assert!(
             !has(&analysis, DIAG_UNRESOLVED),
