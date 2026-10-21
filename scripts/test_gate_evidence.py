@@ -22,6 +22,7 @@ from scripts.gate_evidence import (
     evaluate_selector,
     gate_rollup,
     index_artifact,
+    known_failures_for,
     load_baseline,
     load_items,
     main,
@@ -29,7 +30,7 @@ from scripts.gate_evidence import (
     package_name,
     parse_log,
     prepare_command,
-    skip_arguments,
+    select_test_targets,
 )
 
 EXECUTABLES = {
@@ -252,7 +253,7 @@ class FailureTests(unittest.TestCase):
         new, known = classify(failures[4:], baseline, "gate-c")
         self.assertEqual((new, [entry.bead for _, entry in known]), ([], ["ornadb-demo.3"]))
 
-    def test_skip_arguments_cover_named_failures_of_the_tested_packages_only(self) -> None:
+    def test_known_failures_for_skips_only_unrecorded_entries_of_the_named_target(self) -> None:
         baseline = [
             KnownFailure("orna-demo-v1", "lib", "codec::tests::rejects_bad_tag", "ornadb-demo.1", "pinned"),
             KnownFailure("orna-demo-v1", "test:storage_scale", "*", "ornadb-demo.2", "stack overflow"),
@@ -261,7 +262,42 @@ class FailureTests(unittest.TestCase):
             KnownFailure("workspace", "check:fmt", "fmt", "ornadb-demo.5", "drift"),
         ]
 
-        self.assertEqual(skip_arguments(baseline, ["orna-demo-v1"]), ["--skip", "codec::tests::rejects_bad_tag"])
+        self.assertEqual(known_failures_for(baseline, "orna-demo-v1", "lib"), (["codec::tests::rejects_bad_tag"], False))
+        self.assertEqual(known_failures_for(baseline, "orna-demo-v1", "test:storage_scale"), ([], True))
+        self.assertEqual(known_failures_for(baseline, "orna-other-v1", "lib"), (["tests::other"], False))
+        self.assertEqual(known_failures_for(baseline, "orna-demo-v1", "test:missing"), ([], False))
+
+    def test_select_test_targets_orders_by_metadata_and_honours_filters(self) -> None:
+        metadata = {
+            "packages": [
+                {
+                    "name": "orna-demo-v1",
+                    "targets": [
+                        {"name": "orna_demo_v1", "kind": ["lib"], "test": True},
+                        {"name": "storage_scale", "kind": ["test"], "test": True},
+                        {"name": "bench_only", "kind": ["bench"], "test": False},
+                    ],
+                },
+                {"name": "orna-other-v1", "targets": [{"name": "storage_scale", "kind": ["test"], "test": True}]},
+            ]
+        }
+
+        self.assertEqual(
+            select_test_targets(metadata, ["orna-demo-v1"], [], False),
+            [("orna-demo-v1", "lib"), ("orna-demo-v1", "test:storage_scale")],
+        )
+        self.assertEqual(
+            select_test_targets(metadata, ["orna-demo-v1"], [], True),
+            [("orna-demo-v1", "test:storage_scale")],
+        )
+        self.assertEqual(
+            select_test_targets(metadata, ["orna-demo-v1", "orna-other-v1"], ["test:storage_scale"], False),
+            [("orna-demo-v1", "test:storage_scale"), ("orna-other-v1", "test:storage_scale")],
+        )
+        with self.assertRaisesRegex(EvidenceError, "no workspace package named missing-v1"):
+            select_test_targets(metadata, ["missing-v1"], [], False)
+        with self.assertRaisesRegex(EvidenceError, "has no test target test:absent"):
+            select_test_targets(metadata, ["orna-demo-v1"], ["test:absent"], False)
 
 
 class BaselineFileTests(unittest.TestCase):

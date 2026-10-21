@@ -66,6 +66,8 @@ jobs:
   # here and run nightly (.github/workflows/nightly-gates.yml) until their fix lands.
   crate-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -76,31 +78,16 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Test the syntax, value, storage, project and runtime suites
-        shell: bash
-        run: |
-          set -euo pipefail
-          packages=(-p orna-syntax-v1 -p orna-value-v1 -p orna-storage-v1 -p orna-project-v1 -p orna-runtime-v1)
-          python3 scripts/gate_evidence.py skip-args "${packages[@]}" > "$RUNNER_TEMP/skips"
-          mapfile -t skips < "$RUNNER_TEMP/skips"
-          cargo test --locked --no-fail-fast "${packages[@]}" --tests -- --exact "${skips[@]}" --nocapture
+        run: python3 scripts/gate_evidence.py test -p orna-syntax-v1 -p orna-value-v1 -p orna-storage-v1 -p orna-project-v1 -p orna-runtime-v1
 
       - name: Test the orna-repository-v1 integration suites
         if: ${{ !cancelled() }}
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/gate_evidence.py skip-args -p orna-repository-v1 > "$RUNNER_TEMP/skips"
-          mapfile -t skips < "$RUNNER_TEMP/skips"
-          cargo test --locked --no-fail-fast -p orna-repository-v1 --test '*' -- --exact "${skips[@]}" --nocapture
+        run: python3 scripts/gate_evidence.py test -p orna-repository-v1 --integration
 
       - name: Test the orna-evaluator-v1 library and evaluator suite
         if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/gate_evidence.py skip-args -p orna-evaluator-v1 > "$RUNNER_TEMP/skips"
-          mapfile -t skips < "$RUNNER_TEMP/skips"
-          cargo test --locked --no-fail-fast -p orna-evaluator-v1 --lib --test evaluator -- --exact "${skips[@]}" --nocapture
+        run: python3 scripts/gate_evidence.py test -p orna-evaluator-v1 --target lib --target test:evaluator
 
   # Gate D: SIGKILL at each publication boundary. Needs the crash-barriers test feature.
   publication-crash-matrix:
@@ -116,9 +103,4 @@ jobs:
 
       - name: Test the publication crash matrix
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/gate_evidence.py skip-args -p orna-cli-v1 > "$RUNNER_TEMP/skips"
-          mapfile -t skips < "$RUNNER_TEMP/skips"
-          cargo test --locked --no-fail-fast -p orna-cli-v1 --features crash-barriers \
-            --test publication_crash_matrix -- --exact "${skips[@]}" --nocapture
+        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --target test:publication_crash_matrix --features crash-barriers
