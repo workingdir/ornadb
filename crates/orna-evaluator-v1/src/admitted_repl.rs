@@ -25,8 +25,7 @@ use orna_syntax_v1::{
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
-    PureFunction, ReplSession, module_function_alias_key, parse_admitted_repl,
-    source_enum_definitions,
+    PureFunction, ReplSession, module_function_alias_key, source_enum_definitions,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
 
