@@ -35,6 +35,7 @@ mod init;
 pub mod migration_copy;
 mod mount;
 mod native_graph;
+mod object_reader;
 pub mod offline_copy;
 pub mod publication_describe;
 mod publication_transaction;
@@ -2379,10 +2380,14 @@ impl RemoteContinuity {
 }
 
 /// A normal Git repository and its selected worktree.
+///
+/// Clones share one object reader, so a handle and every context opened from
+/// it read committed objects through the same long-lived Git process.
 #[derive(Clone, Debug)]
 pub struct Repository {
     worktree: PathBuf,
     runtime: RuntimePaths,
+    objects: std::sync::Arc<object_reader::ObjectReader>,
 }
 
 /// Binds a candidate tree entry at its exact index position.
@@ -2461,6 +2466,7 @@ impl Repository {
             worktree.join(runtime)
         };
         Ok(Self {
+            objects: std::sync::Arc::new(object_reader::ObjectReader::new(worktree.clone())),
             worktree,
             runtime: RuntimePaths { root: runtime },
         })
@@ -6313,6 +6319,7 @@ impl Repository {
     ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
         const MAX_ENTRY_BYTES: usize = 4 * 1024;
 
+        let object_id_length = self.native_object_id_length()?;
         let mut command = self.command();
         command
             .env("GIT_NO_LAZY_FETCH", "1")
@@ -6345,10 +6352,7 @@ impl Repository {
                         return Err(RepositoryError::GitOperationFailed);
                     }
                     raw_entry.pop();
-                    entries.push(parse_committed_tree_entry(
-                        &raw_entry,
-                        self.native_object_id_length()?,
-                    )?);
+                    entries.push(parse_committed_tree_entry(&raw_entry, object_id_length)?);
                 }
                 Ok(entries)
             })()
@@ -7808,11 +7812,7 @@ impl Repository {
     }
 
     pub(crate) fn native_object_id_length(&self) -> Result<usize, RepositoryError> {
-        match self.git(["rev-parse", "--show-object-format"])?.as_str() {
-            "sha1" => Ok(40),
-            "sha256" => Ok(64),
-            _ => Err(RepositoryError::UnsupportedObjectFormat),
-        }
+        Ok(self.objects.algorithm()?.width() * 2)
     }
 
     /// The local branch currently attached to `HEAD`, for callers that must
