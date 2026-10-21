@@ -318,6 +318,21 @@ pub const OVB2_BLOB_TAG: u64 = 60_110;
 pub const ROV3_BLOB_TAG: u64 = 60_111;
 pub const SOV3_BLOB_TAG: u64 = 60_112;
 pub const ROV3_OVERFLOW_TAG: u64 = 60_113;
+
+/// Whether a CBOR tag may appear in format-3 native node data.
+///
+/// Store format 3 admits registered tags only: the bignums 2 and 3, UUID tag
+/// 37, the portable value tags 60000..=60025 and the profile tags
+/// 60110..=60113 (`profiles/store-format-3.md` §2, `tools/final_model.py`).
+/// Where a profile tag may appear (for example, 60111 and 60113 only in ROV-3
+/// rows) is checked by the reader that interprets the node.
+pub const fn is_format3_node_tag(number: u64) -> bool {
+    matches!(
+        number,
+        2 | 3 | 37 | 60_000..=60_025 | OVB2_BLOB_TAG..=ROV3_OVERFLOW_TAG
+    )
+}
+
 const MAX_BLOB_LENGTH: u64 = 1_u64 << 63;
 const MAX_BLOB_READ: u64 = 8 * 1024 * 1024;
 
