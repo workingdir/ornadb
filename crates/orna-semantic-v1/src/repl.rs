@@ -108,7 +108,17 @@ impl ReplContext {
             .filter(|(_, header)| header.exports.contains_key(name))
             .map(|(namespace, _)| namespace.display())
             .collect();
-        NameHints { similar, modules }
+        let namespaces = self
+            .modules
+            .keys()
+            .map(|namespace| namespace.display())
+            .filter(|namespace| namespace == name)
+            .collect();
+        NameHints {
+            similar,
+            modules,
+            namespaces,
+        }
     }
 
     /// Checks one parsed REPL input and returns a staged successor.
@@ -304,6 +314,9 @@ pub struct NameHints {
     pub similar: Vec<String>,
     /// Modules exporting the identifier, by dotted namespace, in sorted order.
     pub modules: Vec<String>,
+    /// Loaded module namespaces spelled exactly like the unresolved identifier,
+    /// so `use NAME;` brings the module itself into scope.
+    pub namespaces: Vec<String>,
 }
 
 fn names_are_similar(name: &str, candidate: &str) -> bool {

@@ -9509,7 +9509,11 @@ fn infer_node(
                 } else if !types_match(&left.ty, &right.ty)
                     && !types_match(&right.ty, &left.ty)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -9518,7 +9522,11 @@ fn infer_node(
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -16603,7 +16611,60 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
             }
             _ => "static types are incompatible",
         };
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(type_mismatch(message, expected, actual));
+    }
+}
+
+/// A static type mismatch that names both types, so the person can see which
+/// side has which type. The message stays stable; the types ride in a note.
+fn type_mismatch(message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(DIAG_TYPE, message).with_note(
+        SafeText::new(format!(
+            "expected {}, found {}",
+            type_label(expected),
+            type_label(actual)
+        ))
+        .expect("valid diagnostic note"),
+    )
+}
+
+/// Spells a static type the way source writes it.
+fn type_label(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Decimal => "Decimal".into(),
+        Type::Float => "Float".into(),
+        Type::Date => "Date".into(),
+        Type::Instant => "Instant".into(),
+        Type::Text => "Text".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
+        Type::List(element) => format!("List<{}>", type_label(element)),
+        Type::Range(element) => format!("Range<{}>", type_label(element)),
+        Type::Relation(element) => format!("Relation<{}>", type_label(element)),
+        Type::Stream(element) => format!("Stream<{}>", type_label(element)),
+        Type::Optional(inner) => format!("Optional<{}>", type_label(inner)),
+        Type::Tuple(items) => format!(
+            "({})",
+            items.iter().map(type_label).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Record(_) => "record".into(),
+        Type::Applied { base, arguments } if arguments.is_empty() => base.clone(),
+        Type::Applied { base, arguments } => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Quantity { .. } => "quantity".into(),
+        Type::MoneyPerUnit { .. } => "money rate".into(),
+        Type::Function { .. } => "function".into(),
+        Type::Named(name) => name.clone(),
+        Type::Bottom => "no value".into(),
+        Type::Error => "unknown type".into(),
     }
 }
 
