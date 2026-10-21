@@ -1,1 +1,1 @@
-std.collection.max([1])
+max([1])
