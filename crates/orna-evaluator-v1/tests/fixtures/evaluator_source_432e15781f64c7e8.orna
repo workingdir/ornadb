@@ -1,1 +1,1 @@
-std.collection.map(1, value => value)
+map(1, value => value)
