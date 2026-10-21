@@ -3068,4 +3068,61 @@ pub table Invoice(id: Str) {
             first.id(ObjectKind::VariantField, "Shape.circle.radius")
         );
     }
+
+    /// Pins the manifest and descriptor bytes, and the `orna.schema.v1`
+    /// digest, that the previous builder produced for a table it could
+    /// already encode, so lifecycle support cannot change existing schema
+    /// node identities.
+    #[test]
+    fn previously_supported_table_descriptor_bytes_are_stable() {
+        const MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
+        const DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
+        const SCHEMA_DIGEST: &str =
+            "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let source = ModuleInput::new(
+            "main.orna",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
+        );
+        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+        let record = |kind: ObjectKind, name: &str, byte: u8| ObjectIdentity {
+            kind,
+            qualified_name: name.to_owned(),
+            id: [byte; 16],
+            retired: false,
+        };
+        let manifest = ObjectIdentityManifest {
+            records: vec![
+                record(ObjectKind::Table, "Media", 0x11),
+                record(ObjectKind::Field, "Media.id", 0x21),
+                record(ObjectKind::Field, "Media.payload", 0x22),
+                record(ObjectKind::Field, "Media.size", 0x23),
+                record(ObjectKind::Unit, "B", 0x31),
+                record(ObjectKind::Unit, "MiB", 0x32),
+            ],
+        };
+        assert_eq!(hex(&manifest.encode().unwrap()), MANIFEST);
+
+        let schema = manifest
+            .source_table_schema(
+                std::slice::from_ref(&source),
+                &analysis,
+                None,
+                "",
+                "main.orna",
+                "Media",
+            )
+            .unwrap();
+        assert_eq!(hex(&schema.descriptor().encode().unwrap()), DESCRIPTOR);
+        assert_eq!(
+            hex(&orna_value_v1::schema_identity(schema.descriptor()).unwrap()),
+            SCHEMA_DIGEST
+        );
+    }
 }
