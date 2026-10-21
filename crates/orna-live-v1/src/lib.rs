@@ -6522,8 +6522,10 @@ impl LiveTransport {
         let Ok(origin) = required_origin(&request.headers) else {
             return wire_error(403, "live.origin_denied");
         };
+        // 30-protocol, Session creation and ownership: requests are
+        // `application/json`, so a charset parameter may only name UTF-8.
         if request.method == "POST"
-            && !header_eq(&request.headers, "content-type", "application/json")
+            && !header(&request.headers, "content-type").is_some_and(is_json_media_type)
         {
             return wire_error(400, "live.malformed_request");
         }
@@ -6676,6 +6678,13 @@ impl LiveTransport {
                             headers: Vec::new(),
                             body: Vec::new(),
                         };
+                    }
+                    // 30-protocol, Session creation and ownership: the token
+                    // must be the session's current one. Any other token for
+                    // a live session is unauthenticated; 410 is for a session
+                    // that has ended.
+                    if self.sessions.contains_key(&id) {
+                        return wire_error(401, "live.unauthenticated");
                     }
                     return wire_error(410, "live.expired");
                 }
@@ -7563,6 +7572,11 @@ impl LiveTransport {
         if credential != record.credential {
             return Err(wire_error(401, "live.unauthenticated"));
         }
+        // 30-protocol, Session creation and ownership: an upgrade from
+        // another origin is prohibited (403); it is not an expired session.
+        if origin != record.origin {
+            return Err(wire_error(403, "live.origin_denied"));
+        }
         self.host
             .validate_resume(&ResumeRequest {
                 id,
@@ -7962,6 +7976,20 @@ fn header_token(headers: &[(String, String)], name: &str, expected: &str) -> boo
             .any(|token| token.trim().eq_ignore_ascii_case(expected))
     })
 }
+/// Whether a Content-Type value names JSON: `application/json` in any case,
+/// with no parameter other than `charset=utf-8`.
+fn is_json_media_type(value: &str) -> bool {
+    let mut parts = value.split(';');
+    parts
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+        && parts.all(|parameter| {
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("charset")
+                    && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            })
+        })
+}
 fn required_origin(headers: &[(String, String)]) -> std::result::Result<Origin, ()> {
     header(headers, "origin")
         .ok_or(())
@@ -8142,6 +8170,10 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
+        // A session whose application work must first be joined is
+        // temporarily unavailable on a route that cannot join it; the
+        // request itself is well formed.
+        Error::ApplicationDrainRequired => (503, "live.unavailable"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
