@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna commit` stages the format-3 store: a database made by `orna init`
+  gets its `.orna/store` on the first commit, which creates the branch on an
+  unborn HEAD. Each newly declared table is admitted with its schema node, an
+  empty row map and a relation entry. Stable object IDs live in the store as a
+  sealed system relation rather than `.orna/object-identities.cbor`, which is
+  read only from older commits. `orna publish` refuses rows whose table has no
+  relation in the committed store.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
