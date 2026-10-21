@@ -5,6 +5,54 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
+  it to its activation snapshot: the admitted project tables, plus
+  `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
+  (`orna run` and `orna serve`; the REPL serves neither yet). A query returns its
+  structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
+  row's own message as the summary (the explicit marker only when the row is
+  redacted), its causes, its help as suggestions and the objects it names.
+  `sys.explain(FunctionRef)` is dispatched, but no catalogue records function
+  object identities yet, so every function reference reports
+  `sys.object.not_found`.
+- Changed failure codes, all now taken from the portable failure table:
+  - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
+    `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
+    source or function, `sys.version.incompatible` for a stage or source the
+    planner cannot represent, and `sys.object.wrong_kind` for a reference to
+    another relation. `ORNA-EVAL-TYPE` no longer rejects function and
+    diagnostic arguments.
+  - `sys.blob.capture_file`: `ORNA-INGEST-001`, `-002` and `-003` become
+    `sys.blob.source_denied`; `ORNA-INGEST-004` becomes `sys.blob.limit`; and
+    `ORNA-INGEST-005` becomes `sys.blob.source_changed`. A negative or
+    unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
+    quota is `sys.blob.limit`. The host operation declares these codes instead
+    of `sys.blob.capture.*`. `orna annotate` source errors cite the portable
+    code.
+  - `sys.blob.annotate`: an OVB-1 value is
+    `sys.codec.unsupported_value_profile`; arguments that are not annotated
+    Blobs are `ORNA-EVAL-TYPE`; a host without the generated provider is
+    `sys.version.incompatible`. No `sys.abi.*` code reaches programs.
+  - `orna serve` stream administration: `sys.admin.unavailable` becomes
+    `sys.admin.missing_object`, `sys.admin.busy`, the specific checkpoint or
+    snapshot code, or `sys.storage.unavailable`. A dispatcher without resume
+    reports `sys.admin.read_only`, unavailable publication metadata reports
+    `sys.storage.unavailable` instead of `sys.storage.metadata_unavailable`, and
+    `sys.admin.result` is gone.
+- Every portable `sys` operation now declares its failure codes explicitly
+  through `#[ornasys(failures = ...)]`, replacing the namespace-prefix guess.
+  The build checks that every published code is declared by an operation, is
+  global, or belongs to a non-callable surface (the `sys.repl` singleton or the
+  VFS).
+- Removed the unreachable duplicate explain implementations:
+  `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
+  `orna_sys_v1::explain_diagnostic` with `Explanation` and
+  `DiagnosticExplanationError`, and the `orna_foundation_v1` explanation
+  envelope (`SystemDiagnosticExplanationInput`,
+  `SystemDiagnosticExplanationOutput`, `system_diagnostic_explanation_input`
+  and `SystemDiagnosticAdapterError`). Also removed
+  `SysHostBindingRegistry::with_explain_catalogue` and
+  `CaptureFileError::code`.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
