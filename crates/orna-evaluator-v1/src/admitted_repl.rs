@@ -16,7 +16,7 @@ use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
     Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    analyze_with_catalogue,
+    SystemProviders, analyze_with_providers,
 };
 use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
 
@@ -209,7 +209,7 @@ impl AdmittedReplSession {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
-            semantic: ReplContext::empty(),
+            semantic: ReplContext::with_providers(SystemProviders::Production),
             runtime: ReplSession::new(limits),
             attached_databases: None,
             repository_scope: None,
@@ -274,7 +274,7 @@ impl AdmittedReplSession {
         limits: Limits,
     ) -> Result<Self, ReplError> {
         let standard_sources = standard_sources.into_iter().collect::<Vec<_>>();
-        let analysis = analyze_with_catalogue(modules, &catalogue);
+        let analysis = analyze_with_providers(modules, &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
@@ -330,7 +330,7 @@ impl AdmittedReplSession {
             }
             None => Catalogue::authoritative_core(),
         };
-        let analysis = analyze_with_catalogue(project.modules(), &catalogue);
+        let analysis = analyze_with_providers(project.modules(), &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
