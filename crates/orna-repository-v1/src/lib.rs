@@ -53,12 +53,12 @@ pub use compact::{
     CompactSegment, CompactSegmentRole, validate_compact_page_uncompressed_sizes,
 };
 pub use init::format_context::{
-    CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
-    HistoricalFormatContext, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
-    SchemaRootPin, StoreRootPin,
+    FINAL_REPOSITORY_FORMAT, CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability,
+    FormatContextError, HistoricalFormatContext, RepositoryFormat, RepositoryFormatContext,
+    RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
 };
 pub use init::{
-    DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
+    STORAGE_PROFILE, DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     inspect_metadata, inspect_metadata_for_runtime, initialize_repository,
 };
 pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};
