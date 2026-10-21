@@ -490,6 +490,8 @@ async fn cli_commit_reopens_after_process_kill_at_index_lock() {
         std::fs::write(root.join("unrelated-staged.txt"), b"staged before crash\n").unwrap();
         git(root, &["add", "--", "unrelated-staged.txt"]);
         std::fs::write(root.join("unrelated-tracked.txt"), b"unstaged before crash\n").unwrap();
+        let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+        assert!(!staged_before.is_empty());
         let unstaged_before = git_output(root, &["diff", "--binary"], None);
         assert!(!unstaged_before.is_empty());
         let seeded_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
@@ -527,6 +529,9 @@ async fn cli_commit_reopens_after_process_kill_at_index_lock() {
         }
         assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
         assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work lost after {boundary}");
+        // `commit` consumes the staged index, so the staged path is now in HEAD
+        // rather than still staged; the staged content must survive into HEAD.
+        assert_eq!(git_output(root, &["show", "HEAD:unrelated-staged.txt"], None), b"staged before crash\n", "staged work lost after {boundary}");
         // Raw Git works again once Orna has recovered the lock.
         std::fs::write(root.join("after-crash.txt"), b"after crash\n").unwrap();
         git(root, &["add", "--", "after-crash.txt"]);
