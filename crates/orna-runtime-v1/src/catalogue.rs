@@ -1764,8 +1764,15 @@ impl RuntimeState {
         )
         .await?;
         encoded.push(catalogue_mutation);
+        let mut base = crate::load_candidate_base_tx(
+            &transaction,
+            &context.committed_rows,
+            mutations,
+            None,
+        )
+        .await?;
         for mutation in mutations {
-            crate::apply_table_mutation_tx(&transaction, mutation).await?;
+            crate::apply_table_mutation_tx(&transaction, mutation, &mut base).await?;
         }
         faults.check(crate::FaultPoint::AfterTableWrite)?;
         let committed_capture = crate::append_mutations_with_catalogue_tx(
