@@ -5,6 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna --help` names the command `orna`. It says that `unmount DIR` detaches
+  the kernel mount, including an orphaned Orna mount, and releases its view
+  record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
+  `migrate copy` help says that `--no-persistent-consumers` confirms that
+  consumer checkpoints are carried, not reset (ORNA-UPGRADE-008).
+- The Linux package archive holds only `usr/bin/orna` and its distribution
+  manifest. The retired embedded-engine manifest, its builder image and its
+  predecessor-engine fields are gone, so a default `packaging/linux/package.sh
+  build` no longer needs an input that nothing produces.
 - `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
