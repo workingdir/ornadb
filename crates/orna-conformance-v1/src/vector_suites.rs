@@ -320,11 +320,13 @@ fn path_vectors(vectors: &Value) -> CaseRun {
                         path_encode_component(right)
                             .map(|right| (path_collision_key(&left), path_collision_key(&right)))
                     });
-                    let passed = keys.as_ref().is_ok_and(|(left, right)| {
-                        left == collision_key && right == collision_key
-                    });
+                    let passed = keys
+                        .as_ref()
+                        .is_ok_and(|(left, right)| left == collision_key && right == collision_key);
                     run.check(&name, passed, || {
-                        format!("{left:?} and {right:?} do not share collision key {collision_key:?}")
+                        format!(
+                            "{left:?} and {right:?} do not share collision key {collision_key:?}"
+                        )
                     });
                 }
             }
@@ -364,7 +366,9 @@ fn path_vectors(vectors: &Value) -> CaseRun {
                 path_encode_key_components(&components).is_ok()
             };
             run.check(&name, accepted == (expect == "pass"), || {
-                format!("an encoded length of {length} was accepted: {accepted}, published {expect}")
+                format!(
+                    "an encoded length of {length} was accepted: {accepted}, published {expect}"
+                )
             });
         }
     }
