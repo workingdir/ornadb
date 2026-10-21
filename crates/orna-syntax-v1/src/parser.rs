@@ -4386,7 +4386,10 @@ impl Parser {
                     ));
                 }
                 self.bump();
-                if allow_lambda && self.is_punct("=>") {
+                if allow_lambda
+                    && matches!(t.kind, TokenKind::Identifier { .. })
+                    && self.is_punct("=>")
+                {
                     self.bump();
                     let body = self.parse_lambda_body();
                     return Some(Expr::Lambda {
