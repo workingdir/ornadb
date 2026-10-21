@@ -181,14 +181,19 @@ fn removed_sys_runtime_name_keeps_its_normative_diagnostic_at_application_admiss
 }
 
 #[test]
-fn portable_runtime_info_signature_is_admitted_by_the_application_authority() {
-    // ORNA-SYS-006 (source/15-system.md:46): the portable sys.RuntimeInfo
-    // function signature is available to application source.
-    let application = authority()
+fn portable_runtime_info_without_a_linked_provider_is_rejected_before_evaluation() {
+    // ORNA-SYS-006 (source/15-system.md:46) types sys.rt.info() as
+    // sys.RuntimeInfo, but no production host links a provider that produces
+    // one, so ORNA-SYS-008 requires admission to fail before any write. The
+    // signature still resolves: version incompatibility is the only failure.
+    let error = authority()
         .admit_module("sys-rt-info.orna", SYS_RT_INFO_SOURCE, "runtime_info")
-        .expect("the checked-in sys.rt.info fixture resolves against sys.RuntimeInfo");
+        .expect_err("sys.rt.info has no linked production provider");
 
-    assert_eq!(application.entry(), "runtime_info");
+    assert_eq!(
+        error,
+        ApplicationError::Semantic(vec!["sys.version.incompatible".to_owned()])
+    );
 }
 
 fn assert_placement_rejected(source: &str, logical_path: &str) {
