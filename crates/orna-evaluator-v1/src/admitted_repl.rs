@@ -19,12 +19,14 @@ use orna_semantic_v1::{
     SystemProviders, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_syntax_v1::{
-    Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, UseTail, Visibility, lex,
-    parse_module, parse_repl,
+    Declaration, EnumVariant, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
+    TypeRepresentation, UseTail, Visibility, lex, parse_module, parse_repl,
 };
+use sha2::{Digest as _, Sha256};
 
 use crate::{
-    CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
+    CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinition,
+    NominalDefinitions, NominalField, NominalVariant, PureFunction, ReplSession,
     module_function_alias_key,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
@@ -670,6 +672,7 @@ fn admitted_runtime_sources(
     }
 
     let mut functions = Functions::new();
+    let mut nominals = NominalDefinitions::new();
     for (namespace, module) in parsed_modules {
         for item in module.items {
             match item.declaration {
@@ -691,6 +694,28 @@ fn admitted_runtime_sources(
                     );
                 }
                 Declaration::Use { .. } | Declaration::Table { .. } => {}
+                // Catalogue-only declarations have no runtime representation.
+                Declaration::Protocol { .. }
+                | Declaration::Dimension { .. }
+                | Declaration::Unit { .. }
+                | Declaration::Type {
+                    representation: TypeRepresentation::Alias { .. },
+                    ..
+                } => {}
+                // Project-root enums and nominal types are ephemeral REPL
+                // definitions keyed by their bare name, like root functions.
+                Declaration::Enum { name, variants, .. } if namespace.is_none() => {
+                    let definition = repl_enum_definition(&name, variants);
+                    insert_repl_nominal(&mut nominals, name, definition)?;
+                }
+                Declaration::Type {
+                    name,
+                    representation: TypeRepresentation::Nominal { members },
+                    ..
+                } if namespace.is_none() => {
+                    let definition = repl_nominal_definition(&name, members)?;
+                    insert_repl_nominal(&mut nominals, name, definition)?;
+                }
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
                 // remain represented by the semantic catalogue. Keep these
@@ -708,11 +733,87 @@ fn admitted_runtime_sources(
             }
         }
     }
-    ReplSession::with_bindings(limits, Environment::new(), functions)
+    let session = ReplSession::with_bindings(limits, Environment::new(), functions)
         .map_err(ReplError::runtime)?
         .with_module_aliases(module_aliases)
         .map(|session| session.with_table_names(table_names))
+        .map_err(ReplError::runtime)?;
+    session
+        .with_nominal_definitions(nominals)
         .map_err(ReplError::runtime)
+}
+
+/// Derives a session-local nominal identity from source spellings. It is
+/// deterministic for one admitted project load and is not a persisted OVB
+/// identity.
+fn repl_nominal_id(parts: &[&str]) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.repl.nominal\0");
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut id = [0_u8; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
+}
+
+fn repl_enum_definition(name: &str, variants: Vec<EnumVariant>) -> NominalDefinition {
+    let variants = variants
+        .into_iter()
+        .map(|variant| {
+            let id = repl_nominal_id(&[name, "variant", variant.name.as_str()]);
+            let payload: Vec<String> = variant.fields.into_iter().map(|field| field.name).collect();
+            NominalVariant::new(id, variant.name).with_payload_fields(payload)
+        })
+        .collect();
+    NominalDefinition::new(repl_nominal_id(&[name, "type"]), None, Vec::new())
+        .with_enum_variants(variants)
+}
+
+fn repl_nominal_definition(
+    name: &str,
+    members: Vec<TypeMember>,
+) -> Result<NominalDefinition, ReplError> {
+    let mut fields = Vec::with_capacity(members.len());
+    for member in members {
+        let TypeMember::Field {
+            visibility,
+            name: field,
+            initializer,
+            ..
+        } = member
+        else {
+            // Assertions and conversions carry checks this boundary does not
+            // evaluate; admitting the type without them would drop the checks.
+            return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED"));
+        };
+        let id = repl_nominal_id(&[name, "field", field.as_str()]);
+        fields.push(match (visibility, initializer) {
+            (true, Some(default)) => NominalField::public_with_default(id, field, default),
+            (true, None) => NominalField::public(id, field),
+            (false, Some(default)) => NominalField::private_with_default(id, field, default),
+            (false, None) => NominalField::private(id, field),
+        });
+    }
+    Ok(NominalDefinition::new(
+        repl_nominal_id(&[name, "type"]),
+        None,
+        fields,
+    ))
+}
+
+fn insert_repl_nominal(
+    nominals: &mut NominalDefinitions,
+    name: String,
+    definition: NominalDefinition,
+) -> Result<(), ReplError> {
+    if nominals.contains_key(&name) {
+        return Err(ReplError::fixed("ORNA-REPL-PROJECT"));
+    }
+    nominals.insert(name, definition);
+    Ok(())
 }
 
 fn add_module_import_aliases(
