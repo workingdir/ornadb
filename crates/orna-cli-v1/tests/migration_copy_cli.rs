@@ -87,6 +87,21 @@ fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
         .unwrap()
 }
 
+fn run_activate(source: &Path, destination: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            source.to_str().unwrap(),
+            "--debug",
+            "migrate",
+            "activate",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let parent = TempDir::new().unwrap();
@@ -657,4 +672,57 @@ fn cli_migration_copy_abort_discards_only_the_prepared_candidate() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn cli_migration_copy_activation_fails_closed_and_leaves_candidate_intact() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_format = fs::read(source.join(".orna/format.orna")).unwrap();
+
+    // Activation needs the protected format transition, which this build does
+    // not perform, so the prepared candidate is refused.
+    let activated = run_activate(&source, &destination);
+    assert!(!activated.status.success(), "activation was accepted");
+    assert!(
+        String::from_utf8_lossy(&activated.stderr)
+            .contains("activation is not available in this build"),
+        "activation refusal: {}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+
+    // The candidate keeps its prepared journal and the source is unchanged.
+    assert!(destination.is_dir());
+    assert!(
+        Repository::discover(&destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        fs::read(source.join(".orna/format.orna")).unwrap(),
+        source_format
+    );
+
+    // The refused candidate is still a valid abort target.
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort after refused activation: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!destination.exists());
 }
