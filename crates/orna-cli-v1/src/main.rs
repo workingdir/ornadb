@@ -34,7 +34,8 @@ use cli_args::{
     requested_debug_mode,
 };
 use cli_dispatch::execute;
-use repl::{AnsiColor, write_styled, write_styled_display};
+use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -142,28 +143,31 @@ enum Exit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Diagnostic {
     code: &'static str,
-    title: &'static str,
+    title: Cow<'static, str>,
     help: &'static str,
     exit: Exit,
     detail: Option<String>,
+    body: Option<String>,
 }
 impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Usage,
             detail: None,
+            body: None,
         }
     }
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: None,
+            body: None,
         }
     }
     fn target_with_detail(
@@ -174,10 +178,11 @@ impl Diagnostic {
     ) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: Some(detail.into()),
+            body: None,
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
@@ -204,6 +209,35 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
             ),
         }
     }
+}
+
+fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if let orna_project_v1::ProjectLoadError::InvalidModule {
+        logical_path,
+        diagnostics,
+    } = &error
+        && let Some(first) = diagnostics.first()
+    {
+        // The first parser diagnostic is the primary code: it is the spec code
+        // that names the source contract violation, not a loader wrapper.
+        let location = match &first.span.start_position {
+            Some(position) => format!("{logical_path}:{}:{}", position.line, position.column),
+            None => logical_path.clone(),
+        };
+        return Diagnostic {
+            code: first.code,
+            title: Cow::Owned(format!("{} ({location})", first.message)),
+            help: "fix the reported source error, then retry",
+            exit: Exit::Target,
+            detail: None,
+            body: None,
+        };
+    }
+    Diagnostic::target(
+        "E2100",
+        "project source could not be loaded",
+        "fix the project module graph and source boundaries, then run check again",
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,15 +490,19 @@ fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagn
     };
     Diagnostic {
         code,
-        title: "operation was cancelled",
+        title: Cow::Borrowed("operation was cancelled"),
         help: "inspect the durable operation state before retrying",
         exit: Exit::Cancelled,
         detail: (code == "E2200").then(|| format!("cancellation code: {}", diagnostic.code())),
+        body: None,
     }
 }
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(body) = &self.body {
+            return f.write_str(body);
+        }
         write!(f, "error[{}]: {}", self.code, self.title)?;
         if let Some(detail) = &self.detail {
             write!(f, "\n  {detail}")?;
@@ -479,6 +517,9 @@ fn write_diagnostic<W: io::Write>(
     color_enabled: bool,
     debug_enabled: bool,
 ) -> io::Result<()> {
+    if let Some(body) = &diagnostic.body {
+        return write_rendered_error(writer, body, color_enabled);
+    }
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
     write_styled(
@@ -1607,13 +1648,7 @@ fn load_project_without_standard_rejection(
     })?;
     let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "project source could not be loaded",
-                "fix the project module graph and source boundaries, then run check again",
-            )
-        })?;
+        .map_err(project_load_diagnostic)?;
     Ok(project)
 }
 
@@ -1651,7 +1686,7 @@ fn semantic_catalogue(
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
     } else {
@@ -1802,7 +1837,7 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1841,7 +1876,7 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1868,7 +1903,7 @@ fn run_project_invocation_with_arguments(
         })?;
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2070,7 +2105,7 @@ fn run_pure_invocation(
         }
     }
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2151,7 +2186,7 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return None;
     }
@@ -2240,13 +2275,7 @@ fn repl_runtime(
     let (session, transactions) = if let Some(repository) = &repository {
         let project = orna_project_v1::ProjectLoader::default()
             .load(repository)
-            .map_err(|_| {
-                Diagnostic::target(
-                    "E2100",
-                    "project source could not be loaded",
-                    "fix the project module graph and source boundaries, then run check again",
-                )
-            })?;
+            .map_err(project_load_diagnostic)?;
         let session = AdmittedReplSession::from_loaded_project(
             &project,
             project.standard_sources().iter().cloned(),
@@ -2375,24 +2404,50 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
+/// A located `ORNA-REPL-EFFECT` failure for a project binding the REPL cannot
+/// honour, naming what is wrong and the remedy to apply.
+fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
+    repl::ReplFailure {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            message: message.to_owned(),
+            span: None,
+            notes: Vec::new(),
+            help: vec![remedy.to_owned()],
+        }),
+    }
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
     session: &mut AdmittedReplSession,
     source: &str,
-) -> Result<Option<CanonicalValue>, String> {
+) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
     let staged = match session.stage_activation(source) {
         Ok(staged) => staged,
-        Err(_) => return session.submit(source).map_err(|error| error.code().to_owned()),
+        Err(_) => return session.submit(source).map_err(repl::ReplFailure::from),
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
-        return Err("ORNA-REPL-EFFECT".to_owned());
+        return Err(repl::ReplFailure::from(
+            orna_evaluator_v1::effect_rejection(staged.effects()),
+        ));
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
-        return Err("ORNA-REPL-EFFECT".to_owned());
+    if current_commit != transactions.commit {
+        return Err(repl_effect_failure(
+            "the project changed since this REPL session started",
+            "restart the REPL to bind to the current HEAD",
+        ));
+    }
+    if !transactions.format_context.supports_writes() {
+        return Err(repl_effect_failure(
+            "this repository's format does not accept REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
     }
     if transactions.state.is_none() {
         let state = transactions
@@ -2494,7 +2549,7 @@ fn run_repl_input(
         Ok(result) => result,
         Err(error) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error));
+            return Err(repl_application_error(error).into());
         }
     };
     if activation.mutations().is_empty() {
@@ -2508,7 +2563,7 @@ fn run_repl_input(
         Ok(activation) => activation,
         Err(error) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error));
+            return Err(repl_application_error(error).into());
         }
     };
     let committed = transactions
@@ -2522,7 +2577,7 @@ fn run_repl_input(
         ));
     if committed.is_err() {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned());
+        return Err("ORNA-REPL-EFFECT".to_owned().into());
     }
     finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
     *session = successor;
@@ -2550,7 +2605,7 @@ fn run_repl_submission<W: io::Write>(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        session.submit(source).map_err(|error| error.code().to_owned())
+        session.submit(source).map_err(repl::ReplFailure::from)
     };
     run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
 }
@@ -2564,7 +2619,7 @@ fn run_repl_submission_with<W, S>(
 ) -> Result<(), Diagnostic>
 where
     W: io::Write,
-    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String>,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, repl::ReplFailure>,
 {
     if source.trim() == ":quit" {
         return Ok(());
@@ -2600,8 +2655,12 @@ where
             Ok(())
         }
         Ok(None) => Ok(()),
-        Err(code) => {
-            let diagnostic = diagnostic_documentation(&code).map_or_else(
+        Err(failure) => {
+            let body = failure
+                .detail
+                .is_some()
+                .then(|| repl::render_repl_failure(&failure, source));
+            let mut diagnostic = diagnostic_documentation(&failure.code).map_or_else(
                 || {
                     Diagnostic::unavailable(
                         "REPL expression could not be evaluated",
@@ -2616,6 +2675,7 @@ where
                     )
                 },
             );
+            diagnostic.body = body;
             Err(diagnostic)
         }
     }
@@ -3085,7 +3145,7 @@ mod tests {
         let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
             .expect_err("invalid color mode is rejected");
         assert_eq!(
-            (error.code, error.title, error.help),
+            (error.code, error.title.as_ref(), error.help),
             (
                 "E1002",
                 "unsupported value for `--color`",
@@ -3094,7 +3154,7 @@ mod tests {
         );
         let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
         assert_eq!(
-            (error.code, error.title),
+            (error.code, error.title.as_ref()),
             ("E1001", "option `--color` needs a value")
         );
         assert_eq!(
@@ -3149,7 +3209,7 @@ mod tests {
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
-            (error.title, error.help),
+            (error.title.as_ref(), error.help),
             (
                 "unsupported `status` option or option placement",
                 "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
@@ -3197,13 +3257,13 @@ mod tests {
         );
         assert_eq!(
             parse_cli(&["serve".into()]).unwrap().command,
-            Command::Serve { port: 8080 }
+            Command::Serve { port: 8080, allow_push: false }
         );
         assert_eq!(
             parse_cli(&["serve".into(), "--port".into(), "0".into()])
                 .unwrap()
                 .command,
-            Command::Serve { port: 0 }
+            Command::Serve { port: 0, allow_push: false }
         );
     }
 
@@ -3524,10 +3584,11 @@ mod tests {
                 .as_slice();
         let mut output = Vec::new();
         repl::run(&mut input, &mut output, &mut runtime.session).expect("scripted session");
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "> > > error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it\n> 42 : Int\n> "
-        );
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.contains("error[ORNA-S012-UNRESOLVED]: "), "{output}");
+        assert!(output.contains("hidden"), "{output}");
+        assert!(output.contains("line 1, column 9"), "{output}");
+        assert!(output.contains("> 42 : Int\n> "), "{output}");
     }
 
     #[test]
@@ -3923,16 +3984,12 @@ mod tests {
         let error = run_repl_submission(&mut session, "missing()", &mut output, false)
             .expect_err("failure is reported");
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
-        assert_eq!(error.title, "name could not be resolved");
-        assert_eq!(
-            error.help,
-            "declare the name or add the matching `use` import before using it"
-        );
         assert_eq!(error.exit, Exit::Target);
-        assert_eq!(
-            error.to_string(),
-            "error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it"
-        );
+        let rendered = error.to_string();
+        assert!(rendered.starts_with("error[ORNA-S012-UNRESOLVED]: "), "{rendered}");
+        assert!(rendered.contains("missing"), "{rendered}");
+        assert!(rendered.contains("line 1, column 1"), "{rendered}");
+        assert!(rendered.contains("\nhelp: "), "{rendered}");
         assert_eq!(
             run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
@@ -4198,7 +4255,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4228,7 +4285,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("unbundled standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4261,7 +4318,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4294,7 +4351,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,

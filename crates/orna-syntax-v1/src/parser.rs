@@ -2696,7 +2696,7 @@ impl Parser {
         }
         let tail = if self.keyword() == Some(Keyword::As) {
             self.bump();
-            if self.contextual() || self.is_punct("_") {
+            if matches!(self.current().kind, TokenKind::Identifier { .. }) || self.is_punct("_") {
                 let alias = ImportSegment {
                     name: self.current().text.clone(),
                     span: self.current().span.clone(),
@@ -2721,7 +2721,7 @@ impl Parser {
                 self.bump();
                 let mut names = Vec::new();
                 while !self.eof() && !self.is_punct("}") {
-                    if !self.contextual() {
+                    if !matches!(self.current().kind, TokenKind::Identifier { .. }) {
                         self.error_here("ORNA-PARSE-001", "expected imported name");
                         break;
                     }
@@ -2884,7 +2884,12 @@ impl Parser {
                     }
                     let mut arguments = Vec::new();
                     let mut fields = Vec::new();
-                    if self.is_punct("{") {
+                    if self.is_punct("{") && path.len() == 1 {
+                        self.error_here(
+                            "ORNA-PARSE-001",
+                            "enum record pattern requires a qualified variant",
+                        );
+                    } else if self.is_punct("{") {
                         self.bump();
                         while !self.eof() && !self.is_punct("}") {
                             if !self.contextual() {
@@ -3013,10 +3018,12 @@ impl Parser {
                     };
                 }
                 let mut elements = Vec::new();
+                let mut saw_comma = false;
                 while !self.eof() && !self.is_punct(close) {
                     elements.push(self.parse_pattern());
                     if self.is_punct(",") {
-                        self.bump()
+                        self.bump();
+                        saw_comma = true;
                     } else {
                         break;
                     }
@@ -3028,6 +3035,8 @@ impl Parser {
                 }
                 let span = token.span.join(self.previous().span.clone());
                 match open.as_str() {
+                    // A parenthesised pattern without a comma is grouping, not a tuple.
+                    "(" if !saw_comma && elements.len() == 1 => elements.swap_remove(0),
                     "(" => Pattern::Tuple { elements, span },
                     "[" => Pattern::List { elements, span },
                     _ => unreachable!(),
@@ -3221,9 +3230,18 @@ impl Parser {
                             value,
                             span: statement_start.join(end),
                         }),
-                        _ => statements.push(Statement::Continue {
-                            span: statement_start,
-                        }),
+                        _ => {
+                            if let Some(value) = &value {
+                                self.errors.push(Diagnostic::error(
+                                    "ORNA-PARSE-002",
+                                    "`continue` takes no value",
+                                    value.span(),
+                                ));
+                            }
+                            statements.push(Statement::Continue {
+                                span: statement_start,
+                            });
+                        }
                     }
                     if self.is_punct(";") {
                         self.bump()
@@ -4108,7 +4126,7 @@ impl Parser {
     }
 
     fn pratt(&mut self, min: u8, mode: NominalBraceMode) -> Option<Expr> {
-        let lhs = self.prefix(mode)?;
+        let lhs = self.prefix(mode, min == 0)?;
         Some(self.pratt_from(lhs, min, mode))
     }
 
@@ -4275,9 +4293,34 @@ impl Parser {
                 );
                 break;
             }
-            let rhs =
-                self.recurse(|parser| parser.pratt(if right { prec } else { prec + 1 }, mode));
+            // A pipeline stage is a postfix expression: additive, multiplicative,
+            // power, and range operators bind tighter than `|`, so they cannot
+            // continue a stage. Parse the stage at postfix precedence and reject
+            // any such operator that follows it.
+            // A lambda stage is parsed at the lowest precedence so the existing
+            // parenthesization diagnostic below reports it, not a trailing-input error.
+            let lambda_stage = op == "|" && self.pipeline_stage_is_lambda();
+            let rhs_min = if lambda_stage {
+                0
+            } else if matches!(op.as_str(), "|" | "|?") {
+                10
+            } else if right {
+                prec
+            } else {
+                prec + 1
+            };
+            let rhs = self.recurse(|parser| parser.pratt(rhs_min, mode));
             let Some(rhs) = rhs else { break };
+            if matches!(op.as_str(), "|" | "|?")
+                && let Some((next_prec, _)) = self.infix()
+                && (6..=9).contains(&next_prec)
+            {
+                self.error_here(
+                    "ORNA-PARSE-001",
+                    "pipeline stages must be postfix expressions",
+                );
+                break;
+            }
             if op == "|" && matches!(rhs, Expr::Lambda { .. }) {
                 self.errors.push(Diagnostic::error(
                     "ORNA-PARSE-001",
@@ -4298,7 +4341,9 @@ impl Parser {
         }
         lhs
     }
-    fn prefix(&mut self, mode: NominalBraceMode) -> Option<Expr> {
+    /// `allow_lambda` is true only at the lowest binding power: a lambda is a
+    /// complete expression and cannot be the operand of an infix or prefix operator.
+    fn prefix(&mut self, mode: NominalBraceMode, allow_lambda: bool) -> Option<Expr> {
         let t = self.current().clone();
         if matches!(t.kind, TokenKind::Punct(".." | "..=")) {
             self.bump();
@@ -4352,7 +4397,10 @@ impl Parser {
                     ));
                 }
                 self.bump();
-                if self.is_punct("=>") {
+                if allow_lambda
+                    && matches!(t.kind, TokenKind::Identifier { .. })
+                    && self.is_punct("=>")
+                {
                     self.bump();
                     let body = self.parse_lambda_body();
                     return Some(Expr::Lambda {
@@ -4409,7 +4457,7 @@ impl Parser {
                 Keyword::If | Keyword::Case | Keyword::For | Keyword::While | Keyword::Loop,
             ) => Some(self.parse_control_expression()),
             TokenKind::Punct("(") => {
-                if self.group_followed_by_arrow() {
+                if allow_lambda && self.group_followed_by_arrow() {
                     let parameters = self.parse_lambda_parameters();
                     self.bump();
                     let body = self.parse_lambda_body();
@@ -4737,6 +4785,14 @@ impl Parser {
         }
         false
     }
+    /// True when the current pipeline stage begins a lambda (`name =>` or `(...) =>`).
+    fn pipeline_stage_is_lambda(&self) -> bool {
+        match self.current().kind {
+            TokenKind::Identifier { .. } => Self::token_is_punct(&self.tokens, self.at + 1, "=>"),
+            TokenKind::Punct("(") => self.group_followed_by_arrow(),
+            _ => false,
+        }
+    }
     fn parse_lambda_parameters(&mut self) -> Vec<LambdaParameter> {
         let mut parameters = Vec::new();
         self.bump();
@@ -4949,7 +5005,15 @@ impl Parser {
                 | TokenKind::StringStart
                 | TokenKind::ReplBinding
                 | TokenKind::Keyword(
-                    Keyword::SelfValue | Keyword::True | Keyword::False | Keyword::Null
+                    Keyword::SelfValue
+                        | Keyword::True
+                        | Keyword::False
+                        | Keyword::Null
+                        | Keyword::If
+                        | Keyword::Case
+                        | Keyword::For
+                        | Keyword::While
+                        | Keyword::Loop
                 )
                 | TokenKind::Punct("(" | "[" | "{" | "!" | "-" | "+")
         )

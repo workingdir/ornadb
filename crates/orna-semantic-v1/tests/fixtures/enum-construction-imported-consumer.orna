@@ -1,0 +1,10 @@
+use types.{Level, SyncResult};
+use types as shared;
+
+pub fn low(): Level = Level.low;
+
+pub fn made(): SyncResult = SyncResult.ok { count: 3 };
+
+pub fn qualified() = shared.Level.high;
+
+pub fn qualified_payload() = shared.SyncResult.failed { reason: "offline", retryable: false };

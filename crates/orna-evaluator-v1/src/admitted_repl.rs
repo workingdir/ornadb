@@ -16,20 +16,43 @@ use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
     Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    analyze_with_catalogue,
+    SystemProviders, analyze_with_providers, unresolved_member, unresolved_name,
 };
-use orna_syntax_v1::{Declaration, ImportSegment, ReplInput, UseTail, Visibility, parse_module};
+use orna_syntax_v1::{
+    Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, UseTail, Visibility, lex,
+    parse_module, parse_repl,
+};
 
 use crate::{
-    CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    module_function_alias_key, parse_admitted_repl,
+    CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    PureFunction, ReplSession, module_function_alias_key, source_enum_definitions,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
 
 /// Redacted failure from the admitted REPL boundary.
+///
+/// [`Self::diagnostic`] never contains submitted source. [`Self::detail`]
+/// carries parser or semantic specifics for the local operator and may quote
+/// the submitted input, so it must not cross a protocol boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplError {
     diagnostic: Box<FoundationDiagnostic>,
+    detail: Option<Box<ReplDetail>>,
+}
+
+/// Explanation of a rejected REPL input, located in its source text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplDetail {
+    /// Parser or semantic code, for example `ORNA-PARSE-001`.
+    pub code: String,
+    /// What the user did wrong, naming the offending identifier when known.
+    pub message: String,
+    /// Byte range of the offending text in the submitted source, when located.
+    pub span: Option<std::ops::Range<usize>>,
+    /// Supporting facts about the failure.
+    pub notes: Vec<String>,
+    /// Concrete remedies the user can apply.
+    pub help: Vec<String>,
 }
 
 impl ReplError {
@@ -55,6 +78,7 @@ impl ReplError {
         .redacted();
         Self {
             diagnostic: Box::new(diagnostic),
+            detail: None,
         }
     }
 
@@ -69,6 +93,12 @@ impl ReplError {
     /// boundary; this value never contains the submitted source.
     pub fn diagnostic(&self) -> &FoundationDiagnostic {
         self.diagnostic.as_ref()
+    }
+
+    /// Returns the located explanation of a parse or static-name failure, when
+    /// one is available. Runtime and host failures carry none.
+    pub fn detail(&self) -> Option<&ReplDetail> {
+        self.detail.as_deref()
     }
 
     fn status_value(&self) -> CanonicalValue {
@@ -209,7 +239,7 @@ impl AdmittedReplSession {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
-            semantic: ReplContext::empty(),
+            semantic: ReplContext::with_providers(SystemProviders::Production),
             runtime: ReplSession::new(limits),
             attached_databases: None,
             repository_scope: None,
@@ -274,7 +304,7 @@ impl AdmittedReplSession {
         limits: Limits,
     ) -> Result<Self, ReplError> {
         let standard_sources = standard_sources.into_iter().collect::<Vec<_>>();
-        let analysis = analyze_with_catalogue(modules, &catalogue);
+        let analysis = analyze_with_providers(modules, &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
@@ -330,7 +360,7 @@ impl AdmittedReplSession {
             }
             None => Catalogue::authoritative_core(),
         };
-        let analysis = analyze_with_catalogue(project.modules(), &catalogue);
+        let analysis = analyze_with_providers(project.modules(), &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
@@ -359,12 +389,12 @@ impl AdmittedReplSession {
             Ok(input) => input,
             Err(error) => return Err(self.publish_failure(error)),
         };
-        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+        let admission = match self.stage_input(&input, source) {
             Ok(admission) => admission,
             Err(error) => return Err(self.publish_failure(error)),
         };
         if !admission.effects.effects.is_empty() {
-            return Err(self.publish_failure(ReplError::fixed("ORNA-REPL-EFFECT")));
+            return Err(self.publish_failure(effect_rejection(&admission.effects)));
         }
         let mut runtime = self.runtime.clone();
         let value = match runtime.submit_admitted(&input).map_err(ReplError::runtime) {
@@ -396,7 +426,7 @@ impl AdmittedReplSession {
             Ok(input) => input,
             Err(error) => return Err(self.publish_failure(error)),
         };
-        let admission = match self.semantic.stage(&input).map_err(semantic_error) {
+        let admission = match self.stage_input(&input, source) {
             Ok(admission) => admission,
             Err(error) => return Err(self.publish_failure(error)),
         };
@@ -429,7 +459,7 @@ impl AdmittedReplSession {
     /// committed activation.
     pub fn stage_activation(&self, source: &str) -> Result<StagedReplActivation, ReplError> {
         let input = self.parse(source)?;
-        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        let admission = self.stage_input(&input, source)?;
         if admission.effects.effects.is_empty() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
@@ -474,9 +504,10 @@ impl AdmittedReplSession {
     ) -> Result<Option<CanonicalValue>, ReplError> {
         cancellation.check().map_err(ReplError::runtime)?;
         let mut candidate = self.clone();
-        let admission = candidate.semantic.stage(input).map_err(semantic_error)?;
+        // This admitted-input path has no source text, so diagnostics carry no spans.
+        let admission = candidate.stage_input(input, "")?;
         if !admission.effects.effects.is_empty() {
-            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+            return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = candidate.runtime.clone();
         let value = runtime
@@ -502,9 +533,9 @@ impl AdmittedReplSession {
         if !matches!(input, ReplInput::Expression(_)) {
             return Err(ReplError::fixed("ORNA-EVAL-UNSUPPORTED"));
         }
-        let admission = self.semantic.stage(&input).map_err(semantic_error)?;
+        let admission = self.stage_input(&input, source)?;
         if !admission.effects.effects.is_empty() {
-            return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
+            return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = self.runtime.clone();
         runtime
@@ -514,7 +545,20 @@ impl AdmittedReplSession {
     }
 
     fn parse(&self, source: &str) -> Result<ReplInput, ReplError> {
-        parse_admitted_repl(source, self.limits).map_err(ReplError::runtime)
+        self.limits
+            .check_source(source)
+            .map_err(ReplError::runtime)?;
+        let parsed = parse_repl(source);
+        if parsed.is_ok() {
+            return Ok(parsed.value);
+        }
+        Err(parse_error(&parsed.diagnostics, source))
+    }
+
+    fn stage_input(&self, input: &ReplInput, source: &str) -> Result<ReplAdmission, ReplError> {
+        self.semantic
+            .stage(input)
+            .map_err(|diagnostics| stage_error(&self.semantic, diagnostics, source))
     }
 
     fn publish_failure(&mut self, error: ReplError) -> ReplError {
@@ -626,7 +670,17 @@ fn admitted_runtime_sources(
     }
 
     let mut functions = Functions::new();
+    let mut nominal_definitions = NominalDefinitions::new();
     for (namespace, module) in parsed_modules {
+        let standard = namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
+        if !standard {
+            // ORNA-ENUM-001..003: project enums execute as construction plans
+            // shared by every evaluation in the session.
+            nominal_definitions
+                .extend(source_enum_definitions(namespace.as_deref(), &module.items));
+        }
         for item in module.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
@@ -646,20 +700,14 @@ fn admitted_runtime_sources(
                         },
                     );
                 }
-                Declaration::Use { .. } | Declaration::Table { .. } => {}
+                Declaration::Use { .. } | Declaration::Table { .. } | Declaration::Enum { .. } => {}
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
                 // remain represented by the semantic catalogue. Keep these
                 // items from preventing unrelated standard functions from
-                // loading; ordinary project declarations remain outside this
+                // loading; other project declarations remain outside this
                 // evaluator boundary.
-                Declaration::Enum { .. }
-                    if namespace
-                        .as_deref()
-                        .is_some_and(|namespace| namespace.starts_with("std.")) => {}
-                _ if namespace.as_deref().is_some_and(|namespace| {
-                    namespace == "std" || namespace.starts_with("std.")
-                }) => {}
+                _ if standard => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }
@@ -667,6 +715,7 @@ fn admitted_runtime_sources(
     ReplSession::with_bindings(limits, Environment::new(), functions)
         .map_err(ReplError::runtime)?
         .with_module_aliases(module_aliases)
+        .and_then(|session| session.with_nominal_definitions(nominal_definitions))
         .map(|session| session.with_table_names(table_names))
         .map_err(ReplError::runtime)
 }
@@ -842,9 +891,204 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
     )
 }
 
+/// The rejection for input that performs effects in a session that never
+/// runs them. Names the effects, so the person can see what made it effectful.
+pub fn effect_rejection(effects: &EffectSummary) -> ReplError {
+    let names = effects
+        .effects
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = ReplError::redacted("ORNA-REPL-EFFECT");
+    error.detail = Some(Box::new(ReplDetail {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        message: format!("this input performs effects: {names}"),
+        span: None,
+        notes: vec!["the core REPL session never runs effects".to_owned()],
+        help: vec![
+            "evaluate a pure expression here".to_owned(),
+            "or run the input in a project repository REPL, where effects are committed"
+                .to_owned(),
+        ],
+    }));
+    error
+}
+
+/// The span of the submitted input without its surrounding whitespace. Used
+/// when analysis cannot narrow a diagnostic below the whole input.
+fn whole_input_span(source: &str) -> Option<std::ops::Range<usize>> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let start = source.len() - source.trim_start().len();
+    Some(start..start + trimmed.len())
+}
+
+fn parse_error(diagnostics: &[SyntaxDiagnostic], source: &str) -> ReplError {
+    let mut error = ReplError::redacted("ORNA-EVAL-PARSE");
+    if let Some(diagnostic) = diagnostics.first() {
+        // End-of-input tokens sit after the trailing newline the terminal
+        // adds; point just past the last written character instead.
+        let content_end = source.trim_end().len();
+        let start = diagnostic.span.start.min(content_end);
+        let end = diagnostic.span.end.min(content_end).max(start);
+        let mut help = diagnostic.help.clone();
+        if help.is_empty()
+            && let Some(remedy) = parse_remedy(&diagnostic.message)
+        {
+            help.push(remedy.to_owned());
+        }
+        let mut notes = diagnostic.notes.clone();
+        if diagnostic.message.starts_with("expected `)`")
+            && let Some(opener) = unclosed_opener(source)
+        {
+            let (line, column) = line_column(source, opener.start);
+            notes.push(format!(
+                "the `(` at line {line}, column {column} is not closed"
+            ));
+        }
+        error.detail = Some(Box::new(ReplDetail {
+            code: diagnostic.code.to_owned(),
+            message: diagnostic.message.clone(),
+            span: Some(start..end),
+            notes,
+            help,
+        }));
+    }
+    error
+}
+
+/// The remedy for a parser message the syntax crate leaves without `help`.
+fn parse_remedy(message: &str) -> Option<&'static str> {
+    if message == "expected namespace path" {
+        Some("name the module to import after `use`, for example `use library;`")
+    } else if message == "expected pattern" {
+        Some("name the binding after `let`, for example `let x = 3;`")
+    } else if message.starts_with("expected `)`") {
+        Some("close the parenthesis with `)`")
+    } else {
+        None
+    }
+}
+
+/// The innermost `(` that is still open at the end of `source`.
+fn unclosed_opener(source: &str) -> Option<std::ops::Range<usize>> {
+    let mut open = Vec::new();
+    for token in lex(source).ok()? {
+        match token.kind {
+            TokenKind::Punct("(") => open.push(token.span.start..token.span.end),
+            TokenKind::Punct(")") => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.pop()
+}
+
+/// One-based line and column of byte `offset` in `source`.
+fn line_column(source: &str, offset: usize) -> (usize, usize) {
+    let before = &source[..offset];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    (line, before[line_start..].chars().count() + 1)
+}
+
+fn stage_error(
+    context: &ReplContext,
+    diagnostics: Vec<orna_foundation_v1::Diagnostic>,
+    source: &str,
+) -> ReplError {
+    let Some(first) = diagnostics.first() else {
+        return ReplError::fixed("ORNA-REPL-SEMANTIC");
+    };
+    let code = first.code();
+    let detail = match (unresolved_name(first), unresolved_member(first)) {
+        (Some(name), _) => unresolved_detail(context, code, name, source),
+        (None, Some((module, member))) => unresolved_member_detail(code, module, member, source),
+        (None, None) => ReplDetail {
+            code: code.to_owned(),
+            message: first.message().to_owned(),
+            span: whole_input_span(source),
+            notes: first
+                .notes()
+                .iter()
+                .map(|note| note.as_str().to_owned())
+                .collect(),
+            help: Vec::new(),
+        },
+    };
+    let mut error = ReplError::redacted(code);
+    error.detail = Some(Box::new(detail));
+    error
+}
+
+fn unresolved_detail(context: &ReplContext, code: &str, name: &str, source: &str) -> ReplDetail {
+    let hints = context.name_hints(name);
+    let mut help: Vec<String> = hints
+        .similar
+        .iter()
+        .map(|candidate| format!("did you mean `{candidate}`?"))
+        .collect();
+    help.extend(
+        hints
+            .modules
+            .iter()
+            .map(|module| format!("add `use {module}.{name}` to bring `{name}` into scope")),
+    );
+    if hints.namespaces.is_empty() {
+        help.push(format!(
+            "declare `{name}` before using it, for example `let {name} = <value>`"
+        ));
+    }
+    help.extend(
+        hints
+            .namespaces
+            .iter()
+            .map(|namespace| format!("add `use {namespace};` to bring module `{name}` into scope")),
+    );
+    ReplDetail {
+        code: code.to_owned(),
+        message: format!("name `{name}` cannot be resolved"),
+        span: locate_identifier(source, name, false),
+        notes: vec![format!(
+            "`{name}` is not declared in this session and is not imported"
+        )],
+        help,
+    }
+}
+
+fn unresolved_member_detail(code: &str, module: &str, member: &str, source: &str) -> ReplDetail {
+    ReplDetail {
+        code: code.to_owned(),
+        message: format!("`{member}` is not a member of module `{module}`"),
+        span: locate_identifier(source, member, true),
+        notes: Vec::new(),
+        help: vec![
+            format!("check the spelling of `{member}` against the exports of `{module}`"),
+            format!("if `{member}` is private in `{module}`, mark it `pub` to use it here"),
+        ],
+    }
+}
+
+/// Locates the first identifier `name` in `source` as a byte span. With
+/// `qualified`, only an occurrence directly after `.` (a member access) counts.
+fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::ops::Range<usize>> {
+    lex(source).ok()?.into_iter().find_map(|token| match &token.kind {
+        TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
+            let start = token.span.start;
+            (!qualified || source[..start].trim_end().ends_with('.')).then(|| start..token.span.end)
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_admitted_repl;
     use orna_project_v1::{AttachedDatabaseSession, PinnedDatabase, ProjectLoader};
     use orna_repository_v1::Repository;
     use orna_semantic_v1::StandardDependencyProfile;
@@ -1453,6 +1697,130 @@ mod tests {
         assert_eq!(
             session.submit(include_str!("fixtures/repl-inline-answer-0db52f40.orna")),
             Ok(Some(Value::int(40.into())))
+        );
+    }
+
+    #[test]
+    fn parse_errors_point_past_the_last_character_with_a_remedy() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("use\n").unwrap_err();
+
+        assert_eq!(error.code(), "ORNA-EVAL-PARSE");
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.code, "ORNA-PARSE-001");
+        assert_eq!(detail.message, "expected namespace path");
+        assert_eq!(detail.span, Some(3..3));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("`use library;`")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unclosed_parenthesis_names_its_opener_and_the_missing_close() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("(1 + 2\n").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.message, "expected `)`");
+        assert_eq!(detail.span, Some(6..6));
+        assert_eq!(
+            detail.notes,
+            vec!["the `(` at line 1, column 1 is not closed".to_owned()]
+        );
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "close the parenthesis with `)`"),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unresolved_name_points_at_the_identifier_with_a_declare_remedy() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("nofn(1)\n").unwrap_err();
+
+        assert_eq!(error.code(), "ORNA-S012-UNRESOLVED");
+        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        assert_eq!(detail.message, "name `nofn` cannot be resolved");
+        assert_eq!(detail.span, Some(0..4));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("declare `nofn` before using it")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn unresolved_name_matching_a_loaded_module_suggests_its_use_import() {
+        let (_directory, project) = loaded_project(
+            &[
+                (
+                    "main.orna",
+                    include_str!(
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                    ),
+                ),
+                (
+                    "library.orna",
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                    ),
+                ),
+            ],
+            None,
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            &project,
+            Vec::<(String, String)>::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let error = session.submit("library.twice(\"x\")\n").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        assert_eq!(detail.message, "name `library` cannot be resolved");
+        assert_eq!(detail.span, Some(0..7));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "add `use library;` to bring module `library` into scope"),
+            "{:?}",
+            detail.help
+        );
+        assert!(
+            detail.help.iter().all(|help| !help.contains("let library")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
+    fn binding_without_a_name_points_at_the_offending_token() {
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let error = session.submit("let = 3;").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        assert_eq!(detail.message, "expected pattern");
+        assert_eq!(detail.span, Some(4..5));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help.contains("`let x = 3;`")),
+            "{:?}",
+            detail.help
         );
     }
 
