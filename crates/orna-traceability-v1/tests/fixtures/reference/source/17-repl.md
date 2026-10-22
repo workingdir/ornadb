@@ -115,4 +115,3 @@ Console operations are prefixed with `:` so they are not confused with language 
 **ORNA-REPL-005** `:at` changes the default snapshot context for the session; it MUST NOT mutate repository HEAD.
 
 **ORNA-REPL-006** `:watch` MUST use the same dependency and delta machinery as page sessions.
-

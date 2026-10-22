@@ -1,0 +1,2 @@
+pub table User(id: Uuid) { name: Str, }
+assert every(User, user => user.name != "");
