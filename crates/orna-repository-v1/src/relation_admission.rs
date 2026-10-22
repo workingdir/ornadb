@@ -190,7 +190,8 @@ impl From<FormatContextError> for RelationAdmissionError {
 }
 
 /// One committed stable object identity (ORNA-OBJECT-001): its UUID, its
-/// object kind code, its qualified source name and whether it is retired.
+/// object kind (its `sys.ObjectKind` ordinal), its qualified source name and
+/// whether it is retired.
 /// Retired identities stay in the inventory so they are never reused
 /// (ORNA-OBJECT-005).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -285,7 +286,7 @@ fn uuid_value(id: [u8; 16]) -> Raw {
 
 /// The sealed closed descriptor of the object-identity inventory relation.
 /// Its key is the identity UUID; its stored fields are the qualified name,
-/// the object kind code and the retirement flag.
+/// the `sys.ObjectKind` ordinal of the object kind and the retirement flag.
 pub fn object_identity_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
     let field = |id: [u8; 16], name: &str, primitive: &str, role: u64| {
         Raw::Array(vec![
