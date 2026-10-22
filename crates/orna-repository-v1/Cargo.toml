@@ -8,10 +8,11 @@ description = "Git-backed repository, CWD, index, and local runtime boundary for
 
 [features]
 crash-barriers = []
+# Test-only builder for legacy compact fixtures; never enabled in production.
+legacy-fixture-writer = []
 
 [dependencies]
 bytes = "1.10.1"
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 fs2 = "0.4.3"
 libc = "0.2.180"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
@@ -32,6 +33,7 @@ orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-semantic-v1 = { path = "../orna-semantic-v1" }
 orna-storage-v1 = { path = "../orna-storage-v1" }
 orna-sys-v1 = { path = "../orna-sys-v1" }
+serde_json = "1.0.151"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "0.38.44", default-features = false, features = ["fs", "std"] }
