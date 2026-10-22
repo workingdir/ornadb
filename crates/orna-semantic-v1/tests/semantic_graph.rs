@@ -1052,7 +1052,7 @@ fn failure_skip_requires_a_typed_version_precondition() {
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol = &valid.modules[&orna_semantic_v1::Namespace(vec!["skip".into()])].exports["skip"];
-    assert!(symbol.effects.effects.contains("admin"));
+    assert!(symbol.effects.opaque);
     assert!(symbol.effects.may_fail);
 }
 
@@ -1077,8 +1077,8 @@ fn failure_replay_requires_a_typed_version_precondition() {
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol =
         &valid.modules[&orna_semantic_v1::Namespace(vec!["replay".into()])].exports["replay"];
-    assert!(symbol.effects.effects.contains("admin"));
-    assert!(!symbol.effects.effects.contains("database write"));
+    assert!(symbol.effects.opaque);
+    assert!(!symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(symbol.effects.may_fail);
 }
 
@@ -1389,7 +1389,7 @@ fn imported_std_net_callables_preserve_effects_and_imports_remain_analysis_only(
         .expect("consumer module");
     for name in ["aliased", "named"] {
         let symbol = module.symbols.get(name).expect("imported callable summary");
-        assert!(symbol.effects.effects.contains("network"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
         assert!(symbol.effects.may_fail);
     }
 }
@@ -1793,7 +1793,7 @@ fn imported_generic_calls_preserve_declared_effects_and_failure_metadata() {
     ));
     assert_eq!(
         read.effects.effects,
-        std::collections::BTreeSet::from(["database read".into()])
+        std::collections::BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
     );
     assert!(read.effects.may_fail);
 }
@@ -2327,7 +2327,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
     let helper = module.exports.get("related").expect("pure helper export");
     assert_eq!(
         helper.effects.effects,
-        std::collections::BTreeSet::from(["database read".into()])
+        std::collections::BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
     );
     assert!(helper.effects.may_fail);
 
@@ -14947,7 +14947,7 @@ fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     }
 }
 
-fn historical_effect_catalogue(effect: &str) -> Catalogue {
+fn historical_effect_catalogue(effects: EffectSummary) -> Catalogue {
     let symbol = Symbol {
         kind: SymbolKind::Function,
         ty: Type::Function {
@@ -14957,10 +14957,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
             result: Box::new(Type::Null),
         },
         public: true,
-        effects: EffectSummary {
-            effects: std::collections::BTreeSet::from([effect.to_owned()]),
-            may_fail: true,
-        },
+        effects,
         generic_parameters: Vec::new(),
         enum_variants: BTreeSet::new(),
         table_schema: None,
@@ -14980,26 +14977,41 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
 #[test]
 fn historical_callables_are_read_effect_only() {
     for effect in [
-        "database write",
-        "checkpoint",
-        "secret",
-        "network",
-        "external",
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableWrite]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::Network]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::SecretAccess]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::new(),
+            opaque: true,
+            may_fail: true,
+        },
     ] {
         let result = analyze_with_catalogue(
             &[ModuleInput::new(
                 "historical-effect.orna",
                 include_str!("fixtures/inline-semantic_graph/4085c519acf1.orna"),
             )],
-            &historical_effect_catalogue(effect),
+            &historical_effect_catalogue(effect.clone()),
         );
-        assert!(!result.is_ok(), "{effect}: {:?}", result.diagnostics);
+        assert!(!result.is_ok(), "{effect:?}: {:?}", result.diagnostics);
         assert!(
             result
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code() == DIAG_UNSUPPORTED),
-            "{effect}: {:?}",
+            "{effect:?}: {:?}",
             result.diagnostics
         );
     }
@@ -15095,7 +15107,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
             )
     ));
     let sync = &module.exports["sync_selected"];
-    assert!(sync.effects.effects.contains("network"));
+    assert!(sync.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
     assert!(sync.effects.may_fail);
 
     let invalid = analyze(&[ModuleInput::new(
@@ -15180,14 +15192,14 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
         module.symbols["recovered"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(!module.symbols["recovered"].effects.may_fail);
     assert!(
         module.symbols["still_fails"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["still_fails"].effects.may_fail);
 }
@@ -15343,7 +15355,7 @@ fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_executi
         .find(|module| module.namespace.display() == "sensors")
         .unwrap();
     let ingest = module.symbols.get("ingest").unwrap();
-    assert!(ingest.effects.effects.contains("database write"));
+    assert!(ingest.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(ingest.effects.may_fail);
 }
 
@@ -15525,7 +15537,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                 arguments: vec![Type::Int],
             }
     ));
-    assert!(metadata.effects.effects.contains("database read"));
+    assert!(metadata.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(metadata.effects.may_fail);
 
     let named_metadata = analyze(&[ModuleInput::new(
@@ -15567,7 +15579,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                     arguments: vec![value_type.clone()],
                 }
         ));
-        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
         assert!(symbol.effects.may_fail);
     }
     let generic = &explicit_metadata.exports["generic"];
@@ -15669,8 +15681,8 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
                 arguments: vec![Type::Named("sys.Value".into())],
             }
     ));
-    assert!(awaited.effects.effects.contains("admin"));
-    assert!(awaited.effects.effects.contains("invoke"));
+    assert!(awaited.effects.opaque);
+    assert!(awaited.effects.effects.is_empty());
     assert!(awaited.effects.may_fail);
 
     let typed = analyze(&[ModuleInput::new(
@@ -15697,8 +15709,9 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         ));
         assert_eq!(
             typed.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(typed.effects.opaque);
         assert!(typed.effects.may_fail);
     }
 
@@ -15713,8 +15726,9 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
 
     for source in [
@@ -15825,8 +15839,9 @@ fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
 
@@ -15907,8 +15922,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
     let local_generic = &module.exports["local_generic"];
@@ -15918,8 +15934,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
     let erased = &module.exports["erased"];
     assert!(matches!(
@@ -15929,8 +15946,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     ));
     assert_eq!(
         erased.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(erased.effects.opaque);
     assert!(erased.effects.may_fail);
 
     for (name, source, message) in [
@@ -16032,8 +16050,9 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
     let local_generic = &module.exports["local_generic"];
@@ -16047,8 +16066,9 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
 
     for (name, source, message) in [
@@ -16150,8 +16170,9 @@ fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
 
@@ -16185,8 +16206,9 @@ fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
     ));
     assert_eq!(
         piped.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(piped.effects.opaque);
     assert!(piped.effects.may_fail);
 
     for (name, source, message) in [
@@ -16314,7 +16336,7 @@ fn default_expression_effects_remain_visible_on_the_callable() {
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
         let symbol = &result.modules.values().next().unwrap().exports["pinned"];
-        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
         assert!(symbol.effects.may_fail);
     }
 }
@@ -16418,7 +16440,7 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
         if expression.contains("snapshot") {
             let symbol = &result.modules.values().next().expect("module").symbols["logical"];
-            assert!(symbol.effects.effects.contains("database read"));
+            assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
             assert!(symbol.effects.may_fail);
         }
     }
@@ -16607,7 +16629,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
     ));
-    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(readings.effects.may_fail);
     let direct = &module.symbols["direct"];
     assert!(matches!(
@@ -16615,7 +16637,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
     ));
-    assert!(direct.effects.effects.contains("database read"));
+    assert!(direct.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(direct.effects.may_fail);
 
     let catalogue_valid = analyze_with_catalogue(
@@ -16641,7 +16663,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         "{:?}",
         readings.ty
     );
-    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(readings.effects.may_fail);
 
     let relation_argument = analyze(&[ModuleInput::new(
@@ -16687,7 +16709,7 @@ fn finite_list_filter_types_predicate_and_preserves_effects() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -16803,7 +16825,7 @@ fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -16871,7 +16893,7 @@ fn finite_list_sort_by_admits_direct_pipeline_and_named_keys() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -17085,7 +17107,7 @@ fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effec
             module.symbols[name]
                 .effects
                 .effects
-                .contains("database read"),
+                .contains(&orna_semantic_v1::EffectKind::TableRead),
             "{name}: {:?}",
             module.symbols[name].effects
         );
@@ -17204,7 +17226,7 @@ fn finite_list_every_and_exists_return_bool_for_all_supported_call_forms_and_pre
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
     assert!(matches!(
@@ -17320,7 +17342,7 @@ fn finite_list_sum_returns_exact_int_for_supported_forms_and_preserves_effects()
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -17422,7 +17444,7 @@ fn finite_list_integer_min_max_return_optional_int_for_all_call_forms() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -17600,7 +17622,7 @@ fn finite_list_float_aggregates_return_exact_types_for_all_call_forms_and_effect
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -17734,7 +17756,7 @@ fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collecti
         module.symbols["relation_inner"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["relation_inner"].effects.may_fail);
 }
@@ -17980,7 +18002,7 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
         sensors.symbols["ingest"]
             .effects
             .effects
-            .contains("database write")
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
     );
     assert!(sensors.symbols["ingest"].effects.may_fail);
 
@@ -17993,7 +18015,7 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
         main.symbols["run"]
             .effects
             .effects
-            .contains("database write")
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
     );
     assert!(main.symbols["run"].effects.may_fail);
 }
@@ -18103,7 +18125,7 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
         values.symbols["describe"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(values.symbols["describe"].effects.may_fail);
 
@@ -18182,7 +18204,7 @@ fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
         Type::Function { result, .. } if result.as_ref() == &Type::Int
     ));
     let populate = &module.symbols["populate"];
-    assert!(populate.effects.effects.contains("database write"));
+    assert!(populate.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(populate.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -18224,7 +18246,7 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         &poll.ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
-    assert!(poll.effects.effects.contains("database write"));
+    assert!(poll.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(poll.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
