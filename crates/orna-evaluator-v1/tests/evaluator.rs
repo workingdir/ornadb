@@ -12054,7 +12054,7 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         orna_syntax_v1::ReplInput::Expression(_)
     ));
     assert!(staged.result_type().is_some());
-    assert!(staged.effects().effects.contains("network"));
+    assert!(staged.effects().effects.contains(&orna_semantic_v1::EffectKind::Network));
     assert!(staged.effects().may_fail);
     assert_eq!(
         session.preview(include_str!("fixtures/admitted_repl_last_result.orna").trim()),
