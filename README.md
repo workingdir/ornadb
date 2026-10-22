@@ -1,14 +1,14 @@
 # OrnaDB
 
 OrnaDB is a Git-backed database platform for typed applications. The current
-implementation work targets the Orna 1.0.0 language, local repository, embedded
-runtime, and command-line workflows.
+implementation work targets the Orna 1.1.0 language, local repository, embedded
+runtime, and command-line workflows. The workspace package version is still 1.0.0.
 
 ## Current local CLI
 
 The active local binary is `orna-cli-v1`. It works with a local Git-backed
 project and keeps source checking, execution, and interactive evaluation on
-the same Orna 1.0 path.
+the same Orna 1.1.0 path.
 
 ### Build
 
@@ -76,10 +76,10 @@ a running database.
 
 ## Project layout
 
-The workspace contains the Orna 1.0 language, value, evaluator, runtime,
+The workspace contains the Orna 1.1.0 language, value, evaluator, runtime,
 repository, storage, system, serving, CLI, and conformance packages. The
 canonical specification and its publication digest are kept in
-`reference/Orna-1.0.0/`.
+`reference/Orna-1.1.0/`.
 
 ## License
 

@@ -118,6 +118,11 @@ failed selection retains the previous session. Remote endpoints are not a
 fallback for a local project: use a local Git worktree and an explicit `--db
 PATH` when selecting a project.
 
+The REPL help text lists `:help [name]` (`REPL_HELP` in `crates/orna-cli-v1/src/repl.rs`). The
+`:watch expression` command needs a host-owned live watch source. The `orna`
+binary does not wire one, so `:watch` reports `ORNA-REPL-COMMAND` there;
+it is exercised only by the test harness in `crates/orna-cli-v1/tests/watch_command.rs`.
+
 ### Diagnostics and exit behaviour
 
 Diagnostics are written to standard error. `explain CODE` accepts a documented
@@ -282,13 +287,13 @@ express; the bits primitives cannot move because Orna has no bitwise operator):
    `cargo test --locked -p orna-standard` and `-p orna-evaluator-v1`, under the
    repository cargo limits, then the fixture-manifest check.
 
-## 1.0.0 requirement evidence report
+## 1.1.0 requirement evidence report
 
 From the repository root, generate the machine-readable report against the
 frozen reference bundle beside this checkout:
 
 ```text
-cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.0.0 > /tmp/orna-traceability.json
+cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.1.0 > /tmp/orna-traceability.json
 ```
 
 The report pins the specification version and publication digests. It lists
@@ -302,8 +307,8 @@ witness for the obligation, not that a test-plan entry or source file is a
 passing implementation test. `implemented`, `optional`, or `out-of-scope` are
 not report statuses.
 
-Treat the report as traceability input, not a conformance claim. The checked-in
-`tests/requirement-evidence.json` associates requirements with evidence
+Treat the report as traceability input, not a conformance claim. The reference
+bundle's `tests/requirement-evidence.json` associates requirements with evidence
 obligations; it does not say those tests ran. Keep any implementation and test
 references tied to captured commands and actual results, and retain partial
 status when evidence covers only a bounded subset. A generated index,
@@ -311,7 +316,7 @@ fixture count, parsed example, or successful report command alone cannot
 establish execution or conformance. These limits follow ORNA-TEST-004
 (source/32-conformance.md:23), ORNA-TEST-010 (line 31), ORNA-TEST-011
 (line 33), and ORNA-EVIDENCE-001 (line 69), and ORNA-CONF-001 through
-ORNA-CONF-003 (Orna-1.0.0.md:56–60) in the frozen reference.
+ORNA-CONF-003 (Orna-1.1.0.md:65–69) in the frozen reference.
 
 Before making a conformance claim, record the claimed class and implementation
 version, the exact reference publication digest, supported optional profiles,
