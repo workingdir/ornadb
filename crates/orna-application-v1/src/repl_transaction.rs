@@ -525,7 +525,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
 }
 
 impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
-    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostContext> {
+    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostAttachment> {
         EffectHandler::sys_host_context(&*self.bindings)
     }
 
@@ -813,7 +813,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
 }
 
 impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
-    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostContext> {
+    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostAttachment> {
         Ovb2EffectHandler::sys_host_context(&*self.bindings)
     }
 

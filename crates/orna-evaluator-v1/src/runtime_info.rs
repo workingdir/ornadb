@@ -10,9 +10,38 @@ use orna_sys_v1::{
     BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
     PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysHostContext,
 };
-use orna_value_v1::OVB2_VERSION;
+use orna_value_v1::{OVB2_VERSION, Raw};
 
 use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};
+
+/// The host context one activation is attached with, together with the
+/// `sys.RuntimeInfo` record it determines. The record is computed once, when
+/// the host attaches the context, so `sys.rt.info()` only reads it back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SysHostAttachment {
+    context: SysHostContext,
+    info: Result<Value, EvaluationError>,
+}
+
+impl SysHostAttachment {
+    /// Attaches `context`, computing the `sys.RuntimeInfo` record it determines.
+    pub fn new(context: SysHostContext) -> Self {
+        let info = runtime_info(&context);
+        Self { context, info }
+    }
+
+    /// The host context this attachment was built from.
+    #[must_use]
+    pub fn context(&self) -> &SysHostContext {
+        &self.context
+    }
+
+    /// The precomputed `sys.RuntimeInfo` record, or the failure reported when a
+    /// required fact could not be read at attach time.
+    pub(crate) fn runtime_info(&self) -> Result<Value, EvaluationError> {
+        self.info.clone()
+    }
+}
 
 /// Builds the `sys.RuntimeInfo` record for one activation
 /// (34-system-reference.md, `sys.RuntimeInfo`).
@@ -54,7 +83,14 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         ("build_id", Value::String(BUILD_ID.to_owned())),
         ("supported_profiles", Value::list(supported_profiles)),
         ("runtime", Value::Uuid(context.runtime_id)),
-        ("mode", Value::String(context.mode.label().to_owned())),
+        (
+            "mode",
+            Value::Enum {
+                type_id: Raw::Text("sys.RuntimeMode".to_owned()),
+                variant_id: Raw::Text(context.mode.label().to_owned()),
+                payload: None,
+            },
+        ),
         ("read_only", Value::Bool(context.read_only)),
         ("std_snapshot", std_snapshot_field(context)?),
         ("unicode_version", Value::String(unicode_version())),
@@ -77,17 +113,17 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
 /// or `none` when the project pins no standard profile.
 ///
 /// The commit is keyed under the attached database. A pin whose commit id
-/// cannot be read back is reported as `sys.abi.provider_failed`, never guessed.
+/// cannot be read back is reported as `sys.snapshot.incomplete`, never guessed.
 fn std_snapshot_field(context: &SysHostContext) -> Result<Value, EvaluationError> {
     let oid = match &context.std_snapshot {
         StdSnapshotPin::Unpinned => return Ok(Value::Option(None)),
-        StdSnapshotPin::Unreadable => return Err(error("sys.abi.provider_failed")),
+        StdSnapshotPin::Unreadable => return Err(error("sys.snapshot.incomplete")),
         StdSnapshotPin::Commit(oid) => oid,
     };
     let algorithm = match oid.len() {
         20 => GitHash::Sha1,
         32 => GitHash::Sha256,
-        _ => return Err(error("sys.abi.provider_failed")),
+        _ => return Err(error("sys.snapshot.incomplete")),
     };
     let snapshot = CanonicalSnapshot::Commit {
         database: context.database_id,
@@ -95,11 +131,11 @@ fn std_snapshot_field(context: &SysHostContext) -> Result<Value, EvaluationError
         oid: oid.clone(),
     };
     let encoded = snapshot_reference(context.database_id, snapshot)
-        .map_err(|_| error("sys.abi.provider_failed"))?
+        .map_err(|_| error("sys.snapshot.incomplete"))?
         .into_row_ref()
         .encode()
-        .map_err(|_| error("sys.abi.provider_failed"))?;
-    let value = CanonicalValue::decode(&encoded).map_err(|_| error("sys.abi.provider_failed"))?;
+        .map_err(|_| error("sys.snapshot.incomplete"))?;
+    let value = CanonicalValue::decode(&encoded).map_err(|_| error("sys.snapshot.incomplete"))?;
     Ok(Value::Option(Some(Box::new(Value::Reference(value)))))
 }
 
@@ -150,12 +186,12 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_pin_fails_closed_as_provider_failed() {
+    fn unreadable_pin_fails_closed_as_snapshot_incomplete() {
         let context = context_pinned(StdSnapshotPin::Unreadable);
         let Err(error) = std_snapshot_field(&context) else {
             panic!("an unreadable pin must not be guessed");
         };
-        assert_eq!(error.code(), "sys.abi.provider_failed");
+        assert_eq!(error.code(), "sys.snapshot.incomplete");
     }
 
     #[test]
@@ -176,6 +212,6 @@ mod tests {
         let Err(error) = std_snapshot_field(&context) else {
             panic!("a commit id that is neither SHA-1 nor SHA-256 must not be guessed");
         };
-        assert_eq!(error.code(), "sys.abi.provider_failed");
+        assert_eq!(error.code(), "sys.snapshot.incomplete");
     }
 }

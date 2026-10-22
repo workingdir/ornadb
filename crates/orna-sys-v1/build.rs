@@ -45,13 +45,43 @@ fn git_output(manifest: &Path, args: &[&str]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+/// The directory owning the Cargo workspace that contains `manifest`: the
+/// nearest ancestor (or `manifest` itself) whose `Cargo.toml` declares a
+/// `[workspace]`, or `manifest` for a package outside any workspace.
+fn workspace_root(manifest: &Path) -> PathBuf {
+    manifest
+        .ancestors()
+        .find(|directory| {
+            fs::read_to_string(directory.join("Cargo.toml")).is_ok_and(|text| {
+                text.lines()
+                    .any(|line| line.trim_start().starts_with("[workspace"))
+            })
+        })
+        .unwrap_or(manifest)
+        .to_path_buf()
+}
+
+/// The commit of `HEAD` when the repository toplevel of `manifest` contains the
+/// workspace root. A repository nested inside the workspace, such as a vendored
+/// checkout, is not this workspace's repository, so its commit is not reported.
+fn workspace_commit(manifest: &Path) -> Option<String> {
+    let toplevel = git_output(manifest, &["rev-parse", "--show-toplevel"])?;
+    let toplevel = fs::canonicalize(toplevel).ok()?;
+    let workspace = fs::canonicalize(workspace_root(manifest)).ok()?;
+    if !workspace.starts_with(&toplevel) {
+        return None;
+    }
+    git_output(manifest, &["rev-parse", "--verify", "HEAD"])
+}
+
 /// The `build_id` of this build: the full git commit of `HEAD`, or the package
-/// version with a `+nogit` suffix when the package carries no git metadata.
+/// version with a `+nogit` suffix when the manifest's repository does not contain
+/// the workspace.
 ///
 /// The files that move `HEAD` are watched so that a new commit reruns this
 /// script and the emitted identity follows the checkout.
 fn build_id(manifest: &Path) -> String {
-    let Some(commit) = git_output(manifest, &["rev-parse", "--verify", "HEAD"]) else {
+    let Some(commit) = workspace_commit(manifest) else {
         let version = env::var("CARGO_PKG_VERSION").expect("package version");
         return format!("{version}+nogit");
     };

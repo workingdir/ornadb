@@ -933,6 +933,21 @@ fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
     }
 }
 
+fn pure_sys_host_context(
+    endpoint: &Endpoint,
+    std_snapshot: StdSnapshotPin,
+) -> Option<SysHostContext> {
+    let path = local_project_path(endpoint).ok()?;
+    let repository = orna_repository_v1::Repository::discover(path).ok()?;
+    let (identity, _) = runtime_identity(&repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Run,
+        std_snapshot,
+    ))
+}
+
 fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
@@ -2131,6 +2146,11 @@ fn run_pure_invocation(
                     ));
                 }
             } else {
+                let std_snapshot = sys_host::std_snapshot_pin(&project);
+                let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                    Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                    None => authority,
+                };
                 authority
                     .evaluate(&admitted, &Environment::new())
                     .map_err(|error| {

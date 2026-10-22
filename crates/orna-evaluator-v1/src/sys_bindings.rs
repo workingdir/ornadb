@@ -19,7 +19,7 @@ use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{
     CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
-    SysHostContext,
+    SysHostAttachment, SysHostContext,
 };
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
@@ -39,7 +39,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
-    sys_host_context: Option<SysHostContext>,
+    sys_host_context: Option<SysHostAttachment>,
 }
 
 #[derive(Debug)]
@@ -97,10 +97,11 @@ impl SysHostBindingRegistry {
     }
 
     /// Installs the attached repository and activation facts that
-    /// `sys.rt.info()` reports. Without them the call reports `sys.abi.unavailable`.
+    /// `sys.rt.info()` reports. Without them the call reports
+    /// `sys.version.incompatible`.
     #[must_use]
     pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
-        self.sys_host_context = Some(context);
+        self.sys_host_context = Some(SysHostAttachment::new(context));
         self
     }
 
@@ -875,7 +876,7 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.sys_host_context.as_ref()
     }
 
@@ -921,7 +922,7 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
     }
 
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.sys_host_context.as_ref()
     }
 
