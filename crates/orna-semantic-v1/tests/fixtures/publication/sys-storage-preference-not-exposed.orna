@@ -1,0 +1,2 @@
+pub fn future_preference(storage: sys.Storage) = storage.preference;
+pub fn preferred(preference: sys.StoragePreference): Bool = true;

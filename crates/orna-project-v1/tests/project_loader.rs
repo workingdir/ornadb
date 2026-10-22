@@ -179,7 +179,7 @@ fn format3_committed_rows_are_not_loaded_as_source_files() {
 fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
     let (directory, repository) = repository(&[
         ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
-        (".orna/format.orna", "format 1\n"),
+        (".orna/format.orna", "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"),
         (".orna/database.orna", "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n"),
         ("Music/london.orna", "{\n    title: \"Legacy row\",\n}\n"),
     ]);

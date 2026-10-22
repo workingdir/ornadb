@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-fact.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-010",
+  "message_contains": "`fact` is not an assertion alias; use `assert`",
+  "status": "expected-not-executed"
+}

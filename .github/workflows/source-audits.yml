@@ -171,6 +171,23 @@ jobs:
       - name: Check Tree-sitter grammar syntax
         run: node --check editors/tree-sitter-orna/grammar.js
 
+      # The highlighter test runs each generated grammar in its real host and
+      # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
+      # missing.
+      - name: Install editor hosts for the highlighter test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox vim
+          npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
+            tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1
+          echo "ORNA_EDITOR_TOOLS=$RUNNER_TEMP/editor-tools" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/editor-tools/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Run every generated highlighter over the shared sample
+        env:
+          ORNA_REQUIRE_EDITORS: "1"
+        run: cargo test --locked -p orna-syntax-v1 --test editor_highlighters
+
   focused-consumer:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' }}
     runs-on: ubuntu-latest

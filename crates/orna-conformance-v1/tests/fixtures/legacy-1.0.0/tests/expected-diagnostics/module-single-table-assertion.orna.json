@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/module-single-table-assertion.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA-A091-003",
+  "message_contains": "a one-table invariant belongs inside that table",
+  "status": "expected-not-executed"
+}

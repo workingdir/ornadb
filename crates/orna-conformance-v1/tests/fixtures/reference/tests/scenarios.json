@@ -1,5 +1,6 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "count": 279,
   "scenarios": [
     {
       "id": "ACTIVATION-001",
@@ -19,7 +20,9 @@
         "ORNA-TXN-005",
         "ORNA-TXN-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "AFFINE-AGG-001",
@@ -39,7 +42,9 @@
         "ORNA-UNIT-005",
         "ORNA-UNIT-007"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ARROW-001",
@@ -58,7 +63,9 @@
         "ORNA-ARROW-002",
         "ORNA-ARROW-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-CHECKOUT-091",
@@ -77,7 +84,9 @@
         "ORNA-ASSERT-044",
         "ORNA-ASSERT-049"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-CHECKPOINT-091",
@@ -97,7 +106,9 @@
         "ORNA-ASSERT-047",
         "ORNA-CP-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-COMMIT-091",
@@ -117,7 +128,9 @@
         "ORNA-ASSERT-041",
         "ORNA-ASSERT-042"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-CROSSTABLE-091",
@@ -140,7 +153,9 @@
         "ORNA-ASSERT-024",
         "ORNA-ASSERT-030"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-DIAGNOSTIC-091",
@@ -163,7 +178,9 @@
         "ORNA-ASSERT-054",
         "ORNA-ASSERT-060"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-MERGE-091",
@@ -182,7 +199,9 @@
       "requirements": [
         "ORNA-ASSERT-043"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-PUBLISH-091",
@@ -202,7 +221,9 @@
         "ORNA-ASSERT-046",
         "ORNA-PUB-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-REFINE-091",
@@ -224,28 +245,9 @@
         "ORNA-REFINE-003",
         "ORNA-ASSERT-033"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "ASSERT-REWRITE-091",
-      "title": "Storage rewrites preserve logical assertion validity",
-      "given": [
-        "a valid logical table and a requested editable/compact representation move"
-      ],
-      "when": [
-        "rewrite physical storage"
-      ],
-      "then": [
-        "assertions evaluate over the unchanged logical relation",
-        "a representation-specific bypass is impossible",
-        "logical diff remains empty"
-      ],
-      "requirements": [
-        "ORNA-ASSERT-045",
-        "ORNA-ASSERT-050",
-        "ORNA-STORAGE-004"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-SYS-091",
@@ -265,7 +267,9 @@
         "ORNA-INFER-005",
         "ORNA-FN-010"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-TABLE-CANDIDATE-091",
@@ -288,7 +292,9 @@
         "ORNA-ASSERT-014",
         "ORNA-ASSERT-015"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ASSERT-TABLE-OWNER-091",
@@ -310,28 +316,9 @@
         "ORNA-ASSERT-055",
         "ORNA-ASSERT-056"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "AUTOID-REFS-001",
-      "title": "Orna-aware transport synchronizes allocator refs",
-      "given": [
-        "a repository with `refs/orna/ids/...` ahead of its remote"
-      ],
-      "when": [
-        "use Orna-aware push and then clone/pull elsewhere"
-      ],
-      "then": [
-        "internal allocator refs are transferred",
-        "allocator ref publication precedes dependent branch publication",
-        "plain Git use is diagnosed when continuity is unknown"
-      ],
-      "requirements": [
-        "ORNA-REMOTE-003",
-        "ORNA-REMOTE-004",
-        "ORNA-REMOTE-005"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CALL-001",
@@ -350,7 +337,9 @@
         "ORNA-CALL-002",
         "ORNA-TXN-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CANCELLATION-091",
@@ -370,7 +359,9 @@
         "ORNA-ERR-005",
         "ORNA-CANCEL-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CASE-091",
@@ -395,7 +386,9 @@
         "ORNA-CASE-005",
         "ORNA-CASE-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CFLOW-001",
@@ -415,70 +408,9 @@
         "ORNA-CFLOW-002",
         "ORNA-CFLOW-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "COMPACT-GENERATION-001",
-      "title": "Publication generation is allocated from the committed base manifest",
-      "given": [
-        "a table manifest with next_generation N and a frozen publication batch"
-      ],
-      "when": [
-        "publish successfully and when branch compare-and-swap loses"
-      ],
-      "then": [
-        "all files in the successful batch use generation N",
-        "the failed attempt reloads current HEAD and does not force its stale generation",
-        "pending mutations are collapsed to one final mutation per key"
-      ],
-      "requirements": [
-        "ORNA-COMPACT-014",
-        "ORNA-COMPACT-015",
-        "ORNA-COMPACT-019"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "COMPACT-MERGE-GENERATION-001",
-      "title": "Concurrent branch generations do not choose merge winners",
-      "given": [
-        "two branches that independently use the same numeric generation"
-      ],
-      "when": [
-        "merge disjoint changes, identical same-key changes and different same-key changes"
-      ],
-      "then": [
-        "disjoint changes coexist",
-        "identical changes coalesce",
-        "different same-key changes conflict",
-        "the merged next_generation exceeds every retained generation"
-      ],
-      "requirements": [
-        "ORNA-COMPACT-016"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "COMPACT-SCHEMA-PROJECTION-001",
-      "title": "Older compact files project through current schema by stable field identity",
-      "given": [
-        "a compact file written before an optional field, rename and computed field were introduced"
-      ],
-      "when": [
-        "read it through the newer compatible snapshot"
-      ],
-      "then": [
-        "renamed fields retain identity",
-        "the optional field is null or uses its frozen introduction fallback",
-        "the computed field is evaluated and not loaded"
-      ],
-      "requirements": [
-        "ORNA-COMPACT-018",
-        "ORNA-SCHEMA-003",
-        "ORNA-SCHEMA-004",
-        "ORNA-SCHEMA-007"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CONCUR-001",
@@ -499,7 +431,9 @@
         "ORNA-CONCUR-002",
         "ORNA-CONCUR-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CONSUMER-CROSSCLONE-001",
@@ -518,7 +452,9 @@
         "ORNA-CONSUMER-007",
         "ORNA-CONSUMER-009"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CONVERT-FAILURE-091",
@@ -539,7 +475,9 @@
         "ORNA-CONVERT-005",
         "ORNA-CONVERT-010"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CONVERT-MULTISOURCE-091",
@@ -561,7 +499,9 @@
         "ORNA-GENERIC-013",
         "ORNA-GENERIC-014"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CONVERT-NOCHAIN-091",
@@ -581,7 +521,9 @@
         "ORNA-CONVERT-007",
         "ORNA-CONVERT-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CP-001",
@@ -600,7 +542,9 @@
         "ORNA-CP-001",
         "ORNA-CP-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CP-002",
@@ -620,7 +564,9 @@
       "requirements": [
         "ORNA-CP-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CP-003",
@@ -638,7 +584,9 @@
       "requirements": [
         "ORNA-CP-007"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CP-004",
@@ -659,7 +607,9 @@
         "ORNA-CP-003",
         "ORNA-CP-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CURRENCY-FORMAT-091",
@@ -681,7 +631,9 @@
         "ORNA-MONEY-009",
         "ORNA-PRES-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "CURRENCY-PROTOCOL-091",
@@ -703,7 +655,9 @@
         "ORNA-MONEY-010",
         "ORNA-GENERIC-009"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "EVAL-001",
@@ -723,7 +677,9 @@
         "ORNA-EVAL-002",
         "ORNA-EVAL-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "EVAL-002",
@@ -743,7 +699,9 @@
         "ORNA-EVAL-005",
         "ORNA-EVAL-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "EVAL-003",
@@ -766,7 +724,9 @@
         "ORNA-EVAL-010",
         "ORNA-EVAL-011"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "EXT-001",
@@ -785,7 +745,9 @@
         "ORNA-EXT-001",
         "ORNA-EXT-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-001",
@@ -803,7 +765,9 @@
       "requirements": [
         "ORNA-FAIL-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-002",
@@ -823,7 +787,9 @@
         "ORNA-FAIL-003",
         "ORNA-FAIL-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-003",
@@ -840,7 +806,9 @@
       "requirements": [
         "ORNA-FAIL-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-004",
@@ -859,7 +827,9 @@
       "requirements": [
         "ORNA-FAIL-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-005",
@@ -878,7 +848,9 @@
         "ORNA-FAIL-004",
         "ORNA-FAIL-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAIL-006",
@@ -900,7 +872,9 @@
         "ORNA-FAIL-003",
         "ORNA-CLI-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAILURE-PROPAGATE-091",
@@ -922,7 +896,9 @@
         "ORNA-ERR-008",
         "ORNA-FAILURE-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FAILURE-ROLLBACK-091",
@@ -942,7 +918,9 @@
         "ORNA-ERR-007",
         "ORNA-TXN-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FIELD-001",
@@ -964,48 +942,9 @@
         "ORNA-FIELD-005",
         "ORNA-FIELD-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "FIELD-002",
-      "title": "Field-introduction fallback is frozen",
-      "given": [
-        "existing rows and a new stored field with constant default `\"GB\"`"
-      ],
-      "when": [
-        "commit the field and later change its insertion default to `\"US\"`"
-      ],
-      "then": [
-        "pre-existing rows continue to read the frozen `\"GB\"` fallback",
-        "new inserts after the edit receive `\"US\"`",
-        "no retroactive row diff appears"
-      ],
-      "requirements": [
-        "ORNA-FIELD-003",
-        "ORNA-SCHEMA-004",
-        "ORNA-SCHEMA-005"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "FLOAT-STATS-001",
-      "title": "Compact Float statistics never cause false-negative pruning",
-      "given": [
-        "compact Float pages containing finite values, signed zeros and NaNs"
-      ],
-      "when": [
-        "write/read statistics and evaluate predicates including NaN-sensitive predicates"
-      ],
-      "then": [
-        "IEEE_754_TOTAL_ORDER and exact nan_count are emitted",
-        "missing or inconsistent nan_count disables unsafe pruning",
-        "optimized results equal reference scanning"
-      ],
-      "requirements": [
-        "ORNA-COMPACT-017",
-        "ORNA-FLOAT-002"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "FLOAT-TOTAL-001",
@@ -1025,7 +964,9 @@
         "ORNA-FLOAT-002",
         "ORNA-FLOAT-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "GENERIC-BOUND-091",
@@ -1047,7 +988,9 @@
         "ORNA-GENERIC-006",
         "ORNA-GENERIC-014"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "GIT-001",
@@ -1066,7 +1009,9 @@
         "ORNA-GIT-005",
         "ORNA-GIT-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "GIT-002",
@@ -1083,7 +1028,9 @@
       "requirements": [
         "ORNA-GIT-009"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "HIST-001",
@@ -1105,7 +1052,9 @@
         "ORNA-HIST-002",
         "ORNA-HIST-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "IMPL-NESTED-091",
@@ -1130,7 +1079,9 @@
         "ORNA-IMPL-005",
         "ORNA-IMPL-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "IMPORT-001",
@@ -1149,7 +1100,9 @@
       "requirements": [
         "ORNA-IMPORT-007"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "INFER-DIAGNOSTIC-091",
@@ -1168,7 +1121,9 @@
         "ORNA-INFER-007",
         "ORNA-INFER-011"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "INFER-METADATA-091",
@@ -1189,7 +1144,9 @@
         "ORNA-INFER-013",
         "ORNA-FN-010"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "INFER-PRINCIPAL-091",
@@ -1210,7 +1167,9 @@
         "ORNA-INFER-006",
         "ORNA-INFER-010"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "KEY-001",
@@ -1229,7 +1188,9 @@
         "ORNA-AUTOID-002",
         "ORNA-AUTOID-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "KEY-002",
@@ -1248,7 +1209,9 @@
         "ORNA-AUTOID-002",
         "ORNA-AUTOID-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "KEY-003",
@@ -1267,46 +1230,9 @@
         "ORNA-KEYDEF-001",
         "ORNA-KEYDEF-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "KEY-004",
-      "title": "Generated key conflict is explicit",
-      "given": [
-        "two branches both allocate alice-smith for different rows"
-      ],
-      "when": [
-        "merge branches"
-      ],
-      "then": [
-        "row conflict is reported",
-        "neither row is silently renamed"
-      ],
-      "requirements": [
-        "ORNA-KEYDEF-004",
-        "ORNA-MERGE-010"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "KEY-005",
-      "title": "Independent clones report automatic-ID collision honestly",
-      "given": [
-        "two disconnected clones share the same last automatic Note ID",
-        "each clone inserts a different next Note"
-      ],
-      "when": [
-        "the histories are merged"
-      ],
-      "then": [
-        "neither row is silently renumbered",
-        "a typed row conflict is produced"
-      ],
-      "requirements": [
-        "ORNA-AUTOID-006",
-        "ORNA-MERGE-010"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LET-REBIND-091",
@@ -1329,7 +1255,9 @@
         "ORNA-CFLOW-006",
         "ORNA-CFLOW-011"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LEX-QUESTION-001",
@@ -1351,7 +1279,9 @@
         "ORNA-ERR-008",
         "ORNA-PIPE-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LIVE-001",
@@ -1369,7 +1299,9 @@
         "ORNA-LIVE-001",
         "ORNA-LIVE-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LIVE-002",
@@ -1386,7 +1318,9 @@
       "requirements": [
         "ORNA-LIVE-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LIVE-003",
@@ -1404,7 +1338,9 @@
       "requirements": [
         "ORNA-LIVE-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LIVE-004",
@@ -1425,7 +1361,9 @@
         "ORNA-WIRE-001",
         "ORNA-WIRE-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "LIVE-FALLBACK-001",
@@ -1446,101 +1384,9 @@
         "ORNA-LIVE-002",
         "ORNA-LIVE-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "MERGE-001",
-      "title": "Independent optional columns merge",
-      "given": [
-        "base Contact has name",
-        "ours adds email?",
-        "theirs adds phone?"
-      ],
-      "when": [
-        "merge"
-      ],
-      "then": [
-        "schema contains name,email?,phone?"
-      ],
-      "requirements": [
-        "ORNA-MERGE-006"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "MERGE-002",
-      "title": "Conflicting type changes stop merge",
-      "given": [
-        "ours changes age to Int",
-        "theirs changes age to Decimal"
-      ],
-      "when": [
-        "merge"
-      ],
-      "then": [
-        "sys.Conflict contains schema conflict",
-        "no partial commit"
-      ],
-      "requirements": [
-        "ORNA-MERGE-007"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "MERGE-003",
-      "title": "Independent row fields merge",
-      "given": [
-        "ours changes email",
-        "theirs changes phone"
-      ],
-      "when": [
-        "merge"
-      ],
-      "then": [
-        "both changes present"
-      ],
-      "requirements": [
-        "ORNA-MERGE-008"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "MERGE-004",
-      "title": "Same field conflict",
-      "given": [
-        "ours and theirs change email differently"
-      ],
-      "when": [
-        "merge"
-      ],
-      "then": [
-        "row conflict is reported"
-      ],
-      "requirements": [
-        "ORNA-MERGE-009"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "MERGE-PRUNE-001",
-      "title": "Segmented merge prunes equal regions and respects budgets",
-      "given": [
-        "base, ours and theirs share most manifest subtrees but overlap in a small key range"
-      ],
-      "when": [
-        "perform semantic merge with a conflict budget"
-      ],
-      "then": [
-        "equal digests are reused without row decoding",
-        "only changed/overlapping ranges descend",
-        "budget overflow leaves ordinary CWD unchanged with a bounded diagnostic"
-      ],
-      "requirements": [
-        "ORNA-MERGE-003",
-        "ORNA-MERGE-004",
-        "ORNA-MERGE-005"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "MIGRATE-SURFACE-091",
@@ -1557,11 +1403,12 @@
       ],
       "requirements": [
         "ORNA-CONF-005",
-        "ORNA-MIGRATE-001",
         "ORNA-MIGRATE-003",
         "ORNA-MIGRATE-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "MODULE-001",
@@ -1581,7 +1428,9 @@
         "ORNA-REPO-002",
         "ORNA-REPO-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "MODULE-002",
@@ -1599,7 +1448,9 @@
       "requirements": [
         "ORNA-IMPORT-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "MONEY-001",
@@ -1616,7 +1467,9 @@
       "requirements": [
         "ORNA-MONEY-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "MONEY-002",
@@ -1633,7 +1486,9 @@
       "requirements": [
         "ORNA-MONEY-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "NOMINAL-PRIVATE-091",
@@ -1655,7 +1510,9 @@
         "ORNA-NOMINAL-007",
         "ORNA-NOMINAL-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "NS-PORTABLE-001",
@@ -1672,7 +1529,9 @@
       "requirements": [
         "ORNA-NS-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "NUM-001",
@@ -1694,7 +1553,9 @@
         "ORNA-NUM-004",
         "ORNA-NUM-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "OBJECT-001",
@@ -1714,66 +1575,9 @@
         "ORNA-OBJECT-002",
         "ORNA-OBJECT-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "ORDER-001",
-      "title": "Storage rewrites preserve canonical relation order",
-      "given": [
-        "a table is stored once as loose rows and once as segmented rows"
-      ],
-      "when": [
-        "scan without an explicit sort"
-      ],
-      "then": [
-        "both results are in the same ascending primary-key order"
-      ],
-      "requirements": [
-        "ORNA-ORDER-001",
-        "ORNA-ORDER-002",
-        "ORNA-ORDER-004"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "PATH-CASE-001",
-      "title": "Editable path collisions are host-independent",
-      "given": [
-        "two editable sibling keys Alice and alice"
-      ],
-      "when": [
-        "insert, load, re-key or merge on case-sensitive and case-insensitive hosts"
-      ],
-      "then": [
-        "every host reports the same path collision before overwrite",
-        "no host silently accepts or suffixes either path"
-      ],
-      "requirements": [
-        "ORNA-PATH-006"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "PATH-EMPTY-001",
-      "title": "Empty editable key has one canonical two-digit encoding",
-      "given": [
-        "an empty Str primary-key component"
-      ],
-      "when": [
-        "encode and decode it",
-        "attempt obsolete or embedded empty sentinels"
-      ],
-      "then": [
-        "the complete component is ~ff",
-        "round trip succeeds",
-        "~e, x~ff and ~ffx are rejected"
-      ],
-      "requirements": [
-        "ORNA-PATH-002",
-        "ORNA-PATH-003",
-        "ORNA-PATH-011"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PIPE-001",
@@ -1793,7 +1597,9 @@
         "ORNA-PIPE-002",
         "ORNA-PIPE-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PIPE-002",
@@ -1814,7 +1620,9 @@
         "ORNA-PIPE-002",
         "ORNA-PIPE-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PRES-001",
@@ -1834,7 +1642,9 @@
         "ORNA-PRES-004",
         "ORNA-PRES-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PRES-002",
@@ -1851,26 +1661,9 @@
       "requirements": [
         "ORNA-PRES-007"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "PROFILE-001",
-      "title": "Loose and segmented interfaces match",
-      "given": [
-        "Contact is loose",
-        "Reading is segmented"
-      ],
-      "when": [
-        "run filter/sort/take on both"
-      ],
-      "then": [
-        "same relation operators and semantics apply"
-      ],
-      "requirements": [
-        "ORNA-STORAGE-001",
-        "ORNA-STORAGE-002"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PROJECT-001",
@@ -1890,87 +1683,9 @@
         "ORNA-ROW-003",
         "ORNA-MONEY-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "PROJECT-LIFE-001",
-      "title": "Complete life project loads rows against schemas",
-      "given": [
-        "the bundled examples/life database"
-      ],
-      "when": [
-        "parse reachable modules, resolve/typecheck, discover and load loose rows"
-      ],
-      "then": [
-        "every row key and body validates against its table schema and units"
-      ],
-      "requirements": [
-        "ORNA-ATTACH-001",
-        "ORNA-ATTACH-002",
-        "ORNA-ATTACH-003",
-        "ORNA-CORE-001",
-        "ORNA-CORE-002",
-        "ORNA-CORE-003",
-        "ORNA-IMPORT-001",
-        "ORNA-IMPORT-002",
-        "ORNA-IMPORT-003",
-        "ORNA-IMPORT-004",
-        "ORNA-IMPORT-005",
-        "ORNA-IMPORT-006",
-        "ORNA-IMPORT-007",
-        "ORNA-KEY-001",
-        "ORNA-KEY-002",
-        "ORNA-KEY-003",
-        "ORNA-KEY-004",
-        "ORNA-KEY-005",
-        "ORNA-KEY-006",
-        "ORNA-MODULE-001",
-        "ORNA-MONEY-001",
-        "ORNA-MONEY-002",
-        "ORNA-MONEY-003",
-        "ORNA-MONEY-004",
-        "ORNA-MONEY-005",
-        "ORNA-MONEY-006",
-        "ORNA-MONEY-007",
-        "ORNA-NS-001",
-        "ORNA-NS-002",
-        "ORNA-NS-003",
-        "ORNA-NS-004",
-        "ORNA-NS-005",
-        "ORNA-NS-006",
-        "ORNA-NS-007",
-        "ORNA-NS-008",
-        "ORNA-PACKAGE-001",
-        "ORNA-PACKAGE-002",
-        "ORNA-PACKAGE-003",
-        "ORNA-PROJECT-001",
-        "ORNA-PROJECT-002",
-        "ORNA-PROJECT-003",
-        "ORNA-PROJECT-004",
-        "ORNA-REPO-001",
-        "ORNA-REPO-002",
-        "ORNA-REPO-003",
-        "ORNA-REPO-004",
-        "ORNA-ROW-001",
-        "ORNA-ROW-002",
-        "ORNA-ROW-003",
-        "ORNA-ROW-004",
-        "ORNA-ROW-005",
-        "ORNA-ROW-006",
-        "ORNA-SOURCE-001",
-        "ORNA-SOURCE-002",
-        "ORNA-SOURCE-003",
-        "ORNA-TABLE-001",
-        "ORNA-UNIT-001",
-        "ORNA-UNIT-002",
-        "ORNA-UNIT-003",
-        "ORNA-UNIT-004",
-        "ORNA-UNIT-005",
-        "ORNA-UNIT-006",
-        "ORNA-UNIT-007",
-        "ORNA-UNIT-008"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-001",
@@ -1990,7 +1705,9 @@
         "ORNA-PUB-005",
         "ORNA-PUB-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-002",
@@ -2010,7 +1727,9 @@
         "ORNA-PUB-007",
         "ORNA-PUB-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-003",
@@ -2030,7 +1749,9 @@
       "requirements": [
         "ORNA-PUB-009"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-004",
@@ -2050,7 +1771,9 @@
         "ORNA-PUB-010",
         "ORNA-PUB-011"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-005",
@@ -2068,7 +1791,9 @@
       "requirements": [
         "ORNA-PUB-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "PUB-006",
@@ -2089,7 +1814,9 @@
         "ORNA-PUB-008",
         "ORNA-PUB-009"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "RECOVERY-FAILURE-091",
@@ -2112,7 +1839,9 @@
         "ORNA-ERR-012",
         "ORNA-FAILURE-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "RECOVERY-REFAIL-091",
@@ -2132,7 +1861,9 @@
         "ORNA-ERR-003",
         "ORNA-FAILURE-006"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "RECOVERY-SUCCESS-091",
@@ -2152,7 +1883,9 @@
         "ORNA-PIPE-009",
         "ORNA-ERR-011"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "REF-001",
@@ -2171,7 +1904,9 @@
         "ORNA-REF-001",
         "ORNA-REF-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "REPL-001",
@@ -2188,7 +1923,9 @@
       "requirements": [
         "ORNA-REPL-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "REPL-002",
@@ -2206,7 +1943,9 @@
       "requirements": [
         "ORNA-REPL-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "REPL-003",
@@ -2224,7 +1963,9 @@
       "requirements": [
         "ORNA-REPL-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "ROW-001",
@@ -2243,26 +1984,9 @@
         "ORNA-ROW-001",
         "ORNA-ROW-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "ROW-002",
-      "title": "Filesystem edit equals update",
-      "given": [
-        "a valid loose row exists"
-      ],
-      "when": [
-        "edit its email field directly",
-        "open Orna status/query"
-      ],
-      "then": [
-        "row appears modified in CWD",
-        "query returns new email"
-      ],
-      "requirements": [
-        "ORNA-ROW-006"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SEC-001",
@@ -2284,7 +2008,9 @@
         "ORNA-TRUST-001",
         "ORNA-TRUST-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SECRET-001",
@@ -2305,7 +2031,9 @@
         "ORNA-SOPS-002",
         "ORNA-SECRET-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SERVER-001",
@@ -2323,7 +2051,9 @@
       "requirements": [
         "ORNA-SERVE-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SERVER-002",
@@ -2340,7 +2070,9 @@
       "requirements": [
         "ORNA-SERVE-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "STATE-001",
@@ -2361,7 +2093,9 @@
         "ORNA-STATE-002",
         "ORNA-STATE-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "STATE-002",
@@ -2380,28 +2114,9 @@
       "requirements": [
         "ORNA-STATE-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "STORAGE-DISJOINT-001",
-      "title": "Editable and compact placement is checked at every state boundary",
-      "given": [
-        "an exact key that exists in compact storage and an editable row candidate with the same key"
-      ],
-      "when": [
-        "insert, discover, checkout, re-key, rewrite, publish, verify or merge"
-      ],
-      "then": [
-        "the implementation performs exact key lookup",
-        "neither representation overwrites the other",
-        "the operation reports a typed conflict and preserves CWD as specified"
-      ],
-      "requirements": [
-        "ORNA-STORAGE-013",
-        "ORNA-STORAGE-014",
-        "ORNA-STORAGE-015"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "STREAM-001",
@@ -2420,7 +2135,9 @@
         "ORNA-STREAM-001",
         "ORNA-TXN-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "STREAM-002",
@@ -2437,7 +2154,9 @@
       "requirements": [
         "ORNA-STREAM-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYNTAX-ARROW-001",
@@ -2460,7 +2179,9 @@
         "ORNA-PIPE-001",
         "ORNA-CFLOW-008"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYNTAX-RECORD-001",
@@ -2483,7 +2204,9 @@
         "ORNA-RECORD-004",
         "ORNA-LAMBDA-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYNTAX-RETURN-091",
@@ -2504,7 +2227,9 @@
         "ORNA-FN-007",
         "ORNA-INFER-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-001",
@@ -2522,7 +2247,9 @@
         "ORNA-SYS-002",
         "ORNA-SYS-004"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-002",
@@ -2539,7 +2266,9 @@
       "requirements": [
         "ORNA-SYS-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-AWAIT-TIMEOUT-100",
@@ -2562,7 +2291,9 @@
         "ORNA-SYS-083",
         "ORNA-SYS-107"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-CHECKPOINT-CAS-100",
@@ -2587,7 +2318,9 @@
         "ORNA-SYS-065",
         "ORNA-SYS-108"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-FAILURE-ADMIN-100",
@@ -2614,7 +2347,9 @@
         "ORNA-SYS-124",
         "ORNA-SYS-127"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-GROUPED-RELATION-100",
@@ -2633,7 +2368,9 @@
         "ORNA-SYS-009",
         "ORNA-SYS-110"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-INVOKE-RESULT-TYPE-100",
@@ -2660,7 +2397,9 @@
         "ORNA-SYS-133",
         "ORNA-SYS-140"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-INVOKE-TYPED-100",
@@ -2683,7 +2422,9 @@
         "ORNA-SYS-079",
         "ORNA-SYS-080"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-REDACTION-100",
@@ -2706,7 +2447,9 @@
         "ORNA-SYS-102",
         "ORNA-SYS-109"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-ROW-REF-100",
@@ -2731,7 +2474,9 @@
         "ORNA-SYS-114",
         "ORNA-SYS-125"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-RT-RENAME-100",
@@ -2751,7 +2496,9 @@
         "ORNA-SYS-005",
         "ORNA-SYS-105"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-SNAPSHOT-OVERLOADS-100",
@@ -2775,7 +2522,9 @@
         "ORNA-SYS-136",
         "ORNA-SYS-139"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-SNAPSHOT-PIN-100",
@@ -2796,7 +2545,9 @@
         "ORNA-SYS-019",
         "ORNA-SYS-106"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-SOURCE-HISTORY-100",
@@ -2820,34 +2571,9 @@
         "ORNA-SYS-052",
         "ORNA-SYS-128"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
-    },
-    {
-      "id": "SYS-STORAGE-ADMIN-100",
-      "title": "Storage preference and rewrite are explicit and logically transparent",
-      "given": [
-        "an editable/compact/hybrid table, an unrepresentable path key and one concurrent generation change"
-      ],
-      "when": [
-        "set preference and attempt rewrites through sys.admin"
-      ],
-      "then": [
-        "preference changes future placement only",
-        "successful rewrite has an empty semantic row diff",
-        "unrepresentable editable output fails before publication",
-        "stale generation retains the prior authoritative representation",
-        "sys.storage is never callable"
-      ],
-      "requirements": [
-        "ORNA-SYS-115",
-        "ORNA-SYS-116",
-        "ORNA-SYS-117",
-        "ORNA-SYS-118",
-        "ORNA-SYS-119",
-        "ORNA-SYS-120",
-        "ORNA-SYS-126"
-      ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "SYS-SUPPORT-TYPES-100",
@@ -2876,7 +2602,9 @@
         "ORNA-SYS-138",
         "ORNA-SYS-141"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "TIME-001",
@@ -2893,7 +2621,9 @@
       "requirements": [
         "ORNA-TIME-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "TXN-001",
@@ -2912,7 +2642,9 @@
         "ORNA-TXN-002",
         "ORNA-TXN-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "TXN-002",
@@ -2929,7 +2661,9 @@
       "requirements": [
         "ORNA-TXN-001"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "TXN-003",
@@ -2947,7 +2681,9 @@
       "requirements": [
         "ORNA-TXN-005"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "UNIT-001",
@@ -2964,7 +2700,9 @@
       "requirements": [
         "ORNA-UNIT-003"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
     },
     {
       "id": "UNIT-002",
@@ -2982,9 +2720,3004 @@
         "ORNA-UNIT-001",
         "ORNA-UNIT-002"
       ],
-      "evidence_level": "implementation scenario, not executed by an Orna engine"
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-01",
+      "title": "Ordinary rows contain immutable Blob values",
+      "given": [
+        "Song.content is Blob and another table contains nested optional Blobs"
+      ],
+      "when": [
+        "Import identical media into distinct keyed rows; edit one title"
+      ],
+      "then": [
+        "Both rows reference one byte value without a compulsory File table",
+        "Title edit does not change the other row or media bytes",
+        "Invalid Blob key shapes remain rejected"
+      ],
+      "requirements": [
+        "ORNA-BLOB-001",
+        "ORNA-BLOB-002",
+        "ORNA-BLOB-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-02",
+      "title": "Identity survives rechunking and Git hash mode",
+      "given": [
+        "Identical source bytes are packed with different boundaries and Git object hash modes"
+      ],
+      "when": [
+        "Compare Blob content commitments and SOV-2 row identities"
+      ],
+      "then": [
+        "Length/raw-content SHA agree while physical tree OIDs may differ",
+        "No semantic content change is emitted",
+        "Legacy row.v1 hashes are not overwritten"
+      ],
+      "requirements": [
+        "ORNA-BLOB-004",
+        "ORNA-BLOB-016",
+        "ORNA-BLOB-017",
+        "ORNA-OGB-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine plus independent byte/identity model",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-03",
+      "title": "Exact equality and detected collisions",
+      "given": [
+        "Two independently admitted values have equal claimed digests; a controlled test double supplies differing bytes"
+      ],
+      "when": [
+        "Compare or coalesce them, then simulate unavailable content"
+      ],
+      "then": [
+        "Conflicting bytes cause sys.blob.collision",
+        "Absent proof never silently yields equality or inequality",
+        "The same retained admitted value compares without hydration"
+      ],
+      "requirements": [
+        "ORNA-BLOB-005",
+        "ORNA-BLOB-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-05",
+      "title": "A held value does not follow moving HEAD",
+      "given": [
+        "A session holds old Song.content while HEAD and the row are changed"
+      ],
+      "when": [
+        "Read a range through the held value; expire its ownership"
+      ],
+      "then": [
+        "Read selects the originally pinned bytes",
+        "Expired or unavailable resolution fails explicitly without rebinding"
+      ],
+      "requirements": [
+        "ORNA-BLOB-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-07",
+      "title": "Bounded range semantics",
+      "given": [
+        "Empty, small, cross-chunk and tree-height-1 contents"
+      ],
+      "when": [
+        "Read zero bytes, exact EOF, clipped tail, negative and past-EOF offsets, huge requests"
+      ],
+      "then": [
+        "Correct slices and EOF results",
+        "Bad arguments fail before payload I/O",
+        "Only intersecting chunks plus disclosed bounded read-ahead are fetched"
+      ],
+      "requirements": [
+        "ORNA-BLOB-011",
+        "ORNA-BLOB-012"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine plus range model and native Git",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-08",
+      "title": "Writer lifecycle and bounded input",
+      "given": [
+        "An owned writer with an expected length and explicit limit"
+      ],
+      "when": [
+        "Append parts; finish twice; abort; append after close; cancel another writer"
+      ],
+      "then": [
+        "Exact bytes are returned only after finish/protection",
+        "Repeated finish returns the retained same value",
+        "Malformed states/lengths/overruns fail without partial successful content",
+        "Cancelled children are joined and their unfinished capture is closed"
+      ],
+      "requirements": [
+        "ORNA-BLOB-013",
+        "ORNA-BLOB-014"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-09",
+      "title": "Hydration differs from current host I/O",
+      "given": [
+        "An old snapshot has missing promised media; the original external path now differs"
+      ],
+      "when": [
+        "Explicitly read the historical Blob online/offline; try capture_file in a watch/preview"
+      ],
+      "then": [
+        "Historical reads use exact object IDs and network policy",
+        "Offline unavailability is not empty data",
+        "External capture is rejected in read-only/historical contexts",
+        "Speculative preview initiates no hydration"
+      ],
+      "requirements": [
+        "ORNA-BLOB-015",
+        "ORNA-INGEST-002"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-BLOB-10",
+      "title": "Complete export and bounded inspection",
+      "given": [
+        "A row is copied across two databases with some source chunks absent locally"
+      ],
+      "when": [
+        "Admit the destination write; disconnect source; materialise through bounded sinks"
+      ],
+      "then": [
+        "Destination ownership/closure precedes acknowledgment",
+        "No cross-database dangling pointer is accepted",
+        "Resource limits produce explicit failure instead of successful truncated results",
+        "No unchanged v1 request fingerprint is replaced with a repository Blob-reference fingerprint; typed references do not grant content access"
+      ],
+      "requirements": [
+        "ORNA-BLOB-018",
+        "ORNA-BLOB-019"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-OGB-01",
+      "title": "Native reachability is not textual hash reachability",
+      "given": [
+        "A real Git commit contains OGB trees; a negative commit contains only chunk OIDs as text"
+      ],
+      "when": [
+        "Clone/mirror and enumerate native reachable objects"
+      ],
+      "then": [
+        "All chunks are transferred/retained through tree edges",
+        "Text-only references do not qualify",
+        "No LFS endpoint or second content-store credential is used"
+      ],
+      "requirements": [
+        "ORNA-OGB-001",
+        "ORNA-OGB-002",
+        "ORNA-OGB-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "native Git plus engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-OGB-02",
+      "title": "Descriptor and tree closure validation",
+      "given": [
+        "Malformed meta/index bytes, mismatched edge OIDs/modes, missing children, cycles/overdeep trees, bad spans, oversized chunks"
+      ],
+      "when": [
+        "Read metadata/ranges and verify full content"
+      ],
+      "then": [
+        "Reject malformed/ambiguous/noncanonical structures before allocating beyond limits",
+        "Verify selected Git object and content hashes",
+        "Full verify detects a forged aggregate digest even when an individual range is valid"
+      ],
+      "requirements": [
+        "ORNA-OGB-003",
+        "ORNA-OGB-004",
+        "ORNA-OGB-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-OGB-03",
+      "title": "Stable content-defined chunking",
+      "given": [
+        "The deterministic fixture stream is delivered in buffers of different sizes and then edited"
+      ],
+      "when": [
+        "Apply GEAR-1 and compare the published known answers"
+      ],
+      "then": [
+        "Buffer boundaries do not affect chunk boundaries",
+        "Insertion reuses unchanged chunks where content permits",
+        "No guarantee of reuse after arbitrary media re-encoding is claimed"
+      ],
+      "requirements": [
+        "ORNA-OGB-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "reference vectors plus engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-INGEST-01",
+      "title": "Normal Orna code owns import",
+      "given": [
+        "music.orna imports a local recording through capture_file then inserts Song"
+      ],
+      "when": [
+        "Run it, delete external source and inspect old/new rows"
+      ],
+      "then": [
+        "The row owns captured immutable bytes independent of the path",
+        "No global files table or ingestion DSL appears",
+        "Repeat import policy is explicit table/key behaviour, not assumed from content dedup"
+      ],
+      "requirements": [
+        "ORNA-INGEST-001",
+        "ORNA-INGEST-006"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-INGEST-02",
+      "title": "Changing source and acquisition limits",
+      "given": [
+        "A regular authorised input changes during capture; another attempt exceeds quotas or is cancelled"
+      ],
+      "when": [
+        "Capture and conflict/retry the row transaction"
+      ],
+      "then": [
+        "Detectable source changes fail explicitly",
+        "No false atomic-filesystem snapshot claim",
+        "Acquisition does not hold an exclusive database writer lock for its full duration",
+        "A safely retained Blob may be reused without rereading the changed path"
+      ],
+      "requirements": [
+        "ORNA-INGEST-002",
+        "ORNA-INGEST-003",
+        "ORNA-INGEST-004",
+        "ORNA-INGEST-005"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-MEDIA-01",
+      "title": "Decoded properties are ordinary reproducible observations",
+      "given": [
+        "Generated PNG and WAV content plus unsupported/corrupt content are imported"
+      ],
+      "when": [
+        "Inspect supported properties using selected standard decoders"
+      ],
+      "then": [
+        "Properties carry content and decoder provenance",
+        "Unsupported format leaves the Blob usable",
+        "Corrupt/absent is distinguished from empty/default metadata",
+        "No own parallel media catalogue becomes required"
+      ],
+      "requirements": [
+        "ORNA-MEDIA-001",
+        "ORNA-MEDIA-002",
+        "ORNA-MEDIA-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-MEDIA-02",
+      "title": "Inspection does not silently persist or upload",
+      "given": [
+        "An imported image has no paid/remote analysis policy"
+      ],
+      "when": [
+        "List/inspect it; request explicit analysis separately"
+      ],
+      "then": [
+        "Opening a row causes no remote upload/model bill or hidden permanent row",
+        "Resource limits and opt-in cache/analysis policy are visible",
+        "No current model result silently replaces historical output",
+        "Decoder cache identity includes code, schema, options and budget; a small-budget partial result is not reused as a complete result",
+        "Native decoder processes use bounded resources and explicit arguments, not shell source"
+      ],
+      "requirements": [
+        "ORNA-MEDIA-003",
+        "ORNA-MEDIA-004",
+        "ORNA-MEDIA-005",
+        "ORNA-KNOW-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-KNOW-01",
+      "title": "Derived answers bind all inputs",
+      "given": [
+        "An analysis uses image content, notes, prompt, model, decoder and options"
+      ],
+      "when": [
+        "Modify each dependency or correct an observation; revisit old revision"
+      ],
+      "then": [
+        "Cache invalidates against the complete declared dependency set",
+        "Output/corrections are normal versioned rows",
+        "Inference remains distinguishable from facts and can be inspected/exported without a hidden service"
+      ],
+      "requirements": [
+        "ORNA-KNOW-001",
+        "ORNA-KNOW-002",
+        "ORNA-KNOW-003",
+        "ORNA-KNOW-004"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-01",
+      "title": "One minimal real devtools application",
+      "given": [
+        "A fresh repository has songs, image and ordinary notes plus the optional UI"
+      ],
+      "when": [
+        "Browse tables; submit a normal REPL expression; refresh; view/play or retrieve content"
+      ],
+      "then": [
+        "Actual evaluator and storage are exercised",
+        "No watch UI, saved-query store, dashboard or fancy editor is necessary",
+        "Run/Clear/reset have the documented scope",
+        "Metadata edit/history/offline workflow works without simulated data"
+      ],
+      "requirements": [
+        "ORNA-APP-001",
+        "ORNA-APP-002",
+        "ORNA-APP-022"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-02",
+      "title": "Native controls without a styling subsystem",
+      "given": [
+        "Minimal devtools rendered as native HTML and also as a plain text response"
+      ],
+      "when": [
+        "Disable its optional CSS and inspect unsupported rich content"
+      ],
+      "then": [
+        "Labels, controls and ordering remain usable",
+        "CSS affects only the web representation",
+        "A CSS engine/theme protocol/DOM assumption is not added to portable values"
+      ],
+      "requirements": [
+        "ORNA-APP-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-04",
+      "title": "Assets use one snapshot-owned Blob interface",
+      "given": [
+        "CSS/JS/image resources come from package files and an ordinary Blob row"
+      ],
+      "when": [
+        "Serve a pinned page; move HEAD; try traversal/symlink/current-host substitutions"
+      ],
+      "then": [
+        "Both sources yield ordinary Blob response bodies",
+        "Exact package/code/resource snapshot is retained",
+        "No special devtools Asset table is required",
+        "Offline build claims include all dynamic/resource dependencies or fail explicitly"
+      ],
+      "requirements": [
+        "ORNA-APP-006",
+        "ORNA-APP-007",
+        "ORNA-APP-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-05",
+      "title": "The server is ordinary library behaviour",
+      "given": [
+        "A server entry and second application use public host capabilities"
+      ],
+      "when": [
+        "Replace minimal HTTP composition/renderer in .orna; omit the serving entry; run unrelated main/streams"
+      ],
+      "then": [
+        "No native route edit or application-specific JS is needed",
+        "Missing entry is diagnosed without executing main or installing UI",
+        "Listeners do not hold a global open transaction",
+        "Claimed full Server profile retains its protocol"
+      ],
+      "requirements": [
+        "ORNA-APP-009",
+        "ORNA-APP-010",
+        "ORNA-APP-011",
+        "ORNA-APP-021"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-06",
+      "title": "Forms and ranges use real bounded operations",
+      "given": [
+        "Native form UI and admitted immutable media resource"
+      ],
+      "when": [
+        "Submit with CSRF/session checks; lose response; read single byte ranges/HEAD/conditional requests"
+      ],
+      "then": [
+        "No automatic duplicate mutation",
+        "Authority checked each request",
+        "Correct bytes/status and no implicit content execution",
+        "A failed stream is not a complete success"
+      ],
+      "requirements": [
+        "ORNA-APP-012",
+        "ORNA-APP-013",
+        "ORNA-APP-014"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-07",
+      "title": "Optional Wasm client retains one language implementation",
+      "given": [
+        "An Orna-authored client runs under the existing evaluator compiled for Wasm"
+      ],
+      "when": [
+        "Link browser-only host imports; attempt server-handle/closure import; send a normal page event"
+      ],
+      "then": [
+        "Selected .orna implements renderer/protocol logic",
+        "Generated JS contains platform bindings only",
+        "Server capabilities are not smuggled into browser",
+        "Typed events and unchanged wire schema are used"
+      ],
+      "requirements": [
+        "ORNA-APP-015",
+        "ORNA-APP-016"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "optional browser-profile engine proof",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-08",
+      "title": "Explicit model ownership and non-destructive input",
+      "given": [
+        "A page and console have separate bindings; the user edits a draft during an incoming update"
+      ],
+      "when": [
+        "Rebind a console name; capture a closure; acknowledge an older submission"
+      ],
+      "then": [
+        "Orna value-capture semantics remain unchanged",
+        "Console state cannot shadow the page environment",
+        "Newer drafts/caret/focus remain intact without server round trips"
+      ],
+      "requirements": [
+        "ORNA-APP-017",
+        "ORNA-APP-018"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "source-app and optional browser profile",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-APP-09",
+      "title": "Recovery and self-update do not replay authority",
+      "given": [
+        "A live page has a pending mutating action and a new application version is published"
+      ],
+      "when": [
+        "Disconnect/restart or hot-reload while an older action remains visible"
+      ],
+      "then": [
+        "Retained outcome is recovered or uncertainty exposed",
+        "No transcript replay/new-ID retry",
+        "New runtime handles are fresh",
+        "Older action never acquires changed meaning",
+        "CLI recovery remains possible if the page is broken"
+      ],
+      "requirements": [
+        "ORNA-APP-019",
+        "ORNA-APP-020"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-UPGRADE-01",
+      "title": "Version coordinates are explicit",
+      "given": [
+        "The 1.0 baseline and new source publication are available"
+      ],
+      "when": [
+        "Open old histories, parse existing code, read old OVB/live records"
+      ],
+      "then": [
+        "Original grammar/signatures/encodings remain valid",
+        "Only explicit repository format2 selects new storage row identity",
+        "No engine conformance follows from publication checks"
+      ],
+      "requirements": [
+        "ORNA-UPGRADE-001",
+        "ORNA-UPGRADE-002",
+        "ORNA-UPGRADE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-UPGRADE-02",
+      "title": "Upgrade is one recoverable forward commit",
+      "given": [
+        "An existing format1 repository has unpublished work, old compact segments and submodules"
+      ],
+      "when": [
+        "Build and review UPGRADE-2 candidate; inject faults and restart"
+      ],
+      "then": [
+        "Prior commits and dependency pins retain exact semantics",
+        "Unpublished work is preserved or explicitly handled, never discarded",
+        "No silent whole-history rewrite",
+        "Marker rollback alone is rejected as a downgrade"
+      ],
+      "requirements": [
+        "ORNA-UPGRADE-002",
+        "ORNA-UPGRADE-003"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "V110-UPGRADE-03",
+      "title": "Publication corrections and evidence stay attributable",
+      "given": [
+        "The new corpus fixes two CAS fixtures and adds required Blob contracts"
+      ],
+      "when": [
+        "Compare parent publication and generated evidence; run first UI milestone"
+      ],
+      "then": [
+        "Each changed input and parent digest is recorded",
+        "Model/Git/editorial passes are not promoted to engine results",
+        "Unimplemented retained requirements block their claimed classes",
+        "The frozen parent archive is unchanged",
+        "Declared commitment, validated structure, verified range and verified full closure have distinguishable evidence states"
+      ],
+      "requirements": [
+        "ORNA-UPGRADE-004",
+        "ORNA-UPGRADE-005",
+        "ORNA-UPGRADE-006",
+        "ORNA-UPGRADE-007",
+        "ORNA-UPGRADE-008"
+      ],
+      "evidence_level": "implementation scenario, not executed by an Orna engine",
+      "required_evidence": "engine",
+      "implementation_status": "not-executed",
+      "origin": "retained behavioral oracle; final context applies"
+    },
+    {
+      "id": "FINAL-ROW-001",
+      "title": "row store: ORNA-ROW-001",
+      "requirements": [
+        "ORNA-ROW-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Every new-format table MUST have one ordered map from typed primary key to stored row value, bound to a stable table/schema identity."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-002",
+      "title": "row store: ORNA-ROW-002",
+      "requirements": [
+        "ORNA-ROW-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Table lookup/order MUST use the language's logical key comparison, not filename order, CBOR byte order or hash order."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-003",
+      "title": "row store: ORNA-ROW-003",
+      "requirements": [
+        "ORNA-ROW-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The canonical page/group algorithm, encoding and bounds MUST be those in ORP-1; runtime optimizations MUST produce identical canonical output for the same logical snapshot."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-004",
+      "title": "row store: ORNA-ROW-004",
+      "requirements": [
+        "ORNA-ROW-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Blob fields MUST use small annotated-content references in stored rows; media bytes MUST never be expanded into row-page bytes or base64 row text."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-005",
+      "title": "row store: ORNA-ROW-005",
+      "requirements": [
+        "ORNA-ROW-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Large rows/strings/collections MUST use the shared value-overflow graph so metadata pages and direct dependency fanout remain bounded."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-006",
+      "title": "row store: ORNA-ROW-006",
+      "requirements": [
+        "ORNA-ROW-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Copy-on-write updates MUST reuse unchanged nodes where canonical boundaries permit it; changed indices and payload bytes MUST be measured separately."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-007",
+      "title": "row store: ORNA-ROW-007",
+      "requirements": [
+        "ORNA-ROW-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Partial fetch MUST preserve exact schema/root pins and return unavailable rather than empty/successfully truncated results on missing objects."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-008",
+      "title": "row store: ORNA-ROW-008",
+      "requirements": [
+        "ORNA-ROW-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Secondary indexes and long-key VFS name indexes MUST use the same ordered store profile and commit atomically with the rows they index."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-009",
+      "title": "row store: ORNA-ROW-009",
+      "requirements": [
+        "ORNA-ROW-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "An unindexed scan MAY require broad reads; explain/counters MUST distinguish estimated from actual transfer, decode and scan work."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-010",
+      "title": "row store: ORNA-ROW-010",
+      "requirements": [
+        "ORNA-ROW-010"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Page rewrites/repacking/rechunking MUST NOT produce logical mutations when decoded values/annotations are unchanged."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-011",
+      "title": "row store: ORNA-ROW-011",
+      "requirements": [
+        "ORNA-ROW-011"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Mutation/assertion/reference validation MUST be shared across all entrypoints; no VFS-specific weaker rules are permitted."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-012",
+      "title": "row store: ORNA-ROW-012",
+      "requirements": [
+        "ORNA-ROW-012"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Raw storage nodes MUST not be exposed as writable row files; external graph modification requires full admission before use."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-013",
+      "title": "row store: ORNA-ROW-013",
+      "requirements": [
+        "ORNA-ROW-013"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Format-1/2 histories MUST retain versioned readers. Migration MUST NOT dual-write the old row layouts or silently upgrade a historical commit."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-014",
+      "title": "row store: ORNA-ROW-014",
+      "requirements": [
+        "ORNA-ROW-014"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "New `sys.Storage` metadata MUST describe root, schema, generation, row count when known, and observed bytes/availability; removed preference/placement modes MUST NOT survive as hidden toggles."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-ROW-015",
+      "title": "row store: ORNA-ROW-015",
+      "requirements": [
+        "ORNA-ROW-015"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The native graph MUST connect all direct dependencies through real Git tree entries, use one object store, and reject mismatching, unused or type-invalid dependency edges."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-001",
+      "title": "native reachability: ORNA-GRAPH-001",
+      "requirements": [
+        "ORNA-GRAPH-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Each nonterminal node MUST be an ordinary Git tree with `data` and optional `refs`; `data` is one canonical bounded CBOR blob and `refs` maps native OID names to exact child object types."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-002",
+      "title": "native reachability: ORNA-GRAPH-002",
+      "requirements": [
+        "ORNA-GRAPH-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The direct dependency inventory in decoded data MUST exactly match `refs`, deduplicated by OID; missing, unused, malformed or wrong-type edges MUST be rejected."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-003",
+      "title": "native reachability: ORNA-GRAPH-003",
+      "requirements": [
+        "ORNA-GRAPH-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Terminal binary chunks MUST be raw Git blobs. No separate media server, pointer-only object or second hash warehouse is permitted."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-004",
+      "title": "native reachability: ORNA-GRAPH-004",
+      "requirements": [
+        "ORNA-GRAPH-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Node metadata MUST be at most 64 KiB and direct fanout at most 256; larger values/indices MUST use the same bounded graph recursively."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-005",
+      "title": "native reachability: ORNA-GRAPH-005",
+      "requirements": [
+        "ORNA-GRAPH-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Objects MUST be validated under their format, schema and context before use. A shared child MUST NOT bypass per-parent semantic constraints."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-006",
+      "title": "native reachability: ORNA-GRAPH-006",
+      "requirements": [
+        "ORNA-GRAPH-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Git SHA-1 and SHA-256 modes MUST retain native OID widths and verification; neither native OID equals the raw-content SHA-256 by definition."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-GRAPH-007",
+      "title": "native reachability: ORNA-GRAPH-007",
+      "requirements": [
+        "ORNA-GRAPH-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The store root MUST contain only snapshot-required reachable state. Retained history belongs to ancestry/pins, not a current-root catalogue of every historical object."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-001",
+      "title": "annotated/lazy content: ORNA-BLOB-001",
+      "requirements": [
+        "ORNA-BLOB-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Blob MUST represent a finite octet sequence with canonical media type and optional suffix hint. The metadata MUST NOT alter the raw-byte content commitment."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-002",
+      "title": "annotated/lazy content: ORNA-BLOB-002",
+      "requirements": [
+        "ORNA-BLOB-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "This release MUST NOT add intrinsic `File`, `Asset`, `Bytes` or `Clob` synonyms or mandatory tables. Existing `sys.File` source-catalogue objects remain distinct from media values."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-003",
+      "title": "annotated/lazy content: ORNA-BLOB-003",
+      "requirements": [
+        "ORNA-BLOB-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Blob MUST work in ordinary stored/nested values; Blob primary keys remain inadmissible."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-004",
+      "title": "annotated/lazy content: ORNA-BLOB-004",
+      "requirements": [
+        "ORNA-BLOB-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Content identity MUST be `(length, SHA256(raw bytes))`, independent of MIME, suffix, Git object header/algorithm, compression, chunking, path and snapshot."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-005",
+      "title": "annotated/lazy content: ORNA-BLOB-005",
+      "requirements": [
+        "ORNA-BLOB-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Blob value equality MUST compare canonical annotations and exact content. `same_content` ignores annotations. Equal digests MUST NOT override detected unequal bytes; independently supplied equal-digest content without a shared admitted witness requires exact streamed comparison or explicit unavailability."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-006",
+      "title": "annotated/lazy content: ORNA-BLOB-006",
+      "requirements": [
+        "ORNA-BLOB-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Detected content collisions MUST fail without overwriting or aliasing an existing content identity."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-007",
+      "title": "annotated/lazy content: ORNA-BLOB-007",
+      "requirements": [
+        "ORNA-BLOB-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Loading a row, passing a same-database Blob reference, showing metadata, reading length/digest or changing MIME/title MUST NOT hydrate media just to form a `Vec<u8>`, encode a row or calculate its semantic digest."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-008",
+      "title": "annotated/lazy content: ORNA-BLOB-008",
+      "requirements": [
+        "ORNA-BLOB-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Held values MUST retain their exact resolution context for their owner/pin lifetime; unavailable/expired values MUST NOT rebind through a later row or HEAD."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-009",
+      "title": "annotated/lazy content: ORNA-BLOB-009",
+      "requirements": [
+        "ORNA-BLOB-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Structured portable annotated values MUST use negotiated OVB-2; old OVB-1 keeps its original bytes-only semantics. No implicit annotation-dropping or reference-in-byte-slot conversion is allowed."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-010",
+      "title": "annotated/lazy content: ORNA-BLOB-010",
+      "requirements": [
+        "ORNA-BLOB-010"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Inspectors MUST display type, length, declaration and content commitment without payload dumps or remote analysis. The VFS/row representation MUST use small references, not base64 media."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-011",
+      "title": "annotated/lazy content: ORNA-BLOB-011",
+      "requirements": [
+        "ORNA-BLOB-011"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "`read` MUST check nonnegative offsets/lengths, offset at/before EOF, checked arithmetic and at most 8 MiB per call; only known EOF clips a successful result."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-012",
+      "title": "annotated/lazy content: ORNA-BLOB-012",
+      "requirements": [
+        "ORNA-BLOB-012"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Range acquisition MUST fetch required descriptors/intersecting chunks and only separately bounded read-ahead. Whole Git-object overfetch MUST be measured, not called exact range transfer."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-013",
+      "title": "annotated/lazy content: ORNA-BLOB-013",
+      "requirements": [
+        "ORNA-BLOB-013"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "BlobWriter MUST be owner/runtime-bound and nonserializable, with open/finished/aborted states, serialized append/finish/abort, idempotent terminal outcomes and cancellation cleanup."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-014",
+      "title": "annotated/lazy content: ORNA-BLOB-014",
+      "requirements": [
+        "ORNA-BLOB-014"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Begin/append/finish MUST enforce declared expected length, total quota and the format maximum 2^63−1. No unbounded buffer or temporary-file bypass is allowed."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-015",
+      "title": "annotated/lazy content: ORNA-BLOB-015",
+      "requirements": [
+        "ORNA-BLOB-015"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Exact snapshot hydration MUST respect offline/network policy and cancellation; host `capture_file` is external I/O and remains forbidden in historical/pure/presenter/assertion contexts."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-016",
+      "title": "annotated/lazy content: ORNA-BLOB-016",
+      "requirements": [
+        "ORNA-BLOB-016"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Format-3 row/argument/consumer semantic commitments MUST use the versioned SOV-3 domains, not Git layout OIDs or eager full-byte encodings."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-017",
+      "title": "annotated/lazy content: ORNA-BLOB-017",
+      "requirements": [
+        "ORNA-BLOB-017"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Cross-format comparison MUST compare decoded values under explicit migration semantics, not unrelated digest bytes."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-018",
+      "title": "annotated/lazy content: ORNA-BLOB-018",
+      "requirements": [
+        "ORNA-BLOB-018"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The existing live protocol MUST reject unnegotiated OVB-2/storage tags. Use typed safe inspector/reference responses and separately authorized content I/O, not automatic full-Blob result serialization."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-019",
+      "title": "annotated/lazy content: ORNA-BLOB-019",
+      "requirements": [
+        "ORNA-BLOB-019"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Copying into an independent database MUST establish and protect destination closure before acknowledging a dependent row, with no hidden dependency on the original user's path."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-020",
+      "title": "annotated/lazy content: ORNA-BLOB-020",
+      "requirements": [
+        "ORNA-BLOB-020"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Generic slicing/concatenation MUST produce octet-stream/null annotations unless it is an exact identity no-op; part of a JPEG does not automatically remain image/jpeg."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-BLOB-021",
+      "title": "annotated/lazy content: ORNA-BLOB-021",
+      "requirements": [
+        "ORNA-BLOB-021"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Byte export MUST mean original raw bytes. Full annotated value export MUST preserve metadata explicitly; an export operation cannot silently switch between these two promises."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-001",
+      "title": "annotated/lazy content: ORNA-OGB-001",
+      "requirements": [
+        "ORNA-OGB-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The root Blob descriptor MUST bind exact length, raw-byte SHA-256 and its native content graph. MIME and suffix MUST be stored with each referencing value, not as global facts about a hash."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-002",
+      "title": "annotated/lazy content: ORNA-OGB-002",
+      "requirements": [
+        "ORNA-OGB-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Chunk entries MUST bind native object OID, byte length and independent chunk SHA-256; offset traversal MUST validate lengths, height and bounds."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-003",
+      "title": "annotated/lazy content: ORNA-OGB-003",
+      "requirements": [
+        "ORNA-OGB-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Zero-length content MUST have one canonical empty descriptor; zero-length nonempty-index children, wrong total length and excessive height MUST be rejected."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-004",
+      "title": "annotated/lazy content: ORNA-OGB-004",
+      "requirements": [
+        "ORNA-OGB-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Metadata-only access MUST not read chunks. Full verification MUST compare every chunk plus the complete raw-content digest before claiming full integrity."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-005",
+      "title": "annotated/lazy content: ORNA-OGB-005",
+      "requirements": [
+        "ORNA-OGB-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The chosen partition rule MUST be reproducible; insertions and adversarial patterns MUST have explicit bounded-resource behaviour and measured index churn."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-006",
+      "title": "annotated/lazy content: ORNA-OGB-006",
+      "requirements": [
+        "ORNA-OGB-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Native Git graph validation MUST not be replaced by checking a descriptor string. Missing promised data is unavailable; unknown missing data is corruption/incomplete closure."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-007",
+      "title": "annotated/lazy content: ORNA-OGB-007",
+      "requirements": [
+        "ORNA-OGB-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "All newly persisted Blob fields MUST use reference form regardless of payload size. Small Blobs may use one terminal chunk, not a second inline-row mode."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-OGB-008",
+      "title": "annotated/lazy content: ORNA-OGB-008",
+      "requirements": [
+        "ORNA-OGB-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Cross-representation equality and semantic diff MUST ignore rechunking, graph OIDs and Git repacking while retaining annotation changes."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-001",
+      "title": "canonical declaration and suffix: ORNA-MIME-001",
+      "requirements": [
+        "ORNA-MIME-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Every new Blob MUST have a valid concrete declared MIME value; constructors without knowledge use application/octet-stream, never a wildcard or empty string."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-002",
+      "title": "canonical declaration and suffix: ORNA-MIME-002",
+      "requirements": [
+        "ORNA-MIME-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Normalization MUST lowercase type/subtype/parameter names, sort parameters, normalize charset case, and preserve other case-sensitive parameter values; duplicate names, controls and malformed quoted strings MUST fail."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-003",
+      "title": "canonical declaration and suffix: ORNA-MIME-003",
+      "requirements": [
+        "ORNA-MIME-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A preferred suffix MUST be chosen from MIME-1 by essence; a compatible explicit safe hint overrides it, otherwise unknown types use bin."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-004",
+      "title": "canonical declaration and suffix: ORNA-MIME-004",
+      "requirements": [
+        "ORNA-MIME-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Explicit hints MUST be lowercase safe ASCII suffix segments of at most 32 bytes, without leading dot, slash, backslash, empty segments or traversal. Known-type incompatible hints MUST fail."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-005",
+      "title": "canonical declaration and suffix: ORNA-MIME-005",
+      "requirements": [
+        "ORNA-MIME-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Defaults matching the preferred suffix MUST canonicalize to no hint; normal spelling/quoting/case variations MUST not create different annotated values."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-006",
+      "title": "canonical declaration and suffix: ORNA-MIME-006",
+      "requirements": [
+        "ORNA-MIME-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Import resolution MUST be explicit declaration first, then bounded trusted detection, then a uniquely mapped suffix, then octet-stream. Conflicting observations MUST be disclosed; host-specific MIME registries cannot silently decide persistent metadata."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-007",
+      "title": "canonical declaration and suffix: ORNA-MIME-007",
+      "requirements": [
+        "ORNA-MIME-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Detection MUST NOT run on listings/stat/metadata-only edits. Unsupported or damaged content MUST remain preservable unless an explicit schema constraint requires a valid format."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-008",
+      "title": "canonical declaration and suffix: ORNA-MIME-008",
+      "requirements": [
+        "ORNA-MIME-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "MIME changes MUST update projected filenames atomically while keeping existing content handles pinned. Renames do not transcode or grant executable status."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-MIME-009",
+      "title": "canonical declaration and suffix: ORNA-MIME-009",
+      "requirements": [
+        "ORNA-MIME-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "HTML/SVG/JS previews MUST not execute merely because the stored declaration requests it. Trusted application assets and arbitrary user-content downloads require different explicit serving policies."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-001",
+      "title": "filesystem editing: ORNA-VFS-001",
+      "requirements": [
+        "ORNA-VFS-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A virtual row directory MUST address database/table/typed key; `data.orna` MUST encode stored non-key fields only, under that snapshot's schema."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-002",
+      "title": "filesystem editing: ORNA-VFS-002",
+      "requirements": [
+        "ORNA-VFS-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Virtual row text and sibling content files MUST be projections of the shared row store, not materialized competing authoritative copies."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-003",
+      "title": "filesystem editing: ORNA-VFS-003",
+      "requirements": [
+        "ORNA-VFS-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Unchanged schema-directed Blob references MUST resolve internally in the captured row/draft context without reopening the mount or reading payloads."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-004",
+      "title": "filesystem editing: ORNA-VFS-004",
+      "requirements": [
+        "ORNA-VFS-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Relative paths MUST stay within that field's registered projection. Absolute paths, symlink/traversal escapes and implicit cross-row references MUST fail."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-005",
+      "title": "filesystem editing: ORNA-VFS-005",
+      "requirements": [
+        "ORNA-VFS-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Commit selectors MUST pin one snapshot; a branch-name snapshot selector resolves once. Workspace mounts MUST share one selected worktree's durable CWD."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-006",
+      "title": "filesystem editing: ORNA-VFS-006",
+      "requirements": [
+        "ORNA-VFS-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Every accepted edit MUST use normal transaction/assertion/reference/permission validation and never automatically create a Git commit."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-007",
+      "title": "filesystem editing: ORNA-VFS-007",
+      "requirements": [
+        "ORNA-VFS-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "FUSE `release` MUST NOT be the only rejection/durability point; callback behavior and close-error limitations MUST be disclosed."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-008",
+      "title": "filesystem editing: ORNA-VFS-008",
+      "requirements": [
+        "ORNA-VFS-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Dirty sequence capture and acceptance MUST serialize with writes; `dup`/fork/repeated flush MUST not create a second acceptance of the same candidate."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-009",
+      "title": "filesystem editing: ORNA-VFS-009",
+      "requirements": [
+        "ORNA-VFS-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Invalid/stale candidates MUST preserve original accepted values, protect retained draft bytes and return a stable error/diagnostic association."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-010",
+      "title": "filesystem editing: ORNA-VFS-010",
+      "requirements": [
+        "ORNA-VFS-010"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A metadata-only save MUST not fetch or rehash sibling content. A binary save MAY require streaming the entire resulting bytes to establish its raw SHA-256; memory remains bounded."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-011",
+      "title": "filesystem editing: ORNA-VFS-011",
+      "requirements": [
+        "ORNA-VFS-011"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Normal save CAS MUST compare the captured write/temp-create baseline. Strong initial-read protection MUST be claimed only for a retained edit token/guarded operation."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-012",
+      "title": "filesystem editing: ORNA-VFS-012",
+      "requirements": [
+        "ORNA-VFS-012"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Renaming a suffix MUST not transcode bytes, rename columns or rekey a row. Compatible aliases update only the explicit suffix hint through CAS."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-013",
+      "title": "filesystem editing: ORNA-VFS-013",
+      "requirements": [
+        "ORNA-VFS-013"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Removing a required Blob MUST fail; optional Blob unlink MAY set that field to null after validation. Deleting `data.orna` MUST fail; row deletion is an explicit database operation."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-014",
+      "title": "filesystem editing: ORNA-VFS-014",
+      "requirements": [
+        "ORNA-VFS-014"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Hard links, device nodes, symlinks and writable shared mmap are unsupported in VFS-1 and MUST fail explicitly. Private mmap/read copies do not modify the database."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-015",
+      "title": "filesystem editing: ORNA-VFS-015",
+      "requirements": [
+        "ORNA-VFS-015"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Multiple file saves MUST NOT be guessed into one transaction. `orna edit --row PATH` provides explicit grouped row/content admission; separate updates may reject cross-field constraints."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-016",
+      "title": "filesystem editing: ORNA-VFS-016",
+      "requirements": [
+        "ORNA-VFS-016"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Reserved/colliding names MUST be escaped reversibly, not rejected as otherwise valid database keys or merged by case-folding."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-017",
+      "title": "filesystem editing: ORNA-VFS-017",
+      "requirements": [
+        "ORNA-VFS-017"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Directory iteration MUST be lazy/paged and pinned; lookup of a known key MUST use the index. An exhaustive recursive scan can still fetch all requested data."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-018",
+      "title": "filesystem editing: ORNA-VFS-018",
+      "requirements": [
+        "ORNA-VFS-018"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "`stat`, directory listings and row documents MUST not sniff/decode/download Blob content; raw-file size comes from the exact content descriptor."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-019",
+      "title": "filesystem editing: ORNA-VFS-019",
+      "requirements": [
+        "ORNA-VFS-019"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Schema changes, MIME path changes and API writes MUST invalidate directory/attribute caches coherently. Existing handles MUST not retarget to a different row or reordered collection element."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-020",
+      "title": "filesystem editing: ORNA-VFS-020",
+      "requirements": [
+        "ORNA-VFS-020"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Source files MAY be edited through the shared workspace source path; complete candidate validation and explicit grouped source edits are required when several files change together. No evaluation occurs during speculative file writes."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-021",
+      "title": "filesystem editing: ORNA-VFS-021",
+      "requirements": [
+        "ORNA-VFS-021"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Sync/rename acknowledgement, new content pins, local row commitment and namespace recovery MUST be journalled so crashes cannot lose acknowledged content."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-022",
+      "title": "filesystem editing: ORNA-VFS-022",
+      "requirements": [
+        "ORNA-VFS-022"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "FUSE writeback caching MUST be off initially; supported caching/IO modes MUST preserve per-open generation semantics despite non-VFS database writers."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-023",
+      "title": "filesystem editing: ORNA-VFS-023",
+      "requirements": [
+        "ORNA-VFS-023"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The adapter MUST NOT expose a fake `.git` directory or writable raw store. Git commands target the backing repository, never generated row documents."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-VFS-024",
+      "title": "filesystem editing: ORNA-VFS-024",
+      "requirements": [
+        "ORNA-VFS-024"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Unmount MUST refuse dirty/unresolved accepted-state recovery unless an explicit policy retains it safely. It MUST NOT report discarded drafts as saved."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-001",
+      "title": "capture and durability: ORNA-CAP-001",
+      "requirements": [
+        "ORNA-CAP-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Every acknowledged row containing new content MUST have durable verified new objects and native retention roots; a hash string in SQLite is insufficient."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-002",
+      "title": "capture and durability: ORNA-CAP-002",
+      "requirements": [
+        "ORNA-CAP-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Inherited promised objects MAY remain unhydrated only with recorded snapshot/promisor evidence; newly imported unknown bytes MUST NOT be acknowledged as merely promised."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-003",
+      "title": "capture and durability: ORNA-CAP-003",
+      "requirements": [
+        "ORNA-CAP-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Runtime pin refs MUST be local, owner-scoped and excluded from ordinary remote push; export of unpublished work MUST first freeze a recoverable consistent root."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-004",
+      "title": "capture and durability: ORNA-CAP-004",
+      "requirements": [
+        "ORNA-CAP-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Recovery MUST distinguish unaccepted scratch, accepted pending content, and published content; cleanup MUST NOT infer orphanhood from one absent in-memory handle."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-005",
+      "title": "capture and durability: ORNA-CAP-005",
+      "requirements": [
+        "ORNA-CAP-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Disk-full, cancellation, source mutation and failed flush MUST leave no falsely acknowledged dependent row; uncertain external effects MUST remain explicitly uncertain."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CAP-006",
+      "title": "capture and durability: ORNA-CAP-006",
+      "requirements": [
+        "ORNA-CAP-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Git GC/repack MUST share the declared maintenance boundary. Concurrent external destructive prune that bypasses protection is unsupported and MUST NOT be advertised as safe."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-001",
+      "title": "migration: ORNA-UPGRADE-001",
+      "requirements": [
+        "ORNA-UPGRADE-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Implementations MUST dispatch readers by recorded repository/value formats, not the CLI version or the current host's defaults."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-002",
+      "title": "migration: ORNA-UPGRADE-002",
+      "requirements": [
+        "ORNA-UPGRADE-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Existing format-1/2 commits MUST remain immutable and readable under their original decoders and equality/digest semantics."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-003",
+      "title": "migration: ORNA-UPGRADE-003",
+      "requirements": [
+        "ORNA-UPGRADE-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "New-format writes MUST use one canonical row store; loose/compact/hybrid dual-writing is forbidden."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-004",
+      "title": "migration: ORNA-UPGRADE-004",
+      "requirements": [
+        "ORNA-UPGRADE-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Legacy Blob annotation defaults MUST be explicit: octet-stream and no suffix, without downloading or decoding every payload during metadata migration."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-005",
+      "title": "migration: ORNA-UPGRADE-005",
+      "requirements": [
+        "ORNA-UPGRADE-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Annotation migration MUST be reported as a semantic profile transition; preservation of raw bytes is not proof of unchanged annotated value identity."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-006",
+      "title": "migration: ORNA-UPGRADE-006",
+      "requirements": [
+        "ORNA-UPGRADE-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A migration failure MUST preserve the old authoritative snapshot/tail and all user edits; it MUST NOT partially change the active writer."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-007",
+      "title": "migration: ORNA-UPGRADE-007",
+      "requirements": [
+        "ORNA-UPGRADE-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Source and API changes MUST be atomic with the format transition; removed storage-preference APIs MUST not secretly choose legacy layouts."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-008",
+      "title": "migration: ORNA-UPGRADE-008",
+      "requirements": [
+        "ORNA-UPGRADE-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Consumers with Blob-containing arguments MUST not reset progress because the argument encoding domain changed; require an explicit validated migration map or fail closed."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-009",
+      "title": "migration: ORNA-UPGRADE-009",
+      "requirements": [
+        "ORNA-UPGRADE-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "New protocols MUST explicitly negotiate new value codecs; old live endpoints and fingerprints MUST remain byte-for-byte legacy-compatible for their admitted values."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-UPGRADE-010",
+      "title": "migration: ORNA-UPGRADE-010",
+      "requirements": [
+        "ORNA-UPGRADE-010"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Unsupported annotated values on legacy wire MUST fail before effects or use the specified retained-without-value result after an already committed operation. No implicit downcast to bytes."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-STAGE-001",
+      "title": "index and checkout: ORNA-STAGE-001",
+      "requirements": [
+        "ORNA-STAGE-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Staging MUST bind the exact selected source/schema/row/content candidate and preserve unrelated staged or partially staged paths."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-STAGE-002",
+      "title": "index and checkout: ORNA-STAGE-002",
+      "requirements": [
+        "ORNA-STAGE-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The index store MUST remain semantically complete and decode under its staged schema; missing dependencies or incompatible staged schemas MUST be rejected, not silently repaired using CWD."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-STAGE-003",
+      "title": "index and checkout: ORNA-STAGE-003",
+      "requirements": [
+        "ORNA-STAGE-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Repeated staging MUST be deterministic and metadata-only staging MUST NOT hydrate media payloads."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-STAGE-004",
+      "title": "index and checkout: ORNA-STAGE-004",
+      "requirements": [
+        "ORNA-STAGE-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Internal `.orna/store` paths MUST be managed atomically by Orna. Direct edits by other Git tools are detected as external candidate changes, not accepted without graph/schema validation."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CHECKOUT-001",
+      "title": "index and checkout: ORNA-CHECKOUT-001",
+      "requirements": [
+        "ORNA-CHECKOUT-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A failed/stale checkout plan MUST leave current accepted state unchanged and preserve all drafts/unrelated changes."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CHECKOUT-002",
+      "title": "index and checkout: ORNA-CHECKOUT-002",
+      "requirements": [
+        "ORNA-CHECKOUT-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Checkout recovery MUST inspect actual refs and journal progress; it MUST NOT force a ref back after another writer advances it."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CHECKOUT-003",
+      "title": "index and checkout: ORNA-CHECKOUT-003",
+      "requirements": [
+        "ORNA-CHECKOUT-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A commit mount MUST be immutable; a branch-name snapshot mount MUST resolve once rather than move during reads."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-CHECKOUT-004",
+      "title": "index and checkout: ORNA-CHECKOUT-004",
+      "requirements": [
+        "ORNA-CHECKOUT-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "A workspace mount MUST share the selected worktree's CWD, not create an untracked independent copy. Independent work requires another worktree/clone."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-001",
+      "title": "minimal source hosted app: ORNA-APP-001",
+      "requirements": [
+        "ORNA-APP-001"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Devtools MUST be ordinary selected Orna source, not a privileged native Git homepage or separate playground product."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-002",
+      "title": "minimal source hosted app: ORNA-APP-002",
+      "requirements": [
+        "ORNA-APP-002"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Browse and console results MUST use shared typed inspection. Run MUST call the real parser/resolver/evaluator; simulated results are not completion."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-003",
+      "title": "minimal source hosted app: ORNA-APP-003",
+      "requirements": [
+        "ORNA-APP-003"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Portable UI meaning MUST not depend on HTML, CSS or DOM. The web renderer SHOULD use native semantic controls and absent/minimal optional CSS."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-004",
+      "title": "minimal source hosted app: ORNA-APP-004",
+      "requirements": [
+        "ORNA-APP-004"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The selected application source/resources MUST be the actual executed inputs; removal MUST not trigger hidden reinstallation or native fallback."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-005",
+      "title": "minimal source hosted app: ORNA-APP-005",
+      "requirements": [
+        "ORNA-APP-005"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Pinned `std` submodules MUST retain normal Git semantics. Editing a dependency requires its own commit then a parent gitlink update, or an explicit local vendor/fork; no silent mutable overlay."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-006",
+      "title": "minimal source hosted app: ORNA-APP-006",
+      "requirements": [
+        "ORNA-APP-006"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "CSS, browser host bindings and Wasm outputs MUST belong to renderer-package resources or ordinary Blob fields. No compulsory File/Asset registry or `std.devtools.Asset` primitive is permitted."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-007",
+      "title": "minimal source hosted app: ORNA-APP-007",
+      "requirements": [
+        "ORNA-APP-007"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Package resources MUST resolve in the caller's admitted dependency/source snapshot. Host paths, newest installed libraries and mutable remote URLs cannot replace those inputs silently."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-008",
+      "title": "minimal source hosted app: ORNA-APP-008",
+      "requirements": [
+        "ORNA-APP-008"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Builds MUST bind source, dependencies, resources, toolchain and host ABI coherently; offline claims require complete dependency closure."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-009",
+      "title": "minimal source hosted app: ORNA-APP-009",
+      "requirements": [
+        "ORNA-APP-009"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Source-hosted conformance MUST put routing, HTML generation, asset serving and application orchestration in replaceable Orna code; a wrapper around a complete native server fails this claim."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-010",
+      "title": "minimal source hosted app: ORNA-APP-010",
+      "requirements": [
+        "ORNA-APP-010"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "CLI serving MUST invoke only the selected serving entry and retain loopback/trusted-perimeter defaults; full Server conformance still requires the existing exact protocol endpoints."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-011",
+      "title": "minimal source hosted app: ORNA-APP-011",
+      "requirements": [
+        "ORNA-APP-011"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Each mutation MUST use shared short activation/request transactions; listeners and browser waits are supervised lifetimes, not open database transactions."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-012",
+      "title": "minimal source hosted app: ORNA-APP-012",
+      "requirements": [
+        "ORNA-APP-012"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The first web implementation MAY use request/response HTML and forms. It MUST bound input, enforce origin/CSRF/session checks, and never blindly replay an uncertain mutation. This is not a full live-protocol claim."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-013",
+      "title": "minimal source hosted app: ORNA-APP-013",
+      "requirements": [
+        "ORNA-APP-013"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Blob summaries MUST be metadata-only. Explicit media/content responses MUST check authority and snapshot identity; inspection of HTML/SVG/JS MUST not execute it."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-014",
+      "title": "minimal source hosted app: ORNA-APP-014",
+      "requirements": [
+        "ORNA-APP-014"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Media responses SHOULD support RFC 9110 HEAD, single byte ranges and immutable validators through the shared Blob reader, with correct 206/416 and truncated-stream failure behaviour."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-015",
+      "title": "minimal source hosted app: ORNA-APP-015",
+      "requirements": [
+        "ORNA-APP-015"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The later browser profile MUST run protocol/control/rendering code authored in Orna through a Wasm build of the shared evaluator initially; a direct compiler may replace it with equivalent semantics later."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-016",
+      "title": "minimal source hosted app: ORNA-APP-016",
+      "requirements": [
+        "ORNA-APP-016"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Generated JS MAY bind browser APIs only; no app-specific Git/table logic or second Orna language implementation. Server handles/closures MUST NOT become client authority."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-017",
+      "title": "minimal source hosted app: ORNA-APP-017",
+      "requirements": [
+        "ORNA-APP-017"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Page updates MUST use explicit immutable-model transitions. The console's scratch bindings MUST NOT overwrite the page's pinned application environment."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-018",
+      "title": "minimal source hosted app: ORNA-APP-018",
+      "requirements": [
+        "ORNA-APP-018"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Focus/caret/unsent drafts/local feedback MUST remain responsive and not be overwritten by unrelated server results."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-019",
+      "title": "minimal source hosted app: ORNA-APP-019",
+      "requirements": [
+        "ORNA-APP-019"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Connection resume, durable request recovery and page-state restoration MUST be separate promises; expired sessions MUST NOT replay mutation transcripts."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-020",
+      "title": "minimal source hosted app: ORNA-APP-020",
+      "requirements": [
+        "ORNA-APP-020"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Source/runtime upgrades MUST switch coherent generations for new sessions; old actions MUST NOT silently acquire new meanings. Invalid app source MUST leave local core recovery usable."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-021",
+      "title": "minimal source hosted app: ORNA-APP-021",
+      "requirements": [
+        "ORNA-APP-021"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "Replaceability MUST be demonstrated by a second ordinary application and an independent minimal Orna renderer/HTTP composition using only public interfaces."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
+    },
+    {
+      "id": "FINAL-APP-022",
+      "title": "minimal source hosted app: ORNA-APP-022",
+      "requirements": [
+        "ORNA-APP-022"
+      ],
+      "given": [
+        "A disposable database using the final format and the actual production implementation."
+      ],
+      "when": [
+        "Exercise the rule, its rejected inputs and the relevant concurrency/recovery boundary."
+      ],
+      "then": [
+        "The minimum demonstration MUST use actual row/Blob storage: import, query, retrieve/play, metadata edit, historical read and complete offline reopen. A mock HTML page is not engine evidence."
+      ],
+      "implementation_status": "not-executed",
+      "gate_matrix": "implementation/ACCEPTANCE.md"
     }
-  ],
-  "count": 144,
-  "execution_status": "Authored scenarios; selected separate models executed as listed in evidence/contract-models.json."
+  ]
 }

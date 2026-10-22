@@ -22,6 +22,7 @@ mod cli_status;
 mod cli_serve;
 mod media_range;
 mod repl;
+mod sys_host;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -56,7 +57,9 @@ use orna_runtime_v1::{
     QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
     RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
 };
-use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use orna_sys_v1::{
+    EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
+};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -930,6 +933,21 @@ fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
     }
 }
 
+fn pure_sys_host_context(
+    endpoint: &Endpoint,
+    std_snapshot: StdSnapshotPin,
+) -> Option<SysHostContext> {
+    let path = local_project_path(endpoint).ok()?;
+    let repository = orna_repository_v1::Repository::discover(path).ok()?;
+    let (identity, _) = runtime_identity(&repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Run,
+        std_snapshot,
+    ))
+}
+
 fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
@@ -1118,7 +1136,8 @@ fn unpublished_mutation_count(
 
 fn runtime_publication_metadata_rows(
     endpoint: &Endpoint,
-) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    std_snapshot: StdSnapshotPin,
+) -> Result<(RuntimePublicationMetadataRows, SysHostContext), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1128,6 +1147,12 @@ fn runtime_publication_metadata_rows(
         )
     })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let sys_host_context = sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Embedded,
+        std_snapshot,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1147,7 +1172,7 @@ fn runtime_publication_metadata_rows(
                 "retry the invocation after checking local runtime state",
             )
         })?;
-    runtime
+    let rows = runtime
         .block_on(state.publication_metadata_rows())
         .map_err(|_| {
             Diagnostic::target(
@@ -1155,7 +1180,8 @@ fn runtime_publication_metadata_rows(
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
-        })
+        })?;
+    Ok((rows, sys_host_context))
 }
 
 fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
@@ -1749,7 +1775,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: project.standard_profile().map(|profile| {
                     // Verify the full graph-bound bundle in the durable
                     // evaluator while loading only import-reachable modules.
@@ -1864,6 +1890,7 @@ fn run_project_function(
             endpoint,
             target,
             &execution,
+            sys_host::std_snapshot_pin(&project),
             color_enabled,
         );
     }
@@ -1885,7 +1912,13 @@ fn run_project_stream_invocation(
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
+    run_project_stream_invocation_with_project(
+        endpoint,
+        root_entry,
+        &execution,
+        sys_host::std_snapshot_pin(&project),
+        color_enabled,
+    )
 }
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
@@ -1926,6 +1959,7 @@ fn run_project_invocation_with_arguments(
             "retry the durable project invocation",
         )
     })?;
+    let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
     let owner_id = invocation_owner_id(identity);
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -1939,19 +1973,26 @@ fn run_project_invocation_with_arguments(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_request_with_arguments(
-                orna_conformance_v1::RuntimeTarget {
-                    repository: &repository,
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
                     identity,
-                    owner_id,
-                    initial_digest,
-                },
-                request,
-                fingerprint,
-                &project,
-                root_entry,
-                arguments,
-            ),
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_request_with_arguments(
+                    orna_conformance_v1::RuntimeTarget {
+                        repository: &repository,
+                        identity,
+                        owner_id,
+                        initial_digest,
+                    },
+                    request,
+                    fingerprint,
+                    &project,
+                    root_entry,
+                    arguments,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -1962,11 +2003,15 @@ fn run_project_invocation_with_arguments(
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project invocation was rejected",
-            "the project transaction failed atomically; no partial changes were committed",
-        )),
+        StageOutcome::Failed(diagnostic) => {
+            let mut rejection = Diagnostic::target(
+                "E2200",
+                "durable project invocation was rejected",
+                "the project transaction failed atomically; no partial changes were committed",
+            );
+            rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+            Err(rejection)
+        }
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -1985,6 +2030,7 @@ fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    std_snapshot: StdSnapshotPin,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -2008,14 +2054,21 @@ fn run_project_stream_invocation_with_project(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_stream(
-                &repository,
-                identity,
-                owner_id,
-                initial_digest,
-                project,
-                root_entry,
-            ),
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
+                    identity,
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_stream(
+                    &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                    project,
+                    root_entry,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -2067,7 +2120,11 @@ fn run_pure_invocation(
                     )
                 })?;
             if admitted.requires_publication_metadata() {
-                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                    endpoint,
+                    sys_host::std_snapshot_pin(&project),
+                )?;
+                let authority = authority.with_sys_host_context(sys_host_context);
                 let activation = authority
                     .evaluate_staged_with_publication_rows(
                         &admitted,
@@ -2089,6 +2146,11 @@ fn run_pure_invocation(
                     ));
                 }
             } else {
+                let std_snapshot = sys_host::std_snapshot_pin(&project);
+                let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                    Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                    None => authority,
+                };
                 authority
                     .evaluate(&admitted, &Environment::new())
                     .map_err(|error| {
@@ -2242,7 +2304,14 @@ fn repl_transactions(
         project,
         commit,
         format_context,
-        authority: ApplicationAuthority::new(catalogue, Limits::default()),
+        authority: ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
+            sys_host::sys_host_context(
+                repository.worktree(),
+                identity,
+                RuntimeMode::Repl,
+                sys_host::std_snapshot_pin(workspace_project),
+            ),
+        ),
         runtime,
         identity,
         initial_digest,
@@ -2269,6 +2338,22 @@ fn same_repl_project_inputs(
         && workspace.standard_modules() == committed.standard_modules()
 }
 
+/// The activation facts a project REPL session reports through
+/// `sys.rt.info()`. `None` leaves the session unattached, so the evaluator
+/// reports `sys.version.incompatible` rather than inventing host facts.
+fn repl_sys_host_context(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Option<SysHostContext> {
+    let (identity, _) = runtime_identity(repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Repl,
+        sys_host::std_snapshot_pin(project),
+    ))
+}
+
 fn repl_runtime(
     repository: Option<orna_repository_v1::Repository>,
 ) -> Result<ReplRuntime, Diagnostic> {
@@ -2282,6 +2367,10 @@ fn repl_runtime(
             Limits::default(),
         )
             .map_err(|error| repl_session_error(&error))?;
+        let session = match repl_sys_host_context(repository, &project) {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        };
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
     } else {
@@ -2356,15 +2445,22 @@ impl ReplSnapshotSessionLoader<'_> {
         self.repository.ok_or(())
     }
 
-    fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
+    fn admit(&self, project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
         // Admit the project's own pinned standard sources; uncaptured imports
         // remain inadmissible because the project has no standard profile.
-        AdmittedReplSession::from_loaded_project(
+        let session = AdmittedReplSession::from_loaded_project(
             project,
             project.standard_sources().iter().cloned(),
             Limits::default(),
         )
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+        let context = self
+            .repository
+            .and_then(|repository| repl_sys_host_context(repository, project));
+        Ok(match context {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        })
     }
 }
 
@@ -2380,7 +2476,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load(self.repository()?)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
@@ -2388,7 +2484,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Ref(reference) => {
                 let repository = self.repository()?;
@@ -2396,7 +2492,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
         };
         self.host_bindings.borrow_mut().take();
@@ -3986,10 +4082,10 @@ mod tests {
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
         assert_eq!(error.exit, Exit::Target);
         let rendered = error.to_string();
-        assert!(rendered.starts_with("error[ORNA-S012-UNRESOLVED]: "), "{rendered}");
-        assert!(rendered.contains("missing"), "{rendered}");
-        assert!(rendered.contains("line 1, column 1"), "{rendered}");
-        assert!(rendered.contains("\nhelp: "), "{rendered}");
+        assert_eq!(
+            rendered,
+            "error[ORNA-S012-UNRESOLVED]: name `missing` cannot be resolved\n  --> line 1, column 1\n  |\n1 | missing()\n  | ^^^^^^^\nnote: `missing` is not declared in this session and is not imported\nhelp: declare `missing` before using it, for example `let missing = <value>`"
+        );
         assert_eq!(
             run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
