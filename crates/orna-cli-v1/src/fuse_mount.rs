@@ -2003,7 +2003,7 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2011,6 +2011,9 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&inode.0).map(|node| &node.kind),
             Some(NodeKind::BlobBytes(_))
         );
+        if replaced_blob {
+            state.track_blob_open(inode.0);
+        }
         drop(state);
         if replaced_blob {
             reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
@@ -2025,7 +2028,7 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let (save, target, scratch, blob_field) = {
-            let state = self
+            let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2045,7 +2048,12 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(Arc::clone(scratch)),
                     blob_field.clone(),
                 ),
-                Some(NodeKind::Bytes(_) | NodeKind::BlobBytes(_) | NodeKind::Blob { .. }) => {
+                Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => {
+                    state.track_blob_open(inode.0);
+                    reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
+                    return;
+                }
+                Some(NodeKind::Bytes(_)) => {
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -2375,20 +2383,29 @@ impl Filesystem for WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let destination = state
-            .nodes
-            .get_mut(&destination_inode)
-            .map(|node| &mut node.kind);
-        match (blob_field, destination) {
-            (Some(_), Some(kind @ (NodeKind::Blob { .. } | NodeKind::BlobBytes(_)))) => {
-                *kind = NodeKind::BlobBytes(accepted_bytes);
+        match blob_field {
+            Some(_) => {
+                if let Err(error) = state.replace_blob_generation(
+                    newparent.0,
+                    newname,
+                    destination_inode,
+                    accepted_bytes,
+                ) {
+                    eprintln!("mounted replacement install failed: {error}");
+                    reply.error(Errno::EIO);
+                    return;
+                }
             }
-            (None, Some(NodeKind::Document { bytes, .. })) => {
+            None => {
+                let Some(NodeKind::Document { bytes, .. }) = state
+                    .nodes
+                    .get_mut(&destination_inode)
+                    .map(|node| &mut node.kind)
+                else {
+                    reply.error(Errno::EIO);
+                    return;
+                };
                 *bytes = accepted_bytes.to_vec();
-            }
-            _ => {
-                reply.error(Errno::EIO);
-                return;
             }
         }
         if let Err(error) = save.writer.scratch_store.remove(&identity) {
@@ -2789,13 +2806,20 @@ impl Filesystem for WorkspaceFilesystem {
     fn release(
         &self,
         _request: &Request,
-        _inode: INodeNo,
+        inode: INodeNo,
         handle: fuser::FileHandle,
         _flags: fuser::OpenFlags,
         _lock_owner: Option<fuser::LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if handle.0 == 0 {
+            // Stateless blob opens are tracked so superseded generations stay readable.
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .track_blob_release(inode.0);
+        }
         let mut draft_state = self
             .draft_state
             .lock()
@@ -2990,6 +3014,10 @@ struct FsBuilder {
     next_inode: u64,
     writer: Option<Arc<MountWriter>>,
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
+    /// Open handle counts for blob inodes opened without draft state (handle 0).
+    open_blobs: HashMap<u64, u64>,
+    /// Replaced blob inodes kept readable until their last open handle is released.
+    superseded_blobs: HashSet<u64>,
 }
 
 impl FsBuilder {
@@ -3007,6 +3035,8 @@ impl FsBuilder {
             next_inode: ROOT_INODE + 1,
             writer: None,
             table_object_ids: Arc::new(BTreeMap::new()),
+            open_blobs: HashMap::new(),
+            superseded_blobs: HashSet::new(),
         }
     }
 
@@ -3793,6 +3823,85 @@ impl FsBuilder {
         self.next_inode = next_inode;
         self.nodes.insert(inode, FsNode { parent, kind });
         Ok(inode)
+    }
+
+    /// Records a stateless open of a blob generation so a replacement keeps the captured
+    /// node readable for as long as a handle still refers to it.
+    fn track_blob_open(&mut self, inode: u64) {
+        *self.open_blobs.entry(inode).or_insert(0) += 1;
+    }
+
+    /// Releases one stateless blob open. The last release of a superseded generation
+    /// removes its node; untracked inodes are ignored.
+    fn track_blob_release(&mut self, inode: u64) {
+        let Some(count) = self.open_blobs.get_mut(&inode) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.open_blobs.remove(&inode);
+            if self.superseded_blobs.remove(&inode) {
+                self.nodes.remove(&inode);
+            }
+        }
+    }
+
+    /// Drops a generation that is no longer reachable by name. Open handles keep it
+    /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
+    fn retire_node(&mut self, inode: u64) {
+        if self.open_blobs.contains_key(&inode) {
+            self.superseded_blobs.insert(inode);
+        } else {
+            self.nodes.remove(&inode);
+        }
+    }
+
+    /// Replaces the blob named `name` under `parent` with a new generation inode.
+    /// The superseded inode keeps its captured content for existing handles.
+    fn replace_blob_generation(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        superseded: u64,
+        bytes: Arc<[u8]>,
+    ) -> Result<u64, String> {
+        if !matches!(
+            self.nodes.get(&superseded).map(|node| &node.kind),
+            Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_))
+        ) {
+            return Err("replaced mount entry is not a blob".into());
+        }
+        let generation = self.next_inode;
+        let next_inode = generation
+            .checked_add(1)
+            .ok_or_else(|| "mount tree has too many entries".to_owned())?;
+        let directory = self
+            .nodes
+            .get_mut(&parent)
+            .and_then(|node| node.kind.directory_mut())
+            .ok_or_else(|| "mount parent is not a directory".to_owned())?;
+        let index = *directory
+            .by_name
+            .get(name)
+            .ok_or_else(|| "replaced blob is missing from its directory".to_owned())?;
+        let entry = directory
+            .entries
+            .get_mut(index)
+            .ok_or_else(|| "mount directory index is stale".to_owned())?;
+        if entry.inode != superseded {
+            return Err("replaced blob directory entry changed".into());
+        }
+        entry.inode = generation;
+        self.next_inode = next_inode;
+        self.nodes.insert(
+            generation,
+            FsNode {
+                parent,
+                kind: NodeKind::BlobBytes(bytes),
+            },
+        );
+        self.retire_node(superseded);
+        Ok(generation)
     }
 }
 
