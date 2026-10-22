@@ -1,0 +1,2 @@
+pub fn rename_contact(id: Str, name: Str) =
+    Contact.update(id, { name: name });

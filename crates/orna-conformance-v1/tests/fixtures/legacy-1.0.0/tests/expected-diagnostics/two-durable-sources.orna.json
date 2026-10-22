@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/two-durable-sources.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E9102",
+  "message_contains": "a durable consumer function may own only one checkpointed source root",
+  "status": "expected-not-executed"
+}

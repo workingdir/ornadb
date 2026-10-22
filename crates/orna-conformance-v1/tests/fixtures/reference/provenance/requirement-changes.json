@@ -1,0 +1,1713 @@
+{
+  "added": [
+    {
+      "id": "ORNA-CAP-001",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 34,
+      "text": "Every acknowledged row containing new content MUST have durable verified new objects and native retention roots; a hash string in SQLite is insufficient."
+    },
+    {
+      "id": "ORNA-CAP-002",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 35,
+      "text": "Inherited promised objects MAY remain unhydrated only with recorded snapshot/promisor evidence; newly imported unknown bytes MUST NOT be acknowledged as merely promised."
+    },
+    {
+      "id": "ORNA-CAP-003",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 36,
+      "text": "Runtime pin refs MUST be local, owner-scoped and excluded from ordinary remote push; export of unpublished work MUST first freeze a recoverable consistent root."
+    },
+    {
+      "id": "ORNA-CAP-004",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 37,
+      "text": "Recovery MUST distinguish unaccepted scratch, accepted pending content, and published content; cleanup MUST NOT infer orphanhood from one absent in-memory handle."
+    },
+    {
+      "id": "ORNA-CAP-005",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 38,
+      "text": "Disk-full, cancellation, source mutation and failed flush MUST leave no falsely acknowledged dependent row; uncertain external effects MUST remain explicitly uncertain."
+    },
+    {
+      "id": "ORNA-CAP-006",
+      "chapter": "embedded",
+      "source": "source/20-embedded.md",
+      "line": 39,
+      "text": "Git GC/repack MUST share the declared maintenance boundary. Concurrent external destructive prune that bypasses protection is unsupported and MUST NOT be advertised as safe."
+    },
+    {
+      "id": "ORNA-STAGE-001",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 26,
+      "text": "Staging MUST bind the exact selected source/schema/row/content candidate and preserve unrelated staged or partially staged paths."
+    },
+    {
+      "id": "ORNA-STAGE-002",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 27,
+      "text": "The index store MUST remain semantically complete and decode under its staged schema; missing dependencies or incompatible staged schemas MUST be rejected, not silently repaired using CWD."
+    },
+    {
+      "id": "ORNA-STAGE-003",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 28,
+      "text": "Repeated staging MUST be deterministic and metadata-only staging MUST NOT hydrate media payloads."
+    },
+    {
+      "id": "ORNA-STAGE-004",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 29,
+      "text": "Internal `.orna/store` paths MUST be managed atomically by Orna. Direct edits by other Git tools are detected as external candidate changes, not accepted without graph/schema validation."
+    },
+    {
+      "id": "ORNA-CHECKOUT-001",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 51,
+      "text": "A failed/stale checkout plan MUST leave current accepted state unchanged and preserve all drafts/unrelated changes."
+    },
+    {
+      "id": "ORNA-CHECKOUT-002",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 52,
+      "text": "Checkout recovery MUST inspect actual refs and journal progress; it MUST NOT force a ref back after another writer advances it."
+    },
+    {
+      "id": "ORNA-CHECKOUT-003",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 53,
+      "text": "A commit mount MUST be immutable; a branch-name snapshot mount MUST resolve once rather than move during reads."
+    },
+    {
+      "id": "ORNA-CHECKOUT-004",
+      "chapter": "branching",
+      "source": "source/21-branching.md",
+      "line": 54,
+      "text": "A workspace mount MUST share the selected worktree's CWD, not create an untracked independent copy. Independent work requires another worktree/clone."
+    },
+    {
+      "id": "ORNA-PUB-018",
+      "chapter": "publication",
+      "source": "source/22-publication.md",
+      "line": 101,
+      "text": "Pending graph objects MUST be native-pinned before mutation acknowledgement and remain protected through publication/recovery."
+    },
+    {
+      "id": "ORNA-PUB-019",
+      "chapter": "publication",
+      "source": "source/22-publication.md",
+      "line": 102,
+      "text": "Auto-publication MUST be opt-in; the initial product defaults to explicit publication so successful saves do not silently create Git commits."
+    },
+    {
+      "id": "ORNA-PUB-020",
+      "chapter": "publication",
+      "source": "source/22-publication.md",
+      "line": 103,
+      "text": "`.orna/store` index reconciliation MUST preserve separately staged logical changes and never stage the reverse of an automatically published batch."
+    },
+    {
+      "id": "ORNA-PUB-021",
+      "chapter": "publication",
+      "source": "source/22-publication.md",
+      "line": 104,
+      "text": "Published system-watermark rows MUST be folded with the same batch without turning historical data into current operational authority."
+    },
+    {
+      "id": "ORNA-ROW-007",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 18,
+      "text": "Partial fetch MUST preserve exact schema/root pins and return unavailable rather than empty/successfully truncated results on missing objects."
+    },
+    {
+      "id": "ORNA-ROW-008",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 19,
+      "text": "Secondary indexes and long-key VFS name indexes MUST use the same ordered store profile and commit atomically with the rows they index."
+    },
+    {
+      "id": "ORNA-ROW-009",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 20,
+      "text": "An unindexed scan MAY require broad reads; explain/counters MUST distinguish estimated from actual transfer, decode and scan work."
+    },
+    {
+      "id": "ORNA-ROW-010",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 21,
+      "text": "Page rewrites/repacking/rechunking MUST NOT produce logical mutations when decoded values/annotations are unchanged."
+    },
+    {
+      "id": "ORNA-ROW-011",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 35,
+      "text": "Mutation/assertion/reference validation MUST be shared across all entrypoints; no VFS-specific weaker rules are permitted."
+    },
+    {
+      "id": "ORNA-ROW-012",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 36,
+      "text": "Raw storage nodes MUST not be exposed as writable row files; external graph modification requires full admission before use."
+    },
+    {
+      "id": "ORNA-ROW-013",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 37,
+      "text": "Format-1/2 histories MUST retain versioned readers. Migration MUST NOT dual-write the old row layouts or silently upgrade a historical commit."
+    },
+    {
+      "id": "ORNA-ROW-014",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 38,
+      "text": "New `sys.Storage` metadata MUST describe root, schema, generation, row count when known, and observed bytes/availability; removed preference/placement modes MUST NOT survive as hidden toggles."
+    },
+    {
+      "id": "ORNA-ROW-015",
+      "chapter": "storage",
+      "source": "source/23-storage.md",
+      "line": 39,
+      "text": "The native graph MUST connect all direct dependencies through real Git tree entries, use one object store, and reject mismatching, unused or type-invalid dependency edges."
+    },
+    {
+      "id": "ORNA-GIT-011",
+      "chapter": "git-history",
+      "source": "source/24-git-history.md",
+      "line": 32,
+      "text": "Repository clone credentials MUST be treated as access to repository content; VFS path hiding, namespaces or filtered clone are not row-level permissions."
+    },
+    {
+      "id": "ORNA-GIT-012",
+      "chapter": "git-history",
+      "source": "source/24-git-history.md",
+      "line": 33,
+      "text": "Offline failure MUST name unavailable scope without exposing secrets; it MUST NOT silently use a current host file or another snapshot."
+    },
+    {
+      "id": "ORNA-EVOL-001",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 9,
+      "text": "Stable table/field identities MUST survive supported renames; a textual name match alone MUST NOT establish continuity."
+    },
+    {
+      "id": "ORNA-EVOL-002",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 10,
+      "text": "Schema changes MUST be admitted against affected rows, references, assertions, indexes and stored codecs before visibility."
+    },
+    {
+      "id": "ORNA-EVOL-003",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 11,
+      "text": "Historical rows MUST be decoded under their historical schema/value profile; current source MUST NOT silently reinterpret them."
+    },
+    {
+      "id": "ORNA-EVOL-004",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 12,
+      "text": "Semantic diff MUST compare logical fields and Blob annotations/content, not storage page or Git-layout IDs."
+    },
+    {
+      "id": "ORNA-EVOL-005",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 13,
+      "text": "A three-way merge MUST validate the merged program/schema/data/content closure and constraints before publishing; a conflict-free Git text merge is not sufficient."
+    },
+    {
+      "id": "ORNA-EVOL-006",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 14,
+      "text": "Conflicting replacements of one Blob MUST be reported as value conflicts unless an explicit application merge function supplies a validated replacement; concatenating chunk lists is not a default merge."
+    },
+    {
+      "id": "ORNA-EVOL-007",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 15,
+      "text": "Explicit rekey MUST use normal immutable-key/reference rules and emit one logical rekey with old/new address, not a filename guess."
+    },
+    {
+      "id": "ORNA-EVOL-008",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 16,
+      "text": "A representation-only rewrite MUST preserve semantic rows and content commitments. Defaulting new annotations in migration is an explicit semantic migration, not falsely an empty semantic diff."
+    },
+    {
+      "id": "ORNA-EVOL-009",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 17,
+      "text": "Required introduction defaults/fallbacks MUST be frozen under the source/schema revision rather than reevaluated on every historical read."
+    },
+    {
+      "id": "ORNA-EVOL-010",
+      "chapter": "evolution",
+      "source": "source/25-evolution.md",
+      "line": 18,
+      "text": "A failed migration/merge/checkout MUST preserve accepted state and conflicting user edits; no automatic ref reset, inferred winner or unknown-schema overwrite is allowed."
+    },
+    {
+      "id": "ORNA-FORMAT-005",
+      "chapter": "formats",
+      "source": "source/29-formats.md",
+      "line": 168,
+      "text": "New annotated Blob values MUST preserve annotations through OVB-2 and MUST NOT silently lose them on old wire/export interfaces."
+    },
+    {
+      "id": "ORNA-FORMAT-006",
+      "chapter": "formats",
+      "source": "source/29-formats.md",
+      "line": 169,
+      "text": "Stored and semantic reference tags MUST be rejected outside their recorded ROV-3/SOV-3 contexts; a raw SHA or Git OID is never permission to read content."
+    },
+    {
+      "id": "ORNA-BLOB-020",
+      "chapter": "blob-values",
+      "source": "source/36-blob-values.md",
+      "line": 58,
+      "text": "Generic slicing/concatenation MUST produce octet-stream/null annotations unless it is an exact identity no-op; part of a JPEG does not automatically remain image/jpeg."
+    },
+    {
+      "id": "ORNA-BLOB-021",
+      "chapter": "blob-values",
+      "source": "source/36-blob-values.md",
+      "line": 59,
+      "text": "Byte export MUST mean original raw bytes. Full annotated value export MUST preserve metadata explicitly; an export operation cannot silently switch between these two promises."
+    },
+    {
+      "id": "ORNA-GRAPH-001",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 20,
+      "text": "Each nonterminal node MUST be an ordinary Git tree with `data` and optional `refs`; `data` is one canonical bounded CBOR blob and `refs` maps native OID names to exact child object types."
+    },
+    {
+      "id": "ORNA-GRAPH-002",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 21,
+      "text": "The direct dependency inventory in decoded data MUST exactly match `refs`, deduplicated by OID; missing, unused, malformed or wrong-type edges MUST be rejected."
+    },
+    {
+      "id": "ORNA-GRAPH-003",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 22,
+      "text": "Terminal binary chunks MUST be raw Git blobs. No separate media server, pointer-only object or second hash warehouse is permitted."
+    },
+    {
+      "id": "ORNA-GRAPH-004",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 23,
+      "text": "Node metadata MUST be at most 64 KiB and direct fanout at most 256; larger values/indices MUST use the same bounded graph recursively."
+    },
+    {
+      "id": "ORNA-GRAPH-005",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 24,
+      "text": "Objects MUST be validated under their format, schema and context before use. A shared child MUST NOT bypass per-parent semantic constraints."
+    },
+    {
+      "id": "ORNA-GRAPH-006",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 25,
+      "text": "Git SHA-1 and SHA-256 modes MUST retain native OID widths and verification; neither native OID equals the raw-content SHA-256 by definition."
+    },
+    {
+      "id": "ORNA-GRAPH-007",
+      "chapter": "blob-storage",
+      "source": "source/37-git-native-blobs.md",
+      "line": 26,
+      "text": "The store root MUST contain only snapshot-required reachable state. Retained history belongs to ancestry/pins, not a current-root catalogue of every historical object."
+    },
+    {
+      "id": "ORNA-VFS-001",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 27,
+      "text": "A virtual row directory MUST address database/table/typed key; `data.orna` MUST encode stored non-key fields only, under that snapshot's schema."
+    },
+    {
+      "id": "ORNA-VFS-002",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 28,
+      "text": "Virtual row text and sibling content files MUST be projections of the shared row store, not materialized competing authoritative copies."
+    },
+    {
+      "id": "ORNA-VFS-003",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 29,
+      "text": "Unchanged schema-directed Blob references MUST resolve internally in the captured row/draft context without reopening the mount or reading payloads."
+    },
+    {
+      "id": "ORNA-VFS-004",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 30,
+      "text": "Relative paths MUST stay within that field's registered projection. Absolute paths, symlink/traversal escapes and implicit cross-row references MUST fail."
+    },
+    {
+      "id": "ORNA-VFS-005",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 31,
+      "text": "Commit selectors MUST pin one snapshot; a branch-name snapshot selector resolves once. Workspace mounts MUST share one selected worktree's durable CWD."
+    },
+    {
+      "id": "ORNA-VFS-006",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 32,
+      "text": "Every accepted edit MUST use normal transaction/assertion/reference/permission validation and never automatically create a Git commit."
+    },
+    {
+      "id": "ORNA-VFS-007",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 60,
+      "text": "FUSE `release` MUST NOT be the only rejection/durability point; callback behavior and close-error limitations MUST be disclosed."
+    },
+    {
+      "id": "ORNA-VFS-008",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 61,
+      "text": "Dirty sequence capture and acceptance MUST serialize with writes; `dup`/fork/repeated flush MUST not create a second acceptance of the same candidate."
+    },
+    {
+      "id": "ORNA-VFS-009",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 62,
+      "text": "Invalid/stale candidates MUST preserve original accepted values, protect retained draft bytes and return a stable error/diagnostic association."
+    },
+    {
+      "id": "ORNA-VFS-010",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 63,
+      "text": "A metadata-only save MUST not fetch or rehash sibling content. A binary save MAY require streaming the entire resulting bytes to establish its raw SHA-256; memory remains bounded."
+    },
+    {
+      "id": "ORNA-VFS-011",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 80,
+      "text": "Normal save CAS MUST compare the captured write/temp-create baseline. Strong initial-read protection MUST be claimed only for a retained edit token/guarded operation."
+    },
+    {
+      "id": "ORNA-VFS-012",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 81,
+      "text": "Renaming a suffix MUST not transcode bytes, rename columns or rekey a row. Compatible aliases update only the explicit suffix hint through CAS."
+    },
+    {
+      "id": "ORNA-VFS-013",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 82,
+      "text": "Removing a required Blob MUST fail; optional Blob unlink MAY set that field to null after validation. Deleting `data.orna` MUST fail; row deletion is an explicit database operation."
+    },
+    {
+      "id": "ORNA-VFS-014",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 83,
+      "text": "Hard links, device nodes, symlinks and writable shared mmap are unsupported in VFS-1 and MUST fail explicitly. Private mmap/read copies do not modify the database."
+    },
+    {
+      "id": "ORNA-VFS-015",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 84,
+      "text": "Multiple file saves MUST NOT be guessed into one transaction. `orna edit --row PATH` provides explicit grouped row/content admission; separate updates may reject cross-field constraints."
+    },
+    {
+      "id": "ORNA-VFS-016",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 93,
+      "text": "Reserved/colliding names MUST be escaped reversibly, not rejected as otherwise valid database keys or merged by case-folding."
+    },
+    {
+      "id": "ORNA-VFS-017",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 94,
+      "text": "Directory iteration MUST be lazy/paged and pinned; lookup of a known key MUST use the index. An exhaustive recursive scan can still fetch all requested data."
+    },
+    {
+      "id": "ORNA-VFS-018",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 95,
+      "text": "`stat`, directory listings and row documents MUST not sniff/decode/download Blob content; raw-file size comes from the exact content descriptor."
+    },
+    {
+      "id": "ORNA-VFS-019",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 96,
+      "text": "Schema changes, MIME path changes and API writes MUST invalidate directory/attribute caches coherently. Existing handles MUST not retarget to a different row or reordered collection element."
+    },
+    {
+      "id": "ORNA-VFS-020",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 97,
+      "text": "Source files MAY be edited through the shared workspace source path; complete candidate validation and explicit grouped source edits are required when several files change together. No evaluation occurs during speculative file writes."
+    },
+    {
+      "id": "ORNA-VFS-021",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 108,
+      "text": "Sync/rename acknowledgement, new content pins, local row commitment and namespace recovery MUST be journalled so crashes cannot lose acknowledged content."
+    },
+    {
+      "id": "ORNA-VFS-022",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 109,
+      "text": "FUSE writeback caching MUST be off initially; supported caching/IO modes MUST preserve per-open generation semantics despite non-VFS database writers."
+    },
+    {
+      "id": "ORNA-VFS-023",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 110,
+      "text": "The adapter MUST NOT expose a fake `.git` directory or writable raw store. Git commands target the backing repository, never generated row documents."
+    },
+    {
+      "id": "ORNA-VFS-024",
+      "chapter": "vfs",
+      "source": "source/41-vfs.md",
+      "line": 111,
+      "text": "Unmount MUST refuse dirty/unresolved accepted-state recovery unless an explicit policy retains it safely. It MUST NOT report discarded drafts as saved."
+    },
+    {
+      "id": "ORNA-MIME-001",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 9,
+      "text": "Every new Blob MUST have a valid concrete declared MIME value; constructors without knowledge use application/octet-stream, never a wildcard or empty string."
+    },
+    {
+      "id": "ORNA-MIME-002",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 10,
+      "text": "Normalization MUST lowercase type/subtype/parameter names, sort parameters, normalize charset case, and preserve other case-sensitive parameter values; duplicate names, controls and malformed quoted strings MUST fail."
+    },
+    {
+      "id": "ORNA-MIME-003",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 11,
+      "text": "A preferred suffix MUST be chosen from MIME-1 by essence; a compatible explicit safe hint overrides it, otherwise unknown types use bin."
+    },
+    {
+      "id": "ORNA-MIME-004",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 12,
+      "text": "Explicit hints MUST be lowercase safe ASCII suffix segments of at most 32 bytes, without leading dot, slash, backslash, empty segments or traversal. Known-type incompatible hints MUST fail."
+    },
+    {
+      "id": "ORNA-MIME-005",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 13,
+      "text": "Defaults matching the preferred suffix MUST canonicalize to no hint; normal spelling/quoting/case variations MUST not create different annotated values."
+    },
+    {
+      "id": "ORNA-MIME-006",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 14,
+      "text": "Import resolution MUST be explicit declaration first, then bounded trusted detection, then a uniquely mapped suffix, then octet-stream. Conflicting observations MUST be disclosed; host-specific MIME registries cannot silently decide persistent metadata."
+    },
+    {
+      "id": "ORNA-MIME-007",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 15,
+      "text": "Detection MUST NOT run on listings/stat/metadata-only edits. Unsupported or damaged content MUST remain preservable unless an explicit schema constraint requires a valid format."
+    },
+    {
+      "id": "ORNA-MIME-008",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 16,
+      "text": "MIME changes MUST update projected filenames atomically while keeping existing content handles pinned. Renames do not transcode or grant executable status."
+    },
+    {
+      "id": "ORNA-MIME-009",
+      "chapter": "media-policy",
+      "source": "source/42-media.md",
+      "line": 17,
+      "text": "HTML/SVG/JS previews MUST not execute merely because the stored declaration requests it. Trusted application assets and arbitrary user-content downloads require different explicit serving policies."
+    },
+    {
+      "id": "ORNA-UPGRADE-009",
+      "chapter": "upgrade",
+      "source": "source/40-upgrade-contract.md",
+      "line": 51,
+      "text": "New protocols MUST explicitly negotiate new value codecs; old live endpoints and fingerprints MUST remain byte-for-byte legacy-compatible for their admitted values."
+    },
+    {
+      "id": "ORNA-UPGRADE-010",
+      "chapter": "upgrade",
+      "source": "source/40-upgrade-contract.md",
+      "line": 52,
+      "text": "Unsupported annotated values on legacy wire MUST fail before effects or use the specified retained-without-value result after an already committed operation. No implicit downcast to bytes."
+    }
+  ],
+  "revised": [
+    {
+      "id": "ORNA-KEY-002",
+      "before": "Primary-key fields MUST be visible as ordinary logical row fields even if their loose-row values are encoded in the path.",
+      "after": "Primary-key fields MUST be visible as ordinary logical row fields even when a virtual/interchange row document obtains its key from a schema-aware path. Canonical persisted rows retain the complete key in the primary index."
+    },
+    {
+      "id": "ORNA-MUT-003",
+      "before": "Ordinary mutations MUST NOT automatically create a human Git commit unless publication rules for managed compact data apply.",
+      "after": "Ordinary mutations MUST NOT automatically create a human Git commit unless an explicitly enabled publication policy publishes the accepted batch."
+    },
+    {
+      "id": "ORNA-MUT-010",
+      "before": "`sys.Change` and semantic diff MUST represent a successful explicit re-key as one `rekey` change containing the old and new keys, even if its physical representation is a file move or a compact deletion plus insertion.",
+      "after": "`sys.Change` and semantic diff MUST represent a successful explicit re-key as one `rekey` change containing the old and new keys, even if its physical representation is a VFS directory change or a page replacement."
+    },
+    {
+      "id": "ORNA-ASSERT-045",
+      "before": "They run before compact publication, editable/compact rewrite or other representation transition becomes visible.",
+      "after": "They run before graph publication, migration or a new physical root becomes visible."
+    },
+    {
+      "id": "ORNA-ASSERT-048",
+      "before": "Git history, compact pages, loose rows and the embedded high-rate tail are representations of one logical state and MUST NOT bypass assertions.",
+      "after": "Git snapshots, indexed row pages and the embedded unpublished tail are representations of one logical state and MUST NOT bypass assertions."
+    },
+    {
+      "id": "ORNA-CODEC-005",
+      "before": "Loading a row unit MUST combine table schema, decoded path key and decoded row body.",
+      "after": "Loading a row document MUST combine its admitted table schema, explicit/path key and decoded stored fields under the selected interchange/VFS context; arbitrary host paths cannot supply authority. Format-3 persistence encodes the key and stored fields directly through ORP-1."
+    },
+    {
+      "id": "ORNA-SYS-068",
+      "before": "A compact segment MUST identify its schema, key range, generation and content digest sufficiently to detect stale or overlapping publication.",
+      "after": "A stored page MUST bind schema, logical key interval, generation and native object identity sufficiently to detect stale, overlapping or mismatched publication."
+    },
+    {
+      "id": "ORNA-SYS-115",
+      "before": "`sys.Storage.profile` MUST describe observed placement and `sys.Storage.preference` MUST describe future automatic placement policy; implementations MUST NOT conflate the two.",
+      "after": "`sys.Storage.profile` MUST identify the one recorded row profile; no new-format future-placement preference is exposed."
+    },
+    {
+      "id": "ORNA-SYS-116",
+      "before": "Setting storage preference MUST NOT rewrite existing logical rows or produce a semantic row change.",
+      "after": "New-format admission MUST reject retired storage-preference functions rather than select a hidden legacy writer."
+    },
+    {
+      "id": "ORNA-SYS-117",
+      "before": "A storage rewrite MUST preserve every logical key/value, ordering and canonical row meaning, and its semantic row diff MUST be empty.",
+      "after": "Physical maintenance MUST preserve every logical key/value, ordering and annotated Blob meaning; semantic row diff MUST be empty."
+    },
+    {
+      "id": "ORNA-SYS-118",
+      "before": "A rewrite to editable storage MUST fail before publication with `sys.storage.unrepresentable_key` when any row key cannot be represented by the canonical path codec or when the normative editable resource bounds cannot be met.",
+      "after": "VFS path limits MUST be handled through reversible projection or explicit view errors, not by switching a table storage mode."
+    },
+    {
+      "id": "ORNA-SYS-119",
+      "before": "A rewrite collision, stale generation or concurrently changed input MUST fail with `sys.storage.rewrite_conflict` and leave the prior generation authoritative.",
+      "after": "A maintenance stale-generation collision MUST preserve the prior authoritative root and report sys.storage.rewrite_conflict."
+    },
+    {
+      "id": "ORNA-SYS-126",
+      "before": "The suite MUST prove storage preference does not rewrite existing rows, storage rewrite produces an empty semantic row diff, unrepresentable editable keys fail before publication and stale generations leave the prior representation authoritative.",
+      "after": "The suite MUST prove one row writer, annotation-aware semantic identity, physical-rewrite neutrality and stale-generation rejection across Orna and VFS edits."
+    },
+    {
+      "id": "ORNA-REPO-001",
+      "before": "`main.orna` at the repository root MUST be the root module.",
+      "after": "`main.orna` MUST remain the fixed root module."
+    },
+    {
+      "id": "ORNA-REPO-002",
+      "before": "The module graph, not a recursive scan of every `.orna` file, MUST determine which module units form the database program.",
+      "after": "The reachable module graph MUST determine the database program; recursive filename scanning is not module admission."
+    },
+    {
+      "id": "ORNA-REPO-003",
+      "before": "Files not reachable from the root module MUST NOT contribute declarations to the database merely because they exist.",
+      "after": "Unreachable `.orna` files MUST NOT acquire declarations or execute because they exist."
+    },
+    {
+      "id": "ORNA-REPO-004",
+      "before": "Row units belonging to a reachable table are database data even though row units are not imported individually.",
+      "after": "Stored rows MUST belong to stable reachable table identities in the format-3 store; rows are not individually imported modules or executable scripts."
+    },
+    {
+      "id": "ORNA-CORE-001",
+      "before": "An Orna repository MUST be a valid Git repository readable by ordinary Git tooling.",
+      "after": "Published repositories MUST use ordinary Git objects, refs and commits readable by ordinary Git tooling."
+    },
+    {
+      "id": "ORNA-CORE-002",
+      "before": "Orna MUST NOT substitute a proprietary commit graph for Git.",
+      "after": "The implementation MUST NOT substitute a proprietary history graph, LFS, or a separate mandatory media service."
+    },
+    {
+      "id": "ORNA-CORE-003",
+      "before": "A Git commit used as an Orna database snapshot MUST identify the code, schema, human-readable rows, large-table manifests, referenced large-table objects, Blob content roots and committed system watermarks required to reproduce that snapshot. Required pinned dependency repositories remain explicit. Reconstructing the logical database does not require eagerly downloading every row/payload or recompiling unchanged modules.",
+      "after": "A published commit MUST bind complete source/schema/data/content closure and exact dependency gitlinks; local availability and globally complete snapshot identity MUST be distinguished."
+    },
+    {
+      "id": "ORNA-STATE-001",
+      "before": "`HEAD` MUST mean the actual selected Git commit and MUST NOT silently include uncommitted hot data.",
+      "after": "`HEAD` MUST exclude uncommitted runtime data."
+    },
+    {
+      "id": "ORNA-STATE-002",
+      "before": "Plain relation access MUST default to CWD.",
+      "after": "Plain relation access MUST select CWD."
+    },
+    {
+      "id": "ORNA-STATE-003",
+      "before": "`relation.as_of(HEAD)` MUST read the selected committed snapshot without the local runtime tail.",
+      "after": "`relation.as_of(HEAD)` MUST exclude the unpublished tail."
+    },
+    {
+      "id": "ORNA-STATE-004",
+      "before": "`relation.as_of(snapshot)` MUST use the exact supplied SnapshotRef. Git revision expressions are resolved explicitly through `sys.snapshot(selector)`; a bare branch expression is not additional source grammar.",
+      "after": "Explicit snapshots MUST resolve exactly, not silently rebind to a later branch head."
+    },
+    {
+      "id": "ORNA-STATE-004A",
+      "before": "Relation-level `as_of` MUST pin data and decoding schema, not silently select historical function code. Whole-program historical evaluation uses the database snapshot object defined in [relations](#relations).",
+      "after": "Relation-level `as_of` MUST pin data and its decoding schema; whole-program historical execution is separately selected."
+    },
+    {
+      "id": "ORNA-STATE-005",
+      "before": "Wall-clock `now()` MUST remain distinct from database-state selectors such as `CWD` and `HEAD`.",
+      "after": "Database selectors MUST NOT replace wall-clock `now()`."
+    },
+    {
+      "id": "ORNA-META-001",
+      "before": "Tracked `.orna/` MUST contain versioned metadata required to interpret or inspect a snapshot. It MUST NOT contain local caches, credentials or the authoritative unpublished runtime tail.",
+      "after": "Format-3 tracked `.orna/` MUST contain only `database.orna` and `store`; required published system records MUST use the shared store."
+    },
+    {
+      "id": "ORNA-META-002",
+      "before": "`.orna/format.orna` MUST identify the repository format and storage profile versions.",
+      "after": "`database.orna` MUST carry `repository_format: 3` and the stable database UUID; a separate `format.orna` is a legacy-format input, not another new-format authority."
+    },
+    {
+      "id": "ORNA-META-003",
+      "before": "`.orna/database.orna` MUST contain the stable database identity created by `orna init`.",
+      "after": "Initialization MUST generate one UUIDv4, preserve existing source, and neither stage nor create a Git commit implicitly. Changing database identity requires an explicit fork-as-new-database migration."
+    },
+    {
+      "id": "ORNA-META-004",
+      "before": "Checkpoint and allocator files in `.orna/` are snapshot watermarks; their current non-rewindable/local counterparts remain in Turso or hidden refs.",
+      "after": "Published checkpoint/allocator/runtime summaries MUST remain historical observations; checking them out MUST NOT rewind live fences, leases or non-rewindable allocators."
+    },
+    {
+      "id": "ORNA-META-005",
+      "before": "Implementations MUST NOT store rebuildable query/compiler caches in the tracked `.orna/` directory.",
+      "after": "Caches, credentials, mounts, sessions, rejected edit drafts and unpublished changes MUST NOT be written into tracked `.orna/`."
+    },
+    {
+      "id": "ORNA-LOCAL-001",
+      "before": "Local runtime state MUST live under a path resolved through Git's per-worktree administrative directory, conceptually `git rev-parse --git-path orna/`.",
+      "after": "Private state MUST use the per-worktree administrative path."
+    },
+    {
+      "id": "ORNA-LOCAL-002",
+      "before": "`state.db` MUST be treated as authoritative for runtime changes that have not yet been published to Git.",
+      "after": "Unpublished accepted state MUST be authoritative and crash-durable under the declared failure model."
+    },
+    {
+      "id": "ORNA-LOCAL-003",
+      "before": "`cache.db` MUST be rebuildable from Git plus `state.db`.",
+      "after": "Derived caches MUST be disposable and keyed by source/schema/store/interface generations."
+    },
+    {
+      "id": "ORNA-LOCAL-004",
+      "before": "Local runtime files MUST NOT be added to ordinary Git commits.",
+      "after": "Private state MUST never be added to ordinary commits or included by a naive working-directory copy advertised as a complete export."
+    },
+    {
+      "id": "ORNA-EMBED-001",
+      "before": "An Orna clone MUST remain usable without `orna serve` or any external Orna daemon.",
+      "after": "Local database use MUST work without devtools, a VFS mount, or `orna serve`."
+    },
+    {
+      "id": "ORNA-EMBED-002",
+      "before": "`orna repl`, `orna run`, `orna status` and other local commands MUST be capable of opening the embedded Turso state in-process when no other local owner exists.",
+      "after": "The local CLI MUST be able to own embedded state in-process when no local writer exists."
+    },
+    {
+      "id": "ORNA-EMBED-003",
+      "before": "When overlapping local processes require one writable Turso handle, they MAY coordinate through a local socket and temporary owner process; this MUST remain an implementation detail and MUST NOT require a network server.",
+      "after": "Concurrent local commands MAY use private IPC to the single owner, not an obligatory public daemon."
+    },
+    {
+      "id": "ORNA-EMBED-004",
+      "before": "Version 1.0 MUST NOT rely for correctness on experimental multi-process Turso file access.",
+      "after": "Correctness MUST NOT depend on experimental unsynchronized multi-process SQLite/Turso access."
+    },
+    {
+      "id": "ORNA-CLONE-001",
+      "before": "Orna MUST treat each clone's CWD as independent.",
+      "after": "Clones and worktrees MUST have independent workspace/runtime identities; database UUID alone MUST NOT identify a writer."
+    },
+    {
+      "id": "ORNA-CLONE-002",
+      "before": "Commits, fetch, push and merge are the synchronization mechanism between clones.",
+      "after": "Published synchronization MUST use Git commits/fetch/push/merge."
+    },
+    {
+      "id": "ORNA-CLONE-003",
+      "before": "Two clones MAY make independent changes. Non-fast-forward pushes and semantic merges MUST be handled through Git-compatible workflows rather than hidden distributed locking.",
+      "after": "Non-fast-forward or concurrent writes MUST be explicit conflicts, not hidden cross-clone locks."
+    },
+    {
+      "id": "ORNA-CLONE-004",
+      "before": "Independent clones MUST NOT run the same durable external consumer concurrently unless its connector profile explicitly supports safe partitioning, coordination or idempotent duplicate processing. Base conformance provides no cross-clone exactly-once guarantee.",
+      "after": "Independent clones MUST NOT claim exactly-once external ingestion without a connector-specific coordination or idempotency contract."
+    },
+    {
+      "id": "ORNA-TURSO-001",
+      "before": "The runtime MUST use an embedded Turso/SQLite-compatible database, not require a Turso server, for the local CWD state profile.",
+      "after": "The local durable CWD MUST use embedded Turso/SQLite-compatible transaction storage, with no mandatory external server."
+    },
+    {
+      "id": "ORNA-TURSO-002",
+      "before": "Runtime row writes and corresponding checkpoint updates MUST occur in one Turso transaction.",
+      "after": "Row writes and associated checkpoint/request outcomes MUST commit atomically in the owning local transaction."
+    },
+    {
+      "id": "ORNA-TURSO-003",
+      "before": "The runtime MUST use durability settings appropriate to its claimed failure model and MUST document whether process crash, OS crash and power loss are covered.",
+      "after": "Implementations MUST document process/OS/power-loss guarantees, flush assumptions and measured settings."
+    },
+    {
+      "id": "ORNA-TURSO-004",
+      "before": "At most one local process may own the writable embedded state when the selected Turso mode only supports single-process access.",
+      "after": "There MUST be at most one owning writable embedded state instance per worktree under the single-owner profile."
+    },
+    {
+      "id": "ORNA-TURSO-005",
+      "before": "Other local commands SHOULD communicate with the temporary owner over a local IPC socket when one exists.",
+      "after": "Other local writers MUST coordinate with that owner or fail, never independently reopen an unsafe writable handle."
+    },
+    {
+      "id": "ORNA-TURSO-006",
+      "before": "When no owner exists, any command requiring access MAY become the owner for its lifetime.",
+      "after": "Ownership acquisition/recovery MUST fence old writers before admitting a replacement."
+    },
+    {
+      "id": "ORNA-IMPL-001",
+      "before": "Implementations MAY use `gix`, libgit2 or the Git executable provided produced objects/refs and observable behavior conform to standard Git.",
+      "after": "Git plumbing MAY use Git, gix or libgit2 while preserving native objects and observable Git semantics."
+    },
+    {
+      "id": "ORNA-BRANCH-001",
+      "before": "Creating a branch without an explicit start point MUST resolve the current Git `HEAD`, create the new branch by compare-and-set against nonexistence, and leave CWD and the index unchanged. The operation MUST NOT commit pending data.",
+      "after": "Creating a branch at HEAD MUST preserve CWD/index and create no implicit commit."
+    },
+    {
+      "id": "ORNA-BRANCH-002",
+      "before": "Selecting a new branch at the same commit MUST preserve the staged/unstaged distinction, pending table changes, local allocator high-water marks and source checkpoints. A branch switch cannot reset an allocator or discard unpublished rows merely because they are not in Git yet.",
+      "after": "Selecting a branch at the same commit MUST preserve pending data, staged/unstaged source differences and non-rewindable continuity state."
+    },
+    {
+      "id": "ORNA-BRANCH-003",
+      "before": "Switching to another commit MUST carry nonconflicting local changes using Git-compatible worktree/index rules and equivalent logical row/schema checks. If a change would be overwritten, or the resulting candidate database would be invalid, the default operation MUST fail with CWD, index and `HEAD` unchanged.",
+      "after": "A different-commit checkout MUST run CHECKOUT-3 with exact target validation, conflict preservation and recoverable state transitions."
+    },
+    {
+      "id": "ORNA-ROW-001",
+      "before": "A loose row unit MUST contain non-key fields only.",
+      "after": "Every new-format table MUST have one ordered map from typed primary key to stored row value, bound to a stable table/schema identity."
+    },
+    {
+      "id": "ORNA-ROW-002",
+      "before": "The row key MUST be reconstructed from the row path and table key schema.",
+      "after": "Table lookup/order MUST use the language's logical key comparison, not filename order, CBOR byte order or hash order."
+    },
+    {
+      "id": "ORNA-ROW-003",
+      "before": "A row unit's record fields MUST be validated against the table schema.",
+      "after": "The canonical page/group algorithm, encoding and bounds MUST be those in ORP-1; runtime optimizations MUST produce identical canonical output for the same logical snapshot."
+    },
+    {
+      "id": "ORNA-ROW-004",
+      "before": "Unknown fields, missing required fields and incompatible values MUST produce diagnostics.",
+      "after": "Blob fields MUST use small annotated-content references in stored rows; media bytes MUST never be expanded into row-page bytes or base64 row text."
+    },
+    {
+      "id": "ORNA-ROW-005",
+      "before": "Comments and source formatting MAY be preserved in manually edited row units.",
+      "after": "Large rows/strings/collections MUST use the shared value-overflow graph so metadata pages and direct dependency fanout remain bounded."
+    },
+    {
+      "id": "ORNA-ROW-006",
+      "before": "Orna MUST give equivalent logical meaning to valid direct filesystem edits and corresponding table operations.",
+      "after": "Copy-on-write updates MUST reuse unchanged nodes where canonical boundaries permit it; changed indices and payload bytes MUST be measured separately."
+    },
+    {
+      "id": "ORNA-GIT-001",
+      "before": "A commit MUST logically name the complete database snapshot, including all segment objects and Blob content roots it references. Actual native Git tree reachability is required in addition to manifest/row identifiers; pinned dependency repositories are included by an explicitly verified dependency closure.",
+      "after": "A committed snapshot MUST identify all required local source, rows and content through native Git reachability and all dependencies through exact gitlinks/recorded origins."
+    },
+    {
+      "id": "ORNA-GIT-002",
+      "before": "A partial clone MAY omit local copies of promised blobs while preserving their object IDs and reachability.",
+      "after": "Partial clones MAY defer blob payloads using ordinary filters and promisor remotes; unknown missing objects MUST be distinguished from promised objects."
+    },
+    {
+      "id": "ORNA-GIT-003",
+      "before": "Laziness is a local materialization property, not permission to create incomplete logical commits.",
+      "after": "A successful full/offline export MUST include all selected snapshot closure and recursive pinned dependencies, not just a pointer-only clone or mounted text files."
+    },
+    {
+      "id": "ORNA-GIT-004",
+      "before": "A partial-clone-aware implementation MUST distinguish sparse checkout (working-tree paths) from partial clone (locally present Git objects).",
+      "after": "Fetch/push/clone MUST preserve Git compatibility and never require LFS to retrieve required content."
+    },
+    {
+      "id": "ORNA-GIT-005",
+      "before": "Query planning SHOULD use committed manifests to identify required segment blobs before fetching them.",
+      "after": "Sparse checkout MUST control materialized paths only; it MUST NOT be presented as an availability or confidentiality boundary."
+    },
+    {
+      "id": "ORNA-GIT-006",
+      "before": "Missing promised objects MAY be fetched lazily from configured promisor remotes.",
+      "after": "Metadata-only queries and updates MUST read zero media payload bytes; metadata objects and tree traffic MUST be accounted separately."
+    },
+    {
+      "id": "ORNA-GIT-007",
+      "before": "Orna MUST NOT require github.com or any specific host to support an external large-object promisor.",
+      "after": "A full mirror of the superproject is not a complete submodule copy; export verification MUST recursively account for dependency object databases."
+    },
+    {
+      "id": "ORNA-GIT-008",
+      "before": "A self-hosted implementation MAY place large Git blobs on a separate promisor remote while the main remote serves commits, trees and normal blobs.",
+      "after": "Refs required for allocator/consumer continuity MUST be synchronized with their existing ordering/validation rules; private edit/capture pins MUST NOT be exposed by ordinary push."
+    },
+    {
+      "id": "ORNA-GIT-009",
+      "before": "Orna MUST NOT silently delete old table rows from HEAD merely because older commits retain them.",
+      "after": "Git host size/push/object limits MUST be reported as deployment constraints. Native format compatibility MUST NOT be advertised as unlimited GitHub storage."
+    },
+    {
+      "id": "ORNA-GIT-010",
+      "before": "Retention or history rewriting MUST be explicit and destructive behavior MUST be clearly diagnosed.",
+      "after": "Collection MUST preserve content reachable from retained commits, local pins, pending accepted changes, open pins and unfinished recovery journals."
+    },
+    {
+      "id": "ORNA-FORMAT-001",
+      "before": "Canonical encoders MUST produce the unique OVB-1 representation for supported values. Strict decoders MUST reject noncanonical aliases before using bytes as an identity or fingerprint.",
+      "after": "Each canonical encoder MUST use the exact selected profile. OVB-1 legacy/wire encodings remain unchanged; OVB-2 uses the additions below. Strict decoders MUST reject aliases and foreign-profile tags before identity use."
+    },
+    {
+      "id": "ORNA-BLOB-001",
+      "before": "`Blob` MUST denote an immutable finite sequence of octets. It MUST NOT require a filename, path, media type, owner row, URL, timestamp or mutable current-version identity.",
+      "after": "Blob MUST represent a finite octet sequence with canonical media type and optional suffix hint. The metadata MUST NOT alter the raw-byte content commitment."
+    },
+    {
+      "id": "ORNA-BLOB-002",
+      "before": "Inline and Git-backed Blob representations MUST expose the same logical type and bytes. `Bytes`, `File`, `Asset` and `Clob` MUST NOT be introduced as additional intrinsic synonyms or mandatory tables by this release. An application MAY define ordinary records with those names. Existing `sys.File`/`sys.FileRef` catalogue identities remain repository/source-file observations; they are not renamed to Blob and do not become a compulsory media registry. `Str` remains text, with its existing Unicode semantics.",
+      "after": "This release MUST NOT add intrinsic `File`, `Asset`, `Bytes` or `Clob` synonyms or mandatory tables. Existing `sys.File` source-catalogue objects remain distinct from media values."
+    },
+    {
+      "id": "ORNA-BLOB-003",
+      "before": "A Blob field MUST be permitted wherever the existing serialisable Blob type is admitted, including nested lists, records, Options and nominal values. Primary-key admissibility is unchanged; this release adds no Blob primary-key representation.",
+      "after": "Blob MUST work in ordinary stored/nested values; Blob primary keys remain inadmissible."
+    },
+    {
+      "id": "ORNA-BLOB-004",
+      "before": "Content identity MUST be independent of storage layout, Git SHA-1/SHA-256 object mode, chunking policy, location and representation rewrites. A content Git tree OID MUST NOT be substituted for the content digest.",
+      "after": "Content identity MUST be `(length, SHA256(raw bytes))`, independent of MIME, suffix, Git object header/algorithm, compression, chunking, path and snapshot."
+    },
+    {
+      "id": "ORNA-BLOB-005",
+      "before": "Logical equality MUST remain byte-sequence equality. Different lengths or different correctly validated content commitments imply inequality. Equal digests alone MUST NOT override detected unequal bytes. Independently obtained equal-digest values without a shared verified content witness require bounded streaming comparison before exact equality can be asserted; inability to obtain bytes is an error, not false or true. Repeated references to the same admitted immutable value may compare equal without rereading it.",
+      "after": "Blob value equality MUST compare canonical annotations and exact content. `same_content` ignores annotations. Equal digests MUST NOT override detected unequal bytes; independently supplied equal-digest content without a shared admitted witness requires exact streamed comparison or explicit unavailability."
+    },
+    {
+      "id": "ORNA-BLOB-006",
+      "before": "An import encountering an existing content ID MUST either reuse a validated identical object or validate equality before coalescing independently supplied bytes. A detected digest collision MUST fail as `sys.blob.collision`; it MUST NOT overwrite the existing object or invent another spelling for it.",
+      "after": "Detected content collisions MUST fail without overwriting or aliasing an existing content identity."
+    },
+    {
+      "id": "ORNA-BLOB-007",
+      "before": "Loading a row, inspecting a Blob summary, reading its length/digest, copying the value between same-database records, or changing another field MUST NOT hydrate the Blob payload merely to build an in-memory `Vec<u8>`, compute a display string or re-encode the row. Metadata/index/descriptor reads remain permitted. Reading or comparing actual content may require I/O and may fail explicitly.",
+      "after": "Loading a row, passing a same-database Blob reference, showing metadata, reading length/digest or changing MIME/title MUST NOT hydrate media just to form a `Vec<u8>`, encode a row or calculate its semantic digest."
+    },
+    {
+      "id": "ORNA-BLOB-008",
+      "before": "A held Blob MUST retain its exact immutable content and resolution context for its owning activation/session/pin lifetime. It MUST NOT resolve through a later HEAD, working-tree path or row value. Expiration/unavailability MUST be reported; it MUST NOT rebind to newer bytes.",
+      "after": "Held values MUST retain their exact resolution context for their owner/pin lifetime; unavailable/expired values MUST NOT rebind through a later row or HEAD."
+    },
+    {
+      "id": "ORNA-BLOB-009",
+      "before": "Codecs that promise complete bytes MUST preserve that promise. OVB-1 Blob remains a CBOR byte string; canonical portable Orna text remains padded Base64 under a Blob type witness. A stored reference is not silently substituted on these interfaces. Full encoding MAY stream; if a sink or protocol cannot admit the length, the operation MUST fail before successful output or provide the explicitly specified retained-without-rich-result outcome for an already committed operation.",
+      "after": "Structured portable annotated values MUST use negotiated OVB-2; old OVB-1 keeps its original bytes-only semantics. No implicit annotation-dropping or reference-in-byte-slot conversion is allowed."
+    },
+    {
+      "id": "ORNA-BLOB-010",
+      "before": "Ordinary Blob inspection MUST report safe type/length/content identity without dumping payloads or invoking remote analysis. A missing payload MUST NOT be presented as an empty Blob. Media type is an interpretation or application field, not part of Blob identity.",
+      "after": "Inspectors MUST display type, length, declaration and content commitment without payload dumps or remote analysis. The VFS/row representation MUST use small references, not base64 media."
+    },
+    {
+      "id": "ORNA-BLOB-011",
+      "before": "`read` MUST reject negative arguments, `offset > length(value)`, and requested lengths above 8 MiB before reading. `offset == length(value)` or requested length zero returns an empty Blob. Addition MUST use checked arithmetic. EOF clipping MUST be explicit in the returned value's length; failures MUST NOT be converted into an EOF result.",
+      "after": "`read` MUST check nonnegative offsets/lengths, offset at/before EOF, checked arithmetic and at most 8 MiB per call; only known EOF clips a successful result."
+    },
+    {
+      "id": "ORNA-BLOB-012",
+      "before": "Range reading MUST fetch only necessary metadata and complete chunks intersecting the requested range, plus a separately bounded, observable read-ahead allowance. Git fetches whole objects: an implementation MUST NOT promise byte-exact network usage. Returned bytes MUST be checked against the selected descriptor and chunk digest before they are exposed.",
+      "after": "Range acquisition MUST fetch required descriptors/intersecting chunks and only separately bounded read-ahead. Whole Git-object overfetch MUST be measured, not called exact range transfer."
+    },
+    {
+      "id": "ORNA-BLOB-013",
+      "before": "A `sys.BlobWriter` MUST be scoped to one owner/runtime generation and serialised against concurrent append/finish/abort. It MUST NOT be stored, encoded as an operational value, or reconstructed by accepting an identifier from a remote client. Its states are open, finished and aborted. Append after termination fails. Finish is idempotent for the same finished writer while retained; abort after finish is an idempotent no-op. Finish after abort fails. Cancellation aborts unfinished writers and joins cleanup.",
+      "after": "BlobWriter MUST be owner/runtime-bound and nonserializable, with open/finished/aborted states, serialized append/finish/abort, idempotent terminal outcomes and cancellation cleanup."
+    },
+    {
+      "id": "ORNA-BLOB-014",
+      "before": "`begin` MUST reject negative or out-of-profile limits, an expected length greater than `max_bytes`, and an expected length outside the profile. Append MUST enforce the total bound before acceptance. Finish MUST check the exact expected length when supplied. An unknown length is counted while streaming; no temporary file may bypass the bound.",
+      "after": "Begin/append/finish MUST enforce declared expected length, total quota and the format maximum 2^63−1. No unbounded buffer or temporary-file bypass is allowed."
+    },
+    {
+      "id": "ORNA-BLOB-015",
+      "before": "Blob acquisition/hydration is not an arbitrary host effect when it resolves already selected immutable repository content. It MUST obey the caller's network/offline policy, budgets and cancellation. Speculative eager REPL previews MUST NOT initiate hydration; explicit evaluation may. `capture_file` is an external read and remains forbidden in historical evaluation, presenters, assertions and read-only watches.",
+      "after": "Exact snapshot hydration MUST respect offline/network policy and cancellation; host `capture_file` is external I/O and remains forbidden in historical/pure/presenter/assertion contexts."
+    },
+    {
+      "id": "ORNA-BLOB-016",
+      "before": "Repository-format-2 row identity MUST use the schema-directed SOV-2 substitution and `orna.row.v2` domain in [Git-native blob storage](#blob-storage). It MUST NOT hash Git layout OIDs or read unchanged payload bytes on a metadata-only update. Legacy row/argument/request identities retain their original versioned algorithms.",
+      "after": "Format-3 row/argument/consumer semantic commitments MUST use the versioned SOV-3 domains, not Git layout OIDs or eager full-byte encodings."
+    },
+    {
+      "id": "ORNA-BLOB-017",
+      "before": "Cross-format semantic comparison MUST compare decoded logical values, not unequal v1/v2 digest bytes. Rewriting storage or upgrading a representation MUST NOT emit logical row mutations merely because a digest coordinate changed.",
+      "after": "Cross-format comparison MUST compare decoded values under explicit migration semantics, not unrelated digest bytes."
+    },
+    {
+      "id": "ORNA-BLOB-018",
+      "before": "Materialised OVB-1 request fingerprints and consumer argument identities MUST remain unchanged. A large Blob cannot be passed through a v1 message by smuggling a storage reference into a byte-string slot. Use a typed row/action reference plus a separately authorised content read, or an explicit later protocol. Such a reference never itself grants access.",
+      "after": "The existing live protocol MUST reject unnegotiated OVB-2/storage tags. Use typed safe inspector/reference responses and separately authorized content I/O, not automatic full-Blob result serialization."
+    },
+    {
+      "id": "ORNA-BLOB-019",
+      "before": "Transferring a Blob into an independent database MUST establish and protect the destination's complete reference closure before acknowledging its row commit. The value MUST NOT become a hidden dependency on the original user's local path or unadvertised content service.",
+      "after": "Copying into an independent database MUST establish and protect destination closure before acknowledging a dependent row, with no hidden dependency on the original user's path."
+    },
+    {
+      "id": "ORNA-OGB-001",
+      "before": "A repository using externalised Blob values MUST select repository format 2 before any such value becomes visible. Its `.orna/format.orna` MUST contain the exact capability record below. Unknown required coordinates fail before decoding rows or accepting writes. Repository-format-1 remains readable under its original encodings; an engine version number alone does not upgrade a database.",
+      "after": "The root Blob descriptor MUST bind exact length, raw-byte SHA-256 and its native content graph. MIME and suffix MUST be stored with each referencing value, not as global facts about a hash."
+    },
+    {
+      "id": "ORNA-OGB-002",
+      "before": "Blob descriptors, index nodes and chunks MUST be ordinary Git blobs/trees in the database's object database. Every published content dependency MUST be reachable through real Git tree entries from the database commit. Strings containing OIDs do not establish Git reachability. OGB-1 MUST NOT require LFS, an alternate content protocol, or a proprietary commit graph.",
+      "after": "Chunk entries MUST bind native object OID, byte length and independent chunk SHA-256; offset traversal MUST validate lengths, height and bounds."
+    },
+    {
+      "id": "ORNA-OGB-003",
+      "before": "Each visible snapshot MUST resolve every external Blob token, including nested fields and committed preserved payloads, to one matching content root in that snapshot. Retaining extra unreferenced roots is permitted but MUST be observable as retained physical content, not silently presented as user records. Removing a root from HEAD requires a complete dependency proof; old commits and local pins still retain their roots.",
+      "after": "Zero-length content MUST have one canonical empty descriptor; zero-length nonempty-index children, wrong total length and excessive height MUST be rejected."
+    },
+    {
+      "id": "ORNA-OGB-004",
+      "before": "Readers MUST validate array arity, canonical CBOR, integer widths/ranges, entry count/order, Git modes/names/OIDs, height, total length and SHA-256 widths at each visited node. A full verifier MUST check all nodes and recompute the raw-content digest. No successful partial read may be described as full verification.",
+      "after": "Metadata-only access MUST not read chunks. Full verification MUST compare every chunk plus the complete raw-content digest before claiming full integrity."
+    },
+    {
+      "id": "ORNA-OGB-005",
+      "before": "A range reader MUST descend using half-open byte intervals, fetch only overlapping subtrees/chunks within the read-ahead policy, check each visited child's interval and verify every returned chunk against its Git OID and SHA-256. Malformed structure, a missing unpromised object and unavailable promised content MUST remain distinguishable outcomes.",
+      "after": "The chosen partition rule MUST be reproducible; insertions and adversarial patterns MUST have explicit bounded-resource behaviour and measured index churn."
+    },
+    {
+      "id": "ORNA-OGB-006",
+      "before": "Writer policy, chunk bounds and observed deduplication MUST be inspectable. Re-encoding compressed media can change most bytes; no fixed deduplication ratio is guaranteed. Rechunking is a storage-only operation with potentially increased retained Git history, requiring an explicit estimate and the existing rewrite safeguards.",
+      "after": "Native Git graph validation MUST not be replaced by checking a descriptor string. Missing promised data is unavailable; unknown missing data is corruption/incomplete closure."
+    },
+    {
+      "id": "ORNA-OGB-007",
+      "before": "ORR-2 MUST also accept legacy inline padded-Base64 strings for Blob fields. Writers SHOULD inline values of at most 64 KiB and MUST externalise larger values; admitted external references may remain external at any size. One field has one value; inline and reference spellings MUST NOT create separate logical identities. A plain portable decoder MUST reject the reference record as a Blob.",
+      "after": "All newly persisted Blob fields MUST use reference form regardless of payload size. Small Blobs may use one terminal chunk, not a second inline-row mode."
+    },
+    {
+      "id": "ORNA-OGB-008",
+      "before": "ROV-2 storage references MUST NOT escape as ordinary OVB-1 Blob values. SOV-2 substitution MUST be type-directed, apply recursively to every Blob leaf and leave other byte-bearing nominal values unchanged. Storage representation changes with equal content MUST yield equal SOV-2 row digests.",
+      "after": "Cross-representation equality and semantic diff MUST ignore rechunking, graph OIDs and Git repacking while retaining annotation changes."
+    },
+    {
+      "id": "ORNA-INGEST-006",
+      "before": "Duplicate ingestion of identical bytes MAY share payload storage, but MUST NOT silently merge two distinct application rows or import events. Row deduplication follows the application's keys and transaction rules; content deduplication follows Blob equality.",
+      "after": "Duplicate ingestion of identical bytes MAY share payload storage, but MUST NOT silently merge two distinct application rows or import events. Row deduplication follows the application's keys and transaction rules; content deduplication follows raw-byte identity, regardless of media annotations; annotated value equality remains separate."
+    },
+    {
+      "id": "ORNA-APP-001",
+      "before": "The default devtools and playground MUST be one optional ordinary application. Its first usable surface MUST provide a table list, a bounded structural inspector, one multiline Orna input, an explicit Run operation, and explicit refresh. Watches, saved snippets, reactive stores, a rich IDE, theme systems and visual query builders MUST NOT be prerequisites for this milestone. Retained 1.0 live/REPL requirements are not deleted; this milestone is not a full-server conformance claim.",
+      "after": "Devtools MUST be ordinary selected Orna source, not a privileged native Git homepage or separate playground product."
+    },
+    {
+      "id": "ORNA-APP-002",
+      "before": "Browse and console output MUST use the same typed inspection semantics. Selecting a table or loading source into the console MUST NOT perform mutations. Run MUST execute through the real admitted Orna evaluator; no demo parser or canned response is an implementation. Clear output MUST NOT clear bindings or data, and resetting bindings MUST NOT reset the database.",
+      "after": "Browse and console results MUST use shared typed inspection. Run MUST call the real parser/resolver/evaluator; simulated results are not completion."
+    },
+    {
+      "id": "ORNA-APP-003",
+      "before": "The default stylesheet SHOULD be absent or a small ordinary optional stylesheet. Native semantic HTML and form controls MUST remain usable without it. Portable UI meanings MUST NOT depend on CSS, HTML tag names, a DOM or a browser. Web styling belongs to the selected web renderer/application package, not intrinsic Blob or table types.",
+      "after": "Portable UI meaning MUST not depend on HTML, CSS or DOM. The web renderer SHOULD use native semantic controls and absent/minimal optional CSS."
+    },
+    {
+      "id": "ORNA-APP-004",
+      "before": "Selected source MUST be the actual executed source. A default UI MAY be vendored as ordinary source/resources or used from a pinned dependency. Its origin, selected revision and ownership MUST be visible. Removing its import/mount MUST NOT trigger a hidden built-in fallback or automatic reinstallation. Git/local database operation MUST remain usable when devtools is absent or broken.",
+      "after": "The selected application source/resources MUST be the actual executed inputs; removal MUST not trigger hidden reinstallation or native fallback."
+    },
+    {
+      "id": "ORNA-APP-005",
+      "before": "Editing a submodule dependency MUST follow ordinary Git semantics: commit changes in the dependency, then update the parent gitlink. Alternatively a user may explicitly vendor/fork the source into a local module. No silent mutable overlay over a pinned dependency or duplicate `std` namespace is permitted. Updates MUST preserve local work, expose conflicts and retain exact provenance.",
+      "after": "Pinned `std` submodules MUST retain normal Git semantics. Editing a dependency requires its own commit then a parent gitlink update, or an explicit local vendor/fork; no silent mutable overlay."
+    },
+    {
+      "id": "ORNA-APP-006",
+      "before": "CSS, required browser adapter code, Wasm modules, images and other package resources MUST be ordinary snapshot-owned content. They MAY be raw tracked files read through `sys.blob.resource`, or Blob fields in an application-owned table. A reusable `std.web` response consumes Blob content plus ordinary media-type metadata; it MUST NOT know about `std.devtools.Asset` or a special playground directory.",
+      "after": "CSS, browser host bindings and Wasm outputs MUST belong to renderer-package resources or ordinary Blob fields. No compulsory File/Asset registry or `std.devtools.Asset` primitive is permitted."
+    },
+    {
+      "id": "ORNA-APP-007",
+      "before": "`sys.blob.resource(path)` MUST resolve against the caller module's selected package root and captured source snapshot, with a safe slash-separated relative path and no symlink/traversal escape. In CWD the resource bytes are captured in the same coherent generation as that code before use. In committed execution they are exact Git objects. A branch name, current host file, arbitrary URL or newest installed library MUST NOT be substituted. Access through this function does not expose the whole repository over HTTP.",
+      "after": "Package resources MUST resolve in the caller's admitted dependency/source snapshot. Host paths, newest installed libraries and mutable remote URLs cannot replace those inputs silently."
+    },
+    {
+      "id": "ORNA-APP-008",
+      "before": "A package build MUST record all resource dependencies in its source/dependency closure and reject unresolved dynamic resource requirements before claiming an offline-complete artifact. Host bindings and generated outputs MUST carry their source/toolchain/interface identity. The HTML, client module and bootstrap contract MUST be selected as one coherent build, never mixed by mutable asset URLs.",
+      "after": "Builds MUST bind source, dependencies, resources, toolchain and host ABI coherently; offline claims require complete dependency closure."
+    },
+    {
+      "id": "ORNA-APP-009",
+      "before": "A source-hosted application implementation MUST place route selection, HTML generation, reusable asset responses and application session orchestration in replaceable `.orna` library code. The engine MAY supply typed socket/platform operations, the admitted evaluator and atomic repository/transaction primitives. A library wrapper around a native complete devtools/server implementation does not satisfy this boundary.",
+      "after": "Source-hosted conformance MUST put routing, HTML generation, asset serving and application orchestration in replaceable Orna code; a wrapper around a complete native server fails this claim."
+    },
+    {
+      "id": "ORNA-APP-010",
+      "before": "`orna serve` MUST select an explicit serving entry and supervise it separately from root `main()` and unrelated streams. Until a package supplies that entry, the host MUST diagnose its absence instead of guessing source or installing a UI. Default loopback and trusted-perimeter rules remain unchanged. A source-hosted serving profile MUST retain the exact existing live endpoints when claiming the full Server class.",
+      "after": "CLI serving MUST invoke only the selected serving entry and retain loopback/trusted-perimeter defaults; full Server conformance still requires the existing exact protocol endpoints."
+    },
+    {
+      "id": "ORNA-APP-011",
+      "before": "The HTTP/application service lifetime MUST NOT be one open database transaction. Each explicit mutation uses the existing short/optimistic activation and request boundary; long listener/client waits are supervised service state. The host's durability/cancellation/identity invariants MUST NOT be duplicated in private application tables.",
+      "after": "Each mutation MUST use shared short activation/request transactions; listeners and browser waits are supervised lifetimes, not open database transactions."
+    },
+    {
+      "id": "ORNA-APP-012",
+      "before": "A first source-hosted web UI MAY use ordinary request/response HTML and native forms without a Wasm client. Requests MUST carry normal perimeter/session/CSRF protection, bounded source/input, and a stable mutation request identity where recovery is offered. A failed or lost response MUST NOT cause automatic replay of a mutating form. This mode is not advertised as `orna.present.v1` without that protocol's full behaviour.",
+      "after": "The first web implementation MAY use request/response HTML and forms. It MUST bound input, enforce origin/CSRF/session checks, and never blindly replay an uncertain mutation. This is not a full live-protocol claim."
+    },
+    {
+      "id": "ORNA-APP-013",
+      "before": "A renderer MUST inspect Blob metadata without loading the media. An explicit download/preview MUST resolve a typed row/content reference in an admitted snapshot and check authority on each request. Raw digest knowledge or a filename is not a bearer capability. MIME handling, escaping, `nosniff` and non-execution of inspected source/HTML MUST preserve the trust boundary.",
+      "after": "Blob summaries MUST be metadata-only. Explicit media/content responses MUST check authority and snapshot identity; inspection of HTML/SVG/JS MUST not execute it."
+    },
+    {
+      "id": "ORNA-APP-014",
+      "before": "A web media response SHOULD implement RFC 9110 single-byte ranges, HEAD and conditional requests against immutable content identity. Invalid/unsatisfiable ranges MUST return the applicable error, not wrong bytes. Range reads MUST use the shared Blob reader. A later stream failure terminates the response; it MUST NOT be reported as a successfully verified complete body. No base64 media payload belongs in a presentation delta merely to start playback.",
+      "after": "Media responses SHOULD support RFC 9110 HEAD, single byte ranges and immutable validators through the shared Blob reader, with correct 206/416 and truncated-stream failure behaviour."
+    },
+    {
+      "id": "ORNA-APP-015",
+      "before": "When the Orna-authored browser-client profile is implemented, protocol processing, generic control behaviour and rendering MUST execute from selected `.orna` code. Compiling the existing admitted evaluator to Wasm and loading these modules is the initial implementation route; an equivalent direct compiler is permitted later. Generated JavaScript may bind platform calls but MUST NOT reimplement Orna semantics or contain app-specific Git/table logic.",
+      "after": "The later browser profile MUST run protocol/control/rendering code authored in Orna through a Wasm build of the shared evaluator initially; a direct compiler may replace it with equivalent semantics later."
+    },
+    {
+      "id": "ORNA-APP-016",
+      "before": "Browser modules MUST link only granted browser interfaces and shared pure functionality. Server database/Git handles and captured server closures MUST NOT cross to the browser as operational values. Explicit programming uses `eval`/`watch`; normal page interactions use typed action handles. No new unnegotiated fields or Blob-reference tags may be added to `orna.present.v1`.",
+      "after": "Generated JS MAY bind browser APIs only; no app-specific Git/table logic or second Orna language implementation. Server handles/closures MUST NOT become client authority."
+    },
+    {
+      "id": "ORNA-APP-017",
+      "before": "Application state transitions MUST pass the current immutable model explicitly. A persistent REPL binding or captured closure MUST NOT be reinterpreted as a mutable reactive cell. The default console environment MUST be isolated from the page's code/bindings even when both share one database context.",
+      "after": "Page updates MUST use explicit immutable-model transitions. The console's scratch bindings MUST NOT overwrite the page's pinned application environment."
+    },
+    {
+      "id": "ORNA-APP-018",
+      "before": "Draft typing, caret, focus, scrolling and native control feedback MUST remain local and responsive. Incoming results MUST NOT overwrite newer unsent edits. A control implementation must distinguish the submission it acknowledges from edits made afterward. Animation, signal frameworks and a WPF-style object system are not required to satisfy this rule.",
+      "after": "Focus/caret/unsent drafts/local feedback MUST remain responsive and not be overwritten by unrelated server results."
+    },
+    {
+      "id": "ORNA-APP-019",
+      "before": "Connection resumption, durable request recovery and serialisable page-state restoration MUST remain separate claims. An expired session yields a new session, not a replayed transcript. New runtime generations invalidate operational handles. Background work that survives page lifetime requires explicit independent ownership. No restore operation may repeat an uncertain external or Git mutation under a fresh ID.",
+      "after": "Connection resume, durable request recovery and page-state restoration MUST be separate promises; expired sessions MUST NOT replay mutation transcripts."
+    },
+    {
+      "id": "ORNA-APP-020",
+      "before": "Updating devtools/renderer/server source MUST validate a coherent candidate before switching new sessions to it. Existing sessions either retain their admitted version until a bounded drain or explicitly reload with new handles. Invalid source MUST leave local core recovery available. A stale button MUST NOT acquire a new implementation meaning.",
+      "after": "Source/runtime upgrades MUST switch coherent generations for new sessions; old actions MUST NOT silently acquire new meanings. Invalid app source MUST leave local core recovery usable."
+    },
+    {
+      "id": "ORNA-APP-021",
+      "before": "A source-hosted/replaceable-framework claim MUST be demonstrated with a second ordinary application and a minimal replacement response renderer or HTTP composition written in `.orna`, using only published interfaces and without native route edits or app-specific JavaScript. A mock page, a CSS editor, or a native shim named `std.web` does not establish this claim.",
+      "after": "Replaceability MUST be demonstrated by a second ordinary application and an independent minimal Orna renderer/HTTP composition using only public interfaces."
+    },
+    {
+      "id": "ORNA-APP-022",
+      "before": "The first product demonstration MUST import a photo and a recording, inspect/query their rows, view/play or retrieve their exact content, change a metadata field, inspect history, and reopen a complete copy offline. It MUST show actual storage/evaluator behaviour and measured hydration, not a simulated browser-only dataset.",
+      "after": "The minimum demonstration MUST use actual row/Blob storage: import, query, retrieve/play, metadata edit, historical read and complete offline reopen. A mock HTML page is not engine evidence."
+    },
+    {
+      "id": "ORNA-UPGRADE-001",
+      "before": "An implementation MUST treat specification version, repository format, system API, value codec, compact segment profile and wire protocol as distinct coordinates. It MUST NOT infer one from a filename or simply change all `v1` labels to `v2`.",
+      "after": "Implementations MUST dispatch readers by recorded repository/value formats, not the CLI version or the current host's defaults."
+    },
+    {
+      "id": "ORNA-UPGRADE-002",
+      "before": "Upgrade MUST preserve historical source, schema and bytes under their original format coordinates and MUST NOT claim a lossless downgrade by changing only `format.orna`. Semantic equality across the transition uses decoded values; differing digest-profile versions are not row changes.",
+      "after": "Existing format-1/2 commits MUST remain immutable and readable under their original decoders and equality/digest semantics."
+    },
+    {
+      "id": "ORNA-UPGRADE-003",
+      "before": "A client without a required repository/profile reader MUST fail before interpreting its values or writing the snapshot. A materialised portable OVB-1 value remains compatible where its length is admitted, but that does not make the same client a format-2 repository reader.",
+      "after": "New-format writes MUST use one canonical row store; loose/compact/hybrid dual-writing is forbidden."
+    },
+    {
+      "id": "ORNA-UPGRADE-004",
+      "before": "Existing postponed features from 1.0 MUST NOT be relabelled complete by this release. The implementation orchestrator MUST first produce a small actual Blob/row/UI path, then close the remaining requirements for the conformance classes it claims. First-milestone success is not full 1.1 completion.",
+      "after": "Legacy Blob annotation defaults MUST be explicit: octet-stream and no suffix, without downloading or decoding every payload during metadata migration."
+    },
+    {
+      "id": "ORNA-UPGRADE-005",
+      "before": "Fixing a publication fixture MUST NOT be implemented as a weakened safety check, skipped conformance phase or silently changed runtime semantic. The release's fixture change record and effective API are the authority for these corrections.",
+      "after": "Annotation migration MUST be reported as a semantic profile transition; preservation of raw bytes is not proof of unchanged annotated value identity."
+    },
+    {
+      "id": "ORNA-UPGRADE-006",
+      "before": "Full Blob/repository conformance MUST execute its tests through the production evaluator, table store, publisher, reader and remote transport. A Git plumbing demonstration or codec unit test MUST NOT be relabelled as whole-engine execution.",
+      "after": "A migration failure MUST preserve the old authoritative snapshot/tail and all user edits; it MUST NOT partially change the active writer."
+    },
+    {
+      "id": "ORNA-UPGRADE-007",
+      "before": "Verification MUST distinguish: declared content commitment; structurally validated descriptors; locally verified chunks/ranges; fully verified content; and complete dependency closure. An online partial clone and an offline-complete repository MUST have distinguishable status. Unavailable promised content is neither empty data nor proof of corruption by itself.",
+      "after": "Source and API changes MUST be atomic with the format transition; removed storage-preference APIs MUST not secretly choose legacy layouts."
+    },
+    {
+      "id": "ORNA-UPGRADE-008",
+      "before": "Release evidence MUST state commands, tool versions, input/publication digests, observed outcomes and scope. Unexecuted crash, Parquet, browser, evaluator or load tests remain explicitly unexecuted. No statement that the design is defect-free follows from authoring checks.",
+      "after": "Consumers with Blob-containing arguments MUST not reset progress because the argument encoding domain changed; require an explicit validated migration map or fail closed."
+    },
+    {
+      "id": "ORNA-TEST-003",
+      "before": "The reference `examples/reference/` project is loaded as one complete database project: parse reachable modules, resolve/type-check them with its declared intrinsic environment and supplied modules, discover every loose row unit belonging to reachable tables, reconstruct keys from paths, and validate row fields/units against table schemas.",
+      "after": "The reference `examples/reference/` project is loaded as one complete database project: parse reachable modules, resolve/type-check them with its declared intrinsic environment and supplied modules, admit every provided legacy row fixture through its declared input context, reconstruct its typed key and validate fields/units before importing it into the current row engine. Do not silently reinterpret fixture paths as format-3 storage."
+    },
+    {
+      "id": "ORNA-TEST-009",
+      "before": "`tests/conformance-manifest.json` MUST index valid, invalid and complete-project fixtures. A complete-project fixture MUST include `load_rows`, which validates every discovered loose row against its resolved table schema and units.",
+      "after": "`tests/conformance-manifest.json` MUST index valid, invalid and complete-project fixtures. A complete-project fixture MUST include `load_rows`, which admits the supplied fixture rows through their declared legacy input reader, validates them against the resolved schema/units, then imports them into the current row engine; fixture files do not enable a second new-format row writer."
+    }
+  ],
+  "retired": [
+    {
+      "id": "ORNA-PATH-001",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-002",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-003",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-004",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-005",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-006",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-007",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-008",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-009",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-010",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-011",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PATH-012",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-001",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-002",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-003",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-PROJECT-004",
+      "previous_source": "source/07-tables.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-BRANCH-004",
+      "previous_source": "source/21-branching.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-001",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-002",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-003",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-004",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-001",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-002",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-003",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-004",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-005",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-006",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-007",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-008",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-009",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-010",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-011",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-012",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-013",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-014",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-015",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-016",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-017",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-018",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-COMPACT-019",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-005",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-006",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-007",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-008",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-009",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-010",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-011",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-012",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-013",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-014",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-015",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-FORMAT-001",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-STORAGE-FORMAT-002",
+      "previous_source": "source/23-storage.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-REMOTE-001",
+      "previous_source": "source/24-git-history.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-REMOTE-002",
+      "previous_source": "source/24-git-history.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-REMOTE-003",
+      "previous_source": "source/24-git-history.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-REMOTE-004",
+      "previous_source": "source/24-git-history.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-REMOTE-005",
+      "previous_source": "source/24-git-history.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-001",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-002",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-001",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-002",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-003",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-004",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-005",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-006",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-007",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-SCHEMA-008",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-003",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-004",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-005",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-006",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-007",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-008",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-009",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-010",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-MERGE-011",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-DIFF-001",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-DIFF-002",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-DIFF-003",
+      "previous_source": "source/25-evolution.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-009",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-010",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-011",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-012",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-013",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-014",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-015",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-016",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-017",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-018",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-019",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    },
+    {
+      "id": "ORNA-OGB-020",
+      "previous_source": "source/37-git-native-blobs.md",
+      "reason": "Superseded by the final single-row-store/native graph/VFS contract; exact legacy requirement retained in compatibility archive."
+    }
+  ]
+}

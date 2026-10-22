@@ -13,8 +13,7 @@ const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
 const IMPLEMENTATION_REF: &str =
     "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
 const TEST_REF: &str = "crates/orna-traceability-v1/tests/traceability_integrated_evidence.rs::declared_parse_witness_preserves_publication_identity_and_partial_requirement_boundary";
-const CANONICAL_MARKDOWN_DIGEST: &str =
-    "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
+mod support;
 
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
@@ -89,11 +88,11 @@ fn declared_parse_witness_preserves_publication_identity_and_partial_requirement
 
     let corpus = Corpus::load(&copied.path).expect("copied authoritative corpus loads");
     let expected_digests = corpus.publication_digests.clone();
-    assert_eq!(
-        expected_digests.get("Orna-1.0.0.md").map(String::as_str),
-        Some(CANONICAL_MARKDOWN_DIGEST),
-        "copied corpus keeps the canonical publication identity"
+    assert!(
+        !expected_digests.keys().any(|key| key.starts_with("Orna-")),
+        "1.1.0 normative map pins no markdown publication key"
     );
+    support::assert_markdown_publication_digest(&copied.path);
 
     let harness = Harness::new(corpus);
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());

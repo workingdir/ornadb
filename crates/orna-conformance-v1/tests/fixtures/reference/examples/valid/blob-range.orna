@@ -1,0 +1,4 @@
+pub fn sample(): Blob {
+    let value = sys.blob.from_bytes([0, 127, 255]);
+    sys.blob.read(value, offset: 1, length: 2)
+}

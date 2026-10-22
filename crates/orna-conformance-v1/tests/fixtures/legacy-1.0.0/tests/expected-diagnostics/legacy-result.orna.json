@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-result.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA091-E-RESULT",
+  "message_contains": "Result/Ok/Err control plumbing was removed; return the success type directly",
+  "status": "expected-not-executed"
+}

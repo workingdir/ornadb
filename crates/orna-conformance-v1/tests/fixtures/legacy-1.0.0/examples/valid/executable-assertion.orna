@@ -1,0 +1,5 @@
+pub fn debit(balance: Money<GBP>, amount: Money<GBP>): Money<GBP> {
+    assert amount > 0.GBP;
+    assert amount <= balance;
+    balance - amount
+}
