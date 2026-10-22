@@ -19,7 +19,8 @@ use orna_evaluator_v1::{
     PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression,
     evaluate_expression_with_functions, evaluate_with_functions_and_budget,
     evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
-    invoke_named_with_nominals,
+    invoke_named_with_effects_nominals_and_budget, invoke_named_with_nominals,
+    source_enum_definitions,
 };
 use orna_foundation_v1::{
     Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
@@ -163,6 +164,9 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
     matches!(
         diagnostic.code(),
         "ORNA091-E-RESULT"
+            | "E2001"
+            | "E2002"
+            | "E2003"
             | "ORNA-S020-ANNOTATION"
             | "ORNA-S021-TYPE"
             | "ORNA-S022-UNSUPPORTED"
@@ -1967,6 +1971,7 @@ impl TransactionalEvaluator {
             table_fields,
             table_assertions,
             module_assertions,
+            nominal_definitions,
         } = admitted;
         let entry = self.entry.clone();
         let limits = self.limits;
@@ -1986,10 +1991,11 @@ impl TransactionalEvaluator {
                 explain_catalogue: self.explain_catalogue.as_ref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
-            let result = invoke_named_with_effects_and_budget(
+            let result = invoke_named_with_effects_nominals_and_budget(
                 &entry,
                 &functions,
                 arguments,
+                nominal_definitions,
                 limits,
                 &mut effects,
                 &mut budget,
@@ -2107,6 +2113,30 @@ pub enum RunningTableRequestDisposition {
     Semantic(StageOutcome<Diagnostic>),
     Fenced(RuntimeError),
 }
+
+/// Why [`DurableTransactionalEvaluator::publish_pending`] published nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PendingPublicationError {
+    /// `HEAD` is a format-1/2 snapshot. It keeps its readers but has no row
+    /// writer, so the pending prefix was not frozen (ORNA-UPGRADE-003).
+    LegacyReadOnly { format: u8 },
+    /// The runtime, the repository or the publication boundary failed.
+    Runtime(RuntimeError),
+}
+
+impl std::fmt::Display for PendingPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyReadOnly { format } => write!(
+                f,
+                "repository format {format} is a read-only legacy snapshot without a row writer"
+            ),
+            Self::Runtime(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PendingPublicationError {}
 
 impl DurableTransactionalEvaluator {
     #[must_use]
@@ -3785,9 +3815,16 @@ impl DurableTransactionalEvaluator {
     }
 
 
-    /// Publishes the caller-selected frozen runtime prefix through the loose
-    /// Git projection. Publication is explicit: source execution only stages
-    /// durable runtime mutations and never advances the repository by itself.
+    /// Publishes the caller-selected frozen runtime prefix into the format-3
+    /// native store as one Git commit. Publication is explicit: source
+    /// execution only stages durable runtime mutations and never advances the
+    /// repository by itself. Format-3 rows have no loose path, so `path_for`
+    /// is never called.
+    ///
+    /// A format-1/2 `HEAD` keeps its readers but has no row writer
+    /// (ORNA-UPGRADE-003). It fails with
+    /// [`PendingPublicationError::LegacyReadOnly`] before the prefix is
+    /// frozen, so the refusal writes no freeze row and no Git state.
     pub async fn publish_pending(
         &self,
         repository: &Repository,
@@ -3796,17 +3833,42 @@ impl DurableTransactionalEvaluator {
         checkpoint: &orna_runtime_v1::Checkpoint,
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage_v1::Error>,
         message: &str,
-    ) -> Result<orna_repository_v1::IndexGeneration, RuntimeError> {
-        let freeze = runtime.freeze(intent_id, checkpoint).await?;
+    ) -> Result<orna_repository_v1::IndexGeneration, PendingPublicationError> {
         let head = repository
             .head()
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .map_err(|_| RuntimeError::StorageUnavailable)
+            .and_then(|head| head.ok_or(RuntimeError::RecoveryInvalid))
+            .map_err(PendingPublicationError::Runtime)?;
+        if let Err(orna_storage_v1::Error::LegacyReadOnly { format }) =
+            orna_storage_v1::writable_snapshot_context(repository, &head)
+        {
+            return Err(PendingPublicationError::LegacyReadOnly { format });
+        }
+        Self::publish_frozen_prefix(
+            repository, runtime, &head, intent_id, checkpoint, path_for, message,
+        )
+        .await
+        .map_err(PendingPublicationError::Runtime)
+    }
+
+    /// Freezes the prefix through `checkpoint` and publishes it onto the
+    /// format-3 snapshot `head`. A prefix with no visible change completes
+    /// its intent without a commit.
+    async fn publish_frozen_prefix(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        head: &orna_repository_v1::GitCommitRef,
+        intent_id: [u8; 16],
+        checkpoint: &orna_runtime_v1::Checkpoint,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage_v1::Error>,
+        message: &str,
+    ) -> Result<orna_repository_v1::IndexGeneration, RuntimeError> {
+        let freeze = runtime.freeze(intent_id, checkpoint).await?;
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-            repository, runtime, &head, index, &freeze, path_for, message,
+            repository, runtime, head, index, &freeze, path_for, message,
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4837,6 +4899,7 @@ fn admit_list_stream_source(
         table_fields,
         mut table_assertions,
         module_assertions,
+        ..
     } = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
@@ -4993,6 +5056,7 @@ fn admit_project_list_stream(
         table_fields,
         table_assertions,
         module_assertions,
+        ..
     } = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
@@ -6235,6 +6299,8 @@ struct AdmittedTransaction {
     table_fields: TableFields,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
+    /// Construction plans of the admitted source enums (ORNA-ENUM-001..003).
+    nominal_definitions: NominalDefinitions,
 }
 
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
@@ -6310,6 +6376,7 @@ fn admit_transaction_source_inner(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     } = admitted;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6326,6 +6393,7 @@ fn admit_transaction_source_inner(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     })
 }
 
@@ -6413,6 +6481,7 @@ fn admit_transaction_project(
     let mut table_fields = TableFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
+    let mut nominal_definitions = NominalDefinitions::new();
     for unit in &project.modules {
         if let Err(error) = limits.check_source(&unit.source) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6434,6 +6503,7 @@ fn admit_transaction_project(
             table_fields: module_table_fields,
             table_assertions: mut module_assertions_by_table,
             module_assertions: mut module_assertions_only,
+            nominal_definitions: module_nominal_definitions,
         } = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
@@ -6479,6 +6549,9 @@ fn admit_transaction_project(
         table_fields.extend(module_table_fields);
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
+        if !is_standard_source(unit) {
+            nominal_definitions.extend(module_nominal_definitions);
+        }
     }
     let mut standard_aliases = BTreeMap::<String, String>::new();
     for unit in &project.modules {
@@ -6529,6 +6602,7 @@ fn admit_transaction_project(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     })
 }
 
@@ -6756,11 +6830,13 @@ fn admitted_transaction_module(
             // graph before this per-module retention pass. Qualified calls are
             // resolved by the evaluator against the retained function map.
             Declaration::Use { .. } => {}
+            // Enums execute as construction plans built for the whole module
+            // below (ORNA-ENUM-001..003).
+            Declaration::Enum { .. } => {}
             // Types and related declarations affect semantic admission but
             // have no activation-time effect in this bounded table runtime.
             // Retaining them as inert preserves project module boundaries.
             Declaration::Protocol { .. }
-            | Declaration::Enum { .. }
             | Declaration::Dimension { .. }
             | Declaration::Unit { .. }
             | Declaration::Type { .. } => {}
@@ -6778,6 +6854,7 @@ fn admitted_transaction_module(
         table_fields,
         table_assertions: assertions,
         module_assertions,
+        nominal_definitions: source_enum_definitions(namespace, items),
     })
 }
 

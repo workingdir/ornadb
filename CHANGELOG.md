@@ -8,6 +8,12 @@ been published.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
 - A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
 - `std.io.fs` operations resolve every path from the root directory handle held
   since the host allowed it, one component at a time without following
   symbolic links, and act on the final entry through its open parent directory.
@@ -138,9 +144,28 @@ been published.
   time adds the Time exponent and returns a length quantity. Dimension expressions
   parse qualified names without consuming multiplication or division operators.
 
+- `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
+  any freeze, with `E2300`; it writes nothing and the pending range stays. The
+  help says this build has no writer or in-place upgrade for format-1/2
+  snapshots and names the upgrade work item, ornadb-5il1.184. Inside a prepared
+  migration copy it says the format-3 candidate is prepared but not activated,
+  and that activation is tracked as ornadb-5il1.192. The loose and compact
+  (Parquet) row writers, their recovery paths and the CLI compact-journal
+  recovery are retired. Format-1/2 commits keep their library readers, but no
+  CLI verb reads them yet (ORNA-UPGRADE-003, ORNA-ROW-013).
+
+- The `format.orna` records that the legacy writers produced are now read as
+  read-only format-1/2 inputs: OrnaDB 1.0's `{repository_format: 1,
+  storage_profile: "compact-storage-v1"}` and the previous draft's closed
+  format-2 record. They were rejected as malformed, so `orna migrate copy`
+  failed on every real legacy repository. Runtime writes now follow the format
+  recorded at `HEAD`. A format-1/2 `HEAD` refuses them with
+  `ORNA-REPO-CONTEXT-015` even when the worktree holds format-3 metadata, and
+  `orna run` and the other write verbs exit with `E2200`. The one exception is
+  a prepared migration copy (ORNA-UPGRADE-001).
+
 - Format-3 store-only publication validates canonical row keys without legacy
-  loose-row path resolution, including no-op preparation. Legacy formats retain
-  their existing loose-path resolution.
+  loose-row path resolution, including no-op preparation.
 
 - Explicit format-3 row rekeys retain their relation identity and canonical old/new
   addresses in the publication journal so replay and recovery do not infer a move
@@ -253,6 +278,13 @@ been published.
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
 
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit
