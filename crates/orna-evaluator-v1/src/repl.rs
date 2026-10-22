@@ -1,6 +1,8 @@
 //! Ephemeral evaluator-owned REPL state.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "system-host-bindings")]
+use std::sync::Arc;
 
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{
@@ -13,6 +15,8 @@ use crate::{
     NominalDefinitions, PureFunction, Scope, bind, error, pattern_names, validate_limits,
     validate_nominal_definitions,
 };
+#[cfg(feature = "system-host-bindings")]
+use crate::{SysHostAttachment, SysHostContext};
 
 /// A bounded ephemeral module for one interactive Orna session.
 ///
@@ -36,6 +40,11 @@ pub struct ReplSession {
     last_status: Option<CanonicalValue>,
     /// Declaration-owned construction plans shared by every evaluation.
     nominal_definitions: NominalDefinitions,
+    /// Activation facts `sys.rt.info()` reports to this session. Without them
+    /// the evaluator reports `sys.version.incompatible`, as it does for any
+    /// activation the host did not attach.
+    #[cfg(feature = "system-host-bindings")]
+    sys_host: Option<Arc<SysHostAttachment>>,
 }
 
 /// Parses one REPL input after applying source bounds. Callers which also
@@ -69,6 +78,8 @@ impl ReplSession {
             last_success: None,
             last_status: None,
             nominal_definitions: NominalDefinitions::new(),
+            #[cfg(feature = "system-host-bindings")]
+            sys_host: None,
         }
     }
 
@@ -108,7 +119,28 @@ impl ReplSession {
             last_success: None,
             last_status: None,
             nominal_definitions: NominalDefinitions::new(),
+            #[cfg(feature = "system-host-bindings")]
+            sys_host: None,
         })
+    }
+
+    /// Attaches the activation facts `sys.rt.info()` reports to pure
+    /// submissions. Without a context, `sys.rt.info()` reports
+    /// `sys.version.incompatible`.
+    #[cfg(feature = "system-host-bindings")]
+    pub(crate) fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host = Some(Arc::new(SysHostAttachment::new(context)));
+        self
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_attachment(&self) -> crate::ActivationSysHost<'_> {
+        self.sys_host.as_deref()
+    }
+
+    #[cfg(not(feature = "system-host-bindings"))]
+    fn sys_host_attachment(&self) -> crate::ActivationSysHost<'_> {
+        None
     }
 
     #[cfg(feature = "project-repl")]
@@ -337,16 +369,17 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: self.sys_host_attachment(),
             cancellation,
         };
         context.items(self.functions.len())?;
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
-        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
@@ -471,15 +504,16 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: self.sys_host_attachment(),
             cancellation,
         };
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
-        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
