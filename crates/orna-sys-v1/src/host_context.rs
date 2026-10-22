@@ -4,6 +4,8 @@
 //! evaluator builds `sys.RuntimeInfo` and the singleton records from it. Every
 //! field is a fact the host observed; none is defaulted or fabricated here.
 
+use std::path::PathBuf;
+
 use uuid::Uuid;
 
 /// The values of `sys.RuntimeMode` (34-system-reference.md, `sys.RuntimeMode`).
@@ -37,6 +39,11 @@ pub const SYS_VERSION: &str = env!("ORNA_SYS_SYS_VERSION");
 /// `build_id`: the git commit of this build, or `<version>+nogit` when the
 /// package carries no git metadata. Emitted by `build.rs`.
 pub const BUILD_ID: &str = env!("ORNA_SYS_BUILD_ID");
+/// `implementation_name` of the running host.
+pub const IMPLEMENTATION_NAME: &str = "orna";
+/// `implementation_version` of the running host: the package version of this
+/// sys crate, the release line the host links.
+pub const IMPLEMENTATION_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `presentation_protocol_version`, the value the sys API compatibility test pins.
 pub const PRESENTATION_PROTOCOL_VERSION: &str = "1";
 /// `supported_profiles`. No release coordinate declares which conformance
@@ -53,6 +60,20 @@ pub fn new_runtime_id() -> [u8; 16] {
     *Uuid::new_v4().as_bytes()
 }
 
+/// The standard library pin of the attached project, the source of
+/// `sys.RuntimeInfo.std_snapshot`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StdSnapshotPin {
+    /// The project pins no standard profile, so the field is `none`.
+    Unpinned,
+    /// The raw Git object id of the pinned standard commit: 20 bytes for
+    /// SHA-1 or 32 bytes for SHA-256.
+    Commit(Vec<u8>),
+    /// A standard profile is pinned but its commit id cannot be read back.
+    /// The evaluator reports `sys.abi.provider_failed` rather than guessing.
+    Unreadable,
+}
+
 /// The attached repository identity and the activation facts that
 /// `sys.rt.info()` and the other `sys` singletons expose.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,9 +85,7 @@ pub struct SysHostContext {
     /// The per-activation runtime id, see [`new_runtime_id`].
     pub runtime_id: [u8; 16],
     /// Absolute repository root as the host resolved it.
-    pub root: String,
-    /// Logical CWD of the activation, relative to the repository root.
-    pub logical_cwd: String,
+    pub root: PathBuf,
     /// Whether the activation refuses repository writes (`sys.RuntimeInfo.read_only`).
     pub read_only: bool,
     /// The activation's `sys.RuntimeMode`.
@@ -75,22 +94,11 @@ pub struct SysHostContext {
     pub repository_layout_version: String,
     /// `storage_manifest_version` of the attached repository's storage profile.
     pub storage_manifest_version: String,
-    /// `implementation_name` of the running host.
-    pub implementation_name: String,
-    /// `implementation_version` of the running host.
-    pub implementation_version: String,
+    /// The standard library pin of the attached project; see [`StdSnapshotPin`].
+    pub std_snapshot: StdSnapshotPin,
 }
 
 impl SysHostContext {
-    /// The `sys.RuntimeId` text: the canonical lowercase hyphenated form of
-    /// `runtime_id`.
-    #[must_use]
-    pub fn runtime_id_text(&self) -> String {
-        Uuid::from_bytes(self.runtime_id)
-            .hyphenated()
-            .to_string()
-    }
-
     /// Whether this activation is a REPL host; only that host provides `sys.repl`.
     #[must_use]
     pub const fn is_repl(&self) -> bool {
@@ -100,7 +108,8 @@ impl SysHostContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeMode, SysHostContext, new_runtime_id};
+    use super::{RuntimeMode, StdSnapshotPin, SysHostContext, new_runtime_id};
+    use std::path::PathBuf;
     use uuid::Uuid;
 
     #[test]
@@ -124,29 +133,17 @@ mod tests {
         assert_eq!(Uuid::from_bytes(first).get_version_num(), 4);
     }
 
-    #[test]
-    fn runtime_id_text_is_the_canonical_hyphenated_uuid() {
-        let context = context_in(RuntimeMode::Embedded);
-        assert_eq!(
-            context.runtime_id_text(),
-            "11111111-1111-1111-1111-111111111111"
-        );
-        assert_eq!(context.clone(), context);
-    }
-
     fn context_in(mode: RuntimeMode) -> SysHostContext {
         SysHostContext {
             database_id: [1; 16],
             repository_id: [2; 16],
             runtime_id: [0x11; 16],
-            root: "/repo".to_owned(),
-            logical_cwd: String::new(),
+            root: PathBuf::from("/repo"),
             read_only: false,
             mode,
             repository_layout_version: "3".to_owned(),
             storage_manifest_version: "store-3".to_owned(),
-            implementation_name: "orna".to_owned(),
-            implementation_version: "1.1.0".to_owned(),
+            std_snapshot: StdSnapshotPin::Unpinned,
         }
     }
 

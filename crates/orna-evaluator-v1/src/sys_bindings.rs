@@ -15,7 +15,10 @@ use orna_sys_v1::{
 };
 use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
+use crate::{
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    SysHostContext,
+};
 
 use crate::explain_bindings::ExplainCatalogue;
 
@@ -37,6 +40,7 @@ pub struct SysHostBindingRegistry {
     http: Option<HttpProvider>,
     system_random: bool,
     explain_catalogue: Option<Arc<dyn ExplainCatalogue>>,
+    sys_host_context: Option<SysHostContext>,
 }
 
 #[derive(Debug)]
@@ -55,6 +59,7 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
+            && self.sys_host_context == other.sys_host_context
             && match (&self.explain_catalogue, &other.explain_catalogue) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
@@ -80,6 +85,7 @@ impl SysHostBindingRegistry {
             http: None,
             system_random: false,
             explain_catalogue: None,
+            sys_host_context: None,
         }
     }
 
@@ -101,6 +107,14 @@ impl SysHostBindingRegistry {
     #[must_use]
     pub fn with_explain_catalogue(mut self, catalogue: Arc<dyn ExplainCatalogue>) -> Self {
         self.explain_catalogue = Some(catalogue);
+        self
+    }
+
+    /// Installs the attached repository and activation facts that
+    /// `sys.rt.info()` reports. Without them the call reports `sys.abi.unavailable`.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host_context = Some(context);
         self
     }
 
@@ -879,6 +893,10 @@ impl EffectHandler for SysHostBindingRegistry {
         self.explain_catalogue.as_deref()
     }
 
+    fn sys_host_context(&self) -> Option<&SysHostContext> {
+        self.sys_host_context.as_ref()
+    }
+
     fn handle(
         &mut self,
         _callee: &Expr,
@@ -917,6 +935,11 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
     #[cfg(feature = "system-host-bindings")]
     fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
         self.explain_catalogue.as_deref()
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostContext> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
