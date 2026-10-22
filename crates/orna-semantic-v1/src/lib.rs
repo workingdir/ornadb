@@ -27967,7 +27967,7 @@ mod tests {
                 fn tuple((left, (right, _)): (Int, (Int, Int))): Int = left + right;
                 fn list([head, tail]: [Int]): Int = head + tail;
                 fn record({name, count: total}: {name: Str, count: Int}): Int = total;
-                fn nominal(Point { x, y: second }: Point): Int = x + second;
+                fn nominal({x, y: second}: Point): Int = x + second;
             "#,
         )]);
         assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
