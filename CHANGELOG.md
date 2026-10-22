@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The read-side `sys.blob` operations run natively: `length`, `digest`, `read`, `verify` and `to_bytes` answer from the Blob value, with `read` returning a bounded Blob slice. `to_bytes` and `read` refuse more than 8 MiB in one call with `sys.blob.limit`, and `from_bytes` builds a Blob from integers in `0..=255` with the `application/octet-stream` fallback, refusing an out-of-range integer with `sys.blob.bounds`. `sys.blob.capture_file` is invoked as an effect, not read. The write-side `begin`, `append`, `finish` and `abort`, and `media_type`, `suffix`, `same_content`, `resource`, are not yet implemented.
 - `orna commit` stages the format-3 store: a database made by `orna init`
   gets its `.orna/store` on the first commit, which creates the branch on an
   unborn HEAD. Each newly declared table is admitted with its schema node, an
