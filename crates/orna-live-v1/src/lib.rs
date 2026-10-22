@@ -105,6 +105,8 @@ pub enum Error {
     ApplicationDeferred,
     RuntimeUnavailable,
     SnapshotExpired,
+    /// The retained session credential or lifetime has expired.
+    SessionExpired,
 }
 
 impl Error {
@@ -127,6 +129,7 @@ impl Error {
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
+            Self::SessionExpired => "wire.session_expired",
         }
     }
 }
@@ -1663,7 +1666,7 @@ impl HttpResponse {
         Self {
             status: match error {
                 Error::Denied => 403,
-                Error::Closed => 410,
+                Error::Closed | Error::SessionExpired => 410,
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
                 Error::DeletionFailed
@@ -2688,7 +2691,23 @@ impl LiveHost {
         } else {
             0
         };
-        let mut work = self.application_work.admit(session, request)?;
+        let mut work = match self.application_work.admit(session, request) {
+            Ok(work) => work,
+            Err(Error::Limit) => {
+                // Admission was refused before any request state existed, so
+                // the correlated limit diagnostic is not retained for replay.
+                return match self.operational_error_outcome(
+                    Some(session),
+                    &envelope,
+                    Error::Limit,
+                    false,
+                )? {
+                    Some(outcome) => Ok(ApplicationPreparation::Completed(outcome)),
+                    None => Err(Error::Limit),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
             work.complete();
             self.retain_failure(session, request, fingerprint).await?;
@@ -3087,6 +3106,8 @@ impl LiveHost {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
             Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
+            Error::Limit => ("wire.limit", event_watch),
+            Error::SessionExpired => ("wire.session_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -5328,7 +5349,8 @@ fn attachment_id(value: [u8; 16]) -> AttachmentId {
 }
 fn map_boundary(error: BoundaryError) -> Error {
     match error {
-        BoundaryError::Closed | BoundaryError::Expired => Error::Closed,
+        BoundaryError::Closed => Error::Closed,
+        BoundaryError::Expired => Error::SessionExpired,
         BoundaryError::DeletionFailed => Error::DeletionFailed,
         BoundaryError::Denied => Error::Denied,
     }
@@ -8287,6 +8309,7 @@ fn host_error(error: Error) -> WireResponse {
     let (status, code) = match error {
         Error::Limit => (413, "live.limit"),
         Error::Closed => (410, "live.expired"),
+        Error::SessionExpired => (410, "wire.session_expired"),
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
