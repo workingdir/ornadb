@@ -1755,6 +1755,9 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Payload rows of every admitted module's source enums, keyed by module,
+    /// so a REPL session admits the same enum spellings as the project.
+    pub(crate) source_enums: BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     /// Whether `sys` members were admitted against production providers.
     production_sys_providers: bool,
 }
@@ -2268,6 +2271,7 @@ fn analyze_retaining_context_with_providers(
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
     }
+    result.source_enums = source_enums;
     if let Some(record) = &unlinked_system_members {
         report_unlinked_system_members(record, &mut result.diagnostics);
     }
@@ -4881,11 +4885,22 @@ fn check_item(
                         );
                     }
                     orna_syntax_v1::TableMember::Field {
+                        initializer: None,
+                        ty,
+                        ..
+                    } => {
+                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        validate_stored_field_type(ty, scope, diagnostics);
+                    }
+                    orna_syntax_v1::TableMember::Field {
                         initializer: Some(initializer),
                         ty,
                         ..
                     } => {
                         validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        if matches!(initializer, FieldInitializer::Default(_)) {
+                            validate_stored_field_type(ty, scope, diagnostics);
+                        }
                         let value = match initializer {
                             FieldInitializer::Default(value)
                             | FieldInitializer::Computed(value) => value,
@@ -5129,6 +5144,15 @@ fn validate_nested_implementation_members(
             ));
             return;
         };
+        if let Type::Named(target_name) = target
+            && scope.refined_types.get(target_name) == Some(&source)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "overlapping protocol implementations are invalid",
+            ));
+            return;
+        }
         if let Some(from) = implementation.members.as_slice().first()
             && implementation.members.len() == 1
         {
@@ -5176,16 +5200,7 @@ fn validate_nested_implementation_members(
                 return;
             }
             let mut local = BTreeMap::new();
-            let source_binding = match &source {
-                Type::Named(name) => scope
-                    .nominal_rows
-                    .get(name)
-                    .or_else(|| scope.table_rows.get(name))
-                    .cloned()
-                    .unwrap_or_else(|| source.clone()),
-                _ => source.clone(),
-            };
-            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
+            bind_pattern(&parameter.pattern, source.clone(), scope, &mut local, diagnostics);
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -6664,6 +6679,46 @@ fn validate_type_annotation(
             }
             validate_type_annotation(result, scope, generic_names, diagnostics);
         }
+    }
+}
+
+/// Stored fields (no initialiser, or a `=` default) persist their value, so
+/// their type must lie in the serialisable subset (29-formats). Secrets are
+/// never committed (ORNA-SECRET-001), and a live relation, stream or function
+/// is not a finite stored value. Computed (`=>`) fields are never stored and
+/// are not checked here.
+fn validate_stored_field_type(
+    type_expr: &TypeExpr,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let resolved = resolved_type_of(type_expr, scope);
+    if contains_secret_value_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "secret values cannot be stored in table fields",
+        ));
+    } else if contains_non_serialisable_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "stored table field type must be serialisable",
+        ));
+    }
+}
+
+fn contains_non_serialisable_type(ty: &Type) -> bool {
+    match ty {
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => true,
+        Type::List(inner) | Type::Range(inner) | Type::Optional(inner) => {
+            contains_non_serialisable_type(inner)
+        }
+        Type::Record(fields) => fields.values().any(contains_non_serialisable_type),
+        Type::Tuple(values) => values.iter().any(contains_non_serialisable_type),
+        Type::Applied { base, arguments } => {
+            matches!(base.as_str(), "Stream" | "Relation" | "Query")
+                || arguments.iter().any(contains_non_serialisable_type)
+        }
+        _ => false,
     }
 }
 
@@ -19961,6 +20016,18 @@ fn infer_nominal_conversion_call(
         return Some(Inferred {
             ty: Type::Named(target.clone()),
             effects,
+        });
+    }
+    // A refined type's base conversion `T.from(base)` is not a nested From
+    // implementation, so an explicit From for other sources must not remove it.
+    if scope
+        .refined_types
+        .get(target)
+        .is_some_and(|underlying| *underlying == argument.ty)
+    {
+        return Some(Inferred {
+            ty: Type::Named(target.clone()),
+            effects: argument.effects,
         });
     }
     diagnostics.push(diag(

@@ -344,10 +344,10 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
-        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {
@@ -478,10 +478,10 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
-        scope.3.clone_from(&self.nominal_definitions);
         scope.4.extend(self.table_bindings.iter().cloned());
         let value = context.evaluate(expression, &mut scope, 0)?;
         if context.transfer.is_some() {

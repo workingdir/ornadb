@@ -1546,19 +1546,6 @@ const LEGACY_FORMAT_RECORDS: [(RepositoryFormat, &[(&str, LegacyRecordValue)]); 
 ];
 
 pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
-    let source = std::str::from_utf8(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
-    let line = source
-        .strip_suffix('\n')
-        .unwrap_or(source)
-        .strip_suffix('\r')
-        .unwrap_or_else(|| source.strip_suffix('\n').unwrap_or(source));
-    match line {
-        "format 1" => return Ok(RepositoryFormat::Legacy1),
-        "format 2" => return Ok(RepositoryFormat::Legacy2),
-        "format 3" => return Err(FormatContextError::UnknownFormat),
-        _ => {}
-    }
-
     let fields = parse_record(bytes).map_err(|()| FormatContextError::MetadataInvalid)?;
     LEGACY_FORMAT_RECORDS
         .iter()
