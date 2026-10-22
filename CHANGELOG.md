@@ -15,6 +15,12 @@ been published.
   `orna commit` refuses to stage while an interrupted publication awaits
   recovery. `orna publish` refuses rows whose table has no relation in the
   committed store.
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
 - `std.io.fs` operations resolve every path from the root directory handle held
   since the host allowed it, one component at a time without following
   symbolic links, and act on the final entry through its open parent directory.
@@ -279,6 +285,13 @@ been published.
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
 
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit
