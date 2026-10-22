@@ -289,6 +289,61 @@ pub fn prepare_format3_migration(
     result
 }
 
+/// Discards a prepared format-3 migration copy at `destination`, leaving the
+/// source worktree and its snapshot untouched.
+///
+/// The destination must be the disposable copy this module prepared from
+/// `source`: a worktree root of its own that still holds the prepared journal
+/// and the working tree that journal recorded. Anything else is refused before
+/// a byte is removed, so a directory the operator owns is never a discard
+/// target.
+pub fn discard_prepared_format3_migration(
+    source: &Repository,
+    destination: &Path,
+) -> Result<(), RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    if destination == source_root
+        || destination.starts_with(&source_root)
+        || source_root.starts_with(&destination)
+    {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RepositoryError::InvalidSelector
+        } else {
+            RepositoryError::LocalStateUnavailable
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    let repository = Repository::discover(&destination)?;
+    if repository.worktree().canonicalize().ok().as_deref() != Some(destination.as_path()) {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    let journal = repository
+        .read_publication_journal()?
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let continuity = journal
+        .migration_continuity()
+        .cloned()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let annotation_defaults = journal
+        .migration_annotation_defaults()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    fs::remove_dir_all(&destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    sync_directory(parent)
+}
+
 fn prepare_format3_migration_in(
     source: &Repository,
     destination: &Path,
