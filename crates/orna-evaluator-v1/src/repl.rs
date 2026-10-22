@@ -24,7 +24,6 @@ pub struct ReplSession {
     limits: Limits,
     environment: Environment,
     functions: Functions,
-    nominals: NominalDefinitions,
     contextual_environment: BTreeMap<String, ContextValue>,
     aliases: BTreeMap<String, String>,
     wildcard_bindings: BTreeMap<String, String>,
@@ -35,6 +34,8 @@ pub struct ReplSession {
     table_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
     last_status: Option<CanonicalValue>,
+    /// Declaration-owned construction plans shared by every evaluation.
+    nominal_definitions: NominalDefinitions,
 }
 
 /// Parses one REPL input after applying source bounds. Callers which also
@@ -57,7 +58,6 @@ impl ReplSession {
             limits,
             environment: Environment::new(),
             functions: Functions::new(),
-            nominals: NominalDefinitions::new(),
             contextual_environment: BTreeMap::new(),
             aliases: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
@@ -68,6 +68,7 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
         }
     }
 
@@ -96,7 +97,6 @@ impl ReplSession {
             limits,
             environment,
             functions,
-            nominals: NominalDefinitions::new(),
             aliases: BTreeMap::new(),
             contextual_environment: BTreeMap::new(),
             wildcard_bindings: BTreeMap::new(),
@@ -107,20 +107,8 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
         })
-    }
-
-    /// Replaces the admitted project nominal definitions visible to this
-    /// session. Definitions are validated before they can reach evaluation.
-    #[cfg(feature = "project-repl")]
-    pub(crate) fn with_nominal_definitions(
-        mut self,
-        nominals: NominalDefinitions,
-    ) -> Result<Self, EvaluationError> {
-        validate_nominal_definitions(&nominals, self.limits)?;
-        self.limits.check_items(nominals.len())?;
-        self.nominals = nominals;
-        Ok(self)
     }
 
     #[cfg(feature = "project-repl")]
@@ -134,6 +122,17 @@ impl ReplSession {
             }
         }
         self.check_retained()?;
+        Ok(self)
+    }
+
+    /// Admits the project's nominal construction plans, such as source
+    /// enums, for every later evaluation in this session.
+    pub fn with_nominal_definitions(
+        mut self,
+        definitions: NominalDefinitions,
+    ) -> Result<Self, EvaluationError> {
+        validate_nominal_definitions(&definitions, self.limits)?;
+        self.nominal_definitions = definitions;
         Ok(self)
     }
 
@@ -344,7 +343,7 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
-            &self.nominals,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
@@ -477,7 +476,7 @@ impl ReplSession {
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
-            &self.nominals,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
