@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/currency-static-symbol.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA091-E-CURRENCY-SYMBOL",
+  "message_contains": "currency symbols belong to locale-aware formatting, not Currency identity",
+  "status": "expected-not-executed"
+}

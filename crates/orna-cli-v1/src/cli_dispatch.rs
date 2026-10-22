@@ -938,12 +938,16 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     let usage = || {
         Diagnostic::usage(
             "E1002",
-            "unsupported `migrate copy` arguments",
-            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers`",
+            "unsupported `migrate` arguments",
+            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers` or `migrate abort DEST`",
         )
     };
     let mut arguments = arguments.iter().map(String::as_str);
-    if arguments.next() != Some("copy") {
+    let subcommand = arguments.next();
+    if subcommand == Some("abort") {
+        return run_migrate_abort(endpoint, arguments);
+    }
+    if subcommand != Some("copy") {
         return Err(usage());
     }
     let destination = arguments.next().ok_or_else(|| {
@@ -1115,6 +1119,59 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         carry.checkpoint_count(),
         carry.history_count(),
     );
+    Ok(())
+}
+
+fn run_migrate_abort<'a>(
+    endpoint: &Endpoint,
+    mut arguments: impl Iterator<Item = &'a str>,
+) -> Result<(), Diagnostic> {
+    let destination = arguments.next().ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate abort` needs a destination",
+            "supply DEST after `migrate abort`",
+        )
+    })?;
+    if arguments.next().is_some() {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "unsupported `migrate abort` arguments",
+            "use `migrate abort DEST`",
+        ));
+    }
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository_v1::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
+        )
+    })?;
+    let destination = std::path::PathBuf::from(destination);
+    let outcome = orna_repository_v1::migration_copy::discard_prepared_format3_migration(
+        &repository,
+        &destination,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration copy could not be discarded",
+            "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })?;
+    match outcome {
+        orna_repository_v1::migration_copy::DiscardOutcome::Discarded => println!(
+            "discarded prepared format-3 migration copy: destination={}",
+            destination.display()
+        ),
+        orna_repository_v1::migration_copy::DiscardOutcome::NothingToDiscard => println!(
+            "nothing to discard: no prepared format-3 migration copy at destination={}",
+            destination.display()
+        ),
+    }
     Ok(())
 }
 

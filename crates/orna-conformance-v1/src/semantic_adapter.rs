@@ -941,7 +941,7 @@ impl BoundedEvaluator {
         let environment = &project.expectations.environment;
         !environment.network
             && !environment.credentials
-            && environment.intrinsics == "Orna 1.0.0 core"
+            && environment.intrinsics == "Orna 1.1.0 core"
             && environment.stdlib.is_none()
             && environment.initial_tables == "empty"
             && project.modules.iter().all(Self::supports_pure_module)
@@ -10215,7 +10215,7 @@ mod transaction_admission_tests {
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },
@@ -10942,7 +10942,7 @@ mod bounded_tests {
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },
@@ -11104,7 +11104,7 @@ mod durable_tests {
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },
@@ -12573,7 +12573,7 @@ fn assertion_checkpoint_091_project() -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -12599,7 +12599,7 @@ fn checkpoint_atomicity_project(fixture_id: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -12956,7 +12956,7 @@ mod list_stream_tests {
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },

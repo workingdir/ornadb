@@ -1,4 +1,4 @@
-# 32. Conformance cases and evidence {#conformance}
+# 39. Conformance cases and evidence {#conformance}
 
 ## Test corpus {#conformance-conventional-conformance-tests}
 
@@ -18,7 +18,7 @@ A generated JSON index describes the fixtures and their expected outcomes for us
 
 **ORNA-TEST-002** Every invalid fixture identifies the expected failing phase and stable diagnostic code.
 
-**ORNA-TEST-003** The reference `examples/reference/` project is loaded as one complete database project: parse reachable modules, resolve/type-check them with its declared intrinsic environment and supplied modules, discover every loose row unit belonging to reachable tables, reconstruct keys from paths, and validate row fields/units against table schemas.
+**ORNA-TEST-003** The reference `examples/reference/` project is loaded as one complete database project: parse reachable modules, resolve/type-check them with its declared intrinsic environment and supplied modules, admit every provided legacy row fixture through its declared input context, reconstruct its typed key and validate fields/units before importing it into the current row engine. Do not silently reinterpret fixture paths as format-3 storage.
 
 **ORNA-TEST-004** Bundle validation distinguishes: a test is specified, a test exists in an implementation, and a test passed. Document/index checks MUST NOT claim that Orna source executed when no implementation was run.
 
@@ -26,7 +26,7 @@ A generated JSON index describes the fixtures and their expected outcomes for us
 
 **ORNA-TEST-006** A generated requirement-to-test coverage report SHOULD expose untested normative behaviour, but it MUST remain a reporting layer over ordinary tests rather than a new test language or CI system. Informative rationale is excluded from the denominator.
 
-**ORNA-TEST-009** `tests/conformance-manifest.json` MUST index valid, invalid and complete-project fixtures. A complete-project fixture MUST include `load_rows`, which validates every discovered loose row against its resolved table schema and units.
+**ORNA-TEST-009** `tests/conformance-manifest.json` MUST index valid, invalid and complete-project fixtures. A complete-project fixture MUST include `load_rows`, which admits the supplied fixture rows through their declared legacy input reader, validates them against the resolved schema/units, then imports them into the current row engine; fixture files do not enable a second new-format row writer.
 
 **ORNA-TEST-010** `tests/requirement-evidence.json` MUST attach a non-empty `tests` list to every numbered requirement. Entries may name ordinary source fixtures, project fixtures, vector suites, behavioural/fault scenarios, interoperability suites, benchmark suites or an explicit inspection requirement. The mapping is a test plan, not evidence that an implementation has executed it.
 
@@ -57,7 +57,7 @@ At minimum:
 - historical `sys.Run.as_of(HEAD)` is valid;
 - page delta falls back to subtree replacement for an unkeyed value;
 - display override does not change codec output;
-- partial clone fetches only required segment blobs.
+- partial clone fetches only the required bounded row/index objects and requested content chunks, with actual tree and payload transfer measured separately.
 
 
 ## Evidence levels
@@ -78,3 +78,12 @@ The machine-readable evidence register maps each executed check to its actual su
 **ORNA-CLOSURE-003** Features outside the declared language/profile are absent, not implicitly implementation-defined. A source program relying on such a feature MUST receive an unsupported-feature or resolution diagnostic rather than silently acquiring vendor-specific behaviour under the same portable coordinate.
 
 Conformance requires agreement with all applicable normative provisions. Report conflicting provisions as specification defects.
+
+## 1.1 binary and source-hosted profiles
+
+The active source/API/profile and `tests/final-scenarios.json` define the
+current 1.1.0 final obligations. `tests/legacy-scenarios.json` and the exact
+compatibility ZIP preserve historical test inputs, not current results.
+`tools/run_checks.py` executes structural/model/native-Git publication checks;
+these do not establish Orna engine, FUSE, crash-safety or scale conformance.
+Profile claims must identify the artifact hash and actual executed tests.

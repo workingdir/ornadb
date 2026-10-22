@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-match.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-MATCH",
+  "message_contains": "use `case` with colon-delimited arms",
+  "status": "expected-not-executed"
+}

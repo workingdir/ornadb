@@ -1775,7 +1775,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: project.standard_profile().map(|profile| {
                     // Verify the full graph-bound bundle in the durable
                     // evaluator while loading only import-reachable modules.

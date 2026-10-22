@@ -30,21 +30,21 @@ For every managed path changed by **P**, automatic publication requires that its
 
 **ORNA-PUB-012** Unresolved merges, rebases, overlapping managed-path edits or unreconcilable index state MUST pause automatic publication. Durable ingestion may continue within configured storage limits; exhaustion fails explicitly rather than discarding the tail.
 
-## Publication algorithm PUB-1
+## Publication algorithm PUB-3
 
 The following ordering specifies observable durability and recovery requirements. An implementation may use equivalent platform primitives but cannot omit ordinary-index reconciliation.
 
 1. **Freeze.** In a short Turso transaction, select a contiguous committed mutation range, allocate its batch identity, and record the included source/checkpoint watermarks and base generation. Mark it `preparing`; do not remove the pending mutations. New activations may append after this range.
 2. **Capture.** Under the worktree publication lock, capture the symbolic/detached `HEAD` identity and old object ID, normal index digest and relevant worktree states. Refuse conflicting merge/rebase state and managed-path edits. Resolve `.git` paths through Git's per-worktree administrative directory.
-3. **Encode.** Produce immutable segments, schemas and manifests for the frozen batch. Fold repeated mutations in transaction order to one authoritative final mutation per key. Write and flush complete Git objects. Objects not subsequently referenced may remain unreachable.
-4. **Build candidate.** With a private index, build **N = H + P** and a commit whose parent is the captured `HEAD`. Human staged or unstaged contents are not inputs. A table publication generation comes from that table's captured manifest.
+3. **Encode.** Produce immutable row/index/value nodes and the store root for the frozen batch. Fold repeated mutations in transaction order to one authoritative final mutation per key. Write and flush complete Git objects. Objects not subsequently referenced may remain unreachable.
+4. **Build candidate.** With a private index, build **N = H + P** and a commit whose parent is the captured `HEAD`. Human staged or unstaged contents are not inputs. A table publication generation is bound to its captured root and schema.
 5. **Plan reconciliation.** Compute **I′** using a Git-compatible two-tree carry-forward from **H** to **N**, preserving unrelated staged changes. Compute **W′** preserving unrelated unstaged changes. Reject managed-path overlaps. Validate staged and CWD database candidates separately; carrying human work cannot make either candidate silently invalid.
 6. **Journal.** Durably record the batch, expected/target refs, old/new index bytes or immutable equivalents, affected old/new worktree entries, object hashes, generation and cleanup watermark. Journal data is local metadata, not ordinary committed source. It must be sufficient to distinguish every crash boundary below.
 7. **Lock and revalidate.** Acquire the ordinary Git `index.lock` before exposing a changed ref. Hold it until the reconciled index is installed. Obtain the Git ref transaction/expected-old-value protection and recheck the captured symbolic `HEAD`, index and relevant files. Abort if they changed. Cooperating Orna worktree mutators remain excluded by the publication lock.
 8. **Prepare files.** Write temporary replacement files and flush them. For each existing affected file, preserve the displaced bytes in the recovery journal/quarantine before installing a replacement. If an external editor changed the path after capture, retain those bytes and stop with a conflict rather than overwrite them. Filesystem writers outside the locking protocol cannot participate in the multi-file transaction. Their conflicting edits must be preserved for reconciliation.
 9. **Advance and reconcile.** Advance the target ref using compare-and-set against the old object ID. While the ordinary index remains locked, atomically install **I′** and finish the planned worktree replacements, recording progress. If an external Git process moves a ref after the protected update, recovery treats it as a new state to reconcile; it never forces the ref back.
 10. **Publish local boundary.** In Turso, record the publication commit and completion state, then consume only the batch's frozen pending range. Newer tail mutations remain. Logical readers switch using the batch watermark so a mutation is visible exactly once: either through the old commit plus tail, or through the new commit with that batch masked out of the tail.
-11. **Complete.** Flush the final journal state, release the normal index lock and worktree lock, and mark the batch complete. Notify storage observers. Do not emit an insert/delete row delta merely because a row moved into a compact file.
+11. **Complete.** Flush the final journal state, release the normal index lock and worktree lock, and mark the batch complete. Notify storage observers. Do not emit an insert/delete row delta merely because a row moved into a different physical node.
 
 **ORNA-PUB-005** Complete objects and their required durability barriers MUST precede a visible ref that names them.
 
@@ -90,3 +90,21 @@ sensors.Reading     48,120 rows
 warehouse.Event       240 rows
 ```
 
+## Format-3 graph publication
+
+The encoder constructs one `.orna/store` root. It does not materialize VFS
+row directories or generated Blob files in the backing worktree. CAPTURE-3
+protects new content before row admission; PUB-3 verifies native reachability
+and records the frozen store root. The private graph and actual index are
+independently verified; hashes written in metadata alone are insufficient.
+
+**ORNA-PUB-018** Pending graph objects MUST be native-pinned before mutation acknowledgement and remain protected through publication/recovery.
+**ORNA-PUB-019** Auto-publication MUST be opt-in; the initial product defaults to explicit publication so successful saves do not silently create Git commits.
+**ORNA-PUB-020** `.orna/store` index reconciliation MUST preserve separately staged logical changes and never stage the reverse of an automatically published batch.
+**ORNA-PUB-021** Published system-watermark rows MUST be folded with the same batch without turning historical data into current operational authority.
+
+For manual reviewed commits, the candidate is the exact admitted index tree,
+not HEAD plus all current work. `review_commit` and `commit_reviewed` retain
+their state-bound semantics and compare the index, source, schema, workspace
+and ref observations under the publication locks. No stale review is refreshed
+and retried automatically.

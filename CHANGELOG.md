@@ -5,6 +5,20 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna commit` stages the format-3 store: a database made by `orna init`
+  gets its `.orna/store` on the first commit, which creates the branch on an
+  unborn HEAD. Each newly declared table is admitted with its schema node, an
+  empty row map and a relation entry. Stable object IDs live in the store as a
+  sealed identity relation keyed by UUID rather than
+  `.orna/object-identities.cbor`, which is read only from older commits. A
+  commit that fails leaves its newly staged tables free to change or drop, and
+  `orna commit` refuses to stage while an interrupted publication awaits
+  recovery. `orna publish` refuses rows whose table has no relation in the
+  committed store. Identity rows record each object's kind as the
+  specification's `sys.ObjectKind` ordinal (table 2, field 3, unit 15, type 8,
+  variant 10, type and variant fields 9), not a private integer. Stores written
+  with the private integers are not readable, and the sidecar's version 1 codes
+  are mapped only when reading an older commit.
 - A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
 - A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
 - `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
@@ -323,6 +337,15 @@ been published.
   to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
   of an unlinked callable. Admission no longer reports a version diagnostic for
   it (ORNA-SYS-006).
+- The CLI's `migrate abort DEST` discards a prepared format-3 migration copy only
+  after verifying that DEST is the copy prepared from the current source. The
+  source is unchanged. Until the verified copy is renamed to its reserved
+  sibling quarantine, a change to the source commit, index, or working tree
+  since preparation makes the command refuse and remove nothing. That rename is
+  the commit point: a repeated `migrate abort DEST` finishes an interrupted
+  removal without rechecking the source, reports nothing to discard once nothing
+  remains, and `migrate copy` refuses the destination while the quarantine
+  exists.
 
 ## 1.0.0 — release inventory (publication pending)
 
