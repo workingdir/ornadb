@@ -2384,7 +2384,7 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
     );
     assert_eq!(
         evaluator.invoke_with(
-            "increment",
+            "std.math.increment",
             &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())),)])
         ),
         StageOutcome::Passed
