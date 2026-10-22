@@ -646,10 +646,10 @@ fn admitted_runtime_sources(
                 if let Declaration::Function { signature, .. } = &item.declaration
                     && matches!(item.visibility, Visibility::Public { .. })
                 {
-                    module_aliases.insert(
-                        format!("main.{}", signature.name),
-                        signature.name.clone(),
-                    );
+                    // The root module executes as `main`, so its public functions
+                    // resolve through the same qualified key a committed run uses.
+                    let qualified = format!("main.{}", signature.name);
+                    module_aliases.insert(qualified.clone(), qualified);
                 }
             }
         }
@@ -679,17 +679,26 @@ fn admitted_runtime_sources(
             .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
         if !standard {
             // ORNA-ENUM-001..003: project enums execute as construction plans
-            // shared by every evaluation in the session.
-            nominal_definitions
-                .extend(source_enum_definitions(namespace.as_deref(), &module.items));
+            // shared by every evaluation in the session. The root module is
+            // admitted under `main`, the namespace the committed run derives for
+            // `main.orna`, so REPL enum values carry the run's identities.
+            let enum_namespace = namespace.as_deref().unwrap_or("main");
+            for (name, definition) in source_enum_definitions(Some(enum_namespace), &module.items) {
+                insert_repl_nominal(&mut nominal_definitions, name, definition)?;
+            }
         }
         for item in module.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
-                    let name = namespace
-                        .as_ref()
-                        .map(|namespace| format!("{namespace}.{}", signature.name))
-                        .unwrap_or(signature.name);
+                    // With no source `main` module the root executes as `main`,
+                    // so its functions are keyed `main.<name>`. A source `main`
+                    // module keeps the root functions under their bare names, and
+                    // the root alias yields to it.
+                    let name = match namespace.as_deref() {
+                        Some(namespace) => format!("{namespace}.{}", signature.name),
+                        None if has_main_module => signature.name,
+                        None => format!("main.{}", signature.name),
+                    };
                     if functions.contains_key(&name) {
                         return Err(ReplError::fixed("ORNA-REPL-PROJECT"));
                     }
@@ -703,24 +712,30 @@ fn admitted_runtime_sources(
                     );
                 }
                 Declaration::Use { .. } | Declaration::Table { .. } | Declaration::Enum { .. } => {}
-                // Catalogue-only declarations have no runtime representation.
+                // Catalogue-only declarations have no runtime representation. The
+                // REPL admits them only in the root project; elsewhere they stay
+                // unsupported below.
                 Declaration::Protocol { .. }
                 | Declaration::Dimension { .. }
                 | Declaration::Unit { .. }
                 | Declaration::Type {
                     representation: TypeRepresentation::Alias { .. },
                     ..
-                } => {}
-                // Project-root nominal types are ephemeral REPL definitions keyed
-                // by their bare name, like root functions. Enums are admitted by
-                // `source_enum_definitions` above.
+                } if namespace.is_none() => {}
+                // Project-root nominal types are ephemeral REPL definitions. They
+                // resolve only through the `main.` spelling, like root enums, so a
+                // bare name never reaches them.
                 Declaration::Type {
                     name,
                     representation: TypeRepresentation::Nominal { members },
                     ..
                 } if namespace.is_none() => {
                     let definition = repl_nominal_definition(&name, members)?;
-                    insert_repl_nominal(&mut nominal_definitions, name, definition)?;
+                    insert_repl_nominal(
+                        &mut nominal_definitions,
+                        format!("main.{name}"),
+                        definition,
+                    )?;
                 }
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
@@ -2209,6 +2224,99 @@ mod tests {
             std_session.submit("std.answer()"),
             Ok(Some(Value::int(42.into())))
         );
+    }
+
+    const ROOT_TYPES: &str = "pub enum Availability { ready, busy, }\npub type Queue { pub size: Int, }\n";
+
+    fn root_types_session() -> (TempDir, AdmittedReplSession) {
+        let (directory, project) = loaded_project(&[("main.orna", ROOT_TYPES)], None);
+        let session = AdmittedReplSession::from_loaded_project(
+            &project,
+            std::iter::empty::<(String, String)>(),
+            Limits::default(),
+        )
+        .unwrap();
+        (directory, session)
+    }
+
+    #[test]
+    fn root_types_resolve_only_through_the_main_spelling() {
+        let (_directory, mut session) = root_types_session();
+        assert!(session.submit("Queue { size: 1 }").is_err());
+        assert!(session.submit("Availability.ready").is_err());
+        assert!(matches!(
+            session.submit("main.Queue { size: 1 }"),
+            Ok(Some(value)) if matches!(value.raw(), Raw::Tag(60009, _))
+        ));
+        assert!(matches!(
+            session.submit("main.Availability.ready"),
+            Ok(Some(value)) if matches!(value.raw(), Raw::Tag(60008, _))
+        ));
+    }
+
+    #[test]
+    fn local_binding_named_like_a_root_type_does_not_capture_the_qualified_spelling() {
+        // Shadowing rule: a session binding shadows only the bare spelling of its
+        // own name. Root types are reached through `main.`, so `let Availability`
+        // never captures `main.Availability.ready`.
+        let (_directory, mut session) = root_types_session();
+        assert_eq!(session.submit("let Availability = 3;"), Ok(None));
+        assert_eq!(
+            session.submit("Availability"),
+            Ok(Some(Value::int(3.into())))
+        );
+        assert!(matches!(
+            session.submit("main.Availability.ready"),
+            Ok(Some(value)) if matches!(value.raw(), Raw::Tag(60008, _))
+        ));
+    }
+
+    #[test]
+    fn repl_root_enum_identity_matches_the_committed_main_namespace() {
+        let parsed = orna_syntax_v1::parse_module(ROOT_TYPES);
+        assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
+        let committed = crate::source_enums::source_enum_definitions(
+            Some("main"),
+            &parsed.value.items,
+        );
+        let definition = &committed["main.Availability"];
+        let ready = definition
+            .variants
+            .iter()
+            .find(|variant| variant.name == "ready")
+            .unwrap();
+        let (_directory, mut session) = root_types_session();
+        let value = session.submit("main.Availability.ready").unwrap().unwrap();
+        assert_eq!(
+            value.raw(),
+            &Raw::Tag(
+                60008,
+                Box::new(Raw::Array(vec![
+                    definition.type_id.clone(),
+                    ready.variant_id.clone(),
+                    Raw::Null,
+                ])),
+            )
+        );
+    }
+
+    #[test]
+    fn namespaced_protocols_are_rejected_before_repl_admission() {
+        let (_directory, project) = loaded_project(
+            &[
+                ("main.orna", "use sensors.greenhouse;\npub fn answer() = 1;\n"),
+                ("sensors/greenhouse/main.orna", "pub protocol Sink {}\n"),
+            ],
+            None,
+        );
+        let Err(error) = AdmittedReplSession::from_loaded_project(
+            &project,
+            std::iter::empty::<(String, String)>(),
+            Limits::default(),
+        ) else {
+            panic!("a namespaced protocol must not be admitted into the REPL");
+        };
+        assert_eq!(error.code(), "ORNA-REPL-UNSUPPORTED");
     }
 }
 
