@@ -42,7 +42,7 @@ fn dirty_legacy_source(root: &Path) {
     fs::create_dir_all(root.join(".orna")).unwrap();
     fs::write(
         root.join(".orna/format.orna"),
-        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
     )
     .unwrap();
     fs::write(
