@@ -600,7 +600,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\n  --> line 1, column 1\n  |\n1 | use std.collection;\n  | ^^^^^^^^^^^^^^^^^^^\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
@@ -673,6 +673,64 @@ fn binary_run_executes_a_named_public_project_function() {
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_evaluates_a_sys_enum_constant_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-mismatch-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+            "library.answer",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failure code: ORNA-EVAL-DIVIDE-BY-ZERO"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
