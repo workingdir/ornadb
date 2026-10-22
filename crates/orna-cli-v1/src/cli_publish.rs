@@ -581,7 +581,7 @@ fn legacy_read_only_refusal(
 
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
-fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
+pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
     use orna_storage_v1::Error as E;
     let detail = match error {
         E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
