@@ -2114,6 +2114,30 @@ pub enum RunningTableRequestDisposition {
     Fenced(RuntimeError),
 }
 
+/// Why [`DurableTransactionalEvaluator::publish_pending`] published nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PendingPublicationError {
+    /// `HEAD` is a format-1/2 snapshot. It keeps its readers but has no row
+    /// writer, so the pending prefix was not frozen (ORNA-UPGRADE-003).
+    LegacyReadOnly { format: u8 },
+    /// The runtime, the repository or the publication boundary failed.
+    Runtime(RuntimeError),
+}
+
+impl std::fmt::Display for PendingPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyReadOnly { format } => write!(
+                f,
+                "repository format {format} is a read-only legacy snapshot without a row writer"
+            ),
+            Self::Runtime(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PendingPublicationError {}
+
 impl DurableTransactionalEvaluator {
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
@@ -3791,9 +3815,16 @@ impl DurableTransactionalEvaluator {
     }
 
 
-    /// Publishes the caller-selected frozen runtime prefix through the loose
-    /// Git projection. Publication is explicit: source execution only stages
-    /// durable runtime mutations and never advances the repository by itself.
+    /// Publishes the caller-selected frozen runtime prefix into the format-3
+    /// native store as one Git commit. Publication is explicit: source
+    /// execution only stages durable runtime mutations and never advances the
+    /// repository by itself. Format-3 rows have no loose path, so `path_for`
+    /// is never called.
+    ///
+    /// A format-1/2 `HEAD` keeps its readers but has no row writer
+    /// (ORNA-UPGRADE-003). It fails with
+    /// [`PendingPublicationError::LegacyReadOnly`] before the prefix is
+    /// frozen, so the refusal writes no freeze row and no Git state.
     pub async fn publish_pending(
         &self,
         repository: &Repository,
@@ -3802,17 +3833,42 @@ impl DurableTransactionalEvaluator {
         checkpoint: &orna_runtime_v1::Checkpoint,
         path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage_v1::Error>,
         message: &str,
-    ) -> Result<orna_repository_v1::IndexGeneration, RuntimeError> {
-        let freeze = runtime.freeze(intent_id, checkpoint).await?;
+    ) -> Result<orna_repository_v1::IndexGeneration, PendingPublicationError> {
         let head = repository
             .head()
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+            .map_err(|_| RuntimeError::StorageUnavailable)
+            .and_then(|head| head.ok_or(RuntimeError::RecoveryInvalid))
+            .map_err(PendingPublicationError::Runtime)?;
+        if let Err(orna_storage_v1::Error::LegacyReadOnly { format }) =
+            orna_storage_v1::writable_snapshot_context(repository, &head)
+        {
+            return Err(PendingPublicationError::LegacyReadOnly { format });
+        }
+        Self::publish_frozen_prefix(
+            repository, runtime, &head, intent_id, checkpoint, path_for, message,
+        )
+        .await
+        .map_err(PendingPublicationError::Runtime)
+    }
+
+    /// Freezes the prefix through `checkpoint` and publishes it onto the
+    /// format-3 snapshot `head`. A prefix with no visible change completes
+    /// its intent without a commit.
+    async fn publish_frozen_prefix(
+        repository: &Repository,
+        runtime: &RuntimeState,
+        head: &orna_repository_v1::GitCommitRef,
+        intent_id: [u8; 16],
+        checkpoint: &orna_runtime_v1::Checkpoint,
+        path_for: impl Fn(&TableMutation) -> Result<LoosePath, orna_storage_v1::Error>,
+        message: &str,
+    ) -> Result<orna_repository_v1::IndexGeneration, RuntimeError> {
+        let freeze = runtime.freeze(intent_id, checkpoint).await?;
         let index = repository
             .index_generation()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let prepared = RuntimePublicationCoordinator::prepare_allow_noop(
-            repository, runtime, &head, index, &freeze, path_for, message,
+            repository, runtime, head, index, &freeze, path_for, message,
         )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;

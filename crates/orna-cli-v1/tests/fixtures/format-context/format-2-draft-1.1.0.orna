@@ -1,0 +1,7 @@
+{
+  repository_format: 2,
+  row_profile: "ORR-2",
+  blob_profile: "OGB-1",
+  semantic_profile: "SOV-2",
+  compact_profile: "compact-storage-v2",
+}
