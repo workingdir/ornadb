@@ -728,7 +728,11 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
 
     // The publication target is a committed format-2 snapshot.
     fs::create_dir_all(temp.path().join(".orna")).expect("legacy metadata directory");
-    fs::write(temp.path().join(".orna/format.orna"), "format 2\n").expect("legacy format");
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n",
+    )
+    .expect("legacy format");
     fs::write(
         temp.path().join(".orna/database.orna"),
         "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
