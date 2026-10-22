@@ -1,131 +1,98 @@
 # 19. Repository, CWD, index and HEAD {#repository}
 
-## Required repository form
 
-A minimal database has this shape:
+## One executable snapshot
 
-```text
-example/
-├── .git/
-├── main.orna
-└── ... reachable modules and data ...
-```
-
-**ORNA-REPO-001** `main.orna` at the repository root MUST be the root module.
-
-**ORNA-REPO-002** The module graph, not a recursive scan of every `.orna` file, MUST determine which module units form the database program.
-
-**ORNA-REPO-003** Files not reachable from the root module MUST NOT contribute declarations to the database merely because they exist.
-
-**ORNA-REPO-004** Row units belonging to a reachable table are database data even though row units are not imported individually.
-
-## CWD, index and HEAD
-
-Orna preserves Git's three human-facing states while adding durable runtime changes:
+**Conceptual integrity:** Git is the published database, not an optional export
+of it. One commit binds program, schema, table data, binary content and exact
+external dependency gitlinks. A clone can acquire omitted objects lazily;
+logical reconstruction does not mean downloading or recompiling everything.
 
 ```text
-HEAD      committed snapshot
-INDEX     changes staged through Git/Orna
-WORKTREE  ordinary checked-out file changes
-RUNTIME   durable Turso-backed pending rows and system state
-CWD       HEAD + INDEX/WORKTREE differences + RUNTIME differences
+library/
+  main.orna
+  music.orna
+  .gitmodules                 # only when dependencies require it
+  stdlib/std/                 # explicit pinned dependency, when selected
+  .orna/
+    database.orna
+    store/                    # native Git tree, normally sparsely excluded
+  .git/                       # directory OR gitfile; not a fixed runtime path
 ```
 
-**ORNA-STATE-001** `HEAD` MUST mean the actual selected Git commit and MUST NOT silently include uncommitted hot data.
+**ORNA-REPO-001** `main.orna` MUST remain the fixed root module.
+**ORNA-REPO-002** The reachable module graph MUST determine the database program; recursive filename scanning is not module admission.
+**ORNA-REPO-003** Unreachable `.orna` files MUST NOT acquire declarations or execute because they exist.
+**ORNA-REPO-004** Stored rows MUST belong to stable reachable table identities in the format-3 store; rows are not individually imported modules or executable scripts.
+**ORNA-CORE-001** Published repositories MUST use ordinary Git objects, refs and commits readable by ordinary Git tooling.
+**ORNA-CORE-002** The implementation MUST NOT substitute a proprietary history graph, LFS, or a separate mandatory media service.
+**ORNA-CORE-003** A published commit MUST bind complete source/schema/data/content closure and exact dependency gitlinks; local availability and globally complete snapshot identity MUST be distinguished.
 
-**ORNA-STATE-002** Plain relation access MUST default to CWD.
+## HEAD, index and CWD
+
+`HEAD` is the selected Git commit. The ordinary index is Git's staged tree and
+flags. The worktree contains checked-out source/resource edits. `state.db`
+contains accepted but unpublished logical changes. CWD is the admitted
+composition of these observations, never an arbitrary last-writer union.
+Overlapping managed-store or schema edits are explicit conflicts.
+
+**ORNA-STATE-001** `HEAD` MUST exclude uncommitted runtime data.
+**ORNA-STATE-002** Plain relation access MUST select CWD.
+**ORNA-STATE-003** `relation.as_of(HEAD)` MUST exclude the unpublished tail.
+**ORNA-STATE-004** Explicit snapshots MUST resolve exactly, not silently rebind to a later branch head.
+**ORNA-STATE-004A** Relation-level `as_of` MUST pin data and its decoding schema; whole-program historical execution is separately selected.
+**ORNA-STATE-005** Database selectors MUST NOT replace wall-clock `now()`.
+
+## Exactly two required tracked metadata entries
+
+`database.orna` is a bounded DATA record, not configuration code:
 
 ```orna
-directory.Contact
+{
+    repository_format: 3,
+    database_id: "9f237b7e-6844-4498-bcd5-d24641c07449",
+}
 ```
 
-is equivalent to:
+The physical format coordinate is not the language or application version.
+The UUID is generated once, preserved across branches/clones, and is not a
+credential. The current commit cannot embed its own final hash. `.orna/store`
+is already named by that commit's tree: no duplicate root hash is needed.
 
-```orna
-directory.Contact.as_of(CWD)
-```
+**ORNA-META-001** Format-3 tracked `.orna/` MUST contain only `database.orna` and `store`; required published system records MUST use the shared store.
+**ORNA-META-002** `database.orna` MUST carry `repository_format: 3` and the stable database UUID; a separate `format.orna` is a legacy-format input, not another new-format authority.
+**ORNA-META-003** Initialization MUST generate one UUIDv4, preserve existing source, and neither stage nor create a Git commit implicitly. Changing database identity requires an explicit fork-as-new-database migration.
+**ORNA-META-004** Published checkpoint/allocator/runtime summaries MUST remain historical observations; checking them out MUST NOT rewind live fences, leases or non-rewindable allocators.
+**ORNA-META-005** Caches, credentials, mounts, sessions, rejected edit drafts and unpublished changes MUST NOT be written into tracked `.orna/`.
 
-**ORNA-STATE-003** `relation.as_of(HEAD)` MUST read the selected committed snapshot without the local runtime tail.
+## Private local ownership
 
-**ORNA-STATE-004** `relation.as_of(snapshot)` MUST use the exact supplied SnapshotRef. Git revision expressions are resolved explicitly through `sys.snapshot(selector)`; a bare branch expression is not additional source grammar.
-
-**ORNA-STATE-004A** Relation-level `as_of` MUST pin data and decoding schema, not silently select historical function code. Whole-program historical evaluation uses the database snapshot object defined in [relations](#relations).
-
-**ORNA-STATE-005** Wall-clock `now()` MUST remain distinct from database-state selectors such as `CWD` and `HEAD`.
-
-## Committed Orna metadata
-
-A small tracked `.orna/` directory is reserved for canonical metadata that must exist in every snapshot but is not user schema source. It is distinct from local runtime files under `.git/orna/`.
+Resolve administrative paths through Git (`git rev-parse --git-path orna`),
+including linked worktrees. Do not append `/.git` to a guessed directory.
 
 ```text
-.orna/
-├── format.orna
-├── database.orna
-├── checkpoints/
-├── allocators/
-├── runs/
-└── failures/
+<per-worktree-git-admin>/orna/
+  state.db       # durable unpublished changes and journals
+  cache.db       # optional, rebuildable
+  scratch/       # bounded capture/edit/recovery candidates
+  runtime.sock   # when an owner runs
+  owner.lock     # when required by platform
 ```
 
-**ORNA-META-001** Tracked `.orna/` MUST contain versioned metadata required to interpret or inspect a snapshot. It MUST NOT contain local caches, credentials or the authoritative unpublished runtime tail.
+WAL/SHM companions and required locks are real durability machinery, not
+clutter to delete. Mount/edit records live in the same journal, not sidecar
+JSON beside each row. Cache loss is recoverable; loss of unpublished accepted
+state is not automatically recoverable from Git.
 
-**ORNA-META-002** `.orna/format.orna` MUST identify the repository format and storage profile versions.
-
-**ORNA-META-003** `.orna/database.orna` MUST contain the stable database identity created by `orna init`.
-
-**ORNA-META-004** Checkpoint and allocator files in `.orna/` are snapshot watermarks; their current non-rewindable/local counterparts remain in Turso or hidden refs.
-
-**ORNA-META-005** Implementations MUST NOT store rebuildable query/compiler caches in the tracked `.orna/` directory.
-
-## Local runtime files
-
-The embedded runtime requires local state that is not ordinary repository content.
-
-**ORNA-LOCAL-001** Local runtime state MUST live under a path resolved through Git's per-worktree administrative directory, conceptually `git rev-parse --git-path orna/`.
-
-A typical layout is:
-
-```text
-.git/orna/
-├── state.db       # Turso: authoritative uncommitted runtime CWD
-├── cache.db       # rebuildable compiler/query/storage indexes
-├── runtime.sock   # optional local coordination socket
-└── locks/
-```
-
-**ORNA-LOCAL-002** `state.db` MUST be treated as authoritative for runtime changes that have not yet been published to Git.
-
-**ORNA-LOCAL-003** `cache.db` MUST be rebuildable from Git plus `state.db`.
-
-**ORNA-LOCAL-004** Local runtime files MUST NOT be added to ordinary Git commits.
-
-## Any clone may operate independently
-
-**ORNA-EMBED-001** An Orna clone MUST remain usable without `orna serve` or any external Orna daemon.
-
-**ORNA-EMBED-002** `orna repl`, `orna run`, `orna status` and other local commands MUST be capable of opening the embedded Turso state in-process when no other local owner exists.
-
-**ORNA-EMBED-003** When overlapping local processes require one writable Turso handle, they MAY coordinate through a local socket and temporary owner process; this MUST remain an implementation detail and MUST NOT require a network server.
-
-**ORNA-EMBED-004** Version 1.0 MUST NOT rely for correctness on experimental multi-process Turso file access.
-
-## Independent clones
-
-Each clone has its own CWD.
-
-**ORNA-CLONE-001** Orna MUST treat each clone's CWD as independent.
-
-**ORNA-CLONE-002** Commits, fetch, push and merge are the synchronization mechanism between clones.
-
-**ORNA-CLONE-003** Two clones MAY make independent changes. Non-fast-forward pushes and semantic merges MUST be handled through Git-compatible workflows rather than hidden distributed locking.
-
-**ORNA-CLONE-004** Independent clones MUST NOT run the same durable external consumer concurrently unless its connector profile explicitly supports safe partitioning, coordination or idempotent duplicate processing. Base conformance provides no cross-clone exactly-once guarantee.
-
-
-## Repository compatibility
-
-**ORNA-CORE-001** An Orna repository MUST be a valid Git repository readable by ordinary Git tooling.
-
-**ORNA-CORE-002** Orna MUST NOT substitute a proprietary commit graph for Git.
-
-**ORNA-CORE-003** A Git commit used as an Orna database snapshot MUST identify the code, schema, human-readable rows, large-table manifests, referenced large-table objects and committed system watermarks required to reproduce that snapshot.
+**ORNA-LOCAL-001** Private state MUST use the per-worktree administrative path.
+**ORNA-LOCAL-002** Unpublished accepted state MUST be authoritative and crash-durable under the declared failure model.
+**ORNA-LOCAL-003** Derived caches MUST be disposable and keyed by source/schema/store/interface generations.
+**ORNA-LOCAL-004** Private state MUST never be added to ordinary commits or included by a naive working-directory copy advertised as a complete export.
+**ORNA-EMBED-001** Local database use MUST work without devtools, a VFS mount, or `orna serve`.
+**ORNA-EMBED-002** The local CLI MUST be able to own embedded state in-process when no local writer exists.
+**ORNA-EMBED-003** Concurrent local commands MAY use private IPC to the single owner, not an obligatory public daemon.
+**ORNA-EMBED-004** Correctness MUST NOT depend on experimental unsynchronized multi-process SQLite/Turso access.
+**ORNA-CLONE-001** Clones and worktrees MUST have independent workspace/runtime identities; database UUID alone MUST NOT identify a writer.
+**ORNA-CLONE-002** Published synchronization MUST use Git commits/fetch/push/merge.
+**ORNA-CLONE-003** Non-fast-forward or concurrent writes MUST be explicit conflicts, not hidden cross-clone locks.
+**ORNA-CLONE-004** Independent clones MUST NOT claim exactly-once external ingestion without a connector-specific coordination or idempotency contract.

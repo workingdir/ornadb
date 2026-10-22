@@ -77,7 +77,15 @@ fn normalize_repl_mutations(
     for mutation in mutations {
         let table = mutation.table().to_owned();
         let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
-        if mutation.is_insert() {
+        // A row admitted through `admit_format3_row` (the Blob insert path)
+        // already carries its canonical store key and stored-field tuple, and
+        // its source-row provenance says so. Every other mutation, a plain
+        // insert included, still holds the evaluator's row map and is
+        // projected to the stored-field tuple here.
+        if source_row_schemas
+            .iter()
+            .any(|source_row| source_row.mutation_id == mutation.id())
+        {
             normalized.push(mutation);
             continue;
         }
@@ -525,6 +533,10 @@ impl ReplTransactionEffectHandler<'_, '_> {
 }
 
 impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
+    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostAttachment> {
+        EffectHandler::sys_host_context(&*self.bindings)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -678,11 +690,18 @@ impl ReplTransactionEffectHandler<'_, '_> {
             let Some(Some(blob)) = blob_value(ty, original) else {
                 continue;
             };
-            if !matches!(blob, OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _)) {
+            if !matches!(
+                blob,
+                OvbRaw::Tag(
+                    orna_value_v1::OVB2_BLOB_TAG
+                        | orna_value_v1::ROV3_BLOB_TAG
+                        | orna_value_v1::SOV3_BLOB_TAG,
+                    _
+                )
+            ) {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
             }
-            let value = ContextValue::new(ValueFormat::Ovb2, blob.clone())
-                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
+            let value = in_profile_of(input_row, blob.clone())?;
             let binding = self.bindings.accept_captured_blob_for_row(&value)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
             blob_bindings.insert(field.clone(), binding);
@@ -708,9 +727,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
             return Ok(None);
         };
         let raw = restore_contextual_blob_values(&schema, result.raw(), input_row.raw())?;
-        ContextValue::new(ValueFormat::Ovb2, raw)
-            .map(Some)
-            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
+        in_profile_of(input_row, raw).map(Some)
     }
 
     fn handle_contextual_effect(
@@ -804,6 +821,10 @@ impl ReplTransactionEffectHandler<'_, '_> {
 }
 
 impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
+    fn sys_host_context(&self) -> Option<&orna_evaluator_v1::SysHostAttachment> {
+        Ovb2EffectHandler::sys_host_context(&*self.bindings)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -848,11 +869,30 @@ impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         )
     }
 
+    /// A lazily captured Blob arrives as a ROV-3 value in its capture context.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+}
+
+/// Rebuilds `raw` in the format and context of `profile`, so a lazily captured
+/// Blob keeps the context that can resolve it.
+fn in_profile_of(profile: &ContextValue, raw: OvbRaw) -> Result<ContextValue, EvaluationError> {
+    match profile.context() {
+        Some(context) => ContextValue::new_in_context(context, profile.format(), raw),
+        None => ContextValue::new(profile.format(), raw),
+    }
+    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
 }
 
 fn contains_contextual_blob_value(value: &OvbRaw) -> bool {
     match value {
-        OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _) => true,
+        OvbRaw::Tag(
+            orna_value_v1::OVB2_BLOB_TAG
+            | orna_value_v1::ROV3_BLOB_TAG
+            | orna_value_v1::SOV3_BLOB_TAG,
+            _,
+        ) => true,
         OvbRaw::Tag(_, inner) => contains_contextual_blob_value(inner),
         OvbRaw::Array(values) => values.iter().any(contains_contextual_blob_value),
         OvbRaw::Map(values) => values.iter().any(|(key, value)| {

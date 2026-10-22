@@ -1,0 +1,4 @@
+pub fn both(duration: Duration) = {
+    display: std.time.duration.clock.format(duration),
+    encoded: std.encoding.orna.encode(duration),
+};
