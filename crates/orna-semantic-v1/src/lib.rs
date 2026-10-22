@@ -24205,7 +24205,11 @@ fn descriptor_relation_record_type(
     substitutions: &BTreeMap<String, Type>,
     expanding: &mut BTreeSet<String>,
 ) -> Option<Type> {
-    let fields = system_api::embedded_system_api().record_fields(system_type)?;
+    let api = system_api::embedded_system_api();
+    if !api.expands_as_record(system_type) {
+        return None;
+    }
+    let fields = api.record_fields(system_type)?;
     if fields.is_empty() || !expanding.insert(system_type.to_owned()) {
         return None;
     }

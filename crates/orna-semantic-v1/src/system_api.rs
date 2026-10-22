@@ -734,6 +734,18 @@ impl SystemApi {
             })
     }
 
+    /// Whether `type_name` structurally expands to its published fields.
+    /// Opaque identifiers may publish descriptive fields, but they stay nominal.
+    pub(crate) fn expands_as_record(&self, type_name: &str) -> bool {
+        self.relations.contains_key(type_name)
+            || self
+                .types
+                .get(type_name)
+                .is_some_and(|descriptor| {
+                    matches!(descriptor.kind.as_str(), "record" | "record-generic")
+                })
+    }
+
     pub(crate) fn field(&self, type_name: &str, field: &str) -> Option<&SystemType> {
         self.record_fields(type_name)?.get(field)
     }
