@@ -23,7 +23,7 @@ use orna_semantic_v1::{
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
+use orna_syntax_v1::{Declaration, Expr, parse_module, parse_module_with_file, parse_row};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
@@ -1462,7 +1462,14 @@ fn load_reachable_project(
         let source = read_module(&logical_path, &mut total_bytes)?;
         let parsed = parse_module(&source);
         if !parsed.is_ok() {
-            return Err(ProjectLoadError::InvalidModule);
+            // Re-parse with the logical path so the reported spans carry the
+            // file and 1-based line/column coordinates. Accepted modules keep
+            // the unannotated tree, so the happy path is unchanged.
+            let located = parse_module_with_file(&source, logical_path.as_str());
+            return Err(ProjectLoadError::InvalidModule {
+                logical_path,
+                diagnostics: located.diagnostics,
+            });
         }
         let namespace = namespace_for_path(&logical_path)?;
         if let Some(previous) = namespaces.insert(namespace.clone(), logical_path.clone())
@@ -1622,7 +1629,10 @@ pub enum ProjectLoadError {
     SourceTooLarge,
     RepositoryLimit,
     ModuleLimit,
-    InvalidModule,
+    InvalidModule {
+        logical_path: String,
+        diagnostics: Vec<orna_syntax_v1::SyntaxDiagnostic>,
+    },
     UnsupportedImport,
     ImportUnavailable,
     AmbiguousImport,
@@ -1648,7 +1658,7 @@ impl fmt::Display for ProjectLoadError {
             Self::SourceTooLarge => "project source exceeds the configured limit",
             Self::RepositoryLimit => "project exceeds the configured source-module limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
-            Self::InvalidModule => "reachable source module is not a valid module unit",
+            Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
             Self::UnsupportedImport => "source import cannot be resolved by this loader",
             Self::ImportUnavailable => "imported source module is unavailable",
             Self::AmbiguousImport => "imported source module has ambiguous ownership",
