@@ -20,6 +20,11 @@ const LEGACY_FORMAT_ONE: &str = include_str!("fixtures/format-context/format-1.o
 const LEGACY_FORMAT_TWO: &str = include_str!("fixtures/format-context/format-2.orna");
 const LEGACY_PROFILE_ONE: &str = include_str!("fixtures/format-context/profile-1-unknown.orna");
 const LEGACY_PROFILE_TWO: &str = include_str!("fixtures/format-context/profile-2-unknown.orna");
+/// The record OrnaDB 1.0's `orna init` wrote, byte for byte.
+const ORNADB_1_0_FORMAT_ONE: &str =
+    include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
+/// The closed format-2 record of the previous 1.1.0 draft, byte for byte.
+const DRAFT_FORMAT_TWO: &str = include_str!("fixtures/format-context/format-2-draft-1.1.0.orna");
 
 fn canonical_database(database_id: &str) -> String {
     DATABASE_TEMPLATE.replace("00000000-0000-4000-8000-000000000000", database_id)
@@ -342,6 +347,128 @@ fn rejects_unenumerated_legacy_storage_profiles() {
             .unwrap_err();
         assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002");
     }
+}
+
+/// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: the `format.orna`
+/// records the legacy writers actually produced dispatch to read-only legacy
+/// readers, with or without the `database_id` sidecar the 1.0 writer added.
+/// Beside a format-3 database record the same record is a mixed format.
+#[test]
+fn dispatches_recorded_legacy_metadata_as_read_only_inputs() {
+    for (record, format) in [(ORNADB_1_0_FORMAT_ONE, 1), (DRAFT_FORMAT_TWO, 2)] {
+        for database in [Some(SIDECAR_DATABASE), None] {
+            let directory = repository(database, Some(record), false);
+            let context = Repository::discover(directory.path())
+                .unwrap()
+                .open_format_context()
+                .unwrap();
+            assert_eq!(context.repository_format_number(), format);
+            assert!(context.is_read_only());
+            assert!(!context.supports_writes());
+            assert_eq!(
+                context.database_id().map(|id| id.to_string()),
+                database.map(|_| DATABASE_ID.to_owned())
+            );
+            assert_eq!(
+                context.final_format_capability().err(),
+                Some(RepositoryFormatContextError::LegacyReadOnly(format))
+            );
+        }
+
+        let mixed = repository(Some(CANONICAL_DATABASE), Some(record), false);
+        let error = Repository::discover(mixed.path())
+            .unwrap()
+            .open_format_context()
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-004");
+    }
+}
+
+/// The recorded legacy records are closed: an extra field, a changed profile
+/// or another format number is not a known legacy layout.
+#[test]
+fn rejects_legacy_records_that_differ_from_the_recorded_ones() {
+    let extra_field =
+        DRAFT_FORMAT_TWO.replace("}\n", "  index_profile: \"compact-storage-v2\",\n}\n");
+    let changed_profile = DRAFT_FORMAT_TWO.replace("\"SOV-2\"", "\"SOV-3\"");
+    let changed_format =
+        ORNADB_1_0_FORMAT_ONE.replace("repository_format: 1", "repository_format: 2");
+    let missing_field =
+        ORNADB_1_0_FORMAT_ONE.replace(", storage_profile: \"compact-storage-v1\"", "");
+    for record in [extra_field, changed_profile, changed_format, missing_field] {
+        let directory = repository(Some(SIDECAR_DATABASE), Some(&record), false);
+        let error = Repository::discover(directory.path())
+            .unwrap()
+            .open_format_context()
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002", "{record}");
+    }
+}
+
+/// ORNA-UPGRADE-001, ORNA-UPGRADE-003: runtime writes follow the format
+/// recorded at `HEAD`. A legacy `HEAD` refuses them even when the worktree
+/// holds format-3 metadata, and the refusal carries its code, format and
+/// remedy. A format-3 or unborn `HEAD` is not refused here.
+#[test]
+fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
+    for (record, format) in [
+        (LEGACY_FORMAT_ONE, 1),
+        (LEGACY_FORMAT_TWO, 2),
+        (ORNADB_1_0_FORMAT_ONE, 1),
+        (DRAFT_FORMAT_TWO, 2),
+    ] {
+        let directory = repository(Some(SIDECAR_DATABASE), Some(record), false);
+        fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+        fs::write(
+            directory.path().join(".orna/database.orna"),
+            CANONICAL_DATABASE,
+        )
+        .unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        assert!(
+            orna_repository_v1::inspect_metadata(&repository)
+                .unwrap()
+                .is_some(),
+            "the worktree metadata alone admits a format-3 runtime"
+        );
+        assert!(!repository.holds_prepared_migration());
+        assert!(
+            !repository.runtime_paths().root().exists(),
+            "checking for a migration journal creates no runtime state"
+        );
+
+        let refusal = repository.require_writable_head_format().unwrap_err();
+        assert_eq!(refusal.format(), format);
+        assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-015");
+        assert_eq!(
+            refusal.title(),
+            "repository HEAD is a read-only legacy snapshot"
+        );
+        assert_eq!(
+            refusal.remedy(),
+            orna_repository_v1::LegacyWriteRefused::REMEDY
+        );
+        assert!(refusal.remedy().contains("ornadb-5il1.184"));
+    }
+
+    let format_three = repository(Some(CANONICAL_DATABASE), None, true);
+    assert_eq!(
+        Repository::discover(format_three.path())
+            .unwrap()
+            .require_writable_head_format(),
+        Ok(())
+    );
+    let unborn = TempDir::new().unwrap();
+    git(
+        unborn.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    assert_eq!(
+        Repository::discover(unborn.path())
+            .unwrap()
+            .require_writable_head_format(),
+        Ok(())
+    );
 }
 
 #[test]

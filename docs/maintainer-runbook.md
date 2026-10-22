@@ -122,11 +122,16 @@ fence stale owners and recovery attempts. A command that cannot acquire or
 resume the local state must fail closed; it must not silently bind a request to
 another worktree or to a newer snapshot.
 
-The local state database is not a publication format. Git repository history,
-loose row files, and compact data are managed by their respective v1 layers;
-callers use the logical table interface and do not branch on physical
-placement. Compact files and manifests must be treated as immutable published
-artifacts and verified before they become authoritative.
+The local state database is not a publication format. Format-3 rows live in the
+committed native store, which publication writes. Format-1/2 loose row files and
+compact data are read-only legacy layouts. The repository and storage readers
+verify and read them, no production path writes them, and no CLI verb reads
+them yet.
+Publication and durable runtime writes on a format-1/2 `HEAD` are refused, and
+no in-place format-3 upgrade ships yet (ornadb-5il1.184). Callers use the logical
+table interface and do not branch on physical placement. Compact files and
+manifests must be treated as immutable published artifacts and verified before
+they become authoritative.
 
 ## Linux FUSE editor drafts
 
