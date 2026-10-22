@@ -11005,6 +11005,11 @@ mod tests {
                 origin,
             },
         );
+        // The resumed socket must detach first: an attached session is governed
+        // by its reconnection lease, which starts at WebSocket loss (30-protocol).
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion {
             fail: true,
             ..ExpiryDeletion::default()
