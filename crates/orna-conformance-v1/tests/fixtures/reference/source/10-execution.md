@@ -105,4 +105,3 @@ For `parallel`, the first observed failure cancels unfinished siblings. After jo
 **ORNA-BACKPRESSURE-002** `for_each` is sequential by default. Concurrent processing MUST be explicit, bounded and consistent with the connector's partition-order and checkpoint rules.
 
 Cancelling a stream callback rolls back both its writes and its checkpoint advance. Stopping the surrounding run prevents admission of the next delivery. Neither action undoes previously committed deliveries.
-

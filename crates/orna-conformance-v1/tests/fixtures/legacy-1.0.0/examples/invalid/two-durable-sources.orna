@@ -1,0 +1,6 @@
+pub fn sync_everything() =
+    merge_streams([
+        google.mail(),
+        openbanking.transactions(),
+    ])
+    | for_each(item => process(item));
