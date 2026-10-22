@@ -7662,6 +7662,20 @@ impl Context<'_, '_> {
                 None if parameter.default.as_deref() == Some("null") => Value::Null,
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
+            if crate::sys_bindings::is_blob_from_bytes_operation(operation) {
+                let Value::List(items) = value else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                let integers = items
+                    .iter()
+                    .map(|item| match item {
+                        Value::Int(integer) => Ok(integer.clone()),
+                        _ => Err(error("ORNA-EVAL-TYPE")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let annotated = crate::sys_bindings::dispatch_blob_from_bytes(&integers)?;
+                return Value::from_context_value(&annotated, self, 0);
+            }
             if matches!(&parameter.ty, orna_sys_v1::AbiType::Named(name) if name == "Int") {
                 let Value::Int(bound) = value else {
                     return Err(error("ORNA-EVAL-TYPE"));
