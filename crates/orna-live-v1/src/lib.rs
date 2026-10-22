@@ -1211,7 +1211,8 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         _context: &'a RuntimeActivationContext,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
     {
-        Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
+        // A dispatcher without resume support cannot perform the mutation.
+        Box::pin(async { Err("sys.admin.read_only".to_owned()) })
     }
 
     fn reject_staged_admin_effect<'a>(
@@ -1251,7 +1252,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                 .publication_metadata_rows()
                 .await
                 .map(Some)
-                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+                .map_err(|_| "sys.storage.unavailable".to_owned())
         })
     }
 
@@ -1276,16 +1277,13 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
                     | orna_runtime_v1::StreamAdministrationOutcome::PausePending { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1308,15 +1306,12 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Running { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1346,13 +1341,34 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     invocation_id,
                 )
                 .await
-                .map_err(|error| match error {
-                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                    _ => "sys.admin.unavailable".to_owned(),
-                })?;
+                .map_err(|error| admin_failure_code(&error))?;
             Err("sys.admin.busy".to_owned())
         })
     }
+}
+
+/// Maps a runtime administration failure onto the portable code
+/// `source/16-administration.md` assigns it (ORNA-SYS-097): an incompatible
+/// owner, lease or concurrent write activation is `sys.admin.busy`
+/// (ORNA-ADMIN-002); a stream reference naming no live stream of the current
+/// owner is a missing object, `sys.admin.missing_object`; snapshot and
+/// checkpoint failures keep their more specific codes; and a runtime store
+/// that cannot complete the transition is `sys.storage.unavailable`.
+fn admin_failure_code(error: &RuntimeError) -> String {
+    error
+        .public_code()
+        .unwrap_or(match error {
+            RuntimeError::InvalidObservationReference
+            | RuntimeError::ObservationCoordinateMismatch
+            | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
+            RuntimeError::LeaseHeld
+            | RuntimeError::OwnerLost
+            | RuntimeError::StaleCapture { .. }
+            | RuntimeError::AdminInvocationConflict
+            | RuntimeError::RecoveryPending => "sys.admin.busy",
+            _ => "sys.storage.unavailable",
+        })
+        .to_owned()
 }
 
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
@@ -5882,6 +5898,10 @@ pub enum WebSocketOutput {
         payload: Vec<u8>,
     },
     Pong(Vec<u8>),
+    /// A host-initiated keepalive Ping. An executable host that owns the
+    /// socket sends it when its peer has been silent, so a half-open
+    /// connection cannot hold an attachment indefinitely.
+    Ping(Vec<u8>),
     /// A WebSocket close, optionally carrying one RFC 6455 close code and
     /// its already-validated UTF-8 reason bytes.
     ///
@@ -5907,6 +5927,10 @@ impl fmt::Debug for WebSocketOutput {
                 .finish(),
             Self::Pong(payload) => formatter
                 .debug_struct("WebSocketOutput::Pong")
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Ping(payload) => formatter
+                .debug_struct("WebSocketOutput::Ping")
                 .field("payload_bytes", &payload.len())
                 .finish(),
             Self::Close { code, reason } => formatter
@@ -5939,6 +5963,7 @@ pub fn encode_websocket_output(
         WebSocketOutput::Accepted(_) => return Ok(None),
         WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
         WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
+        WebSocketOutput::Ping(payload) => (9, payload.as_slice()),
         WebSocketOutput::Close { code, reason } => {
             close_payload = code
                 .map(|code| {
@@ -6513,8 +6538,10 @@ impl LiveTransport {
         let Ok(origin) = required_origin(&request.headers) else {
             return wire_error(403, "live.origin_denied");
         };
+        // 30-protocol, Session creation and ownership: requests are
+        // `application/json`, so a charset parameter may only name UTF-8.
         if request.method == "POST"
-            && !header_eq(&request.headers, "content-type", "application/json")
+            && !header(&request.headers, "content-type").is_some_and(is_json_media_type)
         {
             return wire_error(400, "live.malformed_request");
         }
@@ -6667,6 +6694,13 @@ impl LiveTransport {
                             headers: Vec::new(),
                             body: Vec::new(),
                         };
+                    }
+                    // 30-protocol, Session creation and ownership: the token
+                    // must be the session's current one. Any other token for
+                    // a live session is unauthenticated; 410 is for a session
+                    // that has ended.
+                    if self.sessions.contains_key(&id) {
+                        return wire_error(401, "live.unauthenticated");
                     }
                     return wire_error(410, "live.expired");
                 }
@@ -6926,6 +6960,16 @@ impl LiveTransport {
     /// accept, TLS, cancellation, attachment identity, and clock ownership;
     /// this bridge only adapts the accepted socket to the transport's
     /// byte-stream contract.
+    ///
+    /// The bridge borrows the transport for the whole connection and has no
+    /// cancellation or read deadline, so it suits a transport owned by that
+    /// one connection. A host that shares one transport between connections
+    /// must not hold it across socket I/O: it drives
+    /// [`Self::begin_websocket_upgrade`] and
+    /// [`Self::commit_websocket_upgrade`], then
+    /// [`Self::prepare_websocket_application`] and
+    /// [`Self::complete_application`] one frame at a time, and cancels the
+    /// workers named by [`Self::take_retired_attachments`].
     ///
     /// # Errors
     ///
@@ -7544,6 +7588,11 @@ impl LiveTransport {
         if credential != record.credential {
             return Err(wire_error(401, "live.unauthenticated"));
         }
+        // 30-protocol, Session creation and ownership: an upgrade from
+        // another origin is prohibited (403); it is not an expired session.
+        if origin != record.origin {
+            return Err(wire_error(403, "live.origin_denied"));
+        }
         self.host
             .validate_resume(&ResumeRequest {
                 id,
@@ -7943,6 +7992,20 @@ fn header_token(headers: &[(String, String)], name: &str, expected: &str) -> boo
             .any(|token| token.trim().eq_ignore_ascii_case(expected))
     })
 }
+/// Whether a Content-Type value names JSON: `application/json` in any case,
+/// with no parameter other than `charset=utf-8`.
+fn is_json_media_type(value: &str) -> bool {
+    let mut parts = value.split(';');
+    parts
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+        && parts.all(|parameter| {
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("charset")
+                    && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            })
+        })
+}
 fn required_origin(headers: &[(String, String)]) -> std::result::Result<Origin, ()> {
     header(headers, "origin")
         .ok_or(())
@@ -8123,6 +8186,10 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
+        // A session whose application work must first be joined is
+        // temporarily unavailable on a route that cannot join it; the
+        // request itself is well formed.
+        Error::ApplicationDrainRequired => (503, "live.unavailable"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
@@ -11093,5 +11160,34 @@ mod tests {
             ),
             Err(ActionRegistrationError::InvalidDescriptor)
         );
+    }
+
+    /// ORNA-SYS-097, ORNA-ADMIN-002: stream administration failures surface
+    /// the portable codes of `source/16-administration.md`, never a
+    /// vendor-only code.
+    #[test]
+    fn admin_failures_map_onto_portable_codes() {
+        for (error, code) in [
+            (RuntimeError::AdminBusy, "sys.admin.busy"),
+            (RuntimeError::LeaseHeld, "sys.admin.busy"),
+            (RuntimeError::OwnerLost, "sys.admin.busy"),
+            (RuntimeError::AdminInvocationConflict, "sys.admin.busy"),
+            (
+                RuntimeError::InvalidObservationReference,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamIdentityMismatch,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamCheckpointStale,
+                "sys.checkpoint.conflict",
+            ),
+            (RuntimeError::SnapshotNotFound, "sys.snapshot.not_found"),
+            (RuntimeError::StorageUnavailable, "sys.storage.unavailable"),
+        ] {
+            assert_eq!(admin_failure_code(&error), code, "{error:?}");
+        }
     }
 }
