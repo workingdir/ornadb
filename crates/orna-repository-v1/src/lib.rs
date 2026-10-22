@@ -52,17 +52,18 @@ pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
     CompactManifestWitness, CompactPublicationPending, CompactRuntimeReceipt, CompactSegmentRole,
-    validate_compact_page_uncompressed_sizes,
+    LegacyAuthoritativeRow, LegacyAuthoritativeTable, validate_compact_page_uncompressed_sizes,
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{CompactPublicationPlan, CompactSegment};
 pub use init::format_context::{
-    CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
-    HistoricalFormatContext, LegacyWriteRefused, RepositoryFormat, RepositoryFormatContext,
-    RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
+    FINAL_REPOSITORY_FORMAT, REPOSITORY_LAYOUT_VERSION, CaptureCapabilityError,
+    CommittedTableBinding, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
+    LegacyWriteRefused, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
+    SchemaRootPin, StoreRootPin,
 };
 pub use init::{
-    DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
+    STORAGE_PROFILE, DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     inspect_metadata, inspect_metadata_for_runtime, initialize_repository,
 };
 pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};
@@ -1604,6 +1605,29 @@ impl IndexGeneration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorktreeState(Vec<u8>, [u8; 32]);
 
+/// Stat identity of one managed worktree path, captured before its bytes are read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedFileStamp {
+    file_type: fs::FileType,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    change: (u64, u64, i64, i64, u32),
+}
+
+/// Stamp of one managed path; `None` records that the path is absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedStamp {
+    path: ManagedPath,
+    stamp: Option<ManagedFileStamp>,
+}
+
+/// Worktree status and content digest, plus the stamps of every digested path.
+struct WorktreeScan {
+    state: WorktreeState,
+    stamps: Vec<ManagedStamp>,
+}
+
 impl WorktreeState {
     pub fn as_porcelain_v2_z(&self) -> &[u8] {
         &self.0
@@ -2940,7 +2964,7 @@ impl Repository {
         // runtime's tail consumption relies on it. A ref backend whose refs
         // cannot be flushed is refused before the ref moves.
         native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
-        self.sync_candidate_objects(expected_head, candidate.commit())?;
+        self.sync_candidate_objects(Some(expected_head), candidate.commit())?;
         self.advance_ref_transaction(&reference, expected_head, candidate.commit())?;
         native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
@@ -2950,13 +2974,14 @@ impl Repository {
     }
 
     /// Flushes every object `candidate` adds over `base`: the commit, its root
-    /// tree, and each tree and blob on a changed path. `write-tree` and
-    /// `commit-tree` leave their loose objects unflushed under Git's default
-    /// `core.fsync`, so without this a crash after the ref names them could
-    /// lose or truncate them.
+    /// tree, and each tree and blob on a changed path. Without a base (a root
+    /// commit) every tree and blob of the candidate is flushed. `write-tree`
+    /// and `commit-tree` leave their loose objects unflushed under Git's
+    /// default `core.fsync`, so without this a crash after the ref names them
+    /// could lose or truncate them.
     fn sync_candidate_objects(
         &self,
-        base: &GitCommitRef,
+        base: Option<&GitCommitRef>,
         candidate: &GitCommitRef,
     ) -> Result<(), RepositoryError> {
         let algorithm = match self.native_object_id_length()? {
@@ -2970,15 +2995,28 @@ impl Repository {
             oid(candidate.as_str())?,
             oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
         ]);
-        let changes = self.git_bytes_no_lazy_fetch([
-            "diff-tree",
-            "-r",
-            "-t",
-            "-z",
-            "--no-renames",
-            base.as_str(),
-            candidate.as_str(),
-        ])?;
+        let changes = match base {
+            Some(base) => self.git_bytes_no_lazy_fetch([
+                "diff-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--no-renames",
+                base.as_str(),
+                candidate.as_str(),
+            ])?,
+            // `--root` reports every path of a parentless commit as added.
+            None => self.git_bytes_no_lazy_fetch([
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "-r",
+                "-t",
+                "-z",
+                "--no-renames",
+                candidate.as_str(),
+            ])?,
+        };
         // Raw `-z` output alternates `:<old mode> <new mode> <old> <new> <status>`
         // records with their paths.
         let mut fields = changes
@@ -4081,6 +4119,7 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
+
         // 16-administration `commit`: the staged candidate is validated before
         // its commit is created, and a missing identity fails before any commit
         // object exists. A refused candidate therefore leaves no object or ref.
@@ -4165,7 +4204,9 @@ impl Repository {
     /// the symbolic branch moves from absent to it by compare-and-set. The
     /// ordinary index already equals the new commit's tree and the worktree
     /// keeps its unstaged differences, so there is no index or worktree
-    /// reconciliation to journal.
+    /// reconciliation to journal. Like every other ref advance, the commit
+    /// and all of its objects are flushed before the ref names them, and the
+    /// ref is flushed before the result is recorded (ORNA-PUB-005).
     fn commit_reviewed_root_candidate(
         &self,
         review: &ReviewedCandidateReview,
@@ -4184,6 +4225,9 @@ impl Repository {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
         let reference = self.symbolic_head_ref()?;
+        // Main's identity contract applies to the root commit too: a missing
+        // identity fails before any commit object exists.
+        self.require_configured_commit_identity()?;
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-m"])
@@ -4202,6 +4246,11 @@ impl Repository {
         {
             return Err(RepositoryError::InvalidFormatMigration);
         }
+        // PUB-3 step 3: complete objects and their durability barriers
+        // precede the visible ref. A ref backend whose refs cannot be
+        // flushed is refused before the branch is created.
+        native_graph::require_files_ref_backend(self).map_err(RepositoryError::Graph)?;
+        self.sync_candidate_objects(None, candidate.commit())?;
         let absent = "0".repeat(self.native_object_id_length()?);
         let mut create = self.command();
         create.args([
@@ -4211,6 +4260,7 @@ impl Repository {
             absent.as_str(),
         ]);
         self.run(create)?;
+        native_graph::sync_git_ref_durably(self, &reference).map_err(RepositoryError::Graph)?;
         if self.head()?.as_ref() != Some(candidate.commit()) {
             return Err(RepositoryError::StaleHead);
         }
@@ -4237,7 +4287,7 @@ impl Repository {
     /// from configured Git identity; missing identity fails before creating a
     /// commit." Both identities are resolved by Git itself, exactly as the
     /// following `commit-tree` resolves them.
-    fn require_configured_commit_identity(&self) -> Result<(), RepositoryError> {
+    pub fn require_configured_commit_identity(&self) -> Result<(), RepositoryError> {
         for identity in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
             let mut command = self.configured_identity_command();
             command
@@ -4639,7 +4689,7 @@ impl Repository {
                 // The publisher may have stopped between its CAS and the
                 // barriers after it, so the candidate and the ref must be
                 // durable before RefAdvanced is recorded (ORNA-PUB-005).
-                self.sync_candidate_objects(journal.old_head(), journal.new_head())?;
+                self.sync_candidate_objects(Some(journal.old_head()), journal.new_head())?;
                 self.sync_head_ref()?;
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
@@ -5303,8 +5353,64 @@ impl Repository {
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.
     pub fn worktree_state(&self) -> Result<WorktreeState, RepositoryError> {
-        let status = self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
-        Ok(WorktreeState(status, self.worktree_content_digest(&[])?))
+        Ok(self.worktree_scan()?.state)
+    }
+
+    /// Captures status and hashes managed content once for this observation.
+    fn worktree_scan(&self) -> Result<WorktreeScan, RepositoryError> {
+        let status = self.worktree_status()?;
+        let (digest, stamps) = self.worktree_content_scan(&[], false)?;
+        Ok(WorktreeScan {
+            state: WorktreeState(status, digest),
+            stamps,
+        })
+    }
+
+    /// Reports whether `scan` still describes the worktree. Compares status and
+    /// managed-path stamps only, so managed bytes are never read a second time.
+    fn worktree_scan_stable(&self, scan: &WorktreeScan) -> Result<bool, RepositoryError> {
+        if self.worktree_status()? != scan.state.0 {
+            return Ok(false);
+        }
+        for managed in &scan.stamps {
+            if self.managed_stamp(&managed.path)? != managed.stamp {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn worktree_status(&self) -> Result<Vec<u8>, RepositoryError> {
+        self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+    }
+
+    fn managed_stamp(
+        &self,
+        path: &ManagedPath,
+    ) -> Result<Option<ManagedFileStamp>, RepositoryError> {
+        match fs::symlink_metadata(self.worktree.join(path.as_path())) {
+            Ok(metadata) => Ok(Some(Self::managed_file_stamp(&metadata))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+
+    fn managed_file_stamp(metadata: &fs::Metadata) -> ManagedFileStamp {
+        #[cfg(unix)]
+        let change = (
+            std::os::unix::fs::MetadataExt::dev(metadata),
+            std::os::unix::fs::MetadataExt::ino(metadata),
+            std::os::unix::fs::MetadataExt::ctime(metadata),
+            std::os::unix::fs::MetadataExt::ctime_nsec(metadata),
+            std::os::unix::fs::MetadataExt::mode(metadata),
+        );
+        ManagedFileStamp {
+            file_type: metadata.file_type(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            change,
+        }
     }
     #[cfg(unix)]
     fn worktree_executable_marker(metadata: &fs::Metadata) -> u8 {
@@ -5318,10 +5424,23 @@ impl Repository {
         0
     }
 
+    /// Digest for checkout force plans. Includes git-ignored bytes, so a force
+    /// plan fences ignored files that the checkout could overwrite.
     fn worktree_content_digest(
         &self,
         extra_paths: &[ManagedPath],
     ) -> Result<[u8; 32], RepositoryError> {
+        Ok(self.worktree_content_scan(extra_paths, true)?.0)
+    }
+
+    /// Hashes managed worktree content in bounded chunks and returns each path's
+    /// stamp, taken before its bytes are read. Git-ignored files are listed and
+    /// read only when `include_ignored` is set; CWD observation omits them.
+    fn worktree_content_scan(
+        &self,
+        extra_paths: &[ManagedPath],
+        include_ignored: bool,
+    ) -> Result<([u8; 32], Vec<ManagedStamp>), RepositoryError> {
         let mut paths = BTreeSet::new();
         for path in self
             .git_bytes(["diff", "--no-renames", "--name-only", "-z", "--"])?
@@ -5351,25 +5470,28 @@ impl Repository {
         {
             paths.insert(path.to_vec());
         }
-        for path in self
-            .git_bytes([
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-                "--",
-            ])?
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-        {
-            paths.insert(path.to_vec());
+        if include_ignored {
+            for path in self
+                .git_bytes([
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                ])?
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+            {
+                paths.insert(path.to_vec());
+            }
         }
         for path in extra_paths {
             paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
         }
         let mut digest = Sha256::new();
         digest.update(b"ORNA-WORKTREE-CONTENT\0");
+        let mut stamps = Vec::with_capacity(paths.len());
         for encoded_path in paths {
             let path =
                 String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
@@ -5378,8 +5500,17 @@ impl Repository {
             digest.update((encoded_path.len() as u64).to_be_bytes());
             digest.update(encoded_path);
             let target = self.worktree.join(path.as_path());
-            match fs::symlink_metadata(&target) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+            let metadata = match fs::symlink_metadata(&target) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            };
+            stamps.push(ManagedStamp {
+                path,
+                stamp: metadata.as_ref().map(Self::managed_file_stamp),
+            });
+            match metadata {
+                Some(metadata) if metadata.file_type().is_symlink() => {
                     digest.update([1]);
                     let link = fs::read_link(&target)
                         .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -5387,22 +5518,44 @@ impl Repository {
                     digest.update((link.len() as u64).to_be_bytes());
                     digest.update(link);
                 }
-                Ok(metadata) if metadata.is_file() => {
+                Some(metadata) if metadata.is_file() => {
                     digest.update([2]);
                     digest.update([Self::worktree_executable_marker(&metadata)]);
-                    let contents =
-                        fs::read(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                    digest.update((contents.len() as u64).to_be_bytes());
-                    digest.update(contents);
+                    Self::digest_file_contents(&target, &mut digest)?;
                 }
-                Ok(_) => digest.update([3]),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    digest.update([0]);
-                }
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+                Some(_) => digest.update([3]),
+                None => digest.update([0]),
             }
         }
-        Ok(digest.finalize().into())
+        Ok((digest.finalize().into(), stamps))
+    }
+
+    /// Streams a regular file's length and bytes into `digest` through a fixed
+    /// chunk. A file that shrinks while it is read fails the observation.
+    fn digest_file_contents(target: &Path, digest: &mut Sha256) -> Result<(), RepositoryError> {
+        let file = fs::File::open(target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let len = file
+            .metadata()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?
+            .len();
+        digest.update(len.to_be_bytes());
+        let mut reader = file.take(len);
+        let mut chunk = [0_u8; 64 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&chunk[..read]);
+            copied += read as u64;
+        }
+        if copied != len {
+            return Err(RepositoryError::StaleCwd);
+        }
+        Ok(())
     }
 
     /// Observes CWD. The runtime generation must come from the runtime owner,
@@ -5419,22 +5572,22 @@ impl Repository {
         &self,
         runtime: RuntimeGeneration,
     ) -> Result<CwdGeneration, RepositoryError> {
-        // Do not return a torn CWD if another Git process changes the index
-        // while status is being read.  The lock serializes Orna writers; the
-        // bounded recheck detects external Git writers.
+        // Do not return a torn CWD if another Git process changes the index,
+        // branch, status, or a managed file while it is observed.  The lock
+        // serializes Orna writers; the bounded recheck detects external Git
+        // writers by stamp, so managed bytes are hashed once per attempt.
         for _ in 0..3 {
             let before = self.index_generation()?;
             let branch = self.current_branch()?;
-            let worktree = self.worktree_state()?;
+            let scan = self.worktree_scan()?;
             let after = self.index_generation()?;
             let branch_after = self.current_branch()?;
-            let worktree_after = self.worktree_state()?;
-            if before == after && branch == branch_after && worktree == worktree_after {
+            if before == after && branch == branch_after && self.worktree_scan_stable(&scan)? {
                 return Ok(CwdGeneration {
                     head: before.head.clone(),
                     branch,
                     index: before,
-                    worktree,
+                    worktree: scan.state,
                     runtime,
                 });
             }
@@ -9801,6 +9954,9 @@ pub enum RepositoryError {
     /// Native graph work failed while building or pinning a publication
     /// candidate. The graph context's own error identity is preserved.
     Graph(GraphError),
+    /// Source format admission failed. The format context's own error
+    /// identity is preserved so callers can report the exact cause.
+    FormatContext(FormatContextError),
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
@@ -9878,6 +10034,7 @@ impl fmt::Display for RepositoryError {
                 f.write_str("runtime publication completion is required")
             }
             Self::Graph(error) => write!(f, "native graph operation failed: {error}"),
+            Self::FormatContext(error) => write!(f, "repository format context failed: {error}"),
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
@@ -10241,6 +10398,71 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn repository_with_ignored_big_directory() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        fs::write(root.path().join(".gitignore"), "big/\n").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", ".gitignore", "main.orna"]);
+        git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=Orna Test",
+                "-c",
+                "user.email=orna@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        fs::create_dir(root.path().join("big")).unwrap();
+        root
+    }
+
+    #[test]
+    fn cwd_generation_ignores_git_ignored_content() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("big/app.log"), b"one").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        fs::write(root.path().join("big/app.log"), b"two, longer").unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert!(
+            before == after,
+            "git-ignored content must not enter the CWD observation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_generation_survives_non_utf8_git_ignored_names() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let root = repository_with_ignored_big_directory();
+        fs::write(
+            root.path().join("big").join(OsStr::from_bytes(b"\xff.bin")),
+            b"x",
+        )
+        .unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+    }
+
+    #[test]
+    fn cwd_generation_detects_managed_dirty_content_change() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("main.orna"), "module main;\n// one\n").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n// two\n").unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert!(
+            before != after,
+            "a dirty managed file must change the CWD observation"
+        );
     }
 
     #[cfg(target_os = "linux")]

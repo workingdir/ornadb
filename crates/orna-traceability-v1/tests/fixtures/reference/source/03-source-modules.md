@@ -2,7 +2,7 @@
 
 ## File extension
 
-Module units and loose row units both use `.orna` because both contain Orna syntax.
+Module source, explicit row-interchange documents and VFS `data.orna` projections use `.orna` syntax. Their entrypoints and schemas remain distinct. Format-3 persisted rows are ORP-1 records, not physical loose-row files; legacy row files are read only through their recorded import context.
 
 **ORNA-SOURCE-001** The parser MUST expose distinct entrypoints for module units and row units.
 
@@ -62,4 +62,3 @@ use std.prelude as _;
 **ORNA-IMPORT-006** Importing a module MUST NOT execute arbitrary code, open a network connection or start a stream.
 
 **ORNA-IMPORT-007** Wildcard imports are valid in committed modules and the REPL under the same rules. Local declarations and explicit imports take precedence; two wildcard imports that expose the same otherwise-unresolved name produce an ambiguity diagnostic. Import order MUST NOT select a winner.
-

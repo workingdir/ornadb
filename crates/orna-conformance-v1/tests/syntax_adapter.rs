@@ -13,7 +13,7 @@ fn valid_fixtures_pass_the_parse_stage() {
         .iter()
         .filter(|fixture| fixture.fixture.starts_with("valid/"))
         .collect::<Vec<_>>();
-    assert_eq!(valid.len(), 86);
+    assert_eq!(valid.len(), 92);
     assert!(valid.iter().all(|fixture| {
         fixture.stages[0].stage == Some(Stage::Parse)
             && fixture.stages[0].status == EvidenceStatus::Passed
