@@ -2444,7 +2444,10 @@ async fn mount_captured_media(
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
-    if !wait_for_mount_path(&mut mounted, &mountpoint.join("Music/london").join(mounted_name)) {
+    if !wait_for_mount_path(
+        &mut mounted,
+        &mountpoint.join("Music/london").join(mounted_name),
+    ) {
         return None;
     }
     Some(MountedBlobRow {
@@ -2493,6 +2496,41 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
 }
 
 #[tokio::test]
+#[ignore = "ornadb-5il1.293 open gap: remount after replacement; run with --ignored"]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
+async fn cwd_mount_rename_replacement_survives_remount() {
+    let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let replacement = lcg_bytes(0xfedc_ba98_7654_3210, 2_097_152 + 777);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let scratch_path = blob_path.with_file_name(".content.mp3.replace");
+    std::fs::write(&scratch_path, &replacement).unwrap();
+    std::fs::rename(&scratch_path, &blob_path).unwrap();
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &remount_point);
+    let remounted_blob = remount_point.join("Music/london/content.mp3");
+    assert!(
+        wait_for_mount_path(&mut remounted, &remounted_blob),
+        "FUSE remount must expose the committed Blob after a successful mount"
+    );
+    let restarted = std::fs::read(&remounted_blob).unwrap();
+    unmount_and_reap(row.repository_directory.path(), &mut remounted);
+    assert_eq!(
+        restarted, replacement,
+        "a restarted mount serves the acknowledged replacement"
+    );
+}
+
+#[tokio::test]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a WAV Blob row exports as `content.wav`, serves the seek and range reads a media decoder issues, and exports byte-for-byte.
 async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte() {
     let samples = lcg_bytes(0x0016_0000_5eed, 640_000);
@@ -2514,10 +2552,20 @@ async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_by
     assert_eq!(&header[8..16], b"WAVEfmt ");
     assert_eq!(u16::from_le_bytes([header[20], header[21]]), 1, "PCM");
     assert_eq!(u16::from_le_bytes([header[22], header[23]]), 1, "mono");
-    assert_eq!(u32::from_le_bytes(header[24..28].try_into().unwrap()), 16_000);
-    assert_eq!(u16::from_le_bytes([header[34], header[35]]), 16, "16-bit samples");
+    assert_eq!(
+        u32::from_le_bytes(header[24..28].try_into().unwrap()),
+        16_000
+    );
+    assert_eq!(
+        u16::from_le_bytes([header[34], header[35]]),
+        16,
+        "16-bit samples"
+    );
     assert_eq!(&header[36..40], b"data");
-    assert_eq!(u32::from_le_bytes(header[40..44].try_into().unwrap()), 640_000);
+    assert_eq!(
+        u32::from_le_bytes(header[40..44].try_into().unwrap()),
+        640_000
+    );
 
     // Sequential 64 KiB reads cover the whole Blob, then report EOF.
     let window = 64 * 1024;
@@ -2533,7 +2581,11 @@ async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_by
         assert!(streamed.len() <= original.len(), "read past the Blob end");
     }
     assert_eq!(streamed, original);
-    assert_eq!(handle.read(&mut chunk).unwrap(), 0, "EOF stays at the Blob end");
+    assert_eq!(
+        handle.read(&mut chunk).unwrap(),
+        0,
+        "EOF stays at the Blob end"
+    );
 
     // Container tail probe from the end of the file.
     let tail_len = 4096;
