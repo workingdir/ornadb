@@ -600,7 +600,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
         .wait_with_output()
         .expect("unlisted REPL process output");
     assert!(unlisted_repl.status.success());
-    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n> ");
+    assert_eq!(unlisted_repl.stdout, b"> error[ORNA-S010-IMPORT]: imported module is unavailable\n  --> line 1, column 1\n  |\n1 | use std.collection;\n  | ^^^^^^^^^^^^^^^^^^^\nhelp: use a captured standard dependency or remove the import\n> ");
     assert!(unlisted_repl.stderr.is_empty());
 }
 
@@ -673,6 +673,64 @@ fn binary_run_executes_a_named_public_project_function() {
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_evaluates_a_sys_enum_constant_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/sys-enum-mismatch-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+            "library.answer",
+        ])
+        .output()
+        .expect("CLI process");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failure code: ORNA-EVAL-DIVIDE-BY-ZERO"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1426,8 +1484,7 @@ async fn core_transactions_and_assertions_work_without_std() {
     assert_eq!(committed.len(), 1);
 }
 
-#[test]
-fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+fn captured_standard_project() -> (tempfile::TempDir, String) {
     let directory = tempfile::tempdir().expect("project");
     let module_path = directory.path().join("stdlib/std");
     std::fs::create_dir_all(&module_path).expect("standard module path");
@@ -1465,6 +1522,12 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         &["update-index", "--add", "--cacheinfo", &link],
     );
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+    (directory, module_commit)
+}
+
+#[test]
+fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
+    let (directory, module_commit) = captured_standard_project();
 
     let repository = Repository::discover(directory.path()).expect("project repository");
     let project = orna_project_v1::ProjectLoader::default()
@@ -1502,6 +1565,37 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
     assert_eq!(run.stdout, b"invocation completed\n");
     assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn binary_repl_imports_a_captured_standard_module() {
+    use std::io::Write as _;
+
+    let (directory, _module_commit) = captured_standard_project();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .arg("repl")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("CLI REPL");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"use std.math.{increment};\nincrement(41)\n")
+        .expect("write standard import");
+    let output = child.wait_with_output().expect("CLI REPL output");
+    assert!(output.status.success(), "repl stderr: {:?}", output.stderr);
+    assert!(output.stderr.is_empty(), "repl stderr: {:?}", output.stderr);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("42"),
+        "repl stdout: {:?}",
+        output.stdout
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("error["));
 }
 
 #[tokio::test(flavor = "current_thread")]

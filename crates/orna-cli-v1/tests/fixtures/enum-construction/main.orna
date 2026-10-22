@@ -1,0 +1,56 @@
+pub enum SyncResult {
+    ok { count: Int },
+    failed { reason: Str, retryable: Bool },
+}
+
+pub fn count(result: SyncResult): Int =
+    case result {
+        SyncResult.ok { count }: count,
+        SyncResult.failed { reason: _, retryable: _ }: 0,
+    };
+
+pub enum Level {
+    low,
+    high,
+}
+
+pub table Task(id: Str) {
+    level: Level,
+}
+
+pub fn ok_count(): Int {
+    let result = SyncResult.ok { count: 3 };
+    case result {
+        SyncResult.ok { count }: count,
+        SyncResult.failed { reason: _, retryable: _ }: 0,
+    }
+}
+
+pub fn failed_reason(): Str {
+    let result = SyncResult.failed { reason: "offline", retryable: true };
+    case result {
+        SyncResult.ok { count: _ }: "ok",
+        SyncResult.failed { reason, retryable }: if retryable { "retry: {reason}" } else { reason },
+    }
+}
+
+pub fn level_name(): Str {
+    let level = Level.high;
+    case level {
+        Level.low: "low",
+        Level.high: "high",
+    }
+}
+
+pub fn guarded(n: Int): Int =
+    case Level.low {
+        Level.low if n > 10: 1,
+        Level.low: 2,
+        Level.high: 3,
+    };
+
+pub fn seed() {
+    Task.insert({ id: "a", level: Level.low });
+    assert count(SyncResult.ok { count: 3 }) == 3;
+    assert count(SyncResult.failed { reason: "offline", retryable: false }) == 0;
+}

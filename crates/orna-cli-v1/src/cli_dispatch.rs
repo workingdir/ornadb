@@ -119,7 +119,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             }
             Ok(())
         }
-        Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
+        Command::Serve { port, allow_push } => cli_serve::run(&parsed.endpoint, port, allow_push),
         Command::Mount {
             ref mountpoint,
             ref selector,
@@ -348,7 +348,7 @@ fn run_mv(
     };
 
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(&modules, &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",

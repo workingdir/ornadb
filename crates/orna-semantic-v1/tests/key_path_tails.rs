@@ -1,5 +1,5 @@
 use orna_semantic_v1::{
-    DIAG_TYPE, ModuleInput, RowUnitInput, admit_row_unit, analyze,
+    DIAG_PRIMARY_KEY_FLOAT, DIAG_PRIMARY_KEY_RANGE, ModuleInput, RowUnitInput, admit_row_unit, analyze,
 };
 
 fn analysis() -> orna_semantic_v1::Analysis {
@@ -75,11 +75,11 @@ fn float_and_range_are_rejected_as_keys_while_ranges_remain_stored_data() {
     )]);
     assert!(!invalid.is_ok());
     assert!(invalid.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_PRIMARY_KEY_FLOAT
             && diagnostic.message() == "Float is not a valid primary-key type"
     }));
     assert!(invalid.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_PRIMARY_KEY_RANGE
             && diagnostic.message() == "Range<T> is not a primary-key type in version 1.0"
     }));
 }

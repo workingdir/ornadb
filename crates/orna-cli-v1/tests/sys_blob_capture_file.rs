@@ -14,17 +14,23 @@ use orna_runtime_v1::{
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{
-    decode_rov3_blob_metadata, AvailabilityState, Blob, BlobResolver, ContentIdentity,
-    ContentReference, ContextValue, Error as BlobError, Format3Context, Format3Quota, GitHash,
-    NativeOid, OwnerLifetime, Snapshot, ValueFormat,
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue,
+    Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    ValueFormat, decode_rov3_blob_metadata,
 };
 use tempfile::TempDir;
 
-#[tokio::test]
-/// Exercises capture through the runtime into a format-3 row reference: raw
+/// Exercises capture through the runtime into a format-3 row reference: the
+/// captured value is a lazy ROV-3 reference in its capture context, raw
 /// identity survives annotated OVB-2/ROV-3 conversion and metadata conversion
-/// performs no payload reads. ORNA-BLOB-004, ORNA-BLOB-007, ORNA-BLOB-009,
-/// ORNA-OGB-001.
+/// performs no payload reads. ORNA-BLOB-004, ORNA-BLOB-007, ORNA-BLOB-008,
+/// ORNA-BLOB-009, ORNA-OGB-001. Removing the source after capture and retrying
+/// after a conflicting activation commits the captured Blob, not a reread
+/// (ORNA-INGEST-001, ORNA-INGEST-004). Unauthorised, unsafe, missing,
+/// non-regular and over-quota sources fail with the portable
+/// `sys.blob.source_denied` and `sys.blob.limit` codes (ORNA-INGEST-002,
+/// ORNA-SYS-097).
+#[tokio::test]
 async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let commit = repository.head().unwrap().unwrap();
@@ -91,22 +97,36 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     )
     .unwrap_or_else(|error| panic!("authored capture annotation failed: {}", error.code()));
 
-    assert_eq!(value.format(), ValueFormat::Ovb2);
-    assert!(
-        value.context().is_none(),
-        "portable OVB-2 results carry no owner context"
-    );
+    // store-format-3 §5: "Small and large Blobs use the same reference
+    // representation", and only a full portable encoding carries every byte.
+    // ORNA-BLOB-007 forbids hydrating media to form a value, and ORNA-BLOB-008
+    // keeps a held value's exact resolution context, so a capture of any size
+    // is a ROV-3 reference bound to its capture context, not OVB-2 bytes.
+    assert_eq!(value.format(), ValueFormat::Rov3);
+    let capture_context = value
+        .context()
+        .expect("a captured Blob keeps its capture context")
+        .clone();
     let blob = value.blob().unwrap();
-    assert_eq!(blob.read_to_end().unwrap(), payload);
+    assert!(!blob.is_hydrated(), "capture holds no payload bytes");
+    assert_eq!(
+        blob.content_identity(),
+        ContentIdentity::from_bytes(payload)
+    );
+    assert_eq!(read_captured(&value), payload);
     assert_eq!(blob.media_type(), "audio/mp4");
     assert_eq!(blob.suffix(), Some("m4b"));
 
-    let round_trip = ContextValue::decode(&value.encode().unwrap(), ValueFormat::Ovb2).unwrap();
-    assert_eq!(round_trip.format(), ValueFormat::Ovb2);
-    assert!(round_trip.context().is_none());
+    let round_trip = ContextValue::decode_in_context(
+        &value.encode().unwrap(),
+        ValueFormat::Rov3,
+        &capture_context,
+    )
+    .unwrap();
+    assert_eq!(round_trip.format(), ValueFormat::Rov3);
     let round_trip_blob = round_trip.blob().unwrap();
     assert_eq!(round_trip_blob.content_identity(), blob.content_identity());
-    assert_eq!(round_trip_blob.read_to_end().unwrap(), payload);
+    assert_eq!(read_captured(&round_trip), payload);
     assert_eq!(round_trip_blob.media_type(), "audio/mp4");
     assert_eq!(round_trip_blob.suffix(), Some("m4b"));
 
@@ -281,8 +301,14 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     let committed_blob = decode_rov3_blob_metadata(&committed_value).unwrap();
     assert_eq!(committed_blob.media_type(), "audio/mp4");
     assert_eq!(committed_blob.suffix(), Some("m4b"));
-    assert_eq!(committed_blob.length(), transfer.content_identity().length());
-    assert_eq!(committed_blob.sha256(), transfer.content_identity().sha256());
+    assert_eq!(
+        committed_blob.length(),
+        transfer.content_identity().length()
+    );
+    assert_eq!(
+        committed_blob.sha256(),
+        transfer.content_identity().sha256()
+    );
     assert_eq!(
         committed_blob.descriptor_oid().map(|oid| oid.as_bytes()),
         Some(transfer.descriptor_oid().as_bytes())
@@ -433,24 +459,24 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
     std::fs::write(root.join("capture.json"), payload).unwrap();
     assert_eq!(
         capture_failure(&mut bindings, "/not/authorized", "capture.json", 64),
-        "ORNA-INGEST-001"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "../capture.json", 64),
-        "ORNA-INGEST-002"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "missing", 64),
-        "ORNA-INGEST-003"
+        "sys.blob.source_denied"
     );
     std::fs::create_dir(root.join("directory")).unwrap();
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "directory", 64),
-        "ORNA-INGEST-003"
+        "sys.blob.source_denied"
     );
     assert_eq!(
         capture_failure(&mut bindings, root.to_str().unwrap(), "capture.json", 4),
-        "ORNA-INGEST-004"
+        "sys.blob.limit"
     );
 }
 
@@ -492,24 +518,47 @@ async fn captured_files_keep_the_octet_stream_fallback_until_annotated() {
             &mut bindings,
         )
         .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
-        .blob()
-        .unwrap()
     };
 
     for name in names {
-        let blob = evaluate(&format!(
+        let value = evaluate(&format!(
             "sys.blob.capture_file({media_root}, {name:?}, 65536)"
         ));
+        let blob = value.blob().unwrap();
         assert_eq!(blob.media_type(), "application/octet-stream", "{name}");
         assert_eq!(blob.suffix(), None, "{name}");
-        assert_eq!(blob.read_to_end().unwrap(), payload);
+        assert_eq!(read_captured(&value), payload);
     }
     let declared = evaluate(&format!(
         "sys.blob.annotate(sys.blob.capture_file({media_root}, \"tone.wav\", 65536), \"audio/wav\")"
     ));
-    assert_eq!(declared.media_type(), "audio/wav");
-    assert_eq!(declared.suffix(), None);
-    assert_eq!(declared.read_to_end().unwrap(), payload);
+    let declared_blob = declared.blob().unwrap();
+    assert_eq!(declared_blob.media_type(), "audio/wav");
+    assert_eq!(declared_blob.suffix(), None);
+    assert_eq!(read_captured(&declared), payload);
+}
+
+/// Reads a captured value through its own capture context, the product read
+/// path for a held lazy Blob (ORNA-BLOB-008). The ROV-3 value names its
+/// descriptor; binding that descriptor in the same context streams verified
+/// chunks from the repository graph.
+fn read_captured(value: &ContextValue) -> Vec<u8> {
+    let blob = value.blob().unwrap();
+    let context = value
+        .context()
+        .expect("a captured Blob keeps its capture context");
+    let reference = context
+        .reference(
+            blob.content_identity(),
+            blob.descriptor_oid()
+                .expect("a captured Blob names its descriptor")
+                .clone(),
+        )
+        .unwrap();
+    Blob::from_reference(reference)
+        .unwrap()
+        .read_to_end()
+        .unwrap()
 }
 
 struct FixtureResolver {

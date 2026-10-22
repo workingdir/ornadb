@@ -1,0 +1,1 @@
+pub fn answer(): Int = if sys.InvokeTransaction.inherit == sys.InvokeTransaction.separate { 42 } else { 1 / 0 };
