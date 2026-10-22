@@ -20,7 +20,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  fetch [REMOTE] [BRANCH]",
     "  push [REMOTE] [BRANCH]        publish the branch with its continuity refs",
     "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
-    "  serve [--port PORT]",
+    "  serve [--port PORT] [--allow-push]  serve this clone on loopback; Git push needs --allow-push",
     "  mount DIR --cwd              editable workspace view; row saves are validated",
     "  edit PATH                     edit one projected row or Blob through transactional admission",
     "  edit --row PATH               edit a row through the same transactional admission path",

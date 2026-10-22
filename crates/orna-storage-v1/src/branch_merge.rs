@@ -16453,6 +16453,9 @@ impl BranchMergeTombstoneHistory {
         fragment_count: usize,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
+        if self.next_order.is_none() {
+            return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
+        }
         self.classify_submission_mode_conflict(
             order,
             BranchMergeTombstoneSubmissionMode::DepthFragments,

@@ -1,0 +1,6 @@
+pub enum Level {
+    low,
+    high,
+}
+
+pub fn bad(): Level = Level.medium;
