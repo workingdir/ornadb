@@ -559,10 +559,17 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let mut application =
-        ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
-            .with_runtime_identity(identity.database_id, identity.repository_id)
-            .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
+    let std_snapshot = project
+        .as_ref()
+        .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
+    let sys_host_context =
+        sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot);
+    let mut application = ApplicationLiveAdapter::new(
+        ApplicationAuthority::new(catalogue, Limits::default())
+            .with_sys_host_context(sys_host_context),
+    )
+    .with_runtime_identity(identity.database_id, identity.repository_id)
+    .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
     if let Some(project) = project {
         application = application.with_loaded_project(project);
     }
