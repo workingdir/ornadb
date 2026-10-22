@@ -93,6 +93,13 @@ pub use provider_linkage::{
     system_provider_linkage,
 };
 
+mod host_context;
+pub use host_context::{
+    BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
+    PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, RuntimeMode, StdSnapshotPin,
+    SysHostContext, new_runtime_id,
+};
+
 mod host_registry_model;
 pub use host_registry_model::{
     HostBindingDeclaration, HostOperationDescriptor, HostProviderRole, SystemHostOperationRegistry,
