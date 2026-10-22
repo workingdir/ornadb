@@ -53,7 +53,7 @@ fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<Str
         .expect("consumer function summary");
     (
         symbol.effects.may_fail,
-        symbol.effects.effects.iter().cloned().collect(),
+        symbol.effects.effects.iter().map(|kind| kind.as_str().to_owned()).collect(),
         diagnostics,
     )
 }

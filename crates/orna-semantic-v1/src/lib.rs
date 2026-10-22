@@ -24,9 +24,11 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+mod effects;
 mod repl;
 mod semantic_payload;
 mod system_api;
+pub use effects::EffectKind;
 pub use system_api::system_enum_constant;
 mod source_row;
 
@@ -482,19 +484,27 @@ pub enum Type {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EffectSummary {
-    pub effects: BTreeSet<String>,
+    /// Host effects of the `sys.EffectKind` vocabulary.
+    pub effects: BTreeSet<EffectKind>,
+    /// Effectful operation with no `sys.EffectKind`, such as `sys.invoke` or
+    /// an admin operation. Fails closed: it counts as effectful everywhere.
+    pub opaque: bool,
     pub may_fail: bool,
 }
 impl EffectSummary {
     fn join(&mut self, other: &Self) {
-        self.effects.extend(other.effects.iter().cloned());
+        self.effects.extend(other.effects.iter().copied());
+        self.opaque |= other.opaque;
         self.may_fail |= other.may_fail;
     }
+    /// Whether this summary performs any effect, including opaque ones.
+    pub fn is_effectful(&self) -> bool {
+        self.opaque || !self.effects.is_empty()
+    }
     fn forbidden_for_assertion(&self) -> bool {
-        !self.effects.is_empty()
+        self.is_effectful()
     }
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SymbolKind {
     Function,
@@ -1555,36 +1565,10 @@ where
 /// qualified path. These declarations are host-bound or wrap host operations,
 /// so the declared path is the classification and the body is not trusted.
 fn standard_function_effects(path: &[&str]) -> EffectSummary {
-    let effect = match path {
-        ["std", "net", ..] => "network",
-        ["std", "io", "fs", ..] => "filesystem",
-        ["std", "io", "process" | "environment", ..] => "process",
-        ["std", "concurrent", "sleep"] => "clock",
-        ["std", "random", ..] => "randomness",
-        ["std", "secret", "open"] => "secret_access",
-        _ => return EffectSummary::default(),
-    };
     EffectSummary {
-        effects: BTreeSet::from([effect.into()]),
-        may_fail: true,
-    }
-}
-
-/// Effect summary of an implementation-provided `sys` host operation, keyed by
-/// its callee path. Names follow the `sys.EffectKind` vocabulary.
-fn portable_sys_effect(path: &[&str]) -> EffectSummary {
-    let effect = match path {
-        ["sys", "io", ..] => "filesystem",
-        ["sys", "net", ..] => "network",
-        ["sys", "process", ..] => "process",
-        ["sys", "ui", ..] => "ui",
-        ["sys", "clock", ..] => "clock",
-        ["sys", "random", ..] => "randomness",
-        _ => return EffectSummary::default(),
-    };
-    EffectSummary {
-        effects: BTreeSet::from([effect.into()]),
-        may_fail: true,
+        effects: effects::host_effect(path).into_iter().collect(),
+        opaque: false,
+        may_fail: effects::host_effect(path).is_some(),
     }
 }
 
@@ -1708,7 +1692,7 @@ fn summarize_standard_function_effects(
     // classifications and the summaries of the source functions it calls. The
     // path of the function itself is not a classification, so a pure function
     // in a host-named module such as `std.net.*` stays effect-free.
-    let mut summary: BTreeMap<Vec<String>, BTreeSet<String>> = functions
+    let mut summary: BTreeMap<Vec<String>, BTreeSet<EffectKind>> = functions
         .keys()
         .map(|key| (key.clone(), BTreeSet::new()))
         .collect();
@@ -1718,7 +1702,7 @@ fn summarize_standard_function_effects(
             let mut effects = summary[key].clone();
             for path in paths {
                 match summary.get(path) {
-                    Some(known) => effects.extend(known.iter().cloned()),
+                    Some(known) => effects.extend(known.iter().copied()),
                     None => effects.extend(standard_path_effects(path)),
                 }
             }
@@ -1742,6 +1726,7 @@ fn summarize_standard_function_effects(
         let effect_summary = EffectSummary {
             may_fail: !effects.is_empty(),
             effects,
+            opaque: false,
         };
         for symbols in [&mut header.symbols, &mut header.exports] {
             if let Some(symbol) = symbols.get_mut(name) {
@@ -1753,11 +1738,9 @@ fn summarize_standard_function_effects(
 
 /// Effects of a full path by its host classification alone, used for paths
 /// that are not source-declared standard functions.
-fn standard_path_effects(path: &[String]) -> BTreeSet<String> {
+fn standard_path_effects(path: &[String]) -> BTreeSet<EffectKind> {
     let segments = path.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut effects = standard_function_effects(&segments).effects;
-    effects.extend(portable_sys_effect(&segments).effects);
-    effects
+    standard_function_effects(&segments).effects
 }
 
 fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
@@ -2047,7 +2030,8 @@ fn fixture_connector_function(
 ) -> (String, Symbol) {
     let (name, mut symbol) = fixture_function(name, named_function(parameters, result));
     symbol.effects = EffectSummary {
-        effects: BTreeSet::from(["network".into()]),
+        effects: BTreeSet::from([EffectKind::Network]),
+        opaque: false,
         may_fail: true,
     };
     (name, symbol)
@@ -5290,7 +5274,7 @@ fn check_item(
                         let inferred =
                             infer_contextual(value, &expected, scope, &row_locals, diagnostics);
                         if matches!(initializer, FieldInitializer::Computed(_))
-                            && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
+                            && (inferred.effects.is_effectful() || inferred.effects.may_fail)
                         {
                             diagnostics.push(diag(
                                 DIAG_COMPUTED_NONDETERMINISTIC,
@@ -6815,7 +6799,7 @@ fn call_may_write(callee: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>
         return true;
     }
     if let Some(symbol) = resolved_callable_symbol(callee, scope, local) {
-        return symbol.kind != SymbolKind::Function || !symbol.effects.effects.is_empty();
+        return symbol.kind != SymbolKind::Function || symbol.effects.is_effectful();
     }
     // A callable that is not represented by a resolved, effect-free function
     // summary is not proven pure. This intentionally rejects unknown indirect
@@ -9088,7 +9072,8 @@ fn infer_node(
                 Some(s) if s.kind == SymbolKind::Table => Inferred {
                     ty: Type::Relation(Box::new(s.ty.clone())),
                     effects: EffectSummary {
-                        effects: BTreeSet::from(["database read".into()]),
+                        effects: BTreeSet::from([EffectKind::TableRead]),
+                        opaque: false,
                         may_fail: true,
                     },
                 },
@@ -9378,7 +9363,8 @@ fn infer_node(
                     return Inferred {
                         ty: Type::Relation(Box::new(table.ty.clone())),
                         effects: EffectSummary {
-                            effects: BTreeSet::from(["database read".into()]),
+                            effects: BTreeSet::from([EffectKind::TableRead]),
+                            opaque: false,
                             may_fail: true,
                         },
                     };
@@ -16913,7 +16899,8 @@ fn infer_recovery_pipeline(
     let mut effects = input.effects;
     effects
         .effects
-        .extend(recovered.effects.effects.iter().cloned());
+        .extend(recovered.effects.effects.iter().copied());
+    effects.opaque |= recovered.effects.opaque;
     effects.may_fail = recovered.effects.may_fail;
     let ty = if recovered.ty == Type::Bottom {
         input.ty
@@ -17442,11 +17429,12 @@ fn infer_relation_callback(
     } else {
         infer(expression, scope, local, diagnostics)
     };
-    if callback
-        .effects
-        .effects
-        .iter()
-        .any(|effect| effect != "database read")
+    if callback.effects.opaque
+        || callback
+            .effects
+            .effects
+            .iter()
+            .any(|effect| *effect != EffectKind::TableRead)
     {
         diagnostics.push(diag(DIAG_TYPE, "relation query callback must be read-only"));
     }
@@ -17565,7 +17553,7 @@ fn infer_relation_member_call(
     );
 
     let mut effects = receiver.effects;
-    effects.effects.insert("database read".into());
+    effects.effects.insert(EffectKind::TableRead);
     effects.may_fail = true;
     Some(Inferred {
         ty: match name.as_str() {
@@ -17622,20 +17610,20 @@ fn infer_table_operation(
         ));
     }
     let (parameters, result, effect) = match name.as_str() {
-        "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
-        "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
-        "delete" => (1, Type::Unit, Some("database write")),
-        "count" => (0, Type::Int, Some("database read")),
+        "insert" | "upsert" => (1, table.ty.clone(), Some(EffectKind::TableWrite)),
+        "update" | "rekey" => (2, table.ty.clone(), Some(EffectKind::TableWrite)),
+        "delete" => (1, Type::Unit, Some(EffectKind::TableWrite)),
+        "count" => (0, Type::Int, Some(EffectKind::TableRead)),
         "first" => (
             0,
             Type::Optional(Box::new(table.ty.clone())),
-            Some("database read"),
+            Some(EffectKind::TableRead),
         ),
-        "one" => (0, table.ty.clone(), Some("database read")),
+        "one" => (0, table.ty.clone(), Some(EffectKind::TableRead)),
         "as_of" => (
             1,
             Type::Relation(Box::new(table.ty.clone())),
-            Some("database read"),
+            Some(EffectKind::TableRead),
         ),
         _ => return None,
     };
@@ -17646,7 +17634,8 @@ fn infer_table_operation(
         ));
     }
     let mut effects = EffectSummary {
-        effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
+        effects: BTreeSet::from([effect.expect("all table operations have an effect")]),
+        opaque: false,
         may_fail: true,
     };
     let row = table.table_fields().or_else(|| match &table.ty {
@@ -20263,15 +20252,18 @@ fn descriptor_call_type(
 fn descriptor_effects(effect: system_api::SystemEffect) -> EffectSummary {
     match effect {
         system_api::SystemEffect::Read => EffectSummary {
-            effects: BTreeSet::from(["database read".into()]),
+            effects: BTreeSet::from([EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         },
         system_api::SystemEffect::Invoke => EffectSummary {
-            effects: BTreeSet::from(["invoke".into()]),
+            effects: BTreeSet::new(),
+            opaque: true,
             may_fail: true,
         },
         system_api::SystemEffect::Admin => EffectSummary {
-            effects: BTreeSet::from(["admin".into()]),
+            effects: BTreeSet::new(),
+            opaque: true,
             may_fail: true,
         },
     }
@@ -24985,7 +24977,8 @@ fn infer_historical_member(
             return Some(Inferred {
                 ty: historical_table_type(snapshot, &relation),
                 effects: EffectSummary {
-                    effects: BTreeSet::from(["database read".into()]),
+                    effects: BTreeSet::from([EffectKind::TableRead]),
+                    opaque: false,
                     may_fail: true,
                 },
             });
@@ -25005,17 +24998,19 @@ fn infer_historical_member(
             return Some(Inferred {
                 ty: historical_table_type(snapshot, &full_name),
                 effects: EffectSummary {
-                    effects: BTreeSet::from(["database read".into()]),
+                    effects: BTreeSet::from([EffectKind::TableRead]),
+                    opaque: false,
                     may_fail: true,
                 },
             });
         }
         if symbol.kind == SymbolKind::Function
-            && symbol
-                .effects
-                .effects
-                .iter()
-                .any(|effect| !matches!(effect.as_str(), "database read"))
+            && (symbol.effects.opaque
+                || symbol
+                    .effects
+                    .effects
+                    .iter()
+                    .any(|effect| *effect != EffectKind::TableRead))
         {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -25034,7 +25029,7 @@ fn infer_historical_member(
             },
             effects: {
                 let mut effects = symbol.effects.clone();
-                effects.effects.insert("database read".into());
+                effects.effects.insert(EffectKind::TableRead);
                 effects.may_fail = true;
                 effects
             },
@@ -25599,12 +25594,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let Some(path) = qualified_path(callee) else {
         return EffectSummary::default();
     };
-    let effects = standard_function_effects(&path);
-    if effects.effects.is_empty() {
-        portable_sys_effect(&path)
-    } else {
-        effects
-    }
+    standard_function_effects(&path)
 }
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
     match expr {
@@ -25646,9 +25636,9 @@ fn assertion(
         diagnostics.push(diag(DIAG_ASSERTION, message));
     }
     if inferred.effects.forbidden_for_assertion() {
-        let message = if inferred.effects.effects.contains("network") {
+        let message = if inferred.effects.effects.contains(&EffectKind::Network) {
             "declaration assertion uses forbidden network effect"
-        } else if inferred.effects.effects.contains("filesystem") {
+        } else if inferred.effects.effects.contains(&EffectKind::Filesystem) {
             "declaration assertion uses forbidden filesystem effect"
         } else {
             "assertion has forbidden effects or failure"
