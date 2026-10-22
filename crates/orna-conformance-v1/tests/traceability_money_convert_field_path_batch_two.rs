@@ -5,7 +5,7 @@
 //! path-codec boundary; it is not a claim of complete language conformance.
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_FLOAT_MONEY, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
 };
 use orna_storage_v1::LoosePath;
 
@@ -74,7 +74,7 @@ fn money_003_exact_rate_algebra_admits_decimal_and_rejects_float() {
         include_str!("fixtures/semantic/traceability-money-float-energy-rate.orna"),
     );
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_FLOAT_MONEY
+        diagnostic.code() == DIAG_MONEY_BINARY_FLOAT
             && diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
     }));
     passed("ORNA-MONEY-003", "decimal-rate-typecheck-and-float-rejection");
