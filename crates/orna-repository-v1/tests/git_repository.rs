@@ -86,7 +86,7 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -122,7 +122,7 @@ fn repository_with_v1_module_fixture() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(
         temp.path(),
@@ -448,7 +448,7 @@ fn managed_staging_preserves_unrelated_index_and_worktree_changes() {
     let repo = Repository::discover(root.path()).unwrap();
     fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
     git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join(".orna/format.orna"), "format 2\n").unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n").unwrap();
     fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
     let before = repo.index_generation().unwrap();
     let after = repo
@@ -492,7 +492,7 @@ fn managed_unstage_and_coordination_lock_preserve_unrelated_staging() {
     );
     assert_eq!(
         git(root.path(), &["show", ":.orna/format.orna"]),
-        "format 1"
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}"
     );
 
     repo.runtime_paths().ensure_exists().unwrap();
@@ -2097,7 +2097,7 @@ fn ordinary_git_add_interleavings_make_stage_and_unstage_stale() {
     );
     assert_eq!(
         git(root.path(), &["show", ":.orna/format.orna"]),
-        "format 1"
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}"
     );
 
     let expected_unstage = repo.index_generation().unwrap();
@@ -2151,7 +2151,7 @@ fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
     git(root.path(), &["init", "-b", "main"]);
 
     fs::create_dir_all(root.path().join(".orna")).unwrap();
-    fs::write(root.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     fs::write(root.path().join("ordinary.txt"), "untracked\n").unwrap();
     git(root.path(), &["add", ".orna/format.orna"]);
 
@@ -4435,8 +4435,8 @@ fn hex_digest(digest: &[u8]) -> String {
 #[test]
 fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
     for format in [
-        include_str!("fixtures/format-context/format-1.orna"),
-        include_str!("fixtures/format-context/format-2.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
     ] {
         let root = repository_with_legacy_format(format);
         let dependency_source = TempDir::new().unwrap();
@@ -4618,7 +4618,7 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
 
 #[test]
 fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -4720,7 +4720,7 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
 
 #[test]
 fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -4817,7 +4817,7 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
 
 #[test]
 fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -4868,8 +4868,8 @@ fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
 #[test]
 fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinate() {
     for format in [
-        include_str!("fixtures/format-context/format-1.orna"),
-        include_str!("fixtures/format-context/format-2.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
     ] {
         let root = repository_with_legacy_format(format);
         let repo = Repository::discover(root.path()).unwrap();
@@ -5046,7 +5046,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
 
 #[test]
 fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_resetting_it() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -5262,7 +5262,7 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
     // its consumer/checkpoint identity intact. The journal crosses the failure
     // at a durable stage, and recovery completes the migration from the record
     // instead of re-keying the streams it already carried.
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -5403,7 +5403,7 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
 
 #[test]
 fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edits() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -5568,8 +5568,8 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
 #[test]
 fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates() {
     for (format, format_number) in [
-        (include_str!("fixtures/format-context/format-1.orna"), 1u8),
-        (include_str!("fixtures/format-context/format-2.orna"), 2u8),
+        (include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"), 1u8),
+        (include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"), 2u8),
     ] {
         let source = repository_with_legacy_format(format);
         let module_source = TempDir::new().unwrap();
