@@ -224,7 +224,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     repository
         .require_configured_commit_identity()
         .map_err(|error| failure(&error, "Git identity could not be checked"))?;
-    let admitted = stage_store(&repository)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -296,6 +295,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 )
             })?;
     }
+    let admitted = stage_store(&repository)?;
     let capture = runtime.block_on(state.capture()).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300",
