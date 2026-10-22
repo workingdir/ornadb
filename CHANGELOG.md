@@ -45,6 +45,15 @@ been published.
   sealed system relation rather than `.orna/object-identities.cbor`, which is
   read only from older commits. `orna publish` refuses rows whose table has no
   relation in the committed store.
+- Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
+- A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
+- A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
 - `std.io.fs` operations resolve every path from the root directory handle held
   since the host allowed it, one component at a time without following
   symbolic links, and act on the final entry through its open parent directory.
@@ -309,6 +318,34 @@ been published.
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
 
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
+
+- `orna serve` ends live sessions in order. `DELETE /orna/session/<id>` cancels
+  and joins the session's application work and closes its socket before it
+  answers 204, including while the socket is attached; it used to answer 503
+  then, and 400 once the session had evaluated anything. A sweep ends sessions
+  whose lease has elapsed in the same way.
+
+- `orna serve` serves at most 64 connections at once. The accept loop answers
+  any further connection with 503 straight away, without reading its request.
+
+- `orna serve` bounds each HTTP request body and each response with one
+  deadline for the whole transfer, 15 s plus the time it takes at 64 KiB/s,
+  instead of bounding each blocked read or write. A peer that sends or reads a
+  few bytes at a time can no longer keep a connection busy.
+
+- Live session HTTP errors use the statuses `30-protocol.md` assigns: a
+  WebSocket upgrade from another origin gets 403 instead of 410, and a DELETE
+  carrying a token other than the live session's current one gets 401 instead
+  of 410. A child-free DELETE that would first have to drain application work
+  gets 503 instead of 400. `Content-Type: application/json; charset=utf-8` is
+  accepted.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit

@@ -1592,17 +1592,6 @@ mod tests {
         (temp, repository)
     }
 
-    /// Coordinator fixtures publish through the format-probing path, which
-    /// requires tracked format metadata; a legacy format 2 record declares it.
-    fn legacy_coordinator_repository() -> (TempDir, Repository) {
-        let (temp, repository) = repository();
-        fs::create_dir(temp.path().join(".orna")).unwrap();
-        fs::write(temp.path().join(".orna/format.orna"), "format 2\n").unwrap();
-        git(temp.path(), &["add", ".orna/format.orna"]);
-        git(temp.path(), &["commit", "-m", "legacy format metadata"]);
-        (temp, repository)
-    }
-
     fn decode_base64(value: &str) -> Vec<u8> {
         fn digit(byte: u8) -> u8 {
             match byte {
