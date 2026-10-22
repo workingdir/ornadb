@@ -256,6 +256,11 @@ fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnos
             "annotate source exceeds the OVB-2 format maximum",
             "choose a source smaller than 2^63 bytes",
         ),
+        CaptureFileError::BoundOutOfRange => Diagnostic::usage(
+            "E1002",
+            "annotate source byte bound is out of range",
+            "choose a non-negative byte bound within the capture limit",
+        ),
         CaptureFileError::InvalidPath => Diagnostic::target_with_detail(
             "E2001",
             "annotate source is not a regular file",
