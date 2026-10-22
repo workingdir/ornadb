@@ -7597,7 +7597,7 @@ impl Context<'_, '_> {
     /// role, so a source-level `sys.blob.*` call cannot reach native code the
     /// registry has not declared.
 #[cfg(feature = "system-host-bindings")]
-    fn call_blob_annotation(
+    fn call_blob_operation(
         &mut self,
         operation: &str,
         arguments: &[orna_syntax_v1::Argument],
@@ -7605,7 +7605,7 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if !crate::sys_bindings::is_blob_annotation_operation(operation) {
+        if !crate::sys_bindings::is_blob_call_operation(operation) {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let table = orna_sys_v1::system_dispatch_table();
@@ -7655,13 +7655,44 @@ impl Context<'_, '_> {
         }
 
         let mut supplied_values = Vec::with_capacity(parameters.len());
+        let mut bounds = Vec::new();
         for (position, parameter) in parameters.iter().enumerate() {
             let value = match supplied[position].take() {
                 Some(value) => value,
                 None if parameter.default.as_deref() == Some("null") => Value::Null,
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
-            supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+            if matches!(&parameter.ty, orna_sys_v1::AbiType::Named(name) if name == "Int") {
+                let Value::Int(bound) = value else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                bounds.push(bound);
+            } else {
+                supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+            }
+        }
+        if crate::sys_bindings::is_blob_read_operation(operation) {
+            let source = supplied_values
+                .first()
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+            return match crate::sys_bindings::dispatch_blob_read(operation, source, &bounds)? {
+                crate::sys_bindings::BlobReadValue::Int(length) => {
+                    Ok(Value::Int(BigInt::from(length)))
+                }
+                crate::sys_bindings::BlobReadValue::Digest(digest) => {
+                    Ok(Value::Blob(digest.to_vec()))
+                }
+                crate::sys_bindings::BlobReadValue::Blob(value) => {
+                    Value::from_context_value(&value, self, 0)
+                }
+                crate::sys_bindings::BlobReadValue::Bytes(bytes) => Ok(Value::List(List::from(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Int(BigInt::from(byte)))
+                        .collect::<Vec<_>>(),
+                ))),
+                crate::sys_bindings::BlobReadValue::Unit => Ok(Value::Unit),
+            };
         }
         let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
         Value::from_context_value(&annotated, self, 0)
@@ -7962,7 +7993,7 @@ impl Context<'_, '_> {
         // callable, and a resolved non-Blob function never falls through.
         #[cfg(feature = "system-host-bindings")]
         let declared = match resolved_function.as_deref() {
-            Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
+            Some(name) if crate::sys_bindings::is_blob_call_operation(name) => {
                 Some(name.to_owned())
             }
             Some(_) => None,
@@ -7970,7 +8001,7 @@ impl Context<'_, '_> {
                 .as_deref()
                 .filter(|name| {
                     !scope.0.contains_key("sys")
-                        && crate::sys_bindings::is_blob_annotation_operation(name)
+                        && crate::sys_bindings::is_blob_call_operation(name)
                 })
                 .map(str::to_owned),
         }
@@ -7981,7 +8012,7 @@ impl Context<'_, '_> {
         });
         #[cfg(feature = "system-host-bindings")]
         if let Some(operation) = declared {
-            return self.call_blob_annotation(&operation, arguments, input, scope, depth);
+            return self.call_blob_operation(&operation, arguments, input, scope, depth);
         }
         #[cfg(feature = "system-host-bindings")]
         if let Some(operation_name) = resolved_function.as_deref()
