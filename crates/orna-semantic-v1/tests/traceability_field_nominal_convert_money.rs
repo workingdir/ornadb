@@ -4,7 +4,9 @@
 //! not claim full compiler or Orna-engine execution.
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_FLOAT_MONEY, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_COMPUTED_INSERT, DIAG_COMPUTED_NONDETERMINISTIC, DIAG_CURRENCY_MISMATCH,
+    DIAG_MONEY_BINARY_FLOAT, DIAG_MONEY_FROM_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze,
+    analyze_with_catalogue,
 };
 
 fn has_type_diagnostic(result: &orna_semantic_v1::Analysis) -> bool {
@@ -24,7 +26,14 @@ fn computed_field_cannot_be_supplied_to_insert() {
         include_str!("fixtures/traceability-field-computed-insert.orna"),
     )]);
 
-    assert!(has_type_diagnostic(&result), "{:?}", result.diagnostics);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_COMPUTED_INSERT),
+        "{:?}",
+        result.diagnostics
+    );
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message().contains("computed field")
     }));
@@ -44,7 +53,7 @@ fn computed_field_rejects_io_effects() {
     );
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_COMPUTED_NONDETERMINISTIC
             && diagnostic.message() == "computed field must be deterministic and row-local"
     }));
 }
@@ -139,7 +148,7 @@ fn money_construction_keeps_decimal_exactness() {
         include_str!("fixtures/traceability-money-float-constructor.orna"),
     )]);
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_MONEY_FROM_FLOAT
             && diagnostic.message()
                 == "Money cannot be constructed from an inexact Float without explicit rounding"
     }));
@@ -156,7 +165,7 @@ fn different_currency_amounts_require_explicit_conversion() {
     )]);
 
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_CURRENCY_MISMATCH
             && diagnostic.message() == "cannot add different currencies without conversion"
     }));
 }
@@ -177,7 +186,7 @@ fn exact_energy_rate_algebra_excludes_binary_float() {
         include_str!("fixtures/traceability-money-float-energy-rate.orna"),
     )]);
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_FLOAT_MONEY
+        diagnostic.code() == DIAG_MONEY_BINARY_FLOAT
             && diagnostic.message()
                 == "binary Float cannot enter an exact Money calculation implicitly"
     }));
