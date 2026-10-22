@@ -17790,7 +17790,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &failure).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_version {
+            if record.version != expected_version
+                || record.identity.0.successor != failure.0.successor
+            {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
             if record.status != FailureStatus::Failed {
@@ -17916,7 +17918,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &identity).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_failure_version || record.status != FailureStatus::Failed
+            if record.version != expected_failure_version
+                || record.status != FailureStatus::Failed
+                || record.identity.0.successor != lease.delivery.successor
             {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
@@ -39780,6 +39784,65 @@ mod tests {
             CommitResult::CheckpointAdvanced { ref checkpoint }
                 if checkpoint.committed == Some(revised.successor)
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_retry_rejects_a_successor_the_failure_did_not_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-retry-successor", "runtime-recorded-next");
+        let forged = stream_delivery("runtime-retry-successor", "runtime-forged-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: FailureIdentity(forged),
+                    expected_version: failed.version,
+                    expected,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.version, failed.version);
+        assert_eq!(stored.status, FailureStatus::Failed);
     }
 
     #[tokio::test]
