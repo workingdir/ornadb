@@ -520,11 +520,27 @@ impl ApplicationAuthority {
             .publication_metadata_rows()
             .await
             .map_err(ApplicationError::SourceEffectFailed)?;
+        // The activation can name its admitted tables and the system relations
+        // it serves from publication metadata, at its pinned CWD snapshot.
+        let explain_catalogue = orna_evaluator_v1::ActivationExplainCatalogue::new(
+            context.capture().snapshot(),
+            tables.keys().map(String::as_str).chain(
+                publication_rows
+                    .is_some()
+                    .then_some(["sys.Storage", "sys.MaintenanceJob"])
+                    .into_iter()
+                    .flatten(),
+            ),
+        )
+        .map_err(|_| {
+            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
+        })?;
         let mut handler = AsyncSourceMutationEffectHandler::new_with_table_object_ids(
             tables,
             publication_rows,
             table_object_ids,
         )?;
+        handler.explain_catalogue = Some(explain_catalogue);
         handler.mutations = handler
             .mutations
             .with_insert_defaults(
@@ -1059,6 +1075,8 @@ pub struct SourceMutationEffectHandler {
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
     sys_host: Option<SysHostContext>,
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1080,6 +1098,7 @@ impl SourceMutationEffectHandler {
             source_row_schemas: Vec::new(),
             protected_field_pins: Vec::new(),
             sys_host: None,
+            explain_catalogue: None,
         }
     }
 
@@ -1787,6 +1806,8 @@ struct AsyncSourceMutationEffectHandler {
     mutations: SourceMutationEffectHandler,
     effects: Vec<ApplicationEffectRequest>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
 
 impl AsyncSourceMutationEffectHandler {
@@ -1798,6 +1819,7 @@ impl AsyncSourceMutationEffectHandler {
             mutations: SourceMutationEffectHandler::new(tables),
             effects: Vec::new(),
             publication_rows,
+            explain_catalogue: None,
         }
     }
 
@@ -1816,6 +1838,7 @@ impl AsyncSourceMutationEffectHandler {
             )?,
             effects: Vec::new(),
             publication_rows,
+            explain_catalogue: None,
         })
     }
 
@@ -1963,6 +1986,12 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             rows: vec![row.clone()],
             next: None,
         }))
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        self.explain_catalogue
+            .as_ref()
+            .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
     }
 }
 
@@ -2340,6 +2369,12 @@ impl EffectHandler for SourceMutationEffectHandler {
             rows: vec![row.clone()],
             next: None,
         }))
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        self.explain_catalogue
+            .as_ref()
+            .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
     }
 }
 
@@ -3007,6 +3042,19 @@ impl LiveApplication for ApplicationLiveAdapter {
                     }
                 };
                 let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                // The REPL serves `sys.explain` from the activation's pinned CWD
+                // snapshot (ORNA-SYS-008), as the module activation does. A pure
+                // evaluation has no activation context, so no catalogue is pinned
+                // and explain reports the coordinate unavailable.
+                if let Some(context) = context {
+                    handler.explain_catalogue = Some(
+                        orna_evaluator_v1::ActivationExplainCatalogue::new(
+                            context.capture().snapshot(),
+                            handler.tables.keys().map(String::as_str),
+                        )
+                        .map_err(|_| LiveError::ApplicationRejected)?,
+                    );
+                }
                 let (value, successor) =
                     match repl.evaluate_staged_with_effects(staged, &mut handler) {
                         Ok(result) => result,

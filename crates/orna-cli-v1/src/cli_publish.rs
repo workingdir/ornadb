@@ -14,9 +14,12 @@
 //! The publication commit is a real Git commit in the backing repository, so
 //! `orna history`, `orna export` and `orna copy` all see it through the same
 //! object store as any other commit.
+//!
+//! Only format 3 has a row writer. A format-1/2 `HEAD` stays readable but is
+//! refused before recovery, runtime access or any freeze (ORNA-UPGRADE-003).
 
-use orna_runtime_v1::{PublicationTableIdentity, RuntimeState, TableMutation};
-use orna_storage_v1::{CompactOvbProfile, LoosePath, RuntimePublicationCoordinator};
+use orna_runtime_v1::{RuntimeState, TableMutation};
+use orna_storage_v1::RuntimePublicationCoordinator;
 use orna_repository_v1::publication_crash_barrier;
 
 use super::*;
@@ -66,28 +69,39 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     Ok(message.unwrap_or_else(|| DEFAULT_MESSAGE.to_owned()))
 }
 
-/// Admits a source-owned path already projected from the exact committed schema.
-fn row_path(
-    projection: &orna_project_v1::CommittedLooseRowProjection,
-) -> Result<LoosePath, Diagnostic> {
-    LoosePath::from_encoded_key(projection.table_root(), projection.key_path_components()).map_err(
-        |error| {
-            publish_error(
-                "source row could not be admitted for publication",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        },
-    )
+/// Refuses a format-1/2 `HEAD` before recovery, runtime access or any freeze,
+/// so a refused publication writes nothing: legacy snapshots keep their
+/// versioned readers but have no row writer (ORNA-UPGRADE-003). Unreadable
+/// metadata is not decided here; the format-3 validation of the frozen range
+/// reports it. When `orna migrate copy` already prepared this worktree, the
+/// refusal names that candidate instead of the upgrade work item.
+fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(), Diagnostic> {
+    let head = repository.head().map_err(|error| {
+        publish_error("committed snapshot could not be read", format!("{error:?}"))
+    })?;
+    let Some(head) = head else {
+        return Ok(());
+    };
+    let Err(orna_storage_v1::Error::LegacyReadOnly { format }) =
+        orna_storage_v1::writable_snapshot_context(repository, &head)
+    else {
+        return Ok(());
+    };
+    Err(legacy_read_only_refusal(
+        "publication target is a read-only legacy snapshot",
+        format,
+        repository.holds_prepared_migration(),
+    ))
 }
 
 /// Validates format-3 mutations against the pinned graph and committed source
-/// binding, while resolving legacy row paths only for legacy repository formats.
-/// Format-3 keys remain independent of host filename rules (ORNA-KEY-004).
+/// binding. Format-3 keys remain independent of host filename rules
+/// (ORNA-KEY-004).
 fn validate_candidate_source_rows(
     repository: &orna_repository_v1::Repository,
     head: &orna_repository_v1::GitCommitRef,
     mutations: &[TableMutation],
-) -> Result<BTreeMap<[u8; 16], LoosePath>, Diagnostic> {
+) -> Result<(), Diagnostic> {
     let loader = orna_project_v1::ProjectLoader::default();
     let format = repository
         .open_pinned_format_context(head.as_str())
@@ -97,182 +111,162 @@ fn validate_candidate_source_rows(
                 format!("{error:?}; the pending range was preserved"),
             )
         })?;
-    let mut row_paths = BTreeMap::new();
-    let is_format3 = format.repository_format() == orna_repository_v1::RepositoryFormat::Format3;
-    let mut format3_mutation_ids = is_format3.then(std::collections::BTreeSet::new);
+    let repository_format = format.repository_format();
+    if repository_format != orna_repository_v1::RepositoryFormat::Format3 {
+        return Err(describe_storage_failure(
+            "publication target is a read-only legacy snapshot",
+            &orna_storage_v1::Error::LegacyReadOnly {
+                format: repository_format.number(),
+            },
+        ));
+    }
+    let mut mutation_ids = std::collections::BTreeSet::new();
     for mutation in mutations {
-        if let Some(mutation_ids) = format3_mutation_ids.as_mut()
-            && !mutation_ids.insert(mutation.id())
-        {
+        if !mutation_ids.insert(mutation.id()) {
             return Err(publish_error(
                 "source rows have duplicate mutation identities",
                 "the frozen range cannot be mapped unambiguously to committed source keys; the pending range was preserved",
             ));
         }
-        let path = if !is_format3 {
-            let projection = loader
-                .resolve_committed_loose_row_projection(repository, head, mutation)
-                .map_err(|error| {
-                    publish_error(
-                        "source row path could not be resolved",
-                        format!("{error:?}; the pending range was preserved"),
-                    )
-                })?;
-            row_path(&projection)?
-        } else {
-            let table_id = mutation.table_object_id().ok_or_else(|| {
+        let table_id = mutation.table_object_id().ok_or_else(|| {
+            publish_error(
+                "source row could not be admitted for publication",
+                "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
+            )
+        })?;
+        let schema = loader
+            .resolve_committed_source_table_schema(repository, head, table_id)
+            .map_err(|error| {
                 publish_error(
-                    "source row could not be admitted for publication",
-                    "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
-                )
-            })?;
-            let schema = loader
-                .resolve_committed_source_table_schema(repository, head, table_id)
-                .map_err(|error| {
-                    publish_error(
-                        "source row schema could not be resolved",
-                        format!("{error:?}; the pending range was preserved"),
-                    )
-                })?;
-            let binding = schema.binding();
-            let snapshot_id = format.snapshot_pin().snapshot_id();
-            let database_id = format.require_database_id().map_err(|error| {
-                publish_error(
-                    "format-3 database identity could not be verified",
+                    "source row schema could not be resolved",
                     format!("{error:?}; the pending range was preserved"),
                 )
             })?;
-            if schema.declaration_name() != mutation.table()
-                || schema.table_object_id() != table_id
-                || schema.source_commit() != head
-                || schema.snapshot_id() != &snapshot_id
-                || schema.database_id() != database_id.as_bytes()
-                || binding.database_id() != database_id
-                || binding.snapshot_id() != &snapshot_id
-                || *binding.table_object_id() != table_id.bytes()
-                || binding.declaration_name() != Some(schema.declaration_name())
-                || binding.descriptor() != schema.descriptor()
-            {
-                return Err(publish_error(
-                    "source row table binding does not match its committed format-3 context",
-                    "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
-                ));
-            }
-            let value_context = format.open_value_context(table_id.bytes()).map_err(|error| {
-                publish_error(
-                    "format-3 row value context could not be opened",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            let projected = orna_storage_v1::project_runtime_mutation_for_descriptor(
+        let binding = schema.binding();
+        let snapshot_id = format.snapshot_pin().snapshot_id();
+        let database_id = format.require_database_id().map_err(|error| {
+            publish_error(
+                "format-3 database identity could not be verified",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        if schema.declaration_name() != mutation.table()
+            || schema.table_object_id() != table_id
+            || schema.source_commit() != head
+            || schema.snapshot_id() != &snapshot_id
+            || schema.database_id() != database_id.as_bytes()
+            || binding.database_id() != database_id
+            || binding.snapshot_id() != &snapshot_id
+            || *binding.table_object_id() != table_id.bytes()
+            || binding.declaration_name() != Some(schema.declaration_name())
+            || binding.descriptor() != schema.descriptor()
+        {
+            return Err(publish_error(
+                "source row table binding does not match its committed format-3 context",
+                "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
+            ));
+        }
+        let value_context = format.open_value_context(table_id.bytes()).map_err(|error| {
+            publish_error(
+                "format-3 row value context could not be opened",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let projected = orna_storage_v1::project_runtime_mutation_for_descriptor(
+            binding.descriptor(),
+            table_id.bytes(),
+            mutation,
+            &value_context,
+        )
+        .map_err(|error| {
+            let title = if orna_storage_v1::canonicalize_runtime_key(
                 binding.descriptor(),
                 table_id.bytes(),
-                mutation,
-                &value_context,
+                mutation.key(),
             )
-            .map_err(|error| {
-                let title = if orna_storage_v1::canonicalize_runtime_key(
-                    binding.descriptor(),
-                    table_id.bytes(),
-                    mutation.key(),
-                )
-                .is_err()
-                {
-                    "source row key is not canonical"
-                } else {
-                    "source row does not match its committed schema"
-                };
-                publish_error(
-                    title,
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            let key_bytes = projected.key;
-            orna_repository_v1::TypedKey::decode_canonical(&key_bytes)
-                .map_err(|error| {
-                    publish_error(
-                        "source row key is not canonical",
-                        format!("{error:?}; the pending range was preserved"),
-                    )
-                })?;
-            match projected.value.as_deref() {
-                Some(fields) => {
+            .is_err()
+            {
+                "source row key is not canonical"
+            } else {
+                "source row does not match its committed schema"
+            };
+            publish_error(title, format!("{error:?}; the pending range was preserved"))
+        })?;
+        let key_bytes = projected.key;
+        orna_repository_v1::TypedKey::decode_canonical(&key_bytes).map_err(|error| {
+            publish_error(
+                "source row key is not canonical",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        match projected.value.as_deref() {
+            Some(fields) => {
+                binding
+                    .descriptor()
+                    .validate_stored_row(table_id.bytes(), &key_bytes, fields)
+                    .map_err(|error| {
+                        publish_error(
+                            "source row does not match its committed schema",
+                            format!("{error:?}; the pending range was preserved"),
+                        )
+                    })?;
+                if let Some(new_key_bytes) = projected.rekey_to.as_deref() {
                     binding
                         .descriptor()
-                        .validate_stored_row(table_id.bytes(), &key_bytes, fields)
+                        .validate_stored_row(table_id.bytes(), new_key_bytes, fields)
                         .map_err(|error| {
                             publish_error(
-                                "source row does not match its committed schema",
-                                format!("{error:?}; the pending range was preserved"),
-                            )
-                        })?;
-                    if let Some(new_key_bytes) = projected.rekey_to.as_deref() {
-                        binding
-                            .descriptor()
-                            .validate_stored_row(table_id.bytes(), new_key_bytes, fields)
-                            .map_err(|error| {
-                                publish_error(
-                                    "source row rekey does not match its committed schema",
-                                    format!("{error:?}; the pending range was preserved"),
-                                )
-                            })?;
-                    }
-                }
-                None => {
-                    binding
-                        .descriptor()
-                        .validate_stored_key(table_id.bytes(), &key_bytes)
-                        .map_err(|error| {
-                            publish_error(
-                                "source row key does not match its committed schema",
+                                "source row rekey does not match its committed schema",
                                 format!("{error:?}; the pending range was preserved"),
                             )
                         })?;
                 }
             }
-            let row_map = format.load_row_map(table_id.bytes()).map_err(|error| {
-                publish_error(
-                    "format-3 row map could not be loaded",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            let graph = format.open_native_graph(&row_map).map_err(|error| {
-                publish_error(
-                    "format-3 native graph could not be opened",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            let scope = graph.open_read_scope().map_err(|error| {
-                publish_error(
-                    "format-3 native graph read scope could not be opened",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            let committed_descriptor = graph.read_schema_descriptor(&scope).map_err(|error| {
-                publish_error(
-                    "format-3 committed table binding could not be read",
-                    format!("{error:?}; the pending range was preserved"),
-                )
-            })?;
-            if &committed_descriptor != binding.descriptor() {
-                return Err(publish_error(
-                    "source row table binding does not match its committed format-3 context",
-                    "the native graph descriptor conflicts with the source binding; the pending range was preserved",
-                ));
+            None => {
+                binding
+                    .descriptor()
+                    .validate_stored_key(table_id.bytes(), &key_bytes)
+                    .map_err(|error| {
+                        publish_error(
+                            "source row key does not match its committed schema",
+                            format!("{error:?}; the pending range was preserved"),
+                        )
+                    })?;
             }
-
-            continue;
-        };
-        if row_paths.insert(mutation.id(), path).is_some() {
+        }
+        let row_map = format.load_row_map(table_id.bytes()).map_err(|error| {
+            publish_error(
+                "format-3 row map could not be loaded",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let graph = format.open_native_graph(&row_map).map_err(|error| {
+            publish_error(
+                "format-3 native graph could not be opened",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let scope = graph.open_read_scope().map_err(|error| {
+            publish_error(
+                "format-3 native graph read scope could not be opened",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        let committed_descriptor = graph.read_schema_descriptor(&scope).map_err(|error| {
+            publish_error(
+                "format-3 committed table binding could not be read",
+                format!("{error:?}; the pending range was preserved"),
+            )
+        })?;
+        if &committed_descriptor != binding.descriptor() {
             return Err(publish_error(
-                "source rows have duplicate mutation identities",
-                "the frozen range cannot be mapped unambiguously to committed source keys; the pending range was preserved",
+                "source row table binding does not match its committed format-3 context",
+                "the native graph descriptor conflicts with the source binding; the pending range was preserved",
             ));
         }
     }
-    Ok(row_paths)
+    Ok(())
 }
-
 
 /// Names an already-committed snapshot as the publication result for a frozen
 /// range with no visible change. The commit is the current `HEAD`, so the
@@ -288,219 +282,6 @@ fn publication_commit_id(
     })
 }
 
-async fn recover_pending_publication(
-    repository: &orna_repository_v1::Repository,
-    state: &RuntimeState,
-    journal: Option<&orna_repository_v1::PublicationJournal>,
-) -> Result<(), Diagnostic> {
-    if !journal.is_some_and(|journal| journal.compact_manifest().is_some()) {
-        RuntimePublicationCoordinator::recover(repository, state)
-            .await
-            .map_err(|error| {
-                describe_storage_failure("pending publication could not be recovered", &error)
-            })?;
-        return Ok(());
-    }
-
-    let pending = repository
-        .recover_compact_repository_boundary()
-        .map_err(|error| {
-            publish_error(
-                "compact publication recovery boundary could not be established",
-                format!("{error:?}; journal and pending tail were preserved"),
-            )
-        })?;
-    let Some(pending) = pending else {
-        return Ok(());
-    };
-
-    if let Some(receipt) = state
-        .persisted_compact_publication_receipt(&pending)
-        .await
-        .map_err(|error| {
-            publish_error(
-                "persisted compact publication receipt could not be verified",
-                format!("{error:?}; journal and pending tail were preserved"),
-            )
-        })?
-    {
-        repository
-            .finish_compact_with_receipt(&receipt)
-            .map_err(|error| {
-                publish_error(
-                    "compact publication could not be finalized",
-                    format!("{error:?}; the validated receipt and journal were retained"),
-                )
-            })?;
-        return Ok(());
-    }
-
-    let journal = repository.read_publication_journal().map_err(|error| {
-        publish_error(
-            "compact publication journal could not be refreshed",
-            format!("{error:?}; journal and pending tail were preserved"),
-        )
-    })?;
-    let Some(journal) = journal else {
-        return Err(publish_error(
-            "compact publication journal disappeared during recovery",
-            "no new publication range was selected",
-        ));
-    };
-    let witness = journal.compact_manifest().ok_or_else(|| {
-        publish_error(
-            "compact publication source could not be verified",
-            "the compact journal witness is missing; the journal and pending tail were preserved",
-        )
-    })?;
-    let freeze = state
-        .publication_freeze(pending.runtime_intent_id())
-        .await
-        .map_err(|error| {
-            publish_error(
-                "compact publication freeze could not be recovered",
-                format!("{error:?}; journal and pending tail were preserved"),
-            )
-        })?;
-    if freeze.checkpoint.digest != pending.cleanup_watermark() {
-        return Err(publish_error(
-            "compact publication freeze does not match its journal",
-            "the journal and pending tail were preserved",
-        ));
-    }
-    let mutations = state
-        .pending_table_mutations_through(&freeze)
-        .await
-        .map_err(|error| {
-            publish_error(
-                "compact publication table identity could not be recovered",
-                format!("{error:?}; journal and pending tail were preserved"),
-            )
-        })?;
-    let table_id = *witness.table().as_bytes();
-    let mut table_name: Option<String> = None;
-    for mutation in &mutations {
-        if !mutation
-            .table_object_id()
-            .is_some_and(|object_id| object_id.bytes() == table_id)
-        {
-            return Err(publish_error(
-                "compact publication table identity does not match its journal",
-                "persisted typed mutation identity is missing or conflicts with the source-bound manifest; the journal and pending tail were preserved",
-            ));
-        }
-        match table_name.as_deref() {
-            Some(existing) if existing != mutation.table() => {
-                return Err(publish_error(
-                    "compact publication spans multiple tables",
-                    "the source-bound identity is ambiguous; the journal and pending tail were preserved",
-                ));
-            }
-            Some(_) => {}
-            None => table_name = Some(mutation.table().to_owned()),
-        }
-    }
-    let Some(table_name) = table_name else {
-        return Err(publish_error(
-            "compact publication has no frozen table mutations",
-            "no source-bound table identity can be established; the journal and pending tail were preserved",
-        ));
-    };
-    let manifest = repository
-        .read_compact_manifest(pending.commit(), witness.table())
-        .map_err(|error| {
-            publish_error(
-                "compact publication manifest could not be verified",
-                format!("{error:?}; journal and pending tail were preserved"),
-            )
-        })?
-        .ok_or_else(|| {
-            publish_error(
-                "compact publication manifest is missing",
-                "the journal and pending tail were preserved",
-            )
-        })?;
-    let schema_fingerprint = manifest.schema();
-    let descriptor = orna_storage_v1::trusted_compact_schema_descriptor(
-        repository,
-        journal.old_head(),
-        witness.table(),
-        schema_fingerprint,
-        &journal,
-        pending.commit(),
-    )
-    .map_err(|error| {
-        publish_error(
-            "compact publication source schema is not trusted",
-            format!("{error:?}; journal and pending tail were preserved"),
-        )
-    })?;
-    let profile = CompactOvbProfile::new(descriptor.clone()).map_err(|error| {
-        publish_error(
-            "compact publication source schema is invalid",
-            format!("{error:?}; journal and pending tail were preserved"),
-        )
-    })?;
-    if profile.table_id() != table_id || profile.schema_fingerprint() != schema_fingerprint {
-        return Err(publish_error(
-            "compact publication source schema does not match its journal",
-            "the journal and pending tail were preserved",
-        ));
-    }
-    for mutation in &mutations {
-        if let Some(row) = mutation.value() {
-            let rekey_to = mutation.rekey_to();
-            if rekey_to.is_some() {
-                descriptor
-                    .validate_stored_key(table_id, mutation.key())
-                    .map_err(|error| {
-                        publish_error(
-                            "compact publication rekey is invalid for its committed schema",
-                            format!("{error:?}; journal and pending tail were preserved"),
-                        )
-                    })?;
-            }
-            profile
-                .validate_complete_row(
-                    &descriptor,
-                    rekey_to.unwrap_or_else(|| mutation.key()),
-                    row,
-                )
-                .map_err(|error| {
-                    let message = if rekey_to.is_some() {
-                        "compact publication rekey is invalid for its committed schema"
-                    } else {
-                        "compact publication row is invalid for its committed schema"
-                    };
-                    publish_error(
-                        message,
-                        format!("{error:?}; journal and pending tail were preserved"),
-                    )
-                })?;
-        }
-    }
-    let table_identity = PublicationTableIdentity {
-        table: table_name,
-        table_id,
-        schema_fingerprint,
-        candidate_generation: witness.generation(),
-    };
-    RuntimePublicationCoordinator::recover_compact_validated(
-        repository,
-        state,
-        &profile,
-        &table_identity,
-    )
-    .await
-    .map_err(|error| {
-        publish_error(
-            "source-bound compact publication recovery failed",
-            format!("{error:?}; retry `orna publish` before selecting another range"),
-        )
-    })?;
-    Ok(())
-}
-
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;
@@ -511,6 +292,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             "run the command inside a Git worktree or provide a local project path",
         )
     })?;
+    refuse_legacy_head(&repository)?;
     let journal = repository.read_publication_journal().map_err(|error| {
         publish_error(
             "publication recovery journal could not be read",
@@ -543,11 +325,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             publish_error("local runtime could not be opened", detail)
         })?;
     // Reconcile an interrupted publication before reading or freezing the tail.
-    runtime.block_on(recover_pending_publication(
-        &repository,
-        &state,
-        journal.as_ref(),
-    ))?;
+    runtime
+        .block_on(RuntimePublicationCoordinator::recover(&repository, &state))
+        .map_err(|error| {
+            describe_storage_failure("pending publication could not be recovered", &error)
+        })?;
     // Never select another range if recovery returned with a journal still
     // present, including when a new publication raced with recovery.
     if repository
@@ -621,7 +403,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     "make an initial commit before publishing runtime data",
                 )
             })?;
-        let row_paths = validate_candidate_source_rows(&repository, &head, &frozen)?;
+        validate_candidate_source_rows(&repository, &head, &frozen)?;
         // The frozen range is the only content this call may commit: the
         // candidate is built from the captured base plus exactly these rows.
         let counts = table_row_counts(&frozen);
@@ -634,12 +416,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             &head,
             index,
             &freeze,
-            |mutation| {
-                row_paths
-                    .get(&mutation.id())
-                    .cloned()
-                    .ok_or(orna_storage_v1::Error::InvalidMutationId)
-            },
+            // Format-3 rows have no loose path, so the coordinator never asks.
+            |_| Err(orna_storage_v1::Error::InvalidKey),
             &message,
         )
         .await
@@ -718,19 +496,47 @@ fn table_row_counts(mutations: &[TableMutation]) -> BTreeMap<String, usize> {
     counts
 }
 
+/// The remedy for a format-1/2 snapshot. This build has no row writer and no
+/// in-place upgrade for it, so the help names the work item that delivers the
+/// upgrade instead of a command that cannot finish the job. It is the same
+/// remedy that every refused runtime write reports.
+const LEGACY_READ_ONLY_HELP: &str = orna_repository_v1::LegacyWriteRefused::REMEDY;
+
+/// The remedy inside a prepared migration copy: its format-3 candidate is
+/// journalled, but nothing in this build activates it.
+const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
+
+/// ORNA-PUB-012: names the read-only legacy format, states that nothing was
+/// written, and gives the remedy that fits the worktree's migration state.
+fn legacy_read_only_refusal(
+    title: &'static str,
+    format: u8,
+    migration_prepared: bool,
+) -> Diagnostic {
+    let (help, kept) = if migration_prepared {
+        (
+            MIGRATION_PREPARED_HELP,
+            "the migration journal and its candidate were left as they were",
+        )
+    } else {
+        (LEGACY_READ_ONLY_HELP, "the pending range was preserved")
+    };
+    Diagnostic::target_with_detail(
+        "E2300",
+        title,
+        help,
+        format!(
+            "repository format {format} is a read-only legacy snapshot: its loose and compact row writers are retired; no Git object, ref, index or worktree change was made and {kept}"
+        ),
+    )
+}
+
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
 pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
     use orna_storage_v1::Error as E;
     let detail = match error {
-        E::ExternalConflict { path, .. } => format!(
-            "managed path {} changed outside the publication lock; resolve it, then retry",
-            path.as_managed_path().as_path().display()
-        ),
-        E::IndexConflict { path } => format!(
-            "ordinary index disagrees with the captured base at {}; unstage that path, then retry",
-            path.as_managed_path().as_path().display()
-        ),
+        E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
         E::ManagedWorktreeConflict => {
             "a managed path was edited after capture; keep or discard that edit, then retry"
                 .to_owned()
@@ -818,5 +624,49 @@ mod tests {
                 ("warehouse.Event".to_owned(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn legacy_snapshot_refusal_names_the_format_and_the_upgrade_work_item() {
+        let diagnostic = describe_storage_failure(
+            "publication target is a read-only legacy snapshot",
+            &orna_storage_v1::Error::LegacyReadOnly { format: 2 },
+        );
+        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(
+            diagnostic.title,
+            "publication target is a read-only legacy snapshot"
+        );
+        assert_eq!(diagnostic.help, LEGACY_READ_ONLY_HELP);
+        assert_eq!(
+            diagnostic.help,
+            "this build has no writer or in-place upgrade for format-1/2 snapshots; the format-3 upgrade is tracked as ornadb-5il1.184"
+        );
+        assert!(!diagnostic.help.contains("migrate copy"));
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("repository format 2 is a read-only"))
+        );
+    }
+
+    #[test]
+    fn prepared_migration_refusal_names_the_unactivated_candidate() {
+        let diagnostic =
+            legacy_read_only_refusal("publication target is a read-only legacy snapshot", 1, true);
+        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.help, MIGRATION_PREPARED_HELP);
+        assert!(
+            diagnostic
+                .help
+                .ends_with("a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192")
+        );
+        assert!(!diagnostic.help.contains("migrate copy"));
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("repository format 1 is a read-only")
+                && detail
+                    .ends_with("the migration journal and its candidate were left as they were")
+        }));
     }
 }
