@@ -97,28 +97,6 @@ bead = "ornadb-5il1.171"
 reason = "Fails on main at cf1c6aa82; the fixtures load a module-level `pub let`, which is not a 1.1.0 top-level item."
 
 [[failure]]
-package = "orna-runtime-v1"
-target = "lib"
-tests = [
-  "tests::durable_stream_control_reopens_paused_and_resets_opaque_position",
-  "tests::replaying_an_already_durable_vfs_save_does_not_commit_twice",
-  "tests::stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen",
-  "tests::typed_table_activation_rejects_a_missing_delete_without_advancing_state",
-]
-bead = "ornadb-5il1.253"
-reason = "Fails on the merged tree (main 471178871 with this branch). Open PR 9197 (fix/ornadb-5il1.253-opus-runtime-failures) addresses this area and names durable_stream_control_reopens_paused_and_resets_opaque_position and replaying_an_already_durable_vfs_save_does_not_commit_twice; verify on that PR before deleting the entry."
-
-[[failure]]
-package = "orna-runtime-v1"
-target = "lib"
-tests = [
-  "tests::terminal_failure_reopens_with_its_stable_identity_after_reset_and_restart",
-  "tests::validated_table_activation_commits_protected_blob_transfer_atomically",
-]
-bead = "ornadb-5il1.253"
-reason = "Fails on the merged tree (main 471178871 with this branch). Not named in open PR 9197's description; owned by ornadb-5il1.253."
-
-[[failure]]
 package = "orna-semantic-v1"
 target = "test:publication_metadata"
 test = "storage_and_maintenance_expose_effective_publication_state"
