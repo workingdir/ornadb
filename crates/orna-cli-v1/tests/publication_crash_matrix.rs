@@ -346,6 +346,98 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
 
+/// Recovery row "Ref still at H" (ORNA-PUB-006): a prepared journal whose
+/// candidate `HEAD` never reached names nothing that was published.
+/// Coordinator recovery discards it and keeps the frozen batch pending, so
+/// the journal cannot fence the next publication.
+#[tokio::test]
+async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending() {
+    let (_directory, _source, repository, state, head, _relation_id, _format_context) =
+        seeded_project().await;
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0x45; 16], &checkpoint).await.unwrap();
+    let index = repository.index_generation().unwrap();
+    let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| panic!("Format-3 store-only publication must not request a legacy path"),
+        "orna: publish runtime data",
+    )
+    .await
+    .unwrap()
+    .expect("the seeded store-only mutation needs publication");
+    repository
+        .write_publication_journal(coordinator.journal())
+        .unwrap();
+    let pending = state.pending().await.unwrap();
+
+    assert_eq!(
+        RuntimePublicationCoordinator::recover(&repository, &state).await,
+        Ok(Some(index.clone()))
+    );
+    assert_eq!(repository.head().unwrap(), Some(head));
+    assert_eq!(repository.index_generation().unwrap(), index);
+    assert_eq!(state.pending().await.unwrap(), pending);
+    assert_eq!(repository.read_publication_journal().unwrap(), None);
+}
+
+/// A journal whose entries do not match the candidate it names is not that
+/// candidate's evidence. Coordinator recovery refuses it and leaves the ref,
+/// the index, the journal and the pending batch as they were.
+#[tokio::test]
+async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
+    let (_directory, _source, repository, state, head, _relation_id, _format_context) =
+        seeded_project().await;
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0x46; 16], &checkpoint).await.unwrap();
+    let index = repository.index_generation().unwrap();
+    let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| panic!("Format-3 store-only publication must not request a legacy path"),
+        "orna: publish runtime data",
+    )
+    .await
+    .unwrap()
+    .expect("the seeded store-only mutation needs publication");
+    let candidate = coordinator.candidate().commit().clone();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.clone(),
+        index.tree().unwrap().clone(),
+        freeze.intent_id,
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            orna_repository_v1::ManagedPath::new("Object/forged.orna").unwrap(),
+            None,
+            Some(b"journal row".to_vec()),
+        )],
+    )
+    .unwrap();
+    repository.write_publication_journal(&journal).unwrap();
+    repository
+        .advance_current_ref(&head, coordinator.candidate())
+        .unwrap();
+    let pending = state.pending().await.unwrap();
+
+    assert_eq!(
+        RuntimePublicationCoordinator::recover(&repository, &state).await,
+        Err(orna_storage_v1::Error::InvalidPublicationJournal)
+    );
+    assert_eq!(repository.head().unwrap(), Some(candidate));
+    assert_eq!(repository.index_generation().unwrap().tree(), index.tree());
+    assert_eq!(state.pending().await.unwrap(), pending);
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+}
+
 /// Coordinated GC: `git gc --prune=now` may discard only objects that no ref names. Objects named by the
 /// protected `refs/orna/pins/*` refs survive; an unreferenced object is removed. This is coordinated GC
 /// only and does not claim that an uncoordinated prune is safe (ORNA-GIT-010).
