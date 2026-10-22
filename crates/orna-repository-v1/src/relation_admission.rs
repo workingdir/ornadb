@@ -2093,6 +2093,22 @@ mod tests {
             Err(RelationAdmissionError::OrphanRelation { relation_id }) if relation_id == music
         ));
 
+        // Payload chunks are skip-worktree; clear that bit so `rm --cached`
+        // removes the whole store index, as a user's removal would.
+        let listed = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["ls-files", "-z", "--", ".orna/store"])
+            .output()
+            .unwrap();
+        assert!(listed.status.success());
+        let mut clear = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["update-index", "--no-skip-worktree", "-z", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(clear.stdin.as_mut().unwrap(), &listed.stdout).unwrap();
+        assert!(clear.wait().unwrap().success());
         git(root, &["rm", "--cached", "-r", "--quiet", ".orna/store"]);
         let staged = repository.capture_staged_candidate().unwrap();
         assert!(matches!(
