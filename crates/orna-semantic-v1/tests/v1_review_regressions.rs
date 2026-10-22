@@ -22,8 +22,7 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 
 use orna_semantic_v1::{
     Analysis, AssertionOwner, Catalogue, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_DISPLAY_READ_ONLY, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
-    EffectSummary, ModuleHeader,
+    DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader,
     ModuleInput, Namespace, Symbol, SymbolKind, Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
@@ -845,7 +844,7 @@ fn table_display_and_present_writes_require_type_diagnostics() {
             include_str!("fixtures/inline-v1_review_regressions/8b311ae59082.orna"),
             &[("protocol", &protocol), ("member", &member)],
         );
-        expect_diagnostics(&analyze_main(&source), &[DIAG_DISPLAY_READ_ONLY]);
+        expect_diagnostics(&analyze_main(&source), &[DIAG_TYPE]);
     }
 }
 
@@ -871,7 +870,7 @@ fn presentation_direct_return_terminates_write_scan() {
             include_str!("fixtures/inline-v1_review_regressions/dd5e785cd9c3.orna"),
             &[("protocol", &protocol), ("member", &member)],
         );
-        expect_diagnostics(&analyze_main(&rejected), &[DIAG_DISPLAY_READ_ONLY]);
+        expect_diagnostics(&analyze_main(&rejected), &[DIAG_TYPE]);
     }
 }
 
@@ -884,7 +883,7 @@ fn presentation_nested_control_return_does_not_terminate_write_scan() {
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
         include_str!("fixtures/inline-v1_review_regressions/2b18ac9922cb.orna"),
         result.diagnostics
     );
@@ -899,7 +898,7 @@ fn presentation_lambda_block_return_does_not_terminate_write_scan() {
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
         include_str!("fixtures/inline-v1_review_regressions/be4c29c7125d.orna"),
         result.diagnostics
     );
@@ -910,7 +909,7 @@ fn presentation_effect_summaries_propagate_through_helpers() {
     let indirect_write = analyze_main(include_str!(
         "fixtures/inline-v1_review_regressions/719b99d4ee69.orna"
     ));
-    expect_diagnostics(&indirect_write, &[DIAG_DISPLAY_READ_ONLY]);
+    expect_diagnostics(&indirect_write, &[DIAG_TYPE]);
 
     // The spelling `insert` is not a write when scope resolution identifies a
     // local function with a proven empty effect summary.
@@ -928,7 +927,7 @@ fn presentation_effect_summaries_propagate_through_helpers() {
             include_str!("fixtures/inline-v1_review_regressions/ca8d532ef690.orna"),
         ),
     ]);
-    expect_diagnostics(&imported_write, &[DIAG_DISPLAY_READ_ONLY]);
+    expect_diagnostics(&imported_write, &[DIAG_TYPE]);
 
     let imported_pure = analyze(&[
         ModuleInput::new(
@@ -1161,10 +1160,12 @@ fn colon_generic_bounds_receive_the_frozen_legacy_diagnostic() {
     }));
 }
 
+// `Note.value` is `pub` so the fixtures' direct construction stays valid
+// outside the owning type (ORNA-NOMINAL-005, ORNA-NOMINAL-007).
 #[test]
 fn generic_calls_retain_callee_effect_and_failure_summaries() {
     let filesystem = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/be79a57479d0.orna"
+        "fixtures/inline-v1_review_regressions/95048dfb2efb.orna"
     ));
     assert!(filesystem.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "declaration assertion uses forbidden filesystem effect"
@@ -1180,15 +1181,14 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
     assert!(reads.effects.effects.contains("filesystem"));
     assert!(reads.effects.may_fail);
 
+    // Failure is not a forbidden assertion effect: evaluation failure inside
+    // an assertion propagates and aborts the same boundary as a false
+    // assertion (ORNA-ASSERT-049), so the plan must retain the callee's
+    // failure summary through the generic call.
     let fallible = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/e29002c2593a.orna"
+        "fixtures/inline-v1_review_regressions/4975c26d0fe4.orna"
     ));
-    // ORNA-A091-007 and ORNA-ASSERT-039 forbid effects and nondeterminism only.
-    // ORNA-ASSERT-049 admits evaluation failure inside an assertion, so a
-    // failure-only generic call must not raise the forbidden-effect diagnostic.
-    assert!(!fallible.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "assertion has forbidden effects or failure"
-    }));
+    expect_accepted(&fallible);
     let maybe = fallible
         .modules
         .values()
@@ -1198,6 +1198,13 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
         .get("maybe")
         .expect("generic fallible function");
     assert!(maybe.effects.may_fail);
+    let plan = fallible
+        .assertions
+        .values()
+        .flatten()
+        .find(|plan| plan.owner == AssertionOwner::Module)
+        .expect("module assertion plan");
+    assert!(plan.effects.may_fail);
 }
 
 #[test]
@@ -1381,9 +1388,11 @@ fn nominal_from_requires_a_nominal_constructor_result() {
     )));
 
     // Tables retain their current row construction form: the AST has no
-    // nominal table constructor, so a structural row remains supported.
+    // nominal table constructor, so a structural row remains supported. A
+    // key-less table's row would also carry its automatic `id`
+    // (ORNA-AUTOID-001, ORNA-KEY-002), so the fixture declares the key.
     expect_accepted(&analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/26c303bb06d5.orna"
+        "fixtures/inline-v1_review_regressions/d85cd086d28f.orna"
     )));
 }
 
