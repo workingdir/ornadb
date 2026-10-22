@@ -3436,7 +3436,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -3454,7 +3454,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -5102,6 +5102,25 @@ fn validate_result_response(
         outcome: FrameOutcome::Accepted,
         response: Some(response),
     })
+}
+
+/// Validates a sync Eval/Event response after the application has run.
+///
+/// The application publishes its effects before the host validates the
+/// envelope, so a response that cannot be validated must not become a generic
+/// failure a retry could mistake for "nothing happened". It is retained as
+/// `RetainedWithoutValue` instead. Fingerprint mismatches keep their own
+/// correlated diagnostic.
+fn validate_applied_result_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    match validate_result_response(request, fingerprint, response, limits) {
+        Err(Error::ApplicationRejected) => Ok(retained_without_value_outcome(request, fingerprint)),
+        result => result,
+    }
 }
 
 /// Host-generated diagnostics are terminal outcomes for a small set of
@@ -8736,6 +8755,30 @@ mod tests {
         }
     }
 
+    struct WrongRequestApplication;
+
+    impl LiveApplication for WrongRequestApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([99; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: None,
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
     struct FailBeforeTableWrite;
 
     impl FaultInjector for FailBeforeTableWrite {
@@ -9493,6 +9536,50 @@ mod tests {
         );
         assert!(!socket.closed);
         assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+    }
+
+    #[test]
+    fn applied_eval_with_unvalidatable_response_is_retained_without_value() {
+        let request = [5; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestApplication;
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The application published its effects before returning a response
+        // the host could not validate. The terminal record must be the
+        // retained-without-value contract, not a generic failure.
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied eval must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+
+        // An exact retry replays that terminal result instead of rerunning the
+        // application under the same request ID.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
     }
 
     #[test]
