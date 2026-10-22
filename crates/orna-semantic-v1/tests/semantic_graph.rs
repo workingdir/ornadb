@@ -2070,15 +2070,17 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
 
 #[test]
 fn table_rows_reject_overlapping_protocol_implementations() {
+    // A key-less table's row includes its automatic `id` (ORNA-AUTOID-001,
+    // ORNA-KEY-002), so these structural conversion rows use an explicit key.
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/ddc1070ae1fd.orna"),
+        include_str!("fixtures/inline-semantic_graph/e6cba2ed225f.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/6f9f39aac506.orna"),
+        include_str!("fixtures/inline-semantic_graph/e12bf9706073.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
