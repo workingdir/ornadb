@@ -1,0 +1,38 @@
+{
+  "version": "1.1.0",
+  "project": "examples/blob-library",
+  "entry": "main.orna",
+  "modules": [
+    "main.orna",
+    "music.orna"
+  ],
+  "input_manifest": "tests/media-fixtures.json",
+  "normal_test_entry": "music.import_song",
+  "scope": "Engine harness creates a disposable writable format-2 Git database and grants only this fixture input directory. No supplied fixture asserts engine execution.",
+  "steps": [
+    {
+      "operation": "capture/import",
+      "file": "tone.wav",
+      "id": "tone",
+      "expect": "one Song with exact recorded Blob length and SHA-256"
+    },
+    {
+      "operation": "capture/inspect",
+      "file": "pixel.png",
+      "expect": "valid Blob; decoder projection has width=1 height=1"
+    },
+    {
+      "operation": "metadata update",
+      "expect": "content identity unchanged; zero payload hydration/new content chunks"
+    },
+    {
+      "operation": "publish, clone partial, range-read, full export",
+      "expect": "native closure and exact original bytes, with measured hydration"
+    },
+    {
+      "operation": "rollback/cancellation",
+      "expect": "no acknowledged row with absent content; no implicit Git commit"
+    }
+  ],
+  "implementation_execution": "not-executed"
+}

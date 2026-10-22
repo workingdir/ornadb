@@ -8,7 +8,7 @@ writer format 3). The installed command is `orna`; Cargo builds it as the
 
 This binary currently accepts `init`, `add --row`, `mv`, `status`, `fetch`,
 `push`, `serve`, `mount`, `edit`, `unmount`, `diff`, `log`, `annotate`,
-`import`, `export`, `migrate copy`, `publish`, `commit`, `semantic-legend`,
+`import`, `export`, `migrate copy`, `migrate abort`, `publish`, `commit`, `semantic-legend`,
 `history`, `query`, `check`, `invoke`, `explain`, `repl`, and `run`, plus help
 and version options. The available command groups and option forms are listed
 by `orna --help`; that list describes this bounded implementation, not the
@@ -61,6 +61,17 @@ receipts) is refused and its state is left unchanged. The source repository,
 including its commit and dirty workspace, remains unchanged. This command
 prepares a journalled candidate only; it does not convert legacy rows into a
 format-3 store or activate a writable format-3 repository.
+
+`migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
+first that DEST is the copy this source prepared, so a directory the operator
+owns is never a discard target. The source repository is unchanged. Until the
+verified copy is renamed to a reserved sibling named `.orna-migration-abort-*`,
+a change to the source commit, index, or working tree since preparation makes
+the command refuse and remove nothing; restore the source or remove DEST
+manually. That rename is the commit point. A repeated `migrate abort DEST` then
+finishes the removal without rechecking the source, and exits 0 reporting
+nothing to discard once nothing remains. While the sibling exists,
+`migrate copy DEST` refuses to prepare or recover; repeat the abort first.
 
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional

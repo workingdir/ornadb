@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/cross-database-write.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E9001",
+  "message_contains": "cross-database writes are not atomic/supported",
+  "status": "expected-not-executed"
+}

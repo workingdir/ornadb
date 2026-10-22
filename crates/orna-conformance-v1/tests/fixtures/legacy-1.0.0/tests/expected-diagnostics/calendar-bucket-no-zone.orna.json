@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/calendar-bucket-no-zone.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E6001",
+  "message_contains": "calendar bucketing of Instant requires a time zone",
+  "status": "expected-not-executed"
+}
