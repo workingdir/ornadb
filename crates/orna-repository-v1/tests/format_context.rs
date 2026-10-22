@@ -16,8 +16,6 @@ const INVALID_DATABASE: &str = include_str!("fixtures/format-context/database-in
 const REORDERED_DATABASE: &str = include_str!("fixtures/format-context/database-reordered.orna");
 const COMPACT_DATABASE: &str = include_str!("fixtures/format-context/database-compact.orna");
 const INDENTED_DATABASE: &str = include_str!("fixtures/format-context/database-indented-two.orna");
-const LEGACY_FORMAT_ONE: &str = include_str!("fixtures/format-context/format-1.orna");
-const LEGACY_FORMAT_TWO: &str = include_str!("fixtures/format-context/format-2.orna");
 const LEGACY_PROFILE_ONE: &str = include_str!("fixtures/format-context/profile-1-unknown.orna");
 const LEGACY_PROFILE_TWO: &str = include_str!("fixtures/format-context/profile-2-unknown.orna");
 /// The record OrnaDB 1.0's `orna init` wrote, byte for byte.
@@ -231,7 +229,7 @@ fn context_binds_database_identity_to_its_committed_snapshot() {
 
 #[test]
 fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
-    let format_one = repository(None, Some(LEGACY_FORMAT_ONE), false);
+    let format_one = repository(None, Some(ORNADB_1_0_FORMAT_ONE), false);
     let context_one = Repository::discover(format_one.path())
         .unwrap()
         .open_format_context()
@@ -244,7 +242,7 @@ fn dispatches_legacy_formats_as_explicit_read_only_inputs() {
         Err(RepositoryFormatContextError::LegacyReadOnly(1))
     ));
 
-    let format_two = repository(Some(SIDECAR_DATABASE), Some(LEGACY_FORMAT_TWO), false);
+    let format_two = repository(Some(SIDECAR_DATABASE), Some(DRAFT_FORMAT_TWO), false);
     let context_two = Repository::discover(format_two.path())
         .unwrap()
         .open_format_context()
@@ -267,7 +265,7 @@ fn fails_closed_on_unknown_mixed_malformed_and_unavailable_metadata() {
         .unwrap_err();
     assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003");
 
-    let mixed = repository(Some(CANONICAL_DATABASE), Some(LEGACY_FORMAT_ONE), false);
+    let mixed = repository(Some(CANONICAL_DATABASE), Some(ORNADB_1_0_FORMAT_ONE), false);
     let error = Repository::discover(mixed.path())
         .unwrap()
         .open_format_context()
@@ -405,6 +403,21 @@ fn rejects_legacy_records_that_differ_from_the_recorded_ones() {
     }
 }
 
+/// ORNA-META-002: `format.orna` identifies a legacy repository by its recorded
+/// record. The bare `format N` spelling was never written by any OrnaDB
+/// writer, so a commit holding it is malformed metadata, not a legacy format.
+#[test]
+fn rejects_bare_format_marker_no_writer_produced() {
+    for marker in ["format 1\n", "format 2\n", "format 3\n"] {
+        let directory = repository(Some(SIDECAR_DATABASE), Some(marker), false);
+        let error = Repository::discover(directory.path())
+            .unwrap()
+            .open_format_context()
+            .unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-002", "{marker}");
+    }
+}
+
 /// ORNA-UPGRADE-001, ORNA-UPGRADE-003: runtime writes follow the format
 /// recorded at `HEAD`. A legacy `HEAD` refuses them even when the worktree
 /// holds format-3 metadata, and the refusal carries its code, format and
@@ -412,8 +425,6 @@ fn rejects_legacy_records_that_differ_from_the_recorded_ones() {
 #[test]
 fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
     for (record, format) in [
-        (LEGACY_FORMAT_ONE, 1),
-        (LEGACY_FORMAT_TWO, 2),
         (ORNADB_1_0_FORMAT_ONE, 1),
         (DRAFT_FORMAT_TWO, 2),
     ] {
@@ -473,7 +484,7 @@ fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
 
 #[test]
 fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
-    let directory = repository(Some(INVALID_DATABASE), Some(LEGACY_FORMAT_ONE), false);
+    let directory = repository(Some(INVALID_DATABASE), Some(ORNADB_1_0_FORMAT_ONE), false);
     replace_database_with_directory(directory.path());
     let error = Repository::discover(directory.path())
         .unwrap()
@@ -563,7 +574,7 @@ fn metadata_entries_that_are_not_regular_files_fail_closed() {
         .expect("create legacy directory");
     fs::write(
         legacy_directory.path().join(".orna/format.orna/nested"),
-        LEGACY_FORMAT_ONE,
+        ORNADB_1_0_FORMAT_ONE,
     )
     .expect("write nested legacy entry");
     git(legacy_directory.path(), &["add", "--all"]);
@@ -599,8 +610,8 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
     // format rather than the host default, and ORNA-UPGRADE-002 keeps each
     // legacy commit readable as itself, so format 1 and format 2 are each
     // reopened beside the format-3 commit that replaced them.
-    reopens_one_legacy_format_beside_format_three(LEGACY_FORMAT_ONE, 1);
-    reopens_one_legacy_format_beside_format_three(LEGACY_FORMAT_TWO, 2);
+    reopens_one_legacy_format_beside_format_three(ORNADB_1_0_FORMAT_ONE, 1);
+    reopens_one_legacy_format_beside_format_three(DRAFT_FORMAT_TWO, 2);
 }
 
 /// Reopens one legacy format's prior commit beside the format-3 commit that
@@ -775,7 +786,7 @@ fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_num
 fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
     // The repository is initialized while it still carries the legacy
     // coordinate, so the first commit really decodes as format 1.
-    let directory = repository(None, Some(LEGACY_FORMAT_ONE), false);
+    let directory = repository(None, Some(ORNADB_1_0_FORMAT_ONE), false);
     let repository = Repository::discover(directory.path()).expect("discover repository");
     let old_selector = git_line(directory.path(), &["rev-parse", "HEAD"]);
     let old_mount = repository
@@ -828,7 +839,7 @@ fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
         old_mount_again
             .read_committed_file(".orna/format.orna", 64)
             .expect("the old mount reads its own legacy metadata"),
-        b"format 1\n".as_slice()
+        ORNADB_1_0_FORMAT_ONE.as_bytes()
     );
     assert!(
         new_mount

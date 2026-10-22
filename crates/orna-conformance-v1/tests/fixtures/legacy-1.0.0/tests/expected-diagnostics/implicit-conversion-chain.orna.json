@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/implicit-conversion-chain.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA091-E-CONVERSION-CHAIN",
+  "message_contains": "implicit conversion chains are not searched; name each conversion explicitly",
+  "status": "expected-not-executed"
+}

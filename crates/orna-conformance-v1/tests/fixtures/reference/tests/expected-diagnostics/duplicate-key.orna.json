@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "fixture": "examples/invalid/duplicate-key.orna",
   "failing_phase": "evaluate",
   "primary_diagnostic": "E3001",
