@@ -1,4 +1,4 @@
-# 31. Worked reference database {#examples}
+# 38. Worked reference database {#examples}
 
 The reference database demonstrates book lending, stock transfers, exact values and resumable sensor ingestion. Its five modules run with local data and the intrinsic Orna environment. The source files are available in [`examples/reference/`](examples/reference/README.md).
 
@@ -201,3 +201,12 @@ The helper is illustrative source requiring a live handle supplied by its caller
 
 Each example case runs in a disposable database with empty tables. The distributed expectations specify initial state, inputs, exact resulting rows and failure outcomes. Parser acceptance is separate from resolver/type/effect checking, and both are separate from execution. A conforming implementation must run all three stages before claiming the example project passes.
 
+
+
+## Storage status of example rows
+
+Example row text illustrates logical data or explicit import. In format 3,
+these rows are stored in ORP-1, not discovered by recursively reading `.orna`
+files from a table folder. VFS-1 can project them as row directories. Historical
+fixture row-load stages remain parser/decoder tests and do not reinstate a
+loose-row writer.
