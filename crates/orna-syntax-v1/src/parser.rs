@@ -69,6 +69,61 @@ fn position_at(source: &str, at: usize) -> SourcePosition {
     SourcePosition { line, column }
 }
 
+/// One-pass position index for annotating every span of one source text.
+///
+/// [`position_at`] walks the source from byte 0, so locating each span of a
+/// whole tree that way costs O(spans x bytes) (A01-16; U03-11). This index
+/// gives the same 1-based line and Unicode-scalar column by binary search:
+/// a `\n` starts a new line, every other scalar (including the `\r` of a CRLF
+/// pair) advances the column, and a scalar is counted only once it ends at or
+/// before the requested byte.
+struct SourceLines<'a> {
+    source: &'a str,
+    /// Byte offset just after each `\n`, in source order.
+    line_starts: Vec<usize>,
+    /// Byte offset of every scalar; `None` for ASCII text, where bytes and
+    /// scalars coincide.
+    scalar_starts: Option<Vec<usize>>,
+}
+impl<'a> SourceLines<'a> {
+    fn new(source: &'a str) -> Self {
+        let line_starts = source
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(index, _)| index + 1)
+            .collect();
+        let scalar_starts =
+            (!source.is_ascii()).then(|| source.char_indices().map(|(index, _)| index).collect());
+        Self {
+            source,
+            line_starts,
+            scalar_starts,
+        }
+    }
+    fn position(&self, at: usize) -> SourcePosition {
+        let mut boundary = at.min(self.source.len());
+        while !self.source.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let newlines = self.line_starts.partition_point(|start| *start <= boundary);
+        let line_start = newlines
+            .checked_sub(1)
+            .map_or(0, |index| self.line_starts[index]);
+        let columns = match &self.scalar_starts {
+            None => boundary - line_start,
+            Some(starts) => {
+                starts.partition_point(|start| *start < boundary)
+                    - starts.partition_point(|start| *start < line_start)
+            }
+        };
+        SourcePosition {
+            line: newlines as u32 + 1,
+            column: columns as u32 + 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label {
     pub span: SourceSpan,
@@ -981,41 +1036,47 @@ pub fn parse_expression(source: &str) -> Parse<Expr> {
 pub fn parse_module_with_file(source: &str, file: impl Into<String>) -> Parse<SyntaxTree> {
     let mut parsed = parse_module(source);
     let file = file.into();
-    annotate_tree(&mut parsed.value, source, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, source, &file);
+    let lines = SourceLines::new(source);
+    annotate_tree(&mut parsed.value, &lines, &file);
+    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
     parsed
 }
 pub fn parse_row_with_file(source: &str, file: impl Into<String>) -> Parse<Expr> {
     let mut parsed = parse_row(source);
     let file = file.into();
-    annotate_expr(&mut parsed.value, source, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, source, &file);
+    let lines = SourceLines::new(source);
+    annotate_expr(&mut parsed.value, &lines, &file);
+    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
     parsed
 }
 pub fn parse_repl_with_file(source: &str, file: impl Into<String>) -> Parse<ReplInput> {
     let mut parsed = parse_repl(source);
     let file = file.into();
+    let lines = SourceLines::new(source);
     match &mut parsed.value {
-        ReplInput::Item(item) => annotate_item(item, source, &file),
+        ReplInput::Item(item) => annotate_item(item, &lines, &file),
         ReplInput::Expression(expr) | ReplInput::ExpressionStatement(expr) => {
-            annotate_expr(expr, source, &file)
+            annotate_expr(expr, &lines, &file)
         }
     }
-    annotate_diagnostics(&mut parsed.diagnostics, source, &file);
+    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
     parsed
 }
 pub fn parse_expression_with_file(source: &str, file: impl Into<String>) -> Parse<Expr> {
     let mut parsed = parse_expression(source);
     let file = file.into();
-    annotate_expr(&mut parsed.value, source, &file);
-    annotate_diagnostics(&mut parsed.diagnostics, source, &file);
+    let lines = SourceLines::new(source);
+    annotate_expr(&mut parsed.value, &lines, &file);
+    annotate_diagnostics(&mut parsed.diagnostics, &lines, &file);
     parsed
 }
 
-fn annotate_span(span: &mut SourceSpan, source: &str, file: &str) {
-    *span = span.clone().located(file, source)
+fn annotate_span(span: &mut SourceSpan, source: &SourceLines<'_>, file: &str) {
+    span.file = Some(file.to_owned());
+    span.start_position = Some(source.position(span.start));
+    span.end_position = Some(source.position(span.end));
 }
-fn annotate_item(item: &mut Item, source: &str, file: &str) {
+fn annotate_item(item: &mut Item, source: &SourceLines<'_>, file: &str) {
     if let Visibility::Public { span } = &mut item.visibility {
         annotate_span(span, source, file);
     }
@@ -1169,7 +1230,7 @@ fn annotate_item(item: &mut Item, source: &str, file: &str) {
     }
     annotate_span(&mut item.span, source, file)
 }
-fn annotate_pattern(pattern: &mut Pattern, source: &str, file: &str) {
+fn annotate_pattern(pattern: &mut Pattern, source: &SourceLines<'_>, file: &str) {
     match pattern {
         Pattern::Name(_, span) | Pattern::Wildcard(span) | Pattern::Literal { span, .. } => {
             annotate_span(span, source, file)
@@ -1197,7 +1258,7 @@ fn annotate_pattern(pattern: &mut Pattern, source: &str, file: &str) {
         }
     }
 }
-fn annotate_type(ty: &mut TypeExpr, source: &str, file: &str) {
+fn annotate_type(ty: &mut TypeExpr, source: &SourceLines<'_>, file: &str) {
     match ty {
         TypeExpr::Name {
             arguments, span, ..
@@ -1242,13 +1303,13 @@ fn annotate_type(ty: &mut TypeExpr, source: &str, file: &str) {
         }
     }
 }
-fn annotate_generic(parameter: &mut GenericParameter, source: &str, file: &str) {
+fn annotate_generic(parameter: &mut GenericParameter, source: &SourceLines<'_>, file: &str) {
     for bound in &mut parameter.bounds {
         annotate_type(bound, source, file)
     }
     annotate_span(&mut parameter.span, source, file)
 }
-fn annotate_parameter(parameter: &mut Parameter, source: &str, file: &str) {
+fn annotate_parameter(parameter: &mut Parameter, source: &SourceLines<'_>, file: &str) {
     annotate_pattern(&mut parameter.pattern, source, file);
     if let Some(annotation) = &mut parameter.annotation {
         annotate_type(annotation, source, file)
@@ -1258,7 +1319,7 @@ fn annotate_parameter(parameter: &mut Parameter, source: &str, file: &str) {
     };
     annotate_span(&mut parameter.span, source, file)
 }
-fn annotate_signature(signature: &mut FunctionSignature, source: &str, file: &str) {
+fn annotate_signature(signature: &mut FunctionSignature, source: &SourceLines<'_>, file: &str) {
     for generic in &mut signature.generics {
         annotate_generic(generic, source, file)
     }
@@ -1270,7 +1331,11 @@ fn annotate_signature(signature: &mut FunctionSignature, source: &str, file: &st
     }
     annotate_span(&mut signature.span, source, file)
 }
-fn annotate_implementation(implementation: &mut Implementation, source: &str, file: &str) {
+fn annotate_implementation(
+    implementation: &mut Implementation,
+    source: &SourceLines<'_>,
+    file: &str,
+) {
     annotate_type(&mut implementation.protocol, source, file);
     for member in &mut implementation.members {
         match member {
@@ -1296,7 +1361,7 @@ fn annotate_implementation(implementation: &mut Implementation, source: &str, fi
     }
     annotate_span(&mut implementation.span, source, file)
 }
-fn annotate_type_member(member: &mut TypeMember, source: &str, file: &str) {
+fn annotate_type_member(member: &mut TypeMember, source: &SourceLines<'_>, file: &str) {
     match member {
         TypeMember::Field {
             ty,
@@ -1323,13 +1388,13 @@ fn annotate_type_member(member: &mut TypeMember, source: &str, file: &str) {
         }
     }
 }
-fn annotate_tree(tree: &mut SyntaxTree, source: &str, file: &str) {
+fn annotate_tree(tree: &mut SyntaxTree, source: &SourceLines<'_>, file: &str) {
     annotate_span(&mut tree.span, source, file);
     for item in &mut tree.items {
         annotate_item(item, source, file)
     }
 }
-fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
+fn annotate_expr(expr: &mut Expr, source: &SourceLines<'_>, file: &str) {
     match expr {
         Expr::Unary { rhs, span, .. } => {
             annotate_expr(rhs, source, file);
@@ -1472,7 +1537,7 @@ fn annotate_expr(expr: &mut Expr, source: &str, file: &str) {
         }
     }
 }
-fn annotate_statement(statement: &mut Statement, source: &str, file: &str) {
+fn annotate_statement(statement: &mut Statement, source: &SourceLines<'_>, file: &str) {
     match statement {
         Statement::Let {
             pattern,
@@ -1512,7 +1577,7 @@ fn annotate_statement(statement: &mut Statement, source: &str, file: &str) {
         Statement::Continue { span } => annotate_span(span, source, file),
     }
 }
-fn annotate_assignment_target(target: &mut AssignmentTarget, source: &str, file: &str) {
+fn annotate_assignment_target(target: &mut AssignmentTarget, source: &SourceLines<'_>, file: &str) {
     match target {
         AssignmentTarget::Name { span, .. } => annotate_span(span, source, file),
         AssignmentTarget::Field { base, span, .. } => {
@@ -1526,7 +1591,7 @@ fn annotate_assignment_target(target: &mut AssignmentTarget, source: &str, file:
         }
     }
 }
-fn annotate_diagnostics(items: &mut [Diagnostic], source: &str, file: &str) {
+fn annotate_diagnostics(items: &mut [Diagnostic], source: &SourceLines<'_>, file: &str) {
     for item in items {
         annotate_span(&mut item.span, source, file);
         for label in &mut item.labels {
@@ -4223,10 +4288,14 @@ impl Parser {
             // every expression shape gets the targeted code without flagging
             // optional types in declarations.
             if self.is_punct("?") {
-                self.error_here(
-                    "ORNA091-E-POSTFIX-QUESTION",
-                    "postfix propagation `?` was removed; failures propagate automatically",
-                );
+                // A call result is the legacy propagation form; other operands
+                // keep the generic removal wording.
+                let message = if matches!(lhs, Expr::Call { .. }) {
+                    "remove postfix `?`; failure propagation is automatic"
+                } else {
+                    "postfix propagation `?` was removed; failures propagate automatically"
+                };
+                self.error_here("ORNA091-E-POSTFIX-QUESTION", message);
                 self.bump();
                 continue;
             }
@@ -5456,6 +5525,48 @@ fn literal_kind(token: &TokenKind) -> LiteralKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Coordinates are UTF-8 byte offsets; human lines and columns derive from
+    /// them (15-system.md "Coordinates use zero-based UTF-8 byte offsets...",
+    /// ORNA-LEX-002) and are one-based (34-system-reference `sys.SourceSpan`).
+    /// This crate counts columns in Unicode scalars (`SourceSpan` docs); the
+    /// one-pass index must give exactly the coordinates of `position_at`.
+    #[test]
+    fn source_line_index_matches_position_at_for_crlf_and_multibyte_text() {
+        let source = "/// café 🧭\r\npub fn naïve(value: Int): Int = value;\r\n\r\n\
+                      // 東京 \r ok\npub fn total(values: [Int]): Int = 0;\n\
+                      pub fn broken(): Int = ;\r\n";
+        let lines = SourceLines::new(source);
+        for at in 0..=source.len() + 2 {
+            assert_eq!(
+                lines.position(at),
+                position_at(source, at),
+                "byte offset {at}"
+            );
+        }
+        let ascii = "pub fn one(): Int = 1;\r\n\npub fn two(): Int = 2;";
+        let ascii_lines = SourceLines::new(ascii);
+        for at in 0..=ascii.len() + 1 {
+            assert_eq!(
+                ascii_lines.position(at),
+                position_at(ascii, at),
+                "byte offset {at}"
+            );
+        }
+
+        let parsed = parse_module_with_file(source, "main.orna");
+        let oracle =
+            |span: &SourceSpan| SourceSpan::new(span.start, span.end).located("main.orna", source);
+        assert_eq!(parsed.value.span, oracle(&parsed.value.span));
+        assert!(parsed.value.items.len() >= 2, "{:?}", parsed.value.items);
+        for item in &parsed.value.items {
+            assert_eq!(item.span, oracle(&item.span));
+        }
+        assert!(!parsed.diagnostics.is_empty());
+        for diagnostic in &parsed.diagnostics {
+            assert_eq!(diagnostic.span, oracle(&diagnostic.span));
+        }
+    }
 
     #[test]
     fn classifies_complete_incomplete_and_malformed_repl_inputs() {
