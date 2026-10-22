@@ -323,6 +323,13 @@ been published.
   to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
   of an unlinked callable. Admission no longer reports a version diagnostic for
   it (ORNA-SYS-006).
+- The CLI's `migrate abort DEST` discards a prepared format-3 migration copy only
+  after verifying that DEST is the copy prepared from the current source. The
+  source is unchanged. If the source commit, index, or working tree has changed
+  since preparation, the command refuses and removes nothing. `migrate activate
+  DEST` runs the same verification and then fails closed with `E2100`: the
+  protected format transition is not available in this build, so no writable
+  format-3 root is installed and the candidate stays intact.
 
 ## 1.0.0 — release inventory (publication pending)
 
