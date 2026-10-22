@@ -23,7 +23,9 @@ use orna_semantic_v1::{
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, Expr, parse_module, parse_module_with_file, parse_row};
+use orna_syntax_v1::{
+    Declaration, Expr, parse_module, parse_module_with_file, parse_row, parse_row_with_file,
+};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
@@ -1532,6 +1534,17 @@ fn load_reachable_project(
         modules.push(ModuleInput::new(logical_path, module.source));
     }
     let loose_rows = discover_rows(&table_paths, &mut total_bytes)?;
+    for row in &loose_rows {
+        // Every loose row file is a row unit (ORNA-SOURCE-003). Reject one that
+        // is not a single record expression here, with its parser code, as for
+        // module units; admission would otherwise report only a loader code.
+        if !parse_row(row.source()).is_ok() {
+            return Err(ProjectLoadError::InvalidRowUnit {
+                logical_path: row.logical_path().to_owned(),
+                diagnostics: parse_row_with_file(row.source(), row.logical_path()).diagnostics,
+            });
+        }
+    }
     let standard_modules = match &standard_profile {
         Some(profile) => standard_modules
             .into_iter()
@@ -1633,6 +1646,10 @@ pub enum ProjectLoadError {
         logical_path: String,
         diagnostics: Vec<orna_syntax_v1::SyntaxDiagnostic>,
     },
+    InvalidRowUnit {
+        logical_path: String,
+        diagnostics: Vec<orna_syntax_v1::SyntaxDiagnostic>,
+    },
     UnsupportedImport,
     ImportUnavailable,
     AmbiguousImport,
@@ -1659,6 +1676,7 @@ impl fmt::Display for ProjectLoadError {
             Self::RepositoryLimit => "project exceeds the configured source-module limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
             Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
+            Self::InvalidRowUnit { .. } => "reachable row unit is not a valid row unit",
             Self::UnsupportedImport => "source import cannot be resolved by this loader",
             Self::ImportUnavailable => "imported source module is unavailable",
             Self::AmbiguousImport => "imported source module has ambiguous ownership",
