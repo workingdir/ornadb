@@ -11647,6 +11647,79 @@ fn cancelling_a_terminal_request_is_idempotent_and_preserves_its_result() {
     assert_eq!(application.calls, 1);
 }
 
+fn assert_unit_acknowledgement(response: Option<&Envelope>, request: [u8; 16]) {
+    assert!(matches!(
+        response,
+        Some(Envelope {
+            request: Some(returned),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            },
+            ..
+        }) if *returned == request && *value == CanonicalValue::unit()
+    ));
+}
+
+#[test]
+fn cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    // 30-protocol.md, Complete message registry: a terminal or unknown target
+    // is never turned into another request; cancellation acknowledges with a
+    // typed Unit and the connection stays open.
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+}
+
+#[test]
+fn durable_cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+    remove_test_repository(&root);
+}
+
 #[test]
 fn dispatches_request_status_and_rejects_unsupported_client_operations() {
     let mut host = host();
