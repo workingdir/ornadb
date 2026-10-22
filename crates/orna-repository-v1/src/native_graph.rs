@@ -22,10 +22,10 @@ use std::{
 
 use fs2::FileExt;
 use orna_value_v1::{
-    AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
-    Format3Context, Format3Quota, GitHash, MediaAnnotation, MimeRegistry,
-    NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
-    Snapshot as ValueSnapshot,
+    AvailabilityState, Blob, BlobMetadata, BlobResolver, ContentIdentity as ValueContentIdentity,
+    ContentReference, ContextValue, Error as ValueError, Format3Context, Format3Quota, GitHash,
+    MediaAnnotation, MimeRegistry, NativeOid as ValueNativeOid, OwnerLifetime, Raw,
+    SchemaDescriptor, Snapshot as ValueSnapshot, ValueFormat,
 };
 use sha2::{Digest, Sha256};
 
@@ -377,6 +377,9 @@ impl AdmittedRowFields {
 pub struct RepositoryCaptureCapability {
     graph: Arc<NativeGraphContext>,
     scope: RepositoryReadScope,
+    /// The snapshot-pinned value context that captured candidates are bound
+    /// to, present when a format context issued this capability.
+    capture_context: Option<Format3Context>,
 }
 
 impl PartialEq for RepositoryCaptureCapability {
@@ -395,7 +398,18 @@ impl RepositoryCaptureCapability {
         scope: RepositoryReadScope,
     ) -> Result<Self, GraphError> {
         scope.authorize(&graph)?;
-        Ok(Self { graph, scope })
+        Ok(Self {
+            graph,
+            scope,
+            capture_context: None,
+        })
+    }
+
+    /// Binds the values this capability issues for captured candidates to the
+    /// exact snapshot pin of the format context that issued it.
+    pub(crate) fn with_capture_pin(mut self, pin: ValueSnapshot) -> Result<Self, ValueError> {
+        self.capture_context = Some(self.value_context(pin)?);
+        Ok(self)
     }
 
     /// Cumulative media payload bytes this capability has read from the graph.
@@ -427,6 +441,34 @@ impl RepositoryCaptureCapability {
     ) -> Result<CapturedBlobCandidate, GraphError> {
         self.graph
             .capture_blob_candidate(source, max_bytes, &self.scope)
+    }
+
+    /// The lazy Blob value of a captured candidate: its content identity, the
+    /// octet-stream fallback annotation and its descriptor, as a ROV-3 value
+    /// in this capability's snapshot-pinned context. Reading it streams
+    /// verified chunks from the graph on demand; the value never holds the
+    /// payload, whatever its size.
+    pub fn candidate_value(
+        &self,
+        candidate: &CapturedBlobCandidate,
+    ) -> Result<ContextValue, GraphError> {
+        let context = self
+            .capture_context
+            .as_ref()
+            .ok_or(GraphError::ContextMismatch)?;
+        if candidate.context != self.graph.identity || candidate.owner_id != self.graph.owner_id {
+            return Err(GraphError::ContextMismatch);
+        }
+        let identity =
+            ValueContentIdentity::new(candidate.identity.length(), candidate.identity.sha256())
+                .map_err(|_| GraphError::InvalidLength(candidate.identity.length()))?;
+        let descriptor = ValueNativeOid::from_bytes(candidate.descriptor_oid.as_bytes())
+            .map_err(|_| GraphError::MalformedOid)?;
+        let reference = context
+            .reference(identity, descriptor)
+            .map_err(|_| GraphError::MalformedOid)?;
+        let blob = Blob::from_reference(reference).map_err(|_| GraphError::ContextMismatch)?;
+        ContextValue::from_blob(&blob, ValueFormat::Rov3).map_err(|_| GraphError::ContextMismatch)
     }
 
     /// Promotes a captured source into an owner-scoped durable pending pin,
@@ -8450,6 +8492,135 @@ mod persisted_orp_tests {
         assert_eq!(*pin.transfer_record().owner_id(), graph.owner_id);
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    /// A byte-identical copy of the Orna 1.1.0 release `tests/final-vectors.json`,
+    /// pinned to its release `SHA256SUMS` value so drift from the publication
+    /// fails here.
+    const FINAL_VECTORS_JSON: &str =
+        include_str!("../tests/fixtures/reference/tests/final-vectors.json");
+    const FINAL_VECTORS_SHA256: &str =
+        "985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d";
+
+    fn vector_hex(value: &serde_json::Value) -> Vec<u8> {
+        let text = value.as_str().expect("a hexadecimal vector field");
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hexadecimal digits"))
+            .collect()
+    }
+
+    /// Reads one object straight from the fixture repository's Git store.
+    fn stored_git_object(directory: &Path, oid: &str) -> (String, Vec<u8>) {
+        let kind = Command::new("git")
+            .current_dir(directory)
+            .args(["cat-file", "-t", oid])
+            .output()
+            .expect("read the stored object kind");
+        assert!(kind.status.success(), "object {oid} is not stored");
+        let kind = String::from_utf8(kind.stdout)
+            .expect("object kinds are UTF-8")
+            .trim()
+            .to_owned();
+        let bytes = Command::new("git")
+            .current_dir(directory)
+            .args(["cat-file", &kind, oid])
+            .output()
+            .expect("read the stored object bytes");
+        assert!(bytes.status.success(), "object {oid} is unreadable");
+        (kind, bytes.stdout)
+    }
+
+    /// Orna 1.1.0 `tests/final-vectors.json` `native_graph`: capturing the
+    /// published three-byte payload into a sha1 graph and accepting it with
+    /// the `rov3-text` annotation writes exactly the seven published OGS-1
+    /// objects, roots them at the published descriptor OID and binds the exact
+    /// `rov3-text` value. The release authors the vector with
+    /// `tools/write_vectors.py` over `tools/final_model.py` `store_blob`.
+    #[test]
+    fn capture_reproduces_the_final_vector_native_graph() {
+        assert_eq!(
+            hex_encode(&Sha256::digest(FINAL_VECTORS_JSON.as_bytes())),
+            FINAL_VECTORS_SHA256,
+            "the vendored final vectors no longer match the release"
+        );
+        let vectors: serde_json::Value =
+            serde_json::from_str(FINAL_VECTORS_JSON).expect("the vendored final vectors are JSON");
+        let expected = &vectors["native_graph"];
+        assert_eq!(expected["algorithm"], "sha1");
+        let rov3 = vectors["values"]
+            .as_array()
+            .expect("value vectors")
+            .iter()
+            .find(|case| case["id"] == "rov3-text")
+            .expect("the rov3-text vector");
+        let annotation = rov3["value"]["value"].as_array().expect("rov3-text fields");
+
+        // The generator captures `abc`; the vector records its length and digest.
+        let payload = b"abc";
+        assert_eq!(expected["blob_length"], payload.len());
+        assert_eq!(expected["blob_sha256"], hex_encode(&Sha256::digest(payload)));
+
+        let (directory, graph) = capture_test_context();
+        assert_eq!(graph.algorithm, GitHashAlgorithm::Sha1);
+        let graph = Arc::new(graph);
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let capability = RepositoryCaptureCapability::new(Arc::clone(&graph), scope)
+            .expect("matching graph and owner scope");
+        let candidate = capability
+            .capture_blob_candidate(&payload[..], payload.len() as u64)
+            .expect("capture the published payload");
+        let binding = capability
+            .accept_captured_blob(
+                candidate,
+                annotation[2].as_str().expect("a media type"),
+                annotation[3].as_str(),
+            )
+            .expect("accept with the published annotation");
+        assert_eq!(
+            binding.descriptor_oid().to_hex(),
+            expected["descriptor_oid"].as_str().expect("a descriptor OID")
+        );
+        assert_eq!(
+            binding.encoded_value(),
+            vector_hex(&rov3["canonical_hex"]),
+            "rov3-text"
+        );
+
+        // The verified closure under the descriptor is exactly the published
+        // object set, and Git stores each object with its published kind and
+        // bytes.
+        let pin = binding.into_pin();
+        let reference = AdmittedBlobReference {
+            context: pin.context,
+            database_id: pin.database_id,
+            owner_id: pin.owner_id,
+            snapshot_id: pin.snapshot_id,
+            descriptor_oid: pin.descriptor_oid.clone(),
+            identity: pin.identity,
+        };
+        let closure_scope = graph.open_read_scope().expect("closure verification scope");
+        let closure = graph
+            .verify_full_blob(&reference, &closure_scope)
+            .expect("verify the captured closure")
+            .into_iter()
+            .map(|oid| oid.to_hex())
+            .collect::<BTreeSet<_>>();
+        let objects = expected["objects"].as_array().expect("native objects");
+        assert_eq!(objects.len(), 7);
+        assert_eq!(
+            closure,
+            objects
+                .iter()
+                .map(|object| object["oid"].as_str().expect("an object ID").to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        for object in objects {
+            let oid = object["oid"].as_str().expect("an object ID");
+            let (kind, bytes) = stored_git_object(directory.path(), oid);
+            assert_eq!(kind, object["kind"].as_str().expect("an object kind"), "{oid}");
+            assert_eq!(bytes, vector_hex(&object["bytes_hex"]), "{oid}");
+        }
     }
 
 /// ORNA-CAP-003: accepted pins transfer to an owner-scoped local ref namespace, never an ordinary remote ref.
