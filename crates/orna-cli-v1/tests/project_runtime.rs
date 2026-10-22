@@ -725,7 +725,7 @@ fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
         .expect("CLI process");
 
     assert!(!output.status.success());
-    assert_ne!(output.stdout, b"invocation completed\n");
+    assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("failure code: ORNA-EVAL-DIVIDE-BY-ZERO"),
