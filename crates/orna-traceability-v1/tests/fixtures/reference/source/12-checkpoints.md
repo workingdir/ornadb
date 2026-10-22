@@ -100,4 +100,3 @@ If the runtime crashes while an attempt is marked `retrying` or `replaying`, rec
 **ORNA-CP-008** A different clone MUST resume from the checkpoint present in its selected fetched snapshot, not a guessed local copy of another clone's tail.
 
 **ORNA-CP-009** Recovery of unpublished data after machine loss requires replayable source data or a separately preserved local tail. Git replication alone does not contain unpublished state.
-

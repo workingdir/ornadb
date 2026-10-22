@@ -1,0 +1,236 @@
+{
+  "version": "1.0.0",
+  "id": "vectors/path-v1",
+  "requirements": [
+    "ORNA-PATH-001",
+    "ORNA-PATH-002",
+    "ORNA-PATH-003",
+    "ORNA-PATH-004",
+    "ORNA-PATH-005",
+    "ORNA-PATH-006",
+    "ORNA-PATH-007",
+    "ORNA-PATH-008",
+    "ORNA-PATH-009",
+    "ORNA-PATH-010",
+    "ORNA-PATH-011",
+    "ORNA-PATH-012"
+  ],
+  "meaning": "Canonical forward, reverse, rejection, collision, limit and containment vectors for editable row key paths.",
+  "round_trip": [
+    {
+      "type": "Str",
+      "value": "alice-smith",
+      "encoded": "alice-smith"
+    },
+    {
+      "type": "Str",
+      "value": "K1",
+      "encoded": "K1"
+    },
+    {
+      "type": "Date",
+      "value": "2026-09-03",
+      "encoded": "2026-09-03"
+    },
+    {
+      "type": "Int",
+      "value": "42",
+      "encoded": "42"
+    },
+    {
+      "type": "Str",
+      "value": "a~b",
+      "encoded": "a~7eb"
+    },
+    {
+      "type": "Str",
+      "value": "foo/bar",
+      "encoded": "foo~2fbar"
+    },
+    {
+      "type": "Str",
+      "value": "hello you",
+      "encoded": "hello~20you"
+    },
+    {
+      "type": "Str",
+      "value": "é",
+      "encoded": "~c3~a9"
+    },
+    {
+      "type": "Str",
+      "value": "",
+      "encoded": "~ff"
+    },
+    {
+      "type": "Str",
+      "value": ".",
+      "encoded": "~2e"
+    },
+    {
+      "type": "Str",
+      "value": "..",
+      "encoded": "~2e~2e"
+    },
+    {
+      "type": "Str",
+      "value": "hello.",
+      "encoded": "hello~2e"
+    },
+    {
+      "type": "Str",
+      "value": "con",
+      "encoded": "~63on"
+    },
+    {
+      "type": "Str",
+      "value": "NUL.txt",
+      "encoded": "~4eUL.txt"
+    },
+    {
+      "type": "Str",
+      "value": ".git",
+      "encoded": "~2egit"
+    },
+    {
+      "type": "Str",
+      "value": "~ff",
+      "encoded": "~7eff"
+    },
+    {
+      "type": "Str",
+      "value": "../x",
+      "encoded": "..~2fx"
+    },
+    {
+      "type": "Str",
+      "value": "PRN",
+      "encoded": "~50RN"
+    },
+    {
+      "type": "Str",
+      "value": "com1.txt",
+      "encoded": "~63om1.txt"
+    },
+    {
+      "type": "Str",
+      "value": "LPT9.log",
+      "encoded": "~4cPT9.log"
+    },
+    {
+      "type": "Str",
+      "value": ".GIT",
+      "encoded": "~2eGIT"
+    },
+    {
+      "type": "Str",
+      "value": "git~1",
+      "encoded": "git~7e1"
+    }
+  ],
+  "composite": [
+    {
+      "types": [
+        "Uuid",
+        "Date"
+      ],
+      "values": [
+        "018f7f43-7b3a-7cc2-8c11-37e728c96f4a",
+        "2026-09-03"
+      ],
+      "components": [
+        "018f7f43-7b3a-7cc2-8c11-37e728c96f4a",
+        "2026-09-03.orna"
+      ]
+    }
+  ],
+  "portable_collisions": [
+    {
+      "left": "Alice",
+      "right": "alice",
+      "collision_key": "alice"
+    },
+    {
+      "left": "K1",
+      "right": "k1",
+      "collision_key": "k1"
+    }
+  ],
+  "reject_encoded": [
+    {
+      "encoded": "~e",
+      "reason": "obsolete one-digit empty form"
+    },
+    {
+      "encoded": "~FF",
+      "reason": "uppercase hexadecimal and reserved form"
+    },
+    {
+      "encoded": "~fF",
+      "reason": "uppercase hexadecimal"
+    },
+    {
+      "encoded": "~f",
+      "reason": "short escape"
+    },
+    {
+      "encoded": "~zz",
+      "reason": "non-hex escape"
+    },
+    {
+      "encoded": "~61lice",
+      "reason": "non-canonical alias for readable byte"
+    },
+    {
+      "encoded": "x~ff",
+      "reason": "empty sentinel inside non-empty component"
+    },
+    {
+      "encoded": "~ffx",
+      "reason": "empty sentinel inside non-empty component"
+    },
+    {
+      "encoded": "../x",
+      "reason": "raw traversal path"
+    },
+    {
+      "encoded": "/absolute",
+      "reason": "absolute path"
+    }
+  ],
+  "limits": {
+    "component": [
+      {
+        "encoded_length": 199,
+        "expect": "pass"
+      },
+      {
+        "encoded_length": 200,
+        "expect": "pass"
+      },
+      {
+        "encoded_length": 201,
+        "expect": "fail"
+      }
+    ],
+    "table_relative_path": [
+      {
+        "encoded_length": 1023,
+        "expect": "pass"
+      },
+      {
+        "encoded_length": 1024,
+        "expect": "pass"
+      },
+      {
+        "encoded_length": 1025,
+        "expect": "fail"
+      }
+    ]
+  },
+  "materialisation": [
+    "decoded paths remain beneath the resolved table row directory",
+    "symlinks and reparse points cannot redirect a write outside that directory",
+    "case collision is detected before any destination is replaced"
+  ]
+}
