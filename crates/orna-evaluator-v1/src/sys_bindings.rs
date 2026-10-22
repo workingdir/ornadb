@@ -15,9 +15,12 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
-use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
+use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
+use crate::{
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    SysHostAttachment, SysHostContext,
+};
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
@@ -36,6 +39,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
+    sys_host_context: Option<SysHostAttachment>,
 }
 
 #[derive(Debug)]
@@ -54,6 +58,7 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
+            && self.sys_host_context == other.sys_host_context
     }
 }
 
@@ -73,6 +78,7 @@ impl SysHostBindingRegistry {
             capture_candidates: Arc::default(),
             http: None,
             system_random: false,
+            sys_host_context: None,
         }
     }
 
@@ -87,6 +93,15 @@ impl SysHostBindingRegistry {
     #[must_use]
     pub fn with_clock_provider(mut self, provider: ClockProvider) -> Self {
         self.clock = Some(provider);
+        self
+    }
+
+    /// Installs the attached repository and activation facts that
+    /// `sys.rt.info()` reports. Without them the call reports
+    /// `sys.version.incompatible`.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host_context = Some(SysHostAttachment::new(context));
         self
     }
 
@@ -861,6 +876,10 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
+    }
+
     fn handle(
         &mut self,
         _callee: &Expr,
@@ -896,6 +915,17 @@ impl EffectHandler for SysHostBindingRegistry {
 }
 
 impl Ovb2EffectHandler for SysHostBindingRegistry {
+    /// Captures return lazy ROV-3 values in the repository capture context;
+    /// every other value keeps the OVB-2 profile.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -962,7 +992,7 @@ impl SysHostBindingRegistry {
         // A negative or unrepresentable byte bound is an out-of-range length.
         let max_bytes = max_bytes
             .to_u64()
-            .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::BoundOutOfRange))?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
@@ -981,7 +1011,11 @@ impl SysHostBindingRegistry {
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
             .map_err(capture_file_failure)?;
-        let candidate = repository.capture_blob_candidate(&mut source, max_bytes);
+        // The stream already holds the source within `max_bytes` and the
+        // provider limit, so its observed length is the writer's ceiling;
+        // growth past it is reported below as a changed source.
+        let length = source.length();
+        let candidate = repository.capture_blob_candidate(&mut source, length);
         source.verify_unchanged().map_err(capture_file_failure)?;
         if source.exceeded() {
             return Err(capture_file_failure(CaptureFileError::LimitExceeded));
@@ -1000,10 +1034,14 @@ impl SysHostBindingRegistry {
         // Capture is one of the old constructors: it supplies the
         // octet-stream/null annotation whatever the file is called, and an
         // importer declares the media type afterwards with `sys.blob.annotate`
-        // (ORNA-MIME-001).
-        let blob = Blob::from_bytes(source.into_captured_bytes());
-        let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
-            .map(Some)
+        // (ORNA-MIME-001). The value names the candidate's descriptor in the
+        // capture context, so no captured byte is held in memory
+        // (ORNA-BLOB-007; store-format-3 ROV-3).
+        let value = repository
+            .candidate_value(&candidate)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        let blob = value
+            .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         self.capture_candidates
             .lock()
@@ -1013,7 +1051,7 @@ impl SysHostBindingRegistry {
                 media_type: blob.media_type().to_owned(),
                 suffix: blob.suffix().map(str::to_owned),
             });
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -1303,6 +1341,7 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_value_v1::Blob;
 
     #[test]
     fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
@@ -1405,6 +1444,7 @@ mod tests {
             CaptureFileError::SourceUnavailable,
             CaptureFileError::LimitExceeded,
             CaptureFileError::SourceChanged,
+            CaptureFileError::BoundOutOfRange,
         ] {
             assert!(
                 operation

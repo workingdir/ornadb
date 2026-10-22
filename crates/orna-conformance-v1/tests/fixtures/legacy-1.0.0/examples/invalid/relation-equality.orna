@@ -1,0 +1,1 @@
+pub fn same() = contacts.Contact == contacts.Contact.as_of(HEAD);

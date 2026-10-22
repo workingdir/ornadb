@@ -157,7 +157,7 @@ fn durable_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -358,7 +358,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .filter(|scenario| scenario.status == EvidenceStatus::Skipped)
             .count(),
-        140
+        275
     );
 }
 
@@ -728,7 +728,11 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
 
     // The publication target is a committed format-2 snapshot.
     fs::create_dir_all(temp.path().join(".orna")).expect("legacy metadata directory");
-    fs::write(temp.path().join(".orna/format.orna"), "format 2\n").expect("legacy format");
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n",
+    )
+    .expect("legacy format");
     fs::write(
         temp.path().join(".orna/database.orna"),
         "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
@@ -835,7 +839,7 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
-    assert_eq!(scenarios.len(), 144);
+    assert_eq!(scenarios.len(), 279);
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),

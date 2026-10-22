@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/assert-missing-semicolon.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-005",
+  "message_contains": "assertion clause must end with `;`",
+  "status": "expected-not-executed"
+}

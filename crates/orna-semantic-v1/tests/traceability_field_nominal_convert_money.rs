@@ -4,7 +4,7 @@
 //! not claim full compiler or Orna-engine execution.
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
 };
 
 fn has_type_diagnostic(result: &orna_semantic_v1::Analysis) -> bool {
@@ -177,7 +177,7 @@ fn exact_energy_rate_algebra_excludes_binary_float() {
         include_str!("fixtures/traceability-money-float-energy-rate.orna"),
     )]);
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_MONEY_BINARY_FLOAT
             && diagnostic.message()
                 == "binary Float cannot enter an exact Money calculation implicitly"
     }));

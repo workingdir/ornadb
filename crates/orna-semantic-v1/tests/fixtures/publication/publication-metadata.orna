@@ -1,17 +1,15 @@
-pub fn storage_target(storage: sys.Storage): Int = storage.publication_policy.compressed_target_bytes;
-pub fn storage_file_bound(storage: sys.Storage): Int = storage.publication_policy.max_file_bytes;
-pub fn storage_pending_age(storage: sys.Storage): Int = storage.publication_policy.max_pending_age_seconds;
+pub fn storage_policy(storage: sys.Storage): sys.Value = storage.publication_policy;
 pub fn storage_pending_rows(storage: sys.Storage): Int = storage.pending_rows;
 pub fn storage_pending_bytes(storage: sys.Storage): Int = storage.pending_bytes;
-pub fn storage_published_rows(storage: sys.Storage): Int = storage.published_rows;
-pub fn storage_published_bytes(storage: sys.Storage): Int = storage.published_bytes;
-pub fn storage_published_at(storage: sys.Storage): Instant? = storage.last_publication;
+pub fn storage_last_publication(storage: sys.Storage): Instant? = storage.last_publication;
+pub fn storage_last_snapshot(storage: sys.Storage): sys.SnapshotRef? = storage.last_snapshot;
+pub fn storage_generation(storage: sys.Storage): Int = storage.logical_generation;
+pub fn storage_objects() = sys.storage.objects;
 
-pub fn maintenance_target(job: sys.MaintenanceJob): Int = job.publication_policy.compressed_target_bytes;
-pub fn maintenance_file_bound(job: sys.MaintenanceJob): Int = job.publication_policy.max_file_bytes;
-pub fn maintenance_pending_age(job: sys.MaintenanceJob): Int = job.publication_policy.max_pending_age_seconds;
-pub fn maintenance_pending_rows(job: sys.MaintenanceJob): Int = job.pending_rows;
-pub fn maintenance_pending_bytes(job: sys.MaintenanceJob): Int = job.pending_bytes;
-pub fn maintenance_published_rows(job: sys.MaintenanceJob): Int = job.published_rows;
-pub fn maintenance_published_bytes(job: sys.MaintenanceJob): Int = job.published_bytes;
-pub fn maintenance_last_publication(job: sys.MaintenanceJob): Instant? = job.last_publication;
+pub fn maintenance_kind(job: sys.MaintenanceJob): sys.MaintenanceKind = job.kind;
+pub fn maintenance_status(job: sys.MaintenanceJob): sys.BuildStatus = job.status;
+pub fn maintenance_progress(job: sys.MaintenanceJob): Decimal? = job.progress;
+pub fn maintenance_ended(job: sys.MaintenanceJob): Instant? = job.ended;
+pub fn maintenance_failure(job: sys.MaintenanceJob): sys.Diagnostic? = job.failure;
+pub fn checkpoint_publications() =
+    sys.storage.maintenance | filter(job => job.kind == sys.MaintenanceKind.checkpoint_publish);

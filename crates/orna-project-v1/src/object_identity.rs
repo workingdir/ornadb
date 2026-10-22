@@ -12,52 +12,92 @@ use std::{
 };
 
 use num_bigint::BigInt;
-use orna_repository_v1::{GitCommitRef, Repository, RepositoryError, Uuid};
+use orna_repository_v1::{
+    GitCommitRef, Repository, RepositoryError, Uuid,
+    relation_admission::{StagedCandidate, StoredObjectIdentity},
+};
 use orna_semantic_v1::{
     Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
     TableSchema, Type, declared_type,
 };
 use orna_syntax_v1::{
-    Declaration, EnumVariant, Expr, FieldInitializer, ImplMember, LiteralKind, Pattern, SyntaxTree,
-    TableMember, Token, TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex,
-    parse_module,
+    Argument, AssignmentTarget, Declaration, EnumVariant, Expr, FieldInitializer, ImplMember,
+    LiteralKind, Pattern, RecordField, Statement, StringSegment, SyntaxTree, TableMember, Token,
+    TokenKind, TypeExpr, TypeMember, TypeRepresentation, UseTail, lex, parse_module,
 };
 use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 
-/// Repository-relative committed location of the object identity inventory.
-pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
+/// Repository-relative location of the legacy identity sidecar. Format 3
+/// commits keep the inventory in the store (see [`ObjectIdentityManifest::read_committed`]);
+/// the worktree copy remains the input of explicit rename tooling.
+pub const OBJECT_IDENTITY_MANIFEST_PATH: &str =
+    orna_repository_v1::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH;
 const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
-const MANIFEST_VERSION: u64 = 1;
+/// Sidecar encoding version. Version 2 stores each kind's `sys.ObjectKind`
+/// ordinal (see [`ObjectKind::spec_ordinal`]); version 1 is the legacy
+/// internal code (see [`ObjectKind::legacy_code`]) and is read only for old commits.
+const MANIFEST_VERSION: u64 = 2;
+const LEGACY_MANIFEST_VERSION: u64 = 1;
+/// `sys.ObjectKind` ordinals (api/sys.json order) shared by several kinds.
+const SPEC_FIELD_ORDINAL: u64 = 9;
+const SPEC_VARIANT_ORDINAL: u64 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-#[repr(u64)]
 pub enum ObjectKind {
-    Table = 1,
+    Table,
     /// A table column, including primary-key columns (`Table.column`).
-    Field = 2,
-    Unit = 3,
+    Field,
+    Unit,
     /// A nominal user type, refined nominal type or enum (`Type`).
-    Type = 4,
+    Type,
     /// One enum variant (`Enum.variant`).
-    Variant = 5,
+    Variant,
     /// One field of a nominal record type (`Type.field`).
-    TypeField = 6,
+    TypeField,
     /// One payload field of an enum variant (`Enum.variant.field`).
-    VariantField = 7,
+    VariantField,
 }
 
 impl ObjectKind {
-    fn from_raw(raw: &Raw) -> Option<Self> {
-        match raw_int(raw)? {
-            1 => Some(Self::Table),
-            2 => Some(Self::Field),
-            3 => Some(Self::Unit),
-            4 => Some(Self::Type),
-            5 => Some(Self::Variant),
-            6 => Some(Self::TypeField),
-            7 => Some(Self::VariantField),
-            _ => None,
+    /// The `sys.ObjectKind` value this kind is stored under. Both nominal
+    /// fields and variant payload fields are `field`; they are told apart by
+    /// their owner when read (see [`records_from_spec_ordinals`]).
+    const fn spec_ordinal(self) -> u64 {
+        match self {
+            Self::Table => 2,
+            Self::Field => 3,
+            Self::Unit => 15,
+            Self::Type => 8,
+            Self::Variant => SPEC_VARIANT_ORDINAL,
+            Self::TypeField | Self::VariantField => SPEC_FIELD_ORDINAL,
         }
+    }
+
+    /// The internal code of sidecar version 1.
+    const fn legacy_code(self) -> u64 {
+        match self {
+            Self::Table => 1,
+            Self::Field => 2,
+            Self::Unit => 3,
+            Self::Type => 4,
+            Self::Variant => 5,
+            Self::TypeField => 6,
+            Self::VariantField => 7,
+        }
+    }
+
+    fn from_legacy_code(code: u64) -> Option<Self> {
+        [
+            Self::Table,
+            Self::Field,
+            Self::Unit,
+            Self::Type,
+            Self::Variant,
+            Self::TypeField,
+            Self::VariantField,
+        ]
+        .into_iter()
+        .find(|kind| kind.legacy_code() == code)
     }
 }
 
@@ -321,15 +361,24 @@ impl ObjectIdentityManifest {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ObjectIdentityError> {
+        self.encode_as(MANIFEST_VERSION, ObjectKind::spec_ordinal)
+    }
+
+    /// Encodes the inventory under `version`, storing each kind as `code` gives it.
+    fn encode_as(
+        &self,
+        version: u64,
+        code: fn(ObjectKind) -> u64,
+    ) -> Result<Vec<u8>, ObjectIdentityError> {
         validate_records(&self.records)?;
         let raw = Raw::Array(vec![
-            Raw::Int(MANIFEST_VERSION.into()),
+            Raw::Int(version.into()),
             Raw::Array(
                 self.records
                     .iter()
                     .map(|record| {
                         Raw::Array(vec![
-                            Raw::Int((record.kind as u64).into()),
+                            Raw::Int(code(record.kind).into()),
                             Raw::Text(record.qualified_name.clone()),
                             Raw::Bytes(record.id.to_vec()),
                             Raw::Bool(record.retired),
@@ -351,13 +400,16 @@ impl ObjectIdentityManifest {
         let Raw::Array(root) = value.raw() else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        if root.len() != 2 || raw_int(&root[0]) != Some(MANIFEST_VERSION) {
-            return Err(ObjectIdentityError::InvalidEncoding);
-        }
+        let version = match root.first().and_then(raw_int) {
+            Some(version @ (LEGACY_MANIFEST_VERSION | MANIFEST_VERSION)) if root.len() == 2 => {
+                version
+            }
+            _ => return Err(ObjectIdentityError::InvalidEncoding),
+        };
         let Raw::Array(entries) = &root[1] else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        let mut records = Vec::with_capacity(entries.len());
+        let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
             let Raw::Array(fields) = entry else {
                 return Err(ObjectIdentityError::InvalidEncoding);
@@ -365,8 +417,7 @@ impl ObjectIdentityManifest {
             if fields.len() != 4 {
                 return Err(ObjectIdentityError::InvalidEncoding);
             }
-            let kind =
-                ObjectKind::from_raw(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
+            let code = raw_int(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
             let Raw::Text(qualified_name) = &fields[1] else {
                 return Err(ObjectIdentityError::InvalidEncoding);
             };
@@ -380,16 +431,31 @@ impl ObjectIdentityManifest {
                 .as_slice()
                 .try_into()
                 .map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-            records.push(ObjectIdentity {
-                kind,
-                qualified_name: qualified_name.clone(),
-                id,
-                retired: *retired,
-            });
+            rows.push((code, qualified_name.clone(), id, *retired));
         }
+        let records = if version == LEGACY_MANIFEST_VERSION {
+            rows.into_iter()
+                .map(|(code, qualified_name, id, retired)| {
+                    Ok(ObjectIdentity {
+                        kind: ObjectKind::from_legacy_code(code)
+                            .ok_or(ObjectIdentityError::InvalidEncoding)?,
+                        qualified_name,
+                        id,
+                        retired,
+                    })
+                })
+                .collect::<Result<Vec<_>, ObjectIdentityError>>()?
+        } else {
+            records_from_spec_ordinals(rows)?
+        };
         let manifest = Self { records };
         validate_records(&manifest.records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-        if manifest.encode()?.as_slice() != bytes {
+        let canonical = if version == LEGACY_MANIFEST_VERSION {
+            manifest.encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)?
+        } else {
+            manifest.encode()?
+        };
+        if canonical.as_slice() != bytes {
             return Err(ObjectIdentityError::InvalidEncoding);
         }
         Ok(manifest)
@@ -457,19 +523,89 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
-    /// Reads and validates the source identity inventory from one exact commit.
+    /// Reads and validates the committed identity inventory of one exact
+    /// commit.
+    ///
+    /// Format 3 keeps the inventory as a sealed system relation of
+    /// `.orna/store`, because tracked `.orna/` holds only `database.orna` and
+    /// `store` (ORNA-META-001) and stable IDs are committed metadata
+    /// (ORNA-OBJECT-002). The tracked sidecar is read only for a legacy
+    /// commit whose store has no inventory relation; when a commit has both,
+    /// the store is the authority.
     pub fn read_committed(
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_committed_object_identities(commit)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored);
+        }
         let bytes = repository
-            .read_committed_file(
-                commit,
-                OBJECT_IDENTITY_MANIFEST_PATH,
-                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
-            )
-            .map_err(|_| ObjectIdentityError::Io)?;
+            .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .ok_or(ObjectIdentityError::Io)?;
         Self::decode(&bytes)
+    }
+
+    /// Reads the inventory the staged candidate of the ordinary index
+    /// carries: its staged store's inventory relation, or else the legacy
+    /// sidecar its staged tree tracks. `Ok(None)` before any identity was
+    /// allocated, as for the first commit of a database.
+    pub fn read_staged(
+        repository: &Repository,
+        staged: &StagedCandidate,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_staged_object_identities(staged)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored).map(Some);
+        }
+        repository
+            .read_staged_legacy_identity_sidecar(staged, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .map(|bytes| Self::decode(&bytes))
+            .transpose()
+    }
+
+    /// The inventory as store rows for the sealed identity relation.
+    pub fn to_stored(&self) -> Vec<StoredObjectIdentity> {
+        self.records
+            .iter()
+            .map(|record| {
+                StoredObjectIdentity::new(
+                    record.id,
+                    record.kind.spec_ordinal(),
+                    record.qualified_name.clone(),
+                    record.retired,
+                )
+            })
+            .collect()
+    }
+
+    /// Rebuilds the inventory from the store rows of the sealed identity
+    /// relation, in the same canonical record order reconciliation uses.
+    fn from_stored(stored: &[StoredObjectIdentity]) -> Result<Self, ObjectIdentityError> {
+        let rows = stored
+            .iter()
+            .map(|identity| {
+                (
+                    identity.kind(),
+                    identity.qualified_name().to_owned(),
+                    *identity.id(),
+                    identity.retired(),
+                )
+            })
+            .collect();
+        let mut records = records_from_spec_ordinals(rows)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+        Ok(Self { records })
     }
     /// Reads the manifest from the current worktree without allocating IDs.
     pub fn read_worktree(repository: &Repository) -> Result<Option<Self>, ObjectIdentityError> {
@@ -571,11 +707,18 @@ impl ObjectIdentityManifest {
 }
 /// Implementation-owned digest domains for source expressions recorded by a
 /// closed storage descriptor: a computed selector's `[2, expression_digest]`
-/// and a refined type's `assertion_semantic_digests` (29-formats.md). The
-/// payload is the expression's lexical token stream, so whitespace and
-/// comments never change a schema fingerprint while every token does.
-const COMPUTED_SELECTOR_DIGEST_DOMAIN: &str = "ornadb.computed-selector.v1";
-const REFINEMENT_ASSERTION_DIGEST_DOMAIN: &str = "ornadb.refinement-assertion.v1";
+/// and a refined type's `assertion_semantic_digests` (29-formats.md). Neither
+/// is one of the fixed 29-formats.md domains; work ADR 0118 documents both.
+///
+/// The payload is an OVB-1 array with one entry per lexical token of the
+/// expression, so whitespace and comments never change a fingerprint
+/// (ORNA-SYS-034). An identifier that is a free reference is replaced by what
+/// it resolves to, `["declaration", namespace, name]` or `["module",
+/// namespace]`, so identical tokens bound to a different declaration give a
+/// different fingerprint. Row fields, local bindings and core names keep
+/// their `["identifier", name]` entry.
+const COMPUTED_SELECTOR_DIGEST_DOMAIN: &str = "ornadb.computed-selector.v2";
+const REFINEMENT_ASSERTION_DIGEST_DOMAIN: &str = "ornadb.refinement-assertion.v2";
 
 const RECORD_DEFINITION: u64 = 0;
 const ENUM_DEFINITION: u64 = 1;
@@ -711,8 +854,12 @@ impl<'a> DescriptorBuilder<'a> {
         {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
-        let computed =
-            self.computed_selector_digests(namespace, declaration_name, &admission.computed)?;
+        let computed = self.computed_selector_digests(
+            namespace,
+            declaration_name,
+            &admission.computed,
+            &schema.fields,
+        )?;
         let mut encoded_fields = Vec::with_capacity(schema.fields.len());
         for (name, ty) in &schema.fields {
             let id = field_ids
@@ -762,6 +909,7 @@ impl<'a> DescriptorBuilder<'a> {
         namespace: &Namespace,
         declaration_name: &str,
         computed: &BTreeSet<String>,
+        fields: &BTreeMap<String, Type>,
     ) -> Result<BTreeMap<String, [u8; 32]>, SourceTableSchemaError> {
         let source = self.source(namespace)?;
         let mut tables = source
@@ -785,10 +933,11 @@ impl<'a> DescriptorBuilder<'a> {
                 ..
             } = member
             {
-                let digest = expression_digest(
+                let digest = self.expression_digest(
                     COMPUTED_SELECTOR_DIGEST_DOMAIN,
-                    &source.module.source,
+                    namespace,
                     expression,
+                    Some(fields),
                 )?;
                 if digests.insert(name.clone(), digest).is_some() {
                     return Err(SourceTableSchemaError::InvalidSourceSchema);
@@ -799,6 +948,55 @@ impl<'a> DescriptorBuilder<'a> {
             return Err(SourceTableSchemaError::InvalidSourceSchema);
         }
         Ok(digests)
+    }
+
+    /// Digests one expression declared in `namespace` under `domain`.
+    /// `row_fields` are the table fields a computed selector reads as lexical
+    /// selectors (ORNA-FIELD-009); refinement assertions have none.
+    fn expression_digest(
+        &self,
+        domain: &str,
+        namespace: &Namespace,
+        expression: &Expr,
+        row_fields: Option<&BTreeMap<String, Type>>,
+    ) -> Result<[u8; 32], SourceTableSchemaError> {
+        let mut references = ReferenceResolver {
+            builder: self,
+            namespace,
+            row_fields,
+            scopes: Vec::new(),
+            resolved: BTreeMap::new(),
+        };
+        references.expr(expression)?;
+        let source = self.source(namespace)?;
+        let span = expression.span();
+        let tokens = source
+            .module
+            .source
+            .get(span.start..span.end)
+            .and_then(|text| lex(text).ok())
+            .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
+        let mut replaced = 0_usize;
+        let payload = Raw::Array(
+            tokens
+                .iter()
+                .filter_map(|token| {
+                    let reference = references.resolved.get(&(span.start + token.span.start));
+                    match (&token.kind, reference) {
+                        (TokenKind::Identifier { .. }, Some(reference)) => {
+                            replaced += 1;
+                            Some(reference.clone())
+                        }
+                        _ => token_raw(token),
+                    }
+                })
+                .collect(),
+        );
+        // Every resolved reference must stand in for exactly one identifier.
+        if replaced != references.resolved.len() {
+            return Err(SourceTableSchemaError::InvalidSourceSchema);
+        }
+        domain_digest(domain, &payload).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
     }
 
     /// Encodes one declared type, spelled in `namespace`, as a closed type node.
@@ -1130,7 +1328,6 @@ impl<'a> DescriptorBuilder<'a> {
         base: &TypeExpr,
         members: &'a [TypeMember],
     ) -> Result<Raw, SourceTableSchemaError> {
-        let source = self.source(namespace)?;
         let base = self.type_node(&declared_type(base), namespace)?;
         let digests = members
             .iter()
@@ -1139,12 +1336,8 @@ impl<'a> DescriptorBuilder<'a> {
                 _ => None,
             })
             .map(|value| {
-                expression_digest(
-                    REFINEMENT_ASSERTION_DIGEST_DOMAIN,
-                    &source.module.source,
-                    value,
-                )
-                .map(|digest| Raw::Bytes(digest.to_vec()))
+                self.expression_digest(REFINEMENT_ASSERTION_DIGEST_DOMAIN, namespace, value, None)
+                    .map(|digest| Raw::Bytes(digest.to_vec()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Raw::Array(vec![base, Raw::Array(digests)]))
@@ -1450,19 +1643,347 @@ impl<'a> DescriptorBuilder<'a> {
     }
 }
 
-/// Digests one source expression's lexical token stream under `domain`.
-fn expression_digest(
-    domain: &str,
-    source: &str,
-    expression: &Expr,
-) -> Result<[u8; 32], SourceTableSchemaError> {
-    let span = expression.span();
-    let tokens = source
-        .get(span.start..span.end)
-        .and_then(|text| lex(text).ok())
-        .ok_or(SourceTableSchemaError::InvalidSourceSchema)?;
-    let payload = Raw::Array(tokens.iter().filter_map(token_raw).collect());
-    domain_digest(domain, &payload).map_err(|_| SourceTableSchemaError::InvalidDescriptor)
+/// Finds the free references of one expression and what they resolve to,
+/// keyed by the source offset of their identifier token. Local bindings shadow
+/// row fields, which shadow module declarations and imports (ORNA-FIELD-009);
+/// a name that resolves to none of these is a core name and stays spelled.
+struct ReferenceResolver<'r, 'a> {
+    builder: &'r DescriptorBuilder<'a>,
+    namespace: &'r Namespace,
+    row_fields: Option<&'r BTreeMap<String, Type>>,
+    scopes: Vec<BTreeSet<String>>,
+    resolved: BTreeMap<usize, Raw>,
+}
+
+impl ReferenceResolver<'_, '_> {
+    fn bound(&self, name: &str) -> bool {
+        name == "self"
+            || self.scopes.iter().any(|scope| scope.contains(name))
+            || self
+                .row_fields
+                .is_some_and(|fields| fields.contains_key(name))
+    }
+
+    fn value_name(&mut self, name: &str, start: usize) -> Result<(), SourceTableSchemaError> {
+        if self.bound(name) {
+            return Ok(());
+        }
+        self.declared_name(name, start)
+    }
+
+    /// Records the declaration or module a free spelling resolves to.
+    fn declared_name(&mut self, name: &str, start: usize) -> Result<(), SourceTableSchemaError> {
+        let reference = match self.builder.resolve(self.namespace, name) {
+            Ok((namespace, name)) => Raw::Array(vec![
+                Raw::Text("declaration".into()),
+                Raw::Text(namespace.display()),
+                Raw::Text(name),
+            ]),
+            Err(SourceTableSchemaError::UnsupportedType) => {
+                match self.builder.module_binding(self.namespace, name) {
+                    Ok(namespace) => Raw::Array(vec![
+                        Raw::Text("module".into()),
+                        Raw::Text(namespace.display()),
+                    ]),
+                    Err(SourceTableSchemaError::UnsupportedType) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        self.resolved.insert(start, reference);
+        Ok(())
+    }
+
+    fn scoped(
+        &mut self,
+        names: BTreeSet<String>,
+        body: impl FnOnce(&mut Self) -> Result<(), SourceTableSchemaError>,
+    ) -> Result<(), SourceTableSchemaError> {
+        self.scopes.push(names);
+        let result = body(self);
+        self.scopes.pop();
+        result
+    }
+
+    fn expr(&mut self, expression: &Expr) -> Result<(), SourceTableSchemaError> {
+        match expression {
+            Expr::Name { text, span } => self.value_name(text, span.start),
+            Expr::Literal { .. } | Expr::ReplBinding { .. } => Ok(()),
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let StringSegment::Expression { value, .. } = segment {
+                        self.expr(value)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Unary { rhs, .. } => self.expr(rhs),
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::Index {
+                base: lhs,
+                index: rhs,
+                ..
+            } => {
+                self.expr(lhs)?;
+                self.expr(rhs)
+            }
+            Expr::Range { lower, upper, .. } => {
+                for bound in [lower, upper].into_iter().flatten() {
+                    self.expr(bound)?;
+                }
+                Ok(())
+            }
+            Expr::Call {
+                callee, arguments, ..
+            } => {
+                self.expr(callee)?;
+                self.arguments(arguments)
+            }
+            Expr::GenericCall {
+                callee,
+                type_arguments,
+                arguments,
+                ..
+            } => {
+                self.expr(callee)?;
+                for argument in type_arguments {
+                    self.type_expr(argument)?;
+                }
+                self.arguments(arguments)
+            }
+            // A member name after `.` is resolved by the base value's type,
+            // not by scope; only the base is a reference.
+            Expr::Field { base, .. } => self.expr(base),
+            Expr::Group { inner, .. } => self.expr(inner),
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for element in elements {
+                    self.expr(element)?;
+                }
+                Ok(())
+            }
+            Expr::Record { fields, .. } => self.record_fields(fields),
+            Expr::Nominal { path, fields, .. } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(&first.text, first.span.start)?;
+                }
+                self.record_fields(fields)
+            }
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                let mut names = BTreeSet::new();
+                for parameter in parameters {
+                    if let Some(annotation) = &parameter.annotation {
+                        self.type_expr(annotation)?;
+                    }
+                    self.pattern(&parameter.pattern, &mut names)?;
+                }
+                self.scoped(names, |resolver| resolver.expr(body))
+            }
+            Expr::Block {
+                statements, tail, ..
+            } => self.scoped(BTreeSet::new(), |resolver| {
+                for statement in statements {
+                    resolver.statement(statement)?;
+                }
+                tail.as_deref().map_or(Ok(()), |tail| resolver.expr(tail))
+            }),
+            Expr::Control {
+                binding,
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    self.expr(condition)?;
+                }
+                let mut names = BTreeSet::new();
+                if let Some(binding) = binding {
+                    self.pattern(binding, &mut names)?;
+                }
+                if let Some(body) = body {
+                    self.scoped(names, |resolver| resolver.expr(body))?;
+                }
+                for arm in arms {
+                    let mut names = BTreeSet::new();
+                    self.pattern(&arm.pattern, &mut names)?;
+                    self.scoped(names, |resolver| {
+                        if let Some(guard) = &arm.guard {
+                            resolver.expr(guard)?;
+                        }
+                        resolver.expr(&arm.body)
+                    })?;
+                }
+                alternate
+                    .as_deref()
+                    .map_or(Ok(()), |alternate| self.expr(alternate))
+            }
+        }
+    }
+
+    fn statement(&mut self, statement: &Statement) -> Result<(), SourceTableSchemaError> {
+        match statement {
+            Statement::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                if let Some(annotation) = annotation {
+                    self.type_expr(annotation)?;
+                }
+                self.expr(value)?;
+                let mut names = BTreeSet::new();
+                self.pattern(pattern, &mut names)?;
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.extend(names);
+                }
+                Ok(())
+            }
+            Statement::Assert { value, .. }
+            | Statement::Expression { value, .. }
+            | Statement::Control { value, .. } => self.expr(value),
+            Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                value.as_ref().map_or(Ok(()), |value| self.expr(value))
+            }
+            Statement::Continue { .. } => Ok(()),
+            Statement::Assignment { target, value, .. } => {
+                self.assignment_target(target)?;
+                self.expr(value)
+            }
+        }
+    }
+
+    fn assignment_target(
+        &mut self,
+        target: &AssignmentTarget,
+    ) -> Result<(), SourceTableSchemaError> {
+        match target {
+            AssignmentTarget::Name { name, span } => self.value_name(name, span.start),
+            AssignmentTarget::Field { base, .. } => self.assignment_target(base),
+            AssignmentTarget::Index { base, index, .. } => {
+                self.assignment_target(base)?;
+                self.expr(index)
+            }
+        }
+    }
+
+    fn arguments(&mut self, arguments: &[Argument]) -> Result<(), SourceTableSchemaError> {
+        for argument in arguments {
+            self.expr(&argument.value)?;
+        }
+        Ok(())
+    }
+
+    fn record_fields(&mut self, fields: &[RecordField]) -> Result<(), SourceTableSchemaError> {
+        for field in fields {
+            self.expr(&field.value)?;
+        }
+        Ok(())
+    }
+
+    /// Collects the names a pattern binds and resolves its constructor paths.
+    fn pattern(
+        &mut self,
+        pattern: &Pattern,
+        names: &mut BTreeSet<String>,
+    ) -> Result<(), SourceTableSchemaError> {
+        match pattern {
+            Pattern::Name(name, _) => {
+                names.insert(name.clone());
+                Ok(())
+            }
+            Pattern::Wildcard(_) | Pattern::Literal { .. } => Ok(()),
+            Pattern::Tuple { elements, .. } | Pattern::List { elements, .. } => {
+                for element in elements {
+                    self.pattern(element, names)?;
+                }
+                Ok(())
+            }
+            Pattern::Record { fields, .. } => {
+                for (name, pattern, _) in fields {
+                    match pattern {
+                        Some(pattern) => self.pattern(pattern, names)?,
+                        None => {
+                            names.insert(name.clone());
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Pattern::Constructor {
+                path,
+                arguments,
+                fields,
+                ..
+            } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(&first.text, first.span.start)?;
+                }
+                for argument in arguments {
+                    self.pattern(argument, names)?;
+                }
+                for field in fields {
+                    match &field.pattern {
+                        Some(pattern) => self.pattern(pattern, names)?,
+                        None => {
+                            names.insert(field.name.clone());
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Type names are never row fields or local bindings.
+    fn type_expr(&mut self, ty: &TypeExpr) -> Result<(), SourceTableSchemaError> {
+        match ty {
+            TypeExpr::Name {
+                path,
+                arguments,
+                span,
+            } => {
+                if let Some(first) = path.first() {
+                    self.declared_name(first, span.start)?;
+                }
+                for argument in arguments {
+                    self.type_expr(argument)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+                self.type_expr(inner)
+            }
+            TypeExpr::Product { lhs, rhs, .. } => {
+                self.type_expr(lhs)?;
+                self.type_expr(rhs)
+            }
+            TypeExpr::Record { fields, .. } => {
+                for (_, field, _) in fields {
+                    self.type_expr(field)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Tuple { elements, .. } => {
+                for element in elements {
+                    self.type_expr(element)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Function {
+                parameters, result, ..
+            } => {
+                for parameter in parameters {
+                    self.type_expr(parameter)?;
+                }
+                self.type_expr(result)
+            }
+        }
+    }
 }
 
 fn token_raw(token: &Token) -> Option<Raw> {
@@ -1781,6 +2302,50 @@ fn raw_int(raw: &Raw) -> Option<u64> {
     }
 }
 
+/// Rebuilds records from `(sys.ObjectKind ordinal, qualified name, id, retired)`
+/// rows. A `field` row is a variant payload field exactly when its owner (the
+/// name without its last segment) is a variant row; otherwise it is a type field.
+fn records_from_spec_ordinals(
+    rows: Vec<(u64, String, [u8; 16], bool)>,
+) -> Result<Vec<ObjectIdentity>, ObjectIdentityError> {
+    let variants: BTreeSet<&str> = rows
+        .iter()
+        .filter(|(code, ..)| *code == SPEC_VARIANT_ORDINAL)
+        .map(|(_, qualified_name, ..)| qualified_name.as_str())
+        .collect();
+    rows.iter()
+        .map(|(code, qualified_name, id, retired)| {
+            let kind = if *code == SPEC_FIELD_ORDINAL {
+                let (owner, _) = qualified_name
+                    .rsplit_once('.')
+                    .ok_or(ObjectIdentityError::InvalidEncoding)?;
+                if variants.contains(owner) {
+                    ObjectKind::VariantField
+                } else {
+                    ObjectKind::TypeField
+                }
+            } else {
+                [
+                    ObjectKind::Table,
+                    ObjectKind::Field,
+                    ObjectKind::Unit,
+                    ObjectKind::Type,
+                    ObjectKind::Variant,
+                ]
+                .into_iter()
+                .find(|kind| kind.spec_ordinal() == *code)
+                .ok_or(ObjectIdentityError::InvalidEncoding)?
+            };
+            Ok(ObjectIdentity {
+                kind,
+                qualified_name: qualified_name.clone(),
+                id: *id,
+                retired: *retired,
+            })
+        })
+        .collect()
+}
+
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
     let mut active = BTreeSet::new();
     let mut ids = HashSet::new();
@@ -2020,6 +2585,77 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
+        );
+    }
+
+    // Restores the retired-id invariant deleted with orna-semantic-v1 (commit
+    // 0e26aa9a4, PR #9168). Spec: ORNA-OBJECT-005 (retired IDs MUST NOT be
+    // reused for an unrelated definition) and ORNA-AUTOID-002 (allocated IDs
+    // are never reused after deletion).
+    #[test]
+    fn committed_ids_survive_edits_and_retirement_prevents_reuse() {
+        let first_source = "pub table Note(id: Str) { title: Str, }";
+        let first = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            None,
+        )
+        .expect("initial authoring allocates committed identities");
+        let table_id = *first.id(ObjectKind::Table, "Note").unwrap();
+        let title_id = *first.id(ObjectKind::Field, "Note.title").unwrap();
+        let encoded = first.encode().unwrap();
+        assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
+
+        let edited = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new(
+                "main.orna",
+                "pub table Note(id: Str) { title: Str, body: Str, }",
+            )],
+            Some(&first),
+        )
+        .expect("compatible edit retains prior identities");
+        assert_eq!(edited.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert_eq!(edited.id(ObjectKind::Field, "Note.title"), Some(&title_id));
+
+        let removed = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&edited),
+        )
+        .expect("removal retires identities");
+        assert!(removed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.is_retired()
+        }));
+        let restored = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            Some(&removed),
+        )
+        .expect("unassisted recreation receives new identities");
+        assert_ne!(restored.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert!(restored.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.id() == &table_id
+                && record.is_retired()
+        }));
+        let removed_again = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&restored),
+        )
+        .expect("later removal can retire the new identity generation");
+        let retired_table_count = removed_again
+            .records()
+            .iter()
+            .filter(|record| {
+                record.kind() == ObjectKind::Table
+                    && record.qualified_name() == "Note"
+                    && record.is_retired()
+            })
+            .count();
+        assert_eq!(retired_table_count, 2);
+        assert_eq!(
+            ObjectIdentityManifest::decode(&removed_again.encode().unwrap()).unwrap(),
+            removed_again,
         );
     }
     #[test]
@@ -2273,6 +2909,41 @@ mod tests {
         );
         SchemaDescriptor::decode(&schema.descriptor.encode().unwrap()).unwrap();
     }
+
+    #[test]
+    fn legacy_sidecar_codes_decode_to_spec_kinds_and_reencode_as_v2() {
+        let manifest = ObjectIdentityManifest {
+            records: vec![
+                ObjectIdentity {
+                    kind: ObjectKind::Type,
+                    qualified_name: "Shape".into(),
+                    id: [1; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::Variant,
+                    qualified_name: "Shape.circle".into(),
+                    id: [2; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::VariantField,
+                    qualified_name: "Shape.circle.radius".into(),
+                    id: [3; 16],
+                    retired: false,
+                },
+            ],
+        };
+        let legacy = manifest
+            .encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)
+            .unwrap();
+        let decoded = ObjectIdentityManifest::decode(&legacy).unwrap();
+        assert_eq!(decoded, manifest);
+        let current = decoded.encode().unwrap();
+        assert_ne!(current, legacy);
+        assert_eq!(ObjectIdentityManifest::decode(&current).unwrap(), manifest);
+    }
+
     #[test]
     fn oversized_worktree_manifest_is_rejected_before_reading() {
         let directory = tempfile::tempdir().unwrap();
@@ -2533,6 +3204,81 @@ pub table Contact(
         assert_eq!(digest(&reformatted), original);
         let changed = SPEC_CONTACT.replace("\"{first} {last}\"", "\"{last}, {first}\"");
         assert_ne!(digest(&changed), original);
+    }
+
+    #[test]
+    fn computed_selector_digest_binds_the_resolved_helper_declaration() {
+        // Identical tokens bound to a different declaration are a different
+        // selector: semantic identity includes resolved meaning (15-system.md).
+        let digest = |module: &str| {
+            let modules = [
+                ModuleInput::new(
+                    "labels/plain.orna",
+                    "pub fn label(value: Str): Str = value;\n",
+                ),
+                ModuleInput::new(
+                    "labels/loud.orna",
+                    "pub fn label(value: Str): Str = \"{value}!\";\n",
+                ),
+                ModuleInput::new(
+                    "main.orna",
+                    format!(
+                        "use {module}.{{label}};\n\npub table Contact(id: Str) {{\n    name: Str,\n    display: Str => label(name),\n}}\n"
+                    ),
+                ),
+            ];
+            let (_, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+            descriptor_field(schema.unwrap().descriptor(), "display")[4].clone()
+        };
+        assert_ne!(digest("labels.plain"), digest("labels.loud"));
+    }
+
+    #[test]
+    fn computed_selector_digest_reads_row_fields_before_module_declarations() {
+        // A table field is a lexical selector inside a computed expression
+        // (ORNA-FIELD-009), so a module declaration with the same spelling
+        // does not change what the selector reads.
+        let digest = |extra: &str| {
+            let modules = [ModuleInput::new(
+                "main.orna",
+                format!(
+                    "{extra}pub table Contact(id: Str) {{\n    name: Str,\n    display: Str => name,\n}}\n"
+                ),
+            )];
+            let (_, schema) = source_descriptor(&modules, None, "main.orna", "Contact");
+            descriptor_field(schema.unwrap().descriptor(), "display")[4].clone()
+        };
+        assert_eq!(digest(""), digest("pub fn name(): Str = \"module\";\n\n"));
+    }
+
+    #[test]
+    fn refinement_digest_tracks_assertion_meaning_not_formatting() {
+        let digests = |refined: &str| {
+            let modules = [ModuleInput::new(
+                "main.orna",
+                format!("{refined}\npub table Player(id: Str) {{\n    score: Score,\n}}\n"),
+            )];
+            let (manifest, schema) = source_descriptor(&modules, None, "main.orna", "Player");
+            let score = *manifest.id(ObjectKind::Type, "Score").unwrap();
+            let Raw::Array(definition) =
+                descriptor_definition(schema.unwrap().descriptor(), &score)
+            else {
+                panic!("refined definition is an array");
+            };
+            let Raw::Array(body) = &definition[2] else {
+                panic!("refined body is an array");
+            };
+            body[1].clone()
+        };
+        let original = digests("pub type Score = Int {\n    assert >= 0;\n}\n");
+        assert_eq!(
+            digests("pub type Score = Int {\n    // never negative\n    assert >=   0;\n}\n"),
+            original
+        );
+        assert_ne!(
+            digests("pub type Score = Int {\n    assert >= 1;\n}\n"),
+            original
+        );
     }
 
     #[test]

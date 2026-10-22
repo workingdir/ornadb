@@ -1,0 +1,2 @@
+pub fn publish(review: sys.CommitReview, message: Str): sys.CommitRef =
+    sys.admin.commit_reviewed(review, message);

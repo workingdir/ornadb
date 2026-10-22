@@ -785,7 +785,7 @@ fn validate_native_method_signature(
             ),
             "sys.blob.capture_file" => (
                 &[("root", "&str"), ("path", "&str"), ("max_bytes", "u64")],
-                "CaptureFileReader",
+                "CaptureFileStream",
                 "CaptureFileError",
             ),
             "std.io.fs.write_text" => (
