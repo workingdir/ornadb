@@ -1444,6 +1444,7 @@ mod tests {
             CaptureFileError::SourceUnavailable,
             CaptureFileError::LimitExceeded,
             CaptureFileError::SourceChanged,
+            CaptureFileError::BoundOutOfRange,
         ] {
             assert!(
                 operation
