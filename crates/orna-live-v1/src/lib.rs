@@ -6482,6 +6482,7 @@ impl LiveTransport {
         // session loses its socket (30-protocol, Session creation and
         // ownership), so it is measured from this detachment.
         if let Some(session) = session
+            && outcome.is_ok()
             && !self.host.attachments.values().any(|owner| *owner == session)
             && let Some(record) = self.sessions.get_mut(&session)
         {
