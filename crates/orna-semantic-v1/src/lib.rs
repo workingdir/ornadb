@@ -4881,11 +4881,22 @@ fn check_item(
                         );
                     }
                     orna_syntax_v1::TableMember::Field {
+                        initializer: None,
+                        ty,
+                        ..
+                    } => {
+                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        validate_stored_field_type(ty, scope, diagnostics);
+                    }
+                    orna_syntax_v1::TableMember::Field {
                         initializer: Some(initializer),
                         ty,
                         ..
                     } => {
                         validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        if matches!(initializer, FieldInitializer::Default(_)) {
+                            validate_stored_field_type(ty, scope, diagnostics);
+                        }
                         let value = match initializer {
                             FieldInitializer::Default(value)
                             | FieldInitializer::Computed(value) => value,
@@ -6664,6 +6675,46 @@ fn validate_type_annotation(
             }
             validate_type_annotation(result, scope, generic_names, diagnostics);
         }
+    }
+}
+
+/// Stored fields (no initialiser, or a `=` default) persist their value, so
+/// their type must lie in the serialisable subset (29-formats). Secrets are
+/// never committed (ORNA-SECRET-001), and a live relation, stream or function
+/// is not a finite stored value. Computed (`=>`) fields are never stored and
+/// are not checked here.
+fn validate_stored_field_type(
+    type_expr: &TypeExpr,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let resolved = resolved_type_of(type_expr, scope);
+    if contains_secret_value_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "secret values cannot be stored in table fields",
+        ));
+    } else if contains_non_serialisable_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "stored table field type must be serialisable",
+        ));
+    }
+}
+
+fn contains_non_serialisable_type(ty: &Type) -> bool {
+    match ty {
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => true,
+        Type::List(inner) | Type::Range(inner) | Type::Optional(inner) => {
+            contains_non_serialisable_type(inner)
+        }
+        Type::Record(fields) => fields.values().any(contains_non_serialisable_type),
+        Type::Tuple(values) => values.iter().any(contains_non_serialisable_type),
+        Type::Applied { base, arguments } => {
+            matches!(base.as_str(), "Stream" | "Relation" | "Query")
+                || arguments.iter().any(contains_non_serialisable_type)
+        }
+        _ => false,
     }
 }
 
