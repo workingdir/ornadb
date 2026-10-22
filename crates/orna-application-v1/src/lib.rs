@@ -8,9 +8,10 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, Ovb2EffectHandler,
-    PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
-    invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry,
+    SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
@@ -194,13 +195,23 @@ impl AdmittedTableSchema {
 pub struct ApplicationAuthority {
     catalogue: Catalogue,
     limits: Limits,
+    sys_host: Option<SysHostContext>,
 }
 
 impl ApplicationAuthority {
     /// Creates an authority with an explicit declaration catalogue and limits.
     #[must_use]
     pub fn new(catalogue: Catalogue, limits: Limits) -> Self {
-        Self { catalogue, limits }
+        Self { catalogue, limits, sys_host: None }
+    }
+
+    /// Attaches the host-owned activation facts that `sys.rt.info()` reads for
+    /// every evaluation through this authority (SYS-022..030). Without a carrier
+    /// that singleton fails closed with `sys.abi.unavailable`.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
+        self.sys_host = Some(sys_host);
+        self
     }
 
     /// Admits one source module through parser, resolver and type/effect checks.
@@ -334,13 +345,18 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
     ) -> Result<CanonicalValue, ApplicationError> {
-        invoke_named(
-            &application.entry,
-            &application.functions,
-            arguments,
-            application.limits,
-        )
-        .map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
+        let result = match &self.sys_host {
+            Some(sys_host) => invoke_named_with_sys_host_context(
+                &application.entry,
+                &application.functions,
+                arguments,
+                &NominalDefinitions::new(),
+                application.limits,
+                sys_host,
+            ),
+            None => invoke_named(&application.entry, &application.functions, arguments, application.limits),
+        };
+        result.map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
     }
 
     /// Executes the admitted entry while staging every admitted table effect
@@ -386,7 +402,8 @@ impl ApplicationAuthority {
                     application.table_insert_defaults.clone(),
                     application.functions.clone(),
                     application.limits,
-                );
+                )
+                .with_sys_host_context(self.sys_host.clone());
         for row in source_rows {
             let value_context = value_context.ok_or(ApplicationError::InvalidTableMetadata)?;
             handler.record_admitted_source_row(row, value_context)?;
@@ -426,7 +443,8 @@ impl ApplicationAuthority {
             application.table_insert_defaults.clone(),
             application.functions.clone(),
             application.limits,
-        );
+        )
+        .with_sys_host_context(self.sys_host.clone());
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -464,7 +482,8 @@ impl ApplicationAuthority {
             application.table_insert_defaults.clone(),
             application.functions.clone(),
             application.limits,
-        );
+        )
+        .with_sys_host_context(self.sys_host.clone());
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -506,11 +525,14 @@ impl ApplicationAuthority {
             publication_rows,
             table_object_ids,
         )?;
-        handler.mutations = handler.mutations.with_insert_defaults(
-            application.table_insert_defaults.clone(),
-            application.functions.clone(),
-            application.limits,
-        );
+        handler.mutations = handler
+            .mutations
+            .with_insert_defaults(
+                application.table_insert_defaults.clone(),
+                application.functions.clone(),
+                application.limits,
+            )
+            .with_sys_host_context(self.sys_host.clone());
         let mut value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -1036,6 +1058,7 @@ pub struct SourceMutationEffectHandler {
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    sys_host: Option<SysHostContext>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1056,7 +1079,13 @@ impl SourceMutationEffectHandler {
             overlay: BTreeMap::new(),
             source_row_schemas: Vec::new(),
             protected_field_pins: Vec::new(),
+            sys_host: None,
         }
+    }
+
+    fn with_sys_host_context(mut self, sys_host: Option<SysHostContext>) -> Self {
+        self.sys_host = sys_host;
+        self
     }
 
     fn new_with_table_object_ids(
@@ -1796,6 +1825,10 @@ impl AsyncSourceMutationEffectHandler {
 }
 
 impl EffectHandler for AsyncSourceMutationEffectHandler {
+    fn sys_host_context(&self) -> Option<&SysHostContext> {
+        EffectHandler::sys_host_context(&self.mutations)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -2092,6 +2125,10 @@ fn runtime_effect_statement_count(statement: &Statement) -> usize {
 }
 
 impl EffectHandler for SourceMutationEffectHandler {
+    fn sys_host_context(&self) -> Option<&SysHostContext> {
+        self.sys_host.as_ref()
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -2557,21 +2594,24 @@ impl ApplicationLiveAdapter {
     }
 
     /// Submits one REPL input. When the host installed a repository capture
-    /// capability, native sys operations bind to that same authority; otherwise
-    /// this is the plain submit path.
+    /// capability or a sys host context, native sys operations bind to those
+    /// authorities; otherwise this is the plain submit path.
     fn submit_repl_input(
         &self,
         repl: &mut AdmittedReplSession,
         source: &str,
     ) -> Result<Option<CanonicalValue>, ReplError> {
-        match &self.repository_capture {
-            Some(capability) => {
-                let mut bindings = SysHostBindingRegistry::default()
-                    .with_repository_capture_capability(capability.clone());
-                repl.submit_with_sys_host_bindings(source, &mut bindings)
-            }
-            None => repl.submit(source),
+        if self.repository_capture.is_none() && self.authority.sys_host.is_none() {
+            return repl.submit(source);
         }
+        let mut bindings = SysHostBindingRegistry::default();
+        if let Some(capability) = &self.repository_capture {
+            bindings = bindings.with_repository_capture_capability(capability.clone());
+        }
+        if let Some(sys_host) = &self.authority.sys_host {
+            bindings = bindings.with_sys_host_context(sys_host.clone());
+        }
+        repl.submit_with_sys_host_bindings(source, &mut bindings)
     }
 
     /// Sets the logical module path and entry used for future Eval messages.
