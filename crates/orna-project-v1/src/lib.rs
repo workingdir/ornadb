@@ -23,7 +23,7 @@ use orna_semantic_v1::{
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
+use orna_syntax_v1::{Declaration, Expr, parse_module, parse_module_with_file, parse_row};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
@@ -174,39 +174,6 @@ impl ResolvedTableSchema {
 
     pub fn binding(&self) -> &CommittedTableBinding {
         &self.binding
-    }
-}
-
-/// Source-owned path for one key under a committed table binding.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommittedLooseRowProjection {
-    schema: ResolvedTableSchema,
-    table_path: String,
-    logical_path: String,
-    key_path_components: Vec<String>,
-}
-
-impl CommittedLooseRowProjection {
-    pub fn schema(&self) -> &ResolvedTableSchema {
-        &self.schema
-    }
-
-    /// Single-component storage root; module namespaces stay in `table_path`.
-    pub fn table_root(&self) -> &str {
-        self.schema.declaration_name()
-    }
-
-    pub fn table_path(&self) -> &str {
-        &self.table_path
-    }
-
-    pub fn logical_path(&self) -> &str {
-        &self.logical_path
-    }
-
-    /// Encoded components exclude the table root and include `.orna` last.
-    pub fn key_path_components(&self) -> &[String] {
-        &self.key_path_components
     }
 }
 
@@ -1129,39 +1096,6 @@ impl ProjectLoader {
         )
     }
 
-    /// Resolves the frozen mutation's committed table identity and projects its
-    /// key to the exact source row path from that same committed snapshot.
-    pub fn resolve_committed_loose_row_projection(
-        &self,
-        repository: &Repository,
-        commit: &GitCommitRef,
-        mutation: &TableMutation,
-    ) -> Result<CommittedLooseRowProjection, ProjectLoadError> {
-        let table_object_id = mutation
-            .table_object_id()
-            .ok_or(ProjectLoadError::InvalidSourceRow)?;
-        let project = self.load_committed_snapshot(repository, commit)?;
-        let schema = resolve_committed_source_table_schema_for_project(
-            repository,
-            commit,
-            &project,
-            table_object_id,
-        )?;
-        if mutation.table() != schema.declaration_name()
-            || mutation.table_object_id() != Some(schema.table_object_id())
-        {
-            return Err(ProjectLoadError::InvalidSourceRow);
-        }
-        let (table_path, logical_path, key_path_components) =
-            committed_source_row_path(&project, &schema, mutation.key())?;
-        Ok(CommittedLooseRowProjection {
-            schema,
-            table_path,
-            logical_path,
-            key_path_components,
-        })
-    }
-
     /// Loads the root module and reachable imports from the immutable tree of
     /// a private publication candidate. The candidate capability, rather than
     /// a ref name or worktree path, is the source authority.
@@ -1451,132 +1385,6 @@ fn resolve_committed_source_table_schema_for_project(
     })
 }
 
-fn committed_source_row_path(
-    project: &LoadedProject,
-    schema: &ResolvedTableSchema,
-    canonical_key: &[u8],
-) -> Result<(String, String, Vec<String>), ProjectLoadError> {
-    if project.source_commit() != Some(schema.source_commit())
-        || project.source_snapshot_id() != Some(*schema.snapshot_id())
-    {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let catalogue = project
-        .standard_catalogue(project.standard_sources().iter().cloned())
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
-    let analysis = match catalogue.as_ref() {
-        Some(catalogue) => analyze_with_catalogue(project.modules(), catalogue),
-        None => analyze(project.modules()),
-    };
-    if !analysis.is_ok() {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let module_name = source_table_module_name(project, &analysis, schema.declaration_name())?;
-    if module_name != schema.table.module_name()
-        || schema.binding.module_name() != Some(schema.table.module_name())
-        || schema.binding.source_path() != Some(schema.table.source_path())
-    {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let table_path = if module_name.is_empty() {
-        schema.declaration_name().to_owned()
-    } else {
-        format!(
-            "{}/{}",
-            module_name.replace('.', "/"),
-            schema.declaration_name()
-        )
-    };
-    let source_schema = schema.descriptor();
-    let key_ids = match raw_map_value(source_schema.raw(), "2") {
-        Some(Raw::Array(ids)) => ids
-            .iter()
-            .map(|id| committed_uuid(id).ok_or(ProjectLoadError::InvalidSourceRow))
-            .collect::<Result<BTreeSet<_>, _>>()?,
-        _ => return Err(ProjectLoadError::InvalidSourceRow),
-    };
-    let (_, fields) = source_schema_fields(source_schema)?;
-    let owner_fields =
-        |candidate: &LooseRowCandidate| absent_source_owner_fields(candidate, &fields, &key_ids);
-    find_committed_source_row_path(project, &analysis, &table_path, canonical_key, owner_fields)
-}
-
-fn absent_source_owner_fields(
-    candidate: &LooseRowCandidate,
-    fields: &[SourceSchemaField],
-    key_ids: &BTreeSet<[u8; 16]>,
-) -> Result<Option<Vec<String>>, ProjectLoadError> {
-    let parsed = parse_row(candidate.source());
-    if !parsed.diagnostics.is_empty() {
-        return Ok(None);
-    }
-    let Expr::Record {
-        fields: row_fields, ..
-    } = parsed.value
-    else {
-        return Ok(None);
-    };
-    let present = row_fields
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect::<BTreeSet<_>>();
-    Ok(Some(
-        fields
-            .iter()
-            .filter(|field| {
-                field.role == 1
-                    && !key_ids.contains(&field.id)
-                    && !present.contains(field.name.as_str())
-            })
-            .map(|field| field.name.clone())
-            .collect(),
-    ))
-}
-
-fn find_committed_source_row_path(
-    project: &LoadedProject,
-    analysis: &Analysis,
-    table_path: &str,
-    canonical_key: &[u8],
-    mut owner_fields_for: impl FnMut(
-        &LooseRowCandidate,
-    ) -> Result<Option<Vec<String>>, ProjectLoadError>,
-) -> Result<(String, String, Vec<String>), ProjectLoadError> {
-    let mut matched = None;
-    for candidate in project
-        .loose_rows()
-        .iter()
-        .filter(|candidate| candidate.table_path() == table_path)
-    {
-        let Some(owner_fields) = owner_fields_for(candidate)? else {
-            continue;
-        };
-        let input = RowUnitInput {
-            logical_path: candidate.logical_path(),
-            table_path: candidate.table_path(),
-            key_path: candidate.key_path(),
-            source: candidate.source(),
-            source_bytes: candidate.source_bytes(),
-            parse_as: candidate.parse_as(),
-        };
-        let Ok(lowered) = lower_row_unit_with_owner_fields(analysis, &input, &owner_fields) else {
-            continue;
-        };
-        if lowered.owner != table_path || lowered.canonical_key != canonical_key {
-            continue;
-        }
-        if matched.is_some() {
-            return Err(ProjectLoadError::InvalidSourceRow);
-        }
-        matched = Some((
-            candidate.table_path().to_owned(),
-            candidate.logical_path().to_owned(),
-            candidate.key_path().to_vec(),
-        ));
-    }
-    matched.ok_or(ProjectLoadError::InvalidSourceRow)
-}
-
 fn source_table_module_name(
     project: &LoadedProject,
     analysis: &Analysis,
@@ -1654,7 +1462,14 @@ fn load_reachable_project(
         let source = read_module(&logical_path, &mut total_bytes)?;
         let parsed = parse_module(&source);
         if !parsed.is_ok() {
-            return Err(ProjectLoadError::InvalidModule);
+            // Re-parse with the logical path so the reported spans carry the
+            // file and 1-based line/column coordinates. Accepted modules keep
+            // the unannotated tree, so the happy path is unchanged.
+            let located = parse_module_with_file(&source, logical_path.as_str());
+            return Err(ProjectLoadError::InvalidModule {
+                logical_path,
+                diagnostics: located.diagnostics,
+            });
         }
         let namespace = namespace_for_path(&logical_path)?;
         if let Some(previous) = namespaces.insert(namespace.clone(), logical_path.clone())
@@ -1814,7 +1629,10 @@ pub enum ProjectLoadError {
     SourceTooLarge,
     RepositoryLimit,
     ModuleLimit,
-    InvalidModule,
+    InvalidModule {
+        logical_path: String,
+        diagnostics: Vec<orna_syntax_v1::SyntaxDiagnostic>,
+    },
     UnsupportedImport,
     ImportUnavailable,
     AmbiguousImport,
@@ -1840,7 +1658,7 @@ impl fmt::Display for ProjectLoadError {
             Self::SourceTooLarge => "project source exceeds the configured limit",
             Self::RepositoryLimit => "project exceeds the configured source-module limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
-            Self::InvalidModule => "reachable source module is not a valid module unit",
+            Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
             Self::UnsupportedImport => "source import cannot be resolved by this loader",
             Self::ImportUnavailable => "imported source module is unavailable",
             Self::AmbiguousImport => "imported source module has ambiguous ownership",
@@ -2589,97 +2407,5 @@ mod source_row_admission_tests {
             &expected_database_id,
             COMMIT,
         ));
-    }
-}
-
-#[cfg(test)]
-mod committed_loose_row_projection_tests {
-    use super::*;
-    use orna_value_v1::Value;
-    use std::{path::Path, process::Command};
-
-    fn git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git executable is available");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn committed_row_key_projects_to_its_unique_source_path() {
-        let root = tempfile::tempdir().unwrap();
-        let fixtures = [
-            (
-                "main.orna",
-                include_str!("../tests/fixtures/main_contacts.orna"),
-            ),
-            (
-                "contacts.orna",
-                include_str!("../tests/fixtures/contacts_table.orna"),
-            ),
-            (
-                "contacts/Contact/42.orna",
-                include_str!("../tests/fixtures/contact_42.orna"),
-            ),
-        ];
-        for (path, source) in fixtures {
-            let path = root.path().join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, source).unwrap();
-        }
-        git(root.path(), &["init", "--quiet"]);
-        git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
-        git(root.path(), &["config", "user.name", "kierandrewett"]);
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "--quiet", "-m", "fixture"]);
-
-        let repository = Repository::discover(root.path()).unwrap();
-        let commit = repository.head().unwrap().unwrap();
-        let project = ProjectLoader::default()
-            .load_committed_snapshot(&repository, &commit)
-            .unwrap();
-        let analysis = analyze(project.modules());
-        let key = Value::new(Raw::Int(42.into())).unwrap().encode().unwrap();
-
-        let (table_path, logical_path, key_path) =
-            find_committed_source_row_path(&project, &analysis, "contacts/Contact", &key, |_| {
-                Ok(Some(Vec::new()))
-            })
-            .unwrap();
-        assert_eq!(table_path, "contacts/Contact");
-        assert_eq!(logical_path, "contacts/Contact/42.orna");
-        assert_eq!(key_path, ["42.orna"]);
-
-        let other_key = Value::new(Raw::Int(43.into())).unwrap().encode().unwrap();
-        assert!(
-            find_committed_source_row_path(
-                &project,
-                &analysis,
-                "contacts/Contact",
-                &other_key,
-                |_| Ok(Some(Vec::new())),
-            )
-            .is_err()
-        );
-
-        let mut ambiguous = project.clone();
-        ambiguous.loose_rows.push(ambiguous.loose_rows[0].clone());
-        assert!(
-            find_committed_source_row_path(
-                &ambiguous,
-                &analysis,
-                "contacts/Contact",
-                &key,
-                |_| Ok(Some(Vec::new())),
-            )
-            .is_err()
-        );
     }
 }

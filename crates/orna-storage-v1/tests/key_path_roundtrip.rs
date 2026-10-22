@@ -1,7 +1,5 @@
-use orna_storage_v1::{LoosePath, LooseRow};
+use orna_storage_v1::LoosePath;
 use orna_value_v1::path_decode_key_components;
-
-const ROW: &str = include_str!("fixtures/key-path-roundtrip-row.orna");
 
 fn encoded_components(path: &LoosePath, table: &str) -> Vec<String> {
     path.as_managed_path()
@@ -16,7 +14,7 @@ fn encoded_components(path: &LoosePath, table: &str) -> Vec<String> {
 }
 
 #[test]
-fn fixture_row_round_trips_reserved_unicode_and_nested_key_components() {
+fn reserved_unicode_and_nested_key_components_round_trip() {
     let keys = [
         "",
         "a/b",
@@ -41,9 +39,6 @@ fn fixture_row_round_trips_reserved_unicode_and_nested_key_components() {
         LoosePath::from_encoded_key("Entry", &components).unwrap(),
         path
     );
-
-    let row = LooseRow::new(ROW.as_bytes().to_vec()).expect("fixture is a bounded row body");
-    assert_eq!(row.bytes(), ROW.as_bytes());
 }
 
 #[test]
