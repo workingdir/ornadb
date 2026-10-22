@@ -8924,16 +8924,6 @@ fn infer_node(
         }
         Expr::Field { base, name, .. } => {
             if let Some(path) = qualified_path(expr)
-                && is_float_constant(&path)
-                && !local.contains_key("Float")
-                && !scope.modules.contains_key("Float")
-            {
-                return Inferred {
-                    ty: Type::Float,
-                    effects: EffectSummary::default(),
-                };
-            }
-            if let Some(path) = qualified_path(expr)
                 && let Some(inferred) = infer_system_path(&path, scope, diagnostics)
             {
                 return inferred;
@@ -25178,12 +25168,6 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
         },
         None => EffectSummary::default(),
     }
-}
-
-/// Core `Float` constants (`Float.nan`, `Float.infinity`): the canonical nonfinite
-/// text forms of ORNA-FORMAT, admitted as source values of type `Float`.
-pub fn is_float_constant(path: &[&str]) -> bool {
-    matches!(path, ["Float", "nan" | "infinity"])
 }
 
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {

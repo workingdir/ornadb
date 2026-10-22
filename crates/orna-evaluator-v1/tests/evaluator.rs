@@ -4342,7 +4342,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
 }
 
 #[test]
-fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
+fn std_collection_float_aggregates_fail_on_bad_inputs_and_yield_ieee_infinity() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
