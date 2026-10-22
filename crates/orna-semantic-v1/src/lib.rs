@@ -1671,6 +1671,19 @@ fn summarize_standard_function_effects(
         }
     }
 
+    // Declared standard symbols: source functions and host-bound module members.
+    // Only these may be named by a namespace-relative callee.
+    let declared: BTreeSet<Vec<String>> = modules
+        .iter()
+        .flat_map(|(namespace, header)| {
+            header
+                .symbols
+                .keys()
+                .map(|name| concat_path(&namespace.0, std::slice::from_ref(name)))
+                .collect::<Vec<_>>()
+        })
+        .chain(functions.keys().cloned())
+        .collect();
     let candidates: BTreeMap<Vec<String>, Vec<Vec<String>>> = functions
         .iter()
         .map(|(key, function)| {
@@ -1679,16 +1692,25 @@ fn summarize_standard_function_effects(
                 .callees
                 .iter()
                 .flat_map(|callee| {
-                    standard_callee_candidates(&function.namespace, module_imports, callee)
+                    standard_callee_candidates(
+                        &function.namespace,
+                        module_imports,
+                        callee,
+                        &declared,
+                    )
                 })
                 .collect();
             (key.clone(), paths)
         })
         .collect();
 
+    // A source function's effects come only from its body: its callees' host
+    // classifications and the summaries of the source functions it calls. The
+    // path of the function itself is not a classification, so a pure function
+    // in a host-named module such as `std.net.*` stays effect-free.
     let mut summary: BTreeMap<Vec<String>, BTreeSet<String>> = functions
         .keys()
-        .map(|key| (key.clone(), standard_path_effects(key)))
+        .map(|key| (key.clone(), BTreeSet::new()))
         .collect();
     loop {
         let mut changed = false;
@@ -1743,12 +1765,15 @@ fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
 }
 
 /// Full paths a syntactic callee may denote from within `namespace`. Paths
-/// rooted at `std` or `sys` are absolute; any other root is tried relative to
-/// the module, its parent, and the module's `use` aliases and globs.
+/// rooted at `std` or `sys` are absolute and always candidates. Any other root
+/// is tried relative to the module, its parent, and the module's `use` aliases
+/// and globs; a relative spelling is a candidate only when it names a declared
+/// symbol, so a parameter or local never inherits a host classification.
 fn standard_callee_candidates(
     namespace: &Namespace,
     imports: Option<&StandardImports>,
     callee: &[String],
+    declared: &BTreeSet<Vec<String>>,
 ) -> Vec<Vec<String>> {
     if callee
         .first()
@@ -1756,19 +1781,30 @@ fn standard_callee_candidates(
     {
         return vec![callee.to_vec()];
     }
-    let mut candidates = vec![concat_path(&namespace.0, callee)];
+    let mut candidates = Vec::new();
+    push_declared(&mut candidates, declared, concat_path(&namespace.0, callee));
     let Some(imports) = imports else {
         return candidates;
     };
     if let Some((root, rest)) = callee.split_first() {
         if let Some(target) = imports.aliases.get(root) {
-            push_import_candidates(&mut candidates, namespace, target, rest);
+            push_import_candidates(&mut candidates, namespace, target, rest, declared);
         }
     }
     for glob in &imports.globs {
-        push_import_candidates(&mut candidates, namespace, glob, callee);
+        push_import_candidates(&mut candidates, namespace, glob, callee, declared);
     }
     candidates
+}
+
+fn push_declared(
+    candidates: &mut Vec<Vec<String>>,
+    declared: &BTreeSet<Vec<String>>,
+    path: Vec<String>,
+) {
+    if declared.contains(&path) {
+        candidates.push(path);
+    }
 }
 
 fn push_import_candidates(
@@ -1776,6 +1812,7 @@ fn push_import_candidates(
     namespace: &Namespace,
     base: &[String],
     rest: &[String],
+    declared: &BTreeSet<Vec<String>>,
 ) {
     let target = concat_path(base, rest);
     if base
@@ -1786,8 +1823,8 @@ fn push_import_candidates(
         return;
     }
     let parent = &namespace.0[..namespace.0.len().saturating_sub(1)];
-    candidates.push(concat_path(&namespace.0, &target));
-    candidates.push(concat_path(parent, &target));
+    push_declared(candidates, declared, concat_path(&namespace.0, &target));
+    push_declared(candidates, declared, concat_path(parent, &target));
 }
 
 /// Collects the maximal `Name`/`Field` paths an expression references.
