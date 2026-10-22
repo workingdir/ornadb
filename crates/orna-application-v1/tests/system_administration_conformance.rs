@@ -185,9 +185,10 @@ fn removed_sys_runtime_name_keeps_its_normative_diagnostic_at_application_admiss
 
 #[test]
 fn portable_runtime_info_is_admitted_with_its_linked_provider() {
-    // ORNA-SYS-006 (source/15-system.md:46) types sys.rt.info() as
-    // sys.RuntimeInfo. The production host links the provider that produces
-    // it, so ORNA-SYS-008 admits the callable without a version diagnostic.
+    // ORNA-SYS-006 (source/15-system.md:46) requires sys.RuntimeInfo to expose
+    // the runtime's coordinates. The production host links the provider that
+    // produces it, so the callable is admitted. ORNA-SYS-008 governs only
+    // consumers that require an unavailable coordinate.
     authority()
         .admit_module("sys-rt-info.orna", SYS_RT_INFO_SOURCE, "runtime_info")
         .expect("sys.rt.info has a linked production provider");

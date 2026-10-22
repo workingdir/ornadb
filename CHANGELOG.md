@@ -188,7 +188,7 @@ been published.
 - `sys.rt.info()` is linked into the production sys provider, so it evaluates
   to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
   of an unlinked callable. Admission no longer reports a version diagnostic for
-  it (ORNA-SYS-006, ORNA-SYS-008).
+  it (ORNA-SYS-006).
 
 ## 1.0.0 — release inventory (publication pending)
 
