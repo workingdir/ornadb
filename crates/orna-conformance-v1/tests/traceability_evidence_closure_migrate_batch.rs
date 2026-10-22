@@ -107,14 +107,14 @@ fn evidence_closure_and_migration_rows_keep_specified_exists_and_passed_distinct
             .iter()
             .find(|row| row["requirement"] == id)
             .unwrap_or_else(|| panic!("evidence obligation exists for {id}"));
-        assert_eq!(row["implementation_result"], "not executed", "{id}: {boundary}");
+        assert_eq!(row["implementation_result"], "not-executed", "{id}: {boundary}");
         assert!(
             row["tests"].as_array().is_some_and(|tests| !tests.is_empty()),
             "{id} has a specified test obligation"
         );
         assert!(
-            row["tests"].as_array().unwrap().iter().all(|test| test["status"] == "planned"),
-            "this bounded guard test must not rewrite planned evidence for {id} as passed"
+            row["tests"].as_array().unwrap().iter().all(|test| test["status"] == "not-executed"),
+            "this bounded guard test must not rewrite not-executed evidence for {id} as passed"
         );
     }
 }
