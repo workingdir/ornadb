@@ -17,7 +17,10 @@ use orna_sys_v1::{
 };
 use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
+use crate::{
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    SysHostAttachment, SysHostContext,
+};
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
@@ -36,6 +39,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
+    sys_host_context: Option<SysHostAttachment>,
 }
 
 #[derive(Debug)]
@@ -54,6 +58,7 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
+            && self.sys_host_context == other.sys_host_context
     }
 }
 
@@ -73,6 +78,7 @@ impl SysHostBindingRegistry {
             capture_candidates: Arc::default(),
             http: None,
             system_random: false,
+            sys_host_context: None,
         }
     }
 
@@ -87,6 +93,15 @@ impl SysHostBindingRegistry {
     #[must_use]
     pub fn with_clock_provider(mut self, provider: ClockProvider) -> Self {
         self.clock = Some(provider);
+        self
+    }
+
+    /// Installs the attached repository and activation facts that
+    /// `sys.rt.info()` reports. Without them the call reports
+    /// `sys.version.incompatible`.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host_context = Some(SysHostAttachment::new(context));
         self
     }
 
@@ -861,6 +876,10 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
+    }
+
     fn handle(
         &mut self,
         _callee: &Expr,
@@ -900,6 +919,11 @@ impl Ovb2EffectHandler for SysHostBindingRegistry {
     /// every other value keeps the OVB-2 profile.
     fn accepts_context_values(&self) -> bool {
         true
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
@@ -968,7 +992,7 @@ impl SysHostBindingRegistry {
         // A negative or unrepresentable byte bound is an out-of-range length.
         let max_bytes = max_bytes
             .to_u64()
-            .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::BoundOutOfRange))?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
@@ -1420,6 +1444,7 @@ mod tests {
             CaptureFileError::SourceUnavailable,
             CaptureFileError::LimitExceeded,
             CaptureFileError::SourceChanged,
+            CaptureFileError::BoundOutOfRange,
         ] {
             assert!(
                 operation

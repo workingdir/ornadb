@@ -1,0 +1,8 @@
+pub table Song(id: Str) {
+    title: Str,
+    content: Blob,
+}
+
+pub fn add(id: Str, title: Str, content: Blob) {
+    Song.insert({ id: id, title: title, content: content });
+}

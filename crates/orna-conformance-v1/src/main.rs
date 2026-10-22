@@ -439,7 +439,7 @@ fn transaction_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1517,7 +1517,7 @@ mod tests {
 
     fn report_with_scenario_status(status: EvidenceStatus) -> RunReport {
         RunReport {
-            specification_version: "1.0.0".into(),
+            specification_version: "1.1.0".into(),
             implementation_claim: ImplementationClaim {
                 implementation_id: "test".into(),
                 profile: "test".into(),
@@ -1685,11 +1685,16 @@ mod tests {
             StageOutcome::Passed
         ));
 
+        let declared = Corpus::load_default()
+            .expect("reference corpus loads")
+            .scenarios["count"]
+            .as_u64()
+            .expect("declared scenario count");
         let report = run_profile(
             Corpus::load_default().expect("reference corpus loads"),
             RunnerProfile::BoundedExpressionRuntime,
         );
-        assert_eq!(report.scenarios.len(), 144);
+        assert_eq!(report.scenarios.len() as u64, declared);
         assert!(
             report
                 .implementation_claim
