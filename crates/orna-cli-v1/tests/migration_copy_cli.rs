@@ -21,7 +21,7 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
 fn initialize_legacy_source(root: &Path) {
     initialize_legacy_source_with_format(
         root,
-        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
     );
 }
 
@@ -369,8 +369,8 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
 fn cli_migration_copy_rejects_mixed_worktree_metadata() {
     let oversized = vec![b'x'; 64 * 1024 + 1];
     for (label, metadata_file, marker) in [
-        ("mixed", ".orna/format.orna", &b"format 3\n"[..]),
-        ("unknown", ".orna/format.orna", &b"format 99\n"[..]),
+        ("mixed", ".orna/format.orna", &b"{repository_format: 3, storage_profile: \"compact-storage-v1\"}\n"[..]),
+        ("unknown", ".orna/format.orna", &b"{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n"[..]),
         (
             "changed database identity",
             ".orna/database.orna",
