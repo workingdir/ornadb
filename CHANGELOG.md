@@ -57,13 +57,15 @@ been published.
   structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
   row's own message as the summary (the explicit marker only when the row is
   redacted), its causes, its help as suggestions and the objects it names.
-  `sys.explain(FunctionRef)` is dispatched, but no catalogue records function
-  object identities yet, so every function reference reports
-  `sys.object.not_found`.
+  `sys.explain(FunctionRef)` is dispatched. The production explain catalogue
+  does not resolve function references (`resolves_functions` defaults to
+  false), so every function reference reports `sys.version.incompatible`.
+  `sys.object.not_found` applies to an unknown source, or to an unknown function
+  only when the catalogue resolves functions.
 - Changed failure codes, all now taken from the portable failure table:
   - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
     `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
-    source or function, `sys.version.incompatible` for a stage or source the
+    source, `sys.version.incompatible` for a stage or source the
     planner cannot represent, and `sys.object.wrong_kind` for a reference to
     another relation. `ORNA-EVAL-TYPE` no longer rejects function and
     diagnostic arguments.

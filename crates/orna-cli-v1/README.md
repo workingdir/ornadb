@@ -140,5 +140,5 @@ deterministic.
 cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-git diff --check -- orna-cli-v1
+git diff --check -- crates/orna-cli-v1
 ```
