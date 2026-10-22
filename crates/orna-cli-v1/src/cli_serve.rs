@@ -590,19 +590,48 @@ fn new_serve_state(
 fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
     start_session_sweep(state)?;
     for accepted in listener.incoming() {
-        let stream = accepted?;
+        let stream = match accepted {
+            Ok(stream) => stream,
+            // A peer that resets before accept, or a process that briefly runs
+            // out of descriptors, must not end the listener for every client.
+            Err(error) if is_transient_accept_error(&error) => {
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let Some(slot) = ConnectionSlot::claim(state, &stream) else {
             refuse_connection(stream);
             continue;
         };
-        std::thread::Builder::new()
+        // A failed spawn drops the closure, which releases the slot and
+        // shuts the connection; the listener keeps serving other clients.
+        let _ = std::thread::Builder::new()
             .name("orna-serve-connection".into())
             .spawn(move || {
                 let _ = serve_connection(stream, &slot.state);
                 drop(slot);
-            })?;
+            });
     }
     Ok(())
+}
+
+/// How long the accept loop pauses after a transient accept failure before
+/// trying again, so a descriptor shortage does not spin the loop.
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Whether an accept failure only concerns one attempt or a temporary
+/// resource shortage, so the listener should retry rather than stop.
+/// The errno values are Linux's: EMFILE 24, ENFILE 23, ENOMEM 12, ENOBUFS 105.
+fn is_transient_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(12 | 23 | 24 | 105))
 }
 
 /// One accepted connection's claim on [`ServeOptions::max_connections`],
@@ -2265,6 +2294,25 @@ mod tests {
             1002,
             "a malformed message closes with 1002"
         );
+    }
+
+    #[test]
+    fn accept_retries_transient_failures_and_stops_on_fatal_ones() {
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::Interrupted
+        )));
+        assert!(
+            is_transient_accept_error(&io::Error::from_raw_os_error(24)),
+            "EMFILE retries after descriptors are released"
+        );
+        assert!(is_transient_accept_error(&io::Error::from_raw_os_error(23)));
+        assert!(!is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_transient_accept_error(&io::Error::from_raw_os_error(22)));
     }
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
