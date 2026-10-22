@@ -282,6 +282,27 @@ been published.
   bounded in time and size. Requests whose Host is not the listener's loopback
   authority, and cross-origin writes, get 403. Smart-HTTP push now requires
   `serve --allow-push`.
+
+- `orna serve` ends live sessions in order. `DELETE /orna/session/<id>` cancels
+  and joins the session's application work and closes its socket before it
+  answers 204, including while the socket is attached; it used to answer 503
+  then, and 400 once the session had evaluated anything. A sweep ends sessions
+  whose lease has elapsed in the same way.
+
+- `orna serve` serves at most 64 connections at once. The accept loop answers
+  any further connection with 503 straight away, without reading its request.
+
+- `orna serve` bounds each HTTP request body and each response with one
+  deadline for the whole transfer, 15 s plus the time it takes at 64 KiB/s,
+  instead of bounding each blocked read or write. A peer that sends or reads a
+  few bytes at a time can no longer keep a connection busy.
+
+- Live session HTTP errors use the statuses `30-protocol.md` assigns: a
+  WebSocket upgrade from another origin gets 403 instead of 410, and a DELETE
+  carrying a token other than the live session's current one gets 401 instead
+  of 410. A child-free DELETE that would first have to drain application work
+  gets 503 instead of 400. `Content-Type: application/json; charset=utf-8` is
+  accepted.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit
