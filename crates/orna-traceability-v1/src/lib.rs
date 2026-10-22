@@ -16,6 +16,8 @@ use std::{
     path::{Component, Path},
 };
 
+const VERSION: &str = "1.1.0";
+const NORMATIVE_PAYLOAD_COUNT: usize = 58;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -168,6 +170,15 @@ struct Fixture {
     diagnostic: Option<String>,
     #[serde(default)]
     expected_diagnostic: Option<String>,
+    #[serde(default)]
+    evidence_level: Option<String>,
+}
+impl Fixture {
+    fn is_bounded_syntax(&self) -> bool {
+        self.evidence_level
+            .as_deref()
+            .is_some_and(|level| level.starts_with("Bounded syntax only"))
+    }
 }
 #[derive(Deserialize)]
 struct InvalidMetadata {
@@ -202,7 +213,9 @@ struct Scenarios {
 struct Scenario {
     id: String,
     requirements: Vec<String>,
-    evidence_level: String,
+    /// Absent on 1.1.0 gate-matrix oracles, which carry only `implementation_status`.
+    #[serde(default)]
+    evidence_level: Option<String>,
 }
 #[derive(Deserialize)]
 struct Models {
@@ -211,6 +224,7 @@ struct Models {
 #[derive(Deserialize)]
 struct Model {
     name: String,
+    passed: bool,
 }
 
 /// Generate the frozen traceability report without implementation execution
@@ -276,7 +290,9 @@ fn generate_inner(
     implementation_evidence_overlay: Option<&ImplementationEvidenceOverlay>,
 ) -> Result<Report> {
     let release: Release = read_json(root, "release.json")?;
-    if release.normative_payload_sha256.is_empty() {
+    if release.version != VERSION
+        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
+    {
         return Err(err("release version or digest inventory is invalid"));
     }
     verify_digests(root, &release.normative_payload_sha256)?;
@@ -288,7 +304,7 @@ fn generate_inner(
     }
     let invalid: InvalidMetadata = read_json(root, "tests/invalid-metadata.json")?;
     let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
-    let models: Models = read_json(root, "evidence/contract-models.json")?;
+    let models: Models = read_json(root, "evidence/model-results.json")?;
     validate(
         root,
         &requirements,
@@ -332,14 +348,18 @@ fn generate_inner(
         normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
         publication_digests: release.normative_payload_sha256,
         requirements: requirement_traces,
-        named_algorithms: models
-            .results
-            .into_iter()
-            .map(|model| InventoryEntry {
-                logical_id: model.name,
-                status: Status::SpecifiedModelOnly,
-            })
-            .collect(),
+        named_algorithms: {
+            let mut seen = BTreeSet::new();
+            models
+                .results
+                .into_iter()
+                .filter(|model| seen.insert(model.name.clone()))
+                .map(|model| InventoryEntry {
+                    logical_id: model.name,
+                    status: Status::SpecifiedModelOnly,
+                })
+                .collect()
+        },
         schema_profile_members: schema_profile_members(root)?,
         fixture_classes: fixture_classes(&manifest),
         behavioral_scenarios: scenarios
@@ -353,7 +373,12 @@ fn generate_inner(
                 {
                     Status::JustifiedGap
                 } else {
-                    status_from_level(&scenario.evidence_level)
+                    // 1.1.0 gate-matrix oracles carry no evidence_level; the bundle
+                    // scopes them as implementation_status "not-executed", a justified gap.
+                    scenario
+                        .evidence_level
+                        .as_deref()
+                        .map_or(Status::JustifiedGap, status_from_level)
                 };
                 ScenarioTrace {
                     scenario_id: scenario.id.clone(),
@@ -639,7 +664,8 @@ fn apply_scenario_execution_witnesses(
                 witness.scenario_id()
             ))
         })?;
-        if scenario.evidence_level != "implementation scenario, not executed by an Orna engine"
+        if scenario.evidence_level.as_deref()
+            != Some("implementation scenario, not executed by an Orna engine")
             || !scenario
                 .requirements
                 .iter()
@@ -806,10 +832,17 @@ fn validate(
                     fixture.id
                 )));
             }
+            // Bounded-syntax fixtures (evidence_level "Bounded syntax only": final/main,
+            // final/data, final/database) await separate semantic admission for final
+            // row/header contexts, so they may omit resolve and typecheck. Any value they
+            // do state must still be pass.
             "valid"
                 if fixture.expect.get("parse").map(String::as_str) != Some("pass")
-                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
-                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass") =>
+                    || ["resolve", "typecheck"].into_iter().any(|phase| {
+                        let expected = fixture.expect.get(phase).map(String::as_str);
+                        expected != Some("pass")
+                            && !(fixture.is_bounded_syntax() && expected.is_none())
+                    }) =>
             {
                 return Err(err(format!(
                     "valid fixture lacks required pass expectations: {}",
@@ -916,13 +949,25 @@ fn validate(
         return Err(err("scenario count or identifiers are invalid"));
     }
     for scenario in &scenarios.scenarios {
-        if scenario.requirements.is_empty() || scenario.evidence_level.is_empty() {
+        if scenario.requirements.is_empty()
+            || scenario
+                .evidence_level
+                .as_deref()
+                .is_some_and(str::is_empty)
+        {
             return Err(err(
                 "scenario has an empty requirement link or evidence field",
             ));
         }
     }
-    if models.results.is_empty() || !unique(models.results.iter().map(|m| m.name.as_str())) {
+    let mut outcomes = BTreeMap::new();
+    let consistent = models.results.iter().all(|model| {
+        !model.name.is_empty()
+            && outcomes
+                .insert(model.name.as_str(), model.passed)
+                .is_none_or(|prior| prior == model.passed)
+    });
+    if models.results.is_empty() || !consistent {
         return Err(err("named algorithm inventory is invalid"));
     }
     Ok(())
@@ -962,6 +1007,9 @@ fn normative_payloads(
         payloads.push(payload);
     }
     if payloads.is_empty() {
+        return Err(err("normative payload report is incomplete"));
+    }
+    if payloads.len() != NORMATIVE_PAYLOAD_COUNT {
         return Err(err("normative payload report is incomplete"));
     }
     Ok(payloads)
@@ -1492,7 +1540,7 @@ mod tests {
         value["normative_payload_sha256"]
             .as_object_mut()
             .expect("digest inventory")
-            .remove("profiles/key-path.md");
+            .remove("profiles/live-protocol.md");
         fs::write(&release, serde_json::to_vec(&value).expect("json")).expect("write");
         assert!(generate(&root).is_err());
         let _ = fs::remove_dir_all(root);
