@@ -120,13 +120,17 @@ fn cli(directory: &Path, arguments: &[&str]) -> Output {
 }
 
 fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> Child {
+    launch_with_arguments(directory, boundary, crash_dir, &["publish"])
+}
+
+fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arguments: &[&str]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
     command.current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env(CRASH_AT, boundary)
         .env(CRASH_DIR, crash_dir);
-    command.args(["publish"]);
+    command.args(arguments);
     command.spawn().expect("publication child starts")
 }
 
@@ -342,6 +346,98 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
 
+/// Recovery row "Ref still at H" (ORNA-PUB-006): a prepared journal whose
+/// candidate `HEAD` never reached names nothing that was published.
+/// Coordinator recovery discards it and keeps the frozen batch pending, so
+/// the journal cannot fence the next publication.
+#[tokio::test]
+async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending() {
+    let (_directory, _source, repository, state, head, _relation_id, _format_context) =
+        seeded_project().await;
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0x45; 16], &checkpoint).await.unwrap();
+    let index = repository.index_generation().unwrap();
+    let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| panic!("Format-3 store-only publication must not request a legacy path"),
+        "orna: publish runtime data",
+    )
+    .await
+    .unwrap()
+    .expect("the seeded store-only mutation needs publication");
+    repository
+        .write_publication_journal(coordinator.journal())
+        .unwrap();
+    let pending = state.pending().await.unwrap();
+
+    assert_eq!(
+        RuntimePublicationCoordinator::recover(&repository, &state).await,
+        Ok(Some(index.clone()))
+    );
+    assert_eq!(repository.head().unwrap(), Some(head));
+    assert_eq!(repository.index_generation().unwrap(), index);
+    assert_eq!(state.pending().await.unwrap(), pending);
+    assert_eq!(repository.read_publication_journal().unwrap(), None);
+}
+
+/// A journal whose entries do not match the candidate it names is not that
+/// candidate's evidence. Coordinator recovery refuses it and leaves the ref,
+/// the index, the journal and the pending batch as they were.
+#[tokio::test]
+async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
+    let (_directory, _source, repository, state, head, _relation_id, _format_context) =
+        seeded_project().await;
+    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+    let freeze = state.freeze([0x46; 16], &checkpoint).await.unwrap();
+    let index = repository.index_generation().unwrap();
+    let coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| panic!("Format-3 store-only publication must not request a legacy path"),
+        "orna: publish runtime data",
+    )
+    .await
+    .unwrap()
+    .expect("the seeded store-only mutation needs publication");
+    let candidate = coordinator.candidate().commit().clone();
+    let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        candidate.clone(),
+        index.tree().unwrap().clone(),
+        freeze.intent_id,
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            orna_repository_v1::ManagedPath::new("Object/forged.orna").unwrap(),
+            None,
+            Some(b"journal row".to_vec()),
+        )],
+    )
+    .unwrap();
+    repository.write_publication_journal(&journal).unwrap();
+    repository
+        .advance_current_ref(&head, coordinator.candidate())
+        .unwrap();
+    let pending = state.pending().await.unwrap();
+
+    assert_eq!(
+        RuntimePublicationCoordinator::recover(&repository, &state).await,
+        Err(orna_storage_v1::Error::InvalidPublicationJournal)
+    );
+    assert_eq!(repository.head().unwrap(), Some(candidate));
+    assert_eq!(repository.index_generation().unwrap().tree(), index.tree());
+    assert_eq!(state.pending().await.unwrap(), pending);
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+}
+
 /// Coordinated GC: `git gc --prune=now` may discard only objects that no ref names. Objects named by the
 /// protected `refs/orna/pins/*` refs survive; an unreferenced object is removed. This is coordinated GC
 /// only and does not claim that an uncoordinated prune is safe (ORNA-GIT-010).
@@ -386,7 +482,7 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
     // ref-index remains the existing boundary after both stages complete.
     // index-install parks after the reconciled index is installed but before
     // its IndexReconciled journal stage is durable (ORNA-PUB-007).
-    for boundary in ["capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
+    for boundary in ["index-lock", "capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
@@ -466,6 +562,74 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
             resumed.status.code().unwrap(),
             second.status.code().unwrap()
         );
+    }
+}
+
+/// W14-01 / ORNA-PUB-016: a `commit` killed after the Orna index lock is taken
+/// must not strand Git's index lock. The next commit reclaims the dead lock,
+/// recovers, and then succeeds. The index-install (ref advanced, IndexReconciled
+/// not durable) commit kill is NOT covered here; see the residual risk notes.
+#[tokio::test]
+async fn cli_commit_reopens_after_process_kill_at_index_lock() {
+    for boundary in ["index-lock"] {
+        let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+        let base = repository.head().unwrap().unwrap();
+        std::fs::write(root.join("unrelated-staged.txt"), b"staged before crash\n").unwrap();
+        git(root, &["add", "--", "unrelated-staged.txt"]);
+        std::fs::write(root.join("unrelated-tracked.txt"), b"unstaged before crash\n").unwrap();
+        let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+        assert!(!staged_before.is_empty());
+        let unstaged_before = git_output(root, &["diff", "--binary"], None);
+        assert!(!unstaged_before.is_empty());
+        let seeded_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
+        drop(state);
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch_with_arguments(root, boundary, crash.path(), &["commit", "-m", "crashed commit"]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "commit child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL commit child");
+        let status = child.wait().expect("wait for killed commit child");
+        assert!(!status.success(), "commit child unexpectedly returned at {boundary}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
+        std::fs::remove_file(&marker).unwrap();
+        assert!(root.join(".git/index.lock").exists(), "{boundary} must strand the Orna index lock for recovery to reclaim");
+        assert_eq!(git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None), seeded_pins);
+
+        // Git stays blocked by the stranded Orna lock until Orna recovers it.
+        // A stranded Orna index lock is recovered by the next commit.
+        let resumed = cli(root, &["commit", "-m", "recovered commit"]);
+        assert!(
+            resumed.status.success(),
+            "commit after {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(!root.join(".git/index.lock").exists(), "index lock left after {boundary}");
+        assert_ne!(head(&repository), base.as_str(), "no commit advanced after {boundary}");
+        if boundary == "index-lock" {
+            let subject = git_output(root, &["log", "-1", "--format=%s"], None);
+            assert_eq!(String::from_utf8_lossy(&subject).trim(), "recovered commit", "commit subject after {boundary}");
+        }
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
+        assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work lost after {boundary}");
+        // `commit` consumes the staged index, so the staged path is now in HEAD
+        // rather than still staged; the staged content must survive into HEAD.
+        assert_eq!(git_output(root, &["show", "HEAD:unrelated-staged.txt"], None), b"staged before crash\n", "staged work lost after {boundary}");
+        // Raw Git works again once Orna has recovered the lock.
+        std::fs::write(root.join("after-crash.txt"), b"after crash\n").unwrap();
+        git(root, &["add", "--", "after-crash.txt"]);
+        let fsck = Command::new("git").args(["fsck", "--no-dangling", "--no-progress"]).current_dir(root)
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(fsck.status.success(), "fsck after {boundary}: {}", String::from_utf8_lossy(&fsck.stderr));
     }
 }
 
