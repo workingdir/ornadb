@@ -11472,9 +11472,29 @@ fn dispatches_request_status_and_rejects_unsupported_client_operations() {
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(status))),
         Ok(FrameOutcome::Accepted)
     );
+    // 30-protocol.md, Limits, connection errors and reconnection: "A
+    // well-formed request with a stale handle, wrong fingerprint, invalid
+    // program or forbidden effect receives a correlated diagnostic without
+    // closing unrelated watches." An operation the application does not
+    // support is rejected the same way, with the portable `wire.unsupported`
+    // code, rather than as a transport error.
     assert_eq!(
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(subscribe()))),
-        Err(Error::UnsupportedOperation)
+        Ok(FrameOutcome::Accepted)
+    );
+    let mut application = UnitApplication::default();
+    let rejection =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(subscribe()), &mut application))
+            .unwrap()
+            .response
+            .expect("the rejection is retained as a correlated diagnostic");
+    assert_eq!(rejection.request, Some([3; 16]));
+    assert!(matches!(rejection.message, Message::Diagnostic { .. }));
+    let encoded = rejection.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.unsupported".len())
+            .any(|window| window == b"wire.unsupported")
     );
 }
 
@@ -22482,6 +22502,35 @@ fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
     };
     assert_eq!(
         encode_websocket_output(&WebSocketOutput::Pong(vec![7; 126]), control_limits),
+        Err(orna_live_v1::WebSocketEncodeError::Limit)
+    );
+}
+
+/// ORNA-WIRE-005: a host keepalive Ping is an unmasked RFC 6455 control frame
+/// with the same 125-byte payload bound as every other control frame.
+#[test]
+fn websocket_output_encoder_emits_bounded_host_pings() {
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(Vec::new()),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 0])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![1, 2]),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 2, 1, 2])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![7; 126]),
+            TransportLimits::default()
+        ),
         Err(orna_live_v1::WebSocketEncodeError::Limit)
     );
 }
