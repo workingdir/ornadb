@@ -256,6 +256,13 @@ been published.
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
 
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit
