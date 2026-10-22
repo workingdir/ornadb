@@ -6,7 +6,8 @@ A developing CLI for the current Orna 1.0 source language.
 
 This binary currently accepts `init`, `status`, `fetch`, `push`, `serve`,
 `mount`, `unmount`, `diff`, `log`, `annotate`, `import`, `export`, `migrate copy`,
-`publish`, `semantic-legend`, `history`, `query`, `check`, `invoke`, `explain`,
+`migrate abort`, `migrate activate`, `publish`, `semantic-legend`, `history`,
+`query`, `check`, `invoke`, `explain`,
 `repl`, and `run`, plus help and version options. The available command groups and
 option forms are listed by `orna --help`; that list describes this bounded
 implementation, not the complete Orna 1.0 command set.
@@ -57,6 +58,18 @@ its state is left unchanged. The source repository, including its commit and
 dirty workspace, remains unchanged. This
 command prepares a journalled candidate only; it does not convert legacy rows
 into a format-3 store or activate a writable format-3 repository.
+
+`migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
+first that DEST is the copy this source prepared, so a directory the operator
+owns is never a discard target. The source repository is unchanged. If the
+source commit, index, or working tree has changed since preparation, the
+command refuses and removes nothing; restore the source or remove DEST
+manually.
+
+`migrate activate DEST` runs the same verification and then refuses. Activating
+a writable format-3 repository needs the protected format transition, which
+this build does not perform. The source and DEST both remain unchanged, and
+DEST can be reviewed or discarded with `migrate abort DEST`.
 
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional
