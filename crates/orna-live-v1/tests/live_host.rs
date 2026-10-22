@@ -8820,7 +8820,7 @@ fn decoded_server_result_is_rejected_before_durable_admission_or_application() {
 }
 
 #[test]
-fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
+fn detached_attachment_past_its_lease_rejects_a_binary_request_before_admission() {
     let (root, repository) = durable_repository();
     let mut host = durable_host_with_owner(open_durable_state(&repository), [86; 16]);
     let mut issuer = Issuer(1, None);
@@ -8843,13 +8843,18 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
         now: 1,
     }))
     .unwrap();
+    // An attached session is governed by its reconnection lease, which starts
+    // at WebSocket loss (30-protocol); detaching at 2 starts that lease.
+    block_on(host.close_attachment([85; 16], 2)).unwrap();
+    // The reconnect lease `durable_host_with_owner` configures (10 ms).
+    let lease_end = 2 + 10;
 
     let request = [84; 16];
     let mut application = UnitApplication::default();
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            3,
+            lease_end,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
@@ -8869,7 +8874,7 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            4,
+            lease_end + 1,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
