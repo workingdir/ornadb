@@ -154,7 +154,7 @@ fn deep_case_chain_keeps_compound_suffix_and_enclosing_fallbacks() {
             assert!(matches!(
                 &arms[0].pattern,
                 Pattern::Constructor { path, fields, .. }
-                    if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Deep"]
+                    if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Geo", "Deep"]
                         && fields.len() == 2
             ));
             assert!(matches!(
