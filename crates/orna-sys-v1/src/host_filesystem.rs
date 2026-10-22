@@ -2,6 +2,8 @@
 //!
 //! The default provider caps UTF-8 file reads/writes at 8 MiB and directory
 //! listings at 4096 entries; hosts can choose tighter limits with `with_limits`.
+//! Captures stream without holding the source in memory, so a host can raise
+//! their quota separately with `with_capture_limit`.
 
 use std::{
     collections::BTreeMap,
@@ -40,6 +42,10 @@ pub enum CaptureFileError {
     UnauthorizedRoot,
     InvalidPath,
     SourceUnavailable,
+    /// The requested byte bound is negative or otherwise outside the range a
+    /// capture length can take (`sys.blob.bounds`). Callers that accept an
+    /// `Int` bound construct this before the provider is reached.
+    BoundOutOfRange,
     LimitExceeded,
     SourceChanged,
 }
@@ -55,6 +61,7 @@ impl CaptureFileError {
             Self::UnauthorizedRoot | Self::InvalidPath | Self::SourceUnavailable => {
                 "sys.blob.source_denied"
             }
+            Self::BoundOutOfRange => "sys.blob.bounds",
             Self::LimitExceeded => "sys.blob.limit",
             Self::SourceChanged => "sys.blob.source_changed",
         }
@@ -101,6 +108,7 @@ pub struct FilesystemProvider {
     roots: BTreeMap<PathBuf, Arc<File>>,
     max_text_bytes: usize,
     max_directory_entries: usize,
+    max_capture_bytes: u64,
 }
 
 impl PartialEq for FilesystemProvider {
@@ -108,6 +116,7 @@ impl PartialEq for FilesystemProvider {
         self.roots.keys().eq(other.roots.keys())
             && self.max_text_bytes == other.max_text_bytes
             && self.max_directory_entries == other.max_directory_entries
+            && self.max_capture_bytes == other.max_capture_bytes
     }
 }
 
@@ -119,6 +128,7 @@ impl Default for FilesystemProvider {
             roots: BTreeMap::new(),
             max_text_bytes: DEFAULT_MAX_TEXT_BYTES,
             max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
+            max_capture_bytes: DEFAULT_MAX_TEXT_BYTES as u64,
         }
     }
 }
@@ -129,7 +139,8 @@ impl FilesystemProvider {
         Self::default()
     }
 
-    /// Creates a provider with host-selected file and listing bounds.
+    /// Creates a provider with host-selected file and listing bounds. The
+    /// capture quota starts equal to the file bound.
     pub fn with_limits(
         max_text_bytes: usize,
         max_directory_entries: usize,
@@ -141,7 +152,22 @@ impl FilesystemProvider {
             roots: BTreeMap::new(),
             max_text_bytes,
             max_directory_entries,
+            max_capture_bytes: max_text_bytes as u64,
         })
+    }
+
+    /// Sets the largest source one capture may stream. A capture never holds
+    /// its source in memory, so this quota may exceed the file bound that
+    /// text reads and writes load into memory.
+    pub fn with_capture_limit(
+        mut self,
+        max_capture_bytes: u64,
+    ) -> Result<Self, FilesystemProviderError> {
+        if max_capture_bytes == 0 {
+            return Err(FilesystemProviderError::InvalidRequest);
+        }
+        self.max_capture_bytes = max_capture_bytes;
+        Ok(self)
     }
 
     /// Adds one existing directory as an explicit filesystem capability.
@@ -188,9 +214,14 @@ impl FilesystemProvider {
             .ok_or(CaptureFileError::UnauthorizedRoot)
     }
 
-    /// Opens one bounded regular file beneath a held, host-authorized root.
-    /// The returned reader retains the open file, captures no more than the
-    /// requested bytes, and can verify the same path identity after streaming.
+    /// Opens one bounded regular file beneath a held, host-authorised root for
+    /// streaming. Reading the returned stream never retains source bytes, and
+    /// it can verify that both the open inode and the current path still match
+    /// their initial identity, size and modification time.
+    ///
+    /// The source must fit both `max_bytes` and the provider limit; a
+    /// `max_bytes` above the provider limit is not itself a failure, because
+    /// the contract bounds the source and the captured Blob, not the request.
     #[sys_host_operation(
         r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.source_denied","sys.blob.bounds","sys.blob.limit","sys.blob.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
     )]
@@ -199,28 +230,9 @@ impl FilesystemProvider {
         root: &str,
         path: &str,
         max_bytes: u64,
-    ) -> Result<CaptureFileReader, CaptureFileError> {
-        let stream = self.capture_file_stream(root, path, max_bytes)?;
-        Ok(CaptureFileReader {
-            stream,
-            captured: Vec::new(),
-        })
-    }
-
-    /// Opens a bounded regular file for streaming without retaining its bytes.
-    /// The returned stream can verify that both the open inode and current
-    /// path still match their initial identity, size, and modification time.
-    pub fn capture_file_stream(
-        &self,
-        root: &str,
-        path: &str,
-        max_bytes: u64,
     ) -> Result<CaptureFileStream, CaptureFileError> {
         let root_handle = self.authorized_root_handle(root)?;
         let components = capture_components(path)?;
-        if max_bytes > self.max_text_bytes as u64 || max_bytes > i64::MAX as u64 {
-            return Err(CaptureFileError::LimitExceeded);
-        }
         let file = beneath::open_capture_source(&root_handle, &components)?;
         let metadata = file
             .metadata()
@@ -229,6 +241,7 @@ impl FilesystemProvider {
             return Err(CaptureFileError::SourceUnavailable);
         }
         let before = FileSnapshot::from_metadata(&metadata)?;
+        let max_bytes = max_bytes.min(self.max_capture_bytes);
         if before.size > max_bytes {
             return Err(CaptureFileError::LimitExceeded);
         }
@@ -411,13 +424,6 @@ impl FilesystemProvider {
     }
 }
 
-/// A file opened beneath a held filesystem root for one bounded Blob capture.
-/// This compatibility wrapper additionally retains captured bytes.
-pub struct CaptureFileReader {
-    stream: CaptureFileStream,
-    captured: Vec<u8>,
-}
-
 /// A file opened beneath a held filesystem root for bounded streaming.
 /// Reading it never retains source bytes in memory.
 pub struct CaptureFileStream {
@@ -428,25 +434,6 @@ pub struct CaptureFileStream {
     max_bytes: u64,
     bytes_read: u64,
     exceeded: bool,
-}
-
-impl CaptureFileReader {
-    pub fn captured_bytes(&self) -> &[u8] {
-        &self.captured
-    }
-
-    /// Consumes the reader and transfers its retained bytes without cloning them.
-    pub fn into_captured_bytes(self) -> Vec<u8> {
-        self.captured
-    }
-
-    pub const fn exceeded(&self) -> bool {
-        self.stream.exceeded()
-    }
-
-    pub fn verify_unchanged(&self) -> Result<(), CaptureFileError> {
-        self.stream.verify_unchanged()
-    }
 }
 
 impl CaptureFileStream {
@@ -497,20 +484,6 @@ impl Read for CaptureFileStream {
         }
         self.bytes_read = self.bytes_read.saturating_add(count as u64);
         self.exceeded = self.bytes_read > self.max_bytes;
-        Ok(count)
-    }
-}
-
-impl Read for CaptureFileReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        let bytes_read = self.stream.bytes_read;
-        let count = self.stream.read(output)?;
-        let remaining = self.stream.max_bytes.saturating_sub(bytes_read);
-        let retained = count.min(usize::try_from(remaining).unwrap_or(usize::MAX));
-        self.captured
-            .try_reserve(retained)
-            .map_err(|_| io::Error::other("capture allocation failed"))?;
-        self.captured.extend_from_slice(&output[..retained]);
         Ok(count)
     }
 }
@@ -1338,7 +1311,7 @@ mod capture_tests {
         provider
     }
 
-    fn failure(result: Result<CaptureFileReader, CaptureFileError>) -> CaptureFileError {
+    fn failure(result: Result<CaptureFileStream, CaptureFileError>) -> CaptureFileError {
         result.err().expect("capture should fail")
     }
 
@@ -1392,6 +1365,62 @@ mod capture_tests {
         );
     }
 
+    /// The host contract bounds "the source and captured Blob" by `max_bytes`
+    /// and the provider limit, so a generous `max_bytes` alone never fails.
+    #[test]
+    fn capture_bounds_the_source_rather_than_a_generous_max_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("small.bin"), [7; 16]).unwrap();
+        fs::write(directory.path().join("large.bin"), vec![9; 1025]).unwrap();
+        let provider = provider(directory.path());
+        let root = directory.path().to_str().unwrap();
+
+        let mut source = provider.capture_file(root, "small.bin", u64::MAX).unwrap();
+        let mut streamed = Vec::new();
+        source.read_to_end(&mut streamed).unwrap();
+        assert_eq!(streamed, [7; 16]);
+        assert!(!source.exceeded());
+        assert_eq!(source.verify_unchanged(), Ok(()));
+        assert_eq!(
+            failure(provider.capture_file(root, "large.bin", u64::MAX)),
+            CaptureFileError::LimitExceeded,
+            "the provider limit still bounds the source"
+        );
+        assert_eq!(
+            failure(provider.capture_file(root, "small.bin", 15)),
+            CaptureFileError::LimitExceeded,
+            "max_bytes still bounds the source"
+        );
+    }
+
+    /// Capture streams, so its quota is set apart from the file bound that
+    /// text reads load into memory.
+    #[test]
+    fn capture_quota_is_independent_of_the_text_read_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("large.bin"), vec![b'x'; 2048]).unwrap();
+        let mut provider = FilesystemProvider::with_limits(1024, 16)
+            .unwrap()
+            .with_capture_limit(4096)
+            .unwrap();
+        provider.allow_root(directory.path()).unwrap();
+        let root = directory.path().to_str().unwrap();
+
+        let mut source = provider.capture_file(root, "large.bin", u64::MAX).unwrap();
+        let mut streamed = Vec::new();
+        source.read_to_end(&mut streamed).unwrap();
+        assert_eq!(streamed.len(), 2048);
+        assert_eq!(
+            provider.read_text(root, "large.bin"),
+            Err(FilesystemProviderError::OutputLimit),
+            "text reads keep their own bound"
+        );
+        assert_eq!(
+            FilesystemProvider::new().with_capture_limit(0).err(),
+            Some(FilesystemProviderError::InvalidRequest)
+        );
+    }
+
     /// ORNA-INGEST-003: a detected change after the streamed read is rejected
     /// as `sys.blob.source_changed`.
     #[test]
@@ -1437,7 +1466,6 @@ mod capture_tests {
         let mut streamed = Vec::new();
         source.read_to_end(&mut streamed).unwrap();
         assert_eq!(streamed, b"12345", "the reader consumes one overflow byte");
-        assert_eq!(source.captured_bytes(), b"1234");
         assert!(source.exceeded());
         assert_eq!(
             source.verify_unchanged(),

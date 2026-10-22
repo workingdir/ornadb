@@ -20,6 +20,7 @@ base64 = "0.22.1"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
+libm = "0.2.16"
 getrandom = "0.3.4"
 uuid = { version = "1.18.1", default-features = false, optional = true }
 icu_properties = "2.2.0"
