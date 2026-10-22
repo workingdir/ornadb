@@ -1,9 +1,10 @@
+mod support;
+
 use orna_conformance_v1::{
     EvidenceStatus, Harness, ImplementationEvidenceAggregate, ImplementationEvidenceBinding,
     ImplementationEvidenceSource, Corpus,
 };
 use orna_traceability_v1::{generate, generate_with_implementation_evidence_overlay, Status};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -12,13 +13,6 @@ use std::{
 
 const REQUIREMENT_ID: &str = "ORNA-RANGE-001";
 const FIXTURE_ID: &str = "valid/minimal-root.orna";
-const PUBLICATION_DIGEST: &str =
-    "f2847c9090ea2360118ec4a00dfa9a0480ff18de051c590047b37c98b33d5f73";
-
-fn canonical_markdown_digest(root: &Path) -> String {
-    let bytes = fs::read(root.join("Orna-1.1.0.md")).expect("read canonical markdown");
-    format!("{:x}", Sha256::digest(bytes))
-}
 
 struct TemporaryReference(PathBuf);
 
@@ -115,7 +109,7 @@ fn bounded_evidence_cannot_promote_mixed_requirement_to_executed() {
         !report.publication_digests.keys().any(|key| key.starts_with("Orna-")),
         "1.1.0 normative map pins no markdown publication key"
     );
-    assert_eq!(canonical_markdown_digest(root.path()), PUBLICATION_DIGEST);
+    support::assert_markdown_publication_digest(root.path());
     assert!(report
         .requirements
         .iter()
