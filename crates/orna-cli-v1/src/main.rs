@@ -35,6 +35,7 @@ use cli_args::{
 };
 use cli_dispatch::execute;
 use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -142,7 +143,7 @@ enum Exit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Diagnostic {
     code: &'static str,
-    title: &'static str,
+    title: Cow<'static, str>,
     help: &'static str,
     exit: Exit,
     detail: Option<String>,
@@ -152,7 +153,7 @@ impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Usage,
             detail: None,
@@ -162,7 +163,7 @@ impl Diagnostic {
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: None,
@@ -177,7 +178,7 @@ impl Diagnostic {
     ) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: Some(detail.into()),
@@ -208,6 +209,35 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
             ),
         }
     }
+}
+
+fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if let orna_project_v1::ProjectLoadError::InvalidModule {
+        logical_path,
+        diagnostics,
+    } = &error
+        && let Some(first) = diagnostics.first()
+    {
+        // The first parser diagnostic is the primary code: it is the spec code
+        // that names the source contract violation, not a loader wrapper.
+        let location = match &first.span.start_position {
+            Some(position) => format!("{logical_path}:{}:{}", position.line, position.column),
+            None => logical_path.clone(),
+        };
+        return Diagnostic {
+            code: first.code,
+            title: Cow::Owned(format!("{} ({location})", first.message)),
+            help: "fix the reported source error, then retry",
+            exit: Exit::Target,
+            detail: None,
+            body: None,
+        };
+    }
+    Diagnostic::target(
+        "E2100",
+        "project source could not be loaded",
+        "fix the project module graph and source boundaries, then run check again",
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -460,7 +490,7 @@ fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagn
     };
     Diagnostic {
         code,
-        title: "operation was cancelled",
+        title: Cow::Borrowed("operation was cancelled"),
         help: "inspect the durable operation state before retrying",
         exit: Exit::Cancelled,
         detail: (code == "E2200").then(|| format!("cancellation code: {}", diagnostic.code())),
@@ -1618,13 +1648,7 @@ fn load_project_without_standard_rejection(
     })?;
     let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "project source could not be loaded",
-                "fix the project module graph and source boundaries, then run check again",
-            )
-        })?;
+        .map_err(project_load_diagnostic)?;
     Ok(project)
 }
 
@@ -2255,13 +2279,7 @@ fn repl_runtime(
     let (session, transactions) = if let Some(repository) = &repository {
         let project = orna_project_v1::ProjectLoader::default()
             .load(repository)
-            .map_err(|_| {
-                Diagnostic::target(
-                    "E2100",
-                    "project source could not be loaded",
-                    "fix the project module graph and source boundaries, then run check again",
-                )
-            })?;
+            .map_err(project_load_diagnostic)?;
         let session = AdmittedReplSession::from_loaded_project(
             &project,
             project.standard_sources().iter().cloned(),
@@ -3131,7 +3149,7 @@ mod tests {
         let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
             .expect_err("invalid color mode is rejected");
         assert_eq!(
-            (error.code, error.title, error.help),
+            (error.code, error.title.as_ref(), error.help),
             (
                 "E1002",
                 "unsupported value for `--color`",
@@ -3140,7 +3158,7 @@ mod tests {
         );
         let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
         assert_eq!(
-            (error.code, error.title),
+            (error.code, error.title.as_ref()),
             ("E1001", "option `--color` needs a value")
         );
         assert_eq!(
@@ -3195,7 +3213,7 @@ mod tests {
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
-            (error.title, error.help),
+            (error.title.as_ref(), error.help),
             (
                 "unsupported `status` option or option placement",
                 "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
@@ -4241,7 +4259,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4271,7 +4289,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("unbundled standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4304,7 +4322,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4337,7 +4355,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,

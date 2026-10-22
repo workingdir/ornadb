@@ -24,8 +24,8 @@ use orna_syntax_v1::{
 };
 
 use crate::{
-    CancellationToken, Environment, EvaluationError, Functions, Limits, PureFunction, ReplSession,
-    module_function_alias_key,
+    CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    PureFunction, ReplSession, module_function_alias_key, source_enum_definitions,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
 
@@ -670,7 +670,17 @@ fn admitted_runtime_sources(
     }
 
     let mut functions = Functions::new();
+    let mut nominal_definitions = NominalDefinitions::new();
     for (namespace, module) in parsed_modules {
+        let standard = namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
+        if !standard {
+            // ORNA-ENUM-001..003: project enums execute as construction plans
+            // shared by every evaluation in the session.
+            nominal_definitions
+                .extend(source_enum_definitions(namespace.as_deref(), &module.items));
+        }
         for item in module.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
@@ -690,20 +700,14 @@ fn admitted_runtime_sources(
                         },
                     );
                 }
-                Declaration::Use { .. } | Declaration::Table { .. } => {}
+                Declaration::Use { .. } | Declaration::Table { .. } | Declaration::Enum { .. } => {}
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
                 // remain represented by the semantic catalogue. Keep these
                 // items from preventing unrelated standard functions from
-                // loading; ordinary project declarations remain outside this
+                // loading; other project declarations remain outside this
                 // evaluator boundary.
-                Declaration::Enum { .. }
-                    if namespace
-                        .as_deref()
-                        .is_some_and(|namespace| namespace.starts_with("std.")) => {}
-                _ if namespace.as_deref().is_some_and(|namespace| {
-                    namespace == "std" || namespace.starts_with("std.")
-                }) => {}
+                _ if standard => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }
@@ -711,6 +715,7 @@ fn admitted_runtime_sources(
     ReplSession::with_bindings(limits, Environment::new(), functions)
         .map_err(ReplError::runtime)?
         .with_module_aliases(module_aliases)
+        .and_then(|session| session.with_nominal_definitions(nominal_definitions))
         .map(|session| session.with_table_names(table_names))
         .map_err(ReplError::runtime)
 }
