@@ -10,8 +10,8 @@ use syn::{
     visit::{self, Visit},
 };
 
-const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
-const GENERATED_API_SYS_VERSION: &str = "1.1";
+pub const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
+pub const GENERATED_API_SYS_VERSION: &str = "1.1";
 const GENERATED_API_STATUS: &str =
     "Final 1.1.0 specification contract; engine execution not claimed";
 /// Publication source-of-truth label for the generated sys API. Rust owns this
