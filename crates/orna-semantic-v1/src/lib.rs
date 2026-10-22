@@ -517,6 +517,10 @@ pub struct TableSchema {
     pub admission: Option<TableAdmission>,
     /// Nested nominal From implementations exported with the target type.
     pub conversions: Vec<(Type, EffectSummary)>,
+    /// The nominal type implements the core `Currency` protocol, so it can
+    /// parameterize `Money` and select a currency literal (ORNA-MONEY-004,
+    /// ORNA-LIT-007). Exported so importers never infer it from a name.
+    pub currency: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1178,6 +1182,10 @@ impl Catalogue {
             fixture_table("Audit", audit),
             contact_table.clone(),
             fixture_type("Customer", customer),
+            // The corpus snippets use `GBP` and `EUR` without declaring them;
+            // the manifest's fixture environment supplies that support.
+            fixture_currency("EUR"),
+            fixture_currency("GBP"),
             fixture_table("Message", Type::Named("Message".into())),
             fixture_nominal_type(
                 "EmailHeader",
@@ -1571,6 +1579,7 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
             fields,
             admission: None,
             conversions: Vec::new(),
+            currency: false,
         });
     }
     (name.into(), symbol)
@@ -1595,7 +1604,18 @@ fn fixture_nominal_type(name: &str, row: Type) -> (String, Symbol) {
             fields,
             admission: None,
             conversions: Vec::new(),
+            currency: false,
         });
+    }
+    (name, symbol)
+}
+
+/// An attached nominal currency with no public fields. It implements the core
+/// `Currency` protocol (ORNA-MONEY-004).
+fn fixture_currency(name: &str) -> (String, Symbol) {
+    let (name, mut symbol) = fixture_nominal_type(name, Type::Record(BTreeMap::new()));
+    if let Some(schema) = &mut symbol.table_schema {
+        schema.currency = true;
     }
     (name, symbol)
 }
@@ -2205,6 +2225,7 @@ fn analyze_retaining_context_with_providers(
         }
         let conversion_metadata = conversion_metadata(&scope);
         attach_conversion_metadata(&mut symbols, &conversion_metadata);
+        attach_currency_metadata(&mut symbols, &scope.currency_types);
         if let Some(module) = result.modules.get_mut(namespace) {
             module.symbols = symbols;
             module.exports = module
@@ -2594,6 +2615,7 @@ fn stabilize_function_summaries(
             }
             let conversion_metadata = conversion_metadata(&scope);
             attach_conversion_metadata(&mut symbols, &conversion_metadata);
+            attach_currency_metadata(&mut symbols, &scope.currency_types);
             if let Some(module) = modules.get_mut(namespace) {
                 module.symbols = symbols;
                 module.exports = module
@@ -3716,8 +3738,9 @@ struct Scope {
     /// closed `Port.from(value)` constructor can check the source value
     /// without erasing the refined nominal result.
     refined_types: BTreeMap<String, Type>,
-    /// Local nominal types with an explicit nested `Currency` implementation.
-    /// This is intentionally not inferred from names or static members.
+    /// Canonical identities of the local, imported and attached nominal types
+    /// that implement the core `Currency` protocol (ORNA-MONEY-004). Never
+    /// inferred from names or static members.
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
@@ -3856,7 +3879,7 @@ fn resolve_imports_with_dependencies(
                 _ => None,
             })
             .collect(),
-        currency_types: currency_types(tree),
+        currency_types: BTreeSet::new(),
         enum_variants: enum_variant_types(tree, diagnostics),
         payload_enum_types: payload_enum_names(tree),
         type_aliases: tree
@@ -4260,6 +4283,7 @@ fn resolve_imports_with_dependencies(
         }
     }
     canonicalize_scope_metadata(&mut scope, namespace, tree);
+    scope.currency_types = currency_types(namespace, tree, &scope);
     for (name, symbol) in attached_symbols {
         if symbol.kind == SymbolKind::Type
             && let Some(row) = symbol.table_fields()
@@ -4490,6 +4514,23 @@ fn attach_conversion_metadata(
             continue;
         };
         schema.conversions = metadata.get(target).cloned().unwrap_or_default();
+    }
+}
+
+/// Export which local nominal types implement the core `Currency` protocol,
+/// so an importer accepts them as currencies without reading their source.
+fn attach_currency_metadata(symbols: &mut BTreeMap<String, Symbol>, currencies: &BTreeSet<String>) {
+    for symbol in symbols.values_mut() {
+        if symbol.kind != SymbolKind::Type {
+            continue;
+        }
+        let Type::Named(identity) = &symbol.ty else {
+            continue;
+        };
+        let currency = currencies.contains(identity);
+        if let Some(schema) = symbol.table_schema.as_mut() {
+            schema.currency = currency;
+        }
     }
 }
 
@@ -6503,11 +6544,11 @@ fn validate_type_annotation(
         TypeExpr::Name {
             path, arguments, ..
         } => {
-            // Numeric arguments name units rather than types; money arguments
-            // use the currency identity surface.
+            // Numeric arguments name units rather than types; `Money` takes a
+            // currency type (ORNA-MONEY-004).
             let numeric_constructor = path.len() == 1
                 && matches!(path[0].as_str(), "Int" | "Decimal" | "Float");
-            let dimensional_constructor = path.len() == 1 && path[0] == "Money";
+            let money_constructor = path.len() == 1 && path[0] == "Money";
             if !annotation_type_name_is_declared(path, scope, generic_names) {
                 diagnostics.push(diag(
                     if path.len() == 1 && path[0] == "Result" {
@@ -6537,12 +6578,8 @@ fn validate_type_annotation(
                 } else {
                     diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
                 }
-            } else if dimensional_constructor && !arguments.is_empty() {
-                if arguments.len() != 1
-                    || !dimensional_argument_is_declared(&arguments[0], scope, generic_names)
-                {
-                    diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
-                }
+            } else if money_constructor && !arguments.is_empty() {
+                validate_money_currency(arguments, scope, generic_names, diagnostics);
             } else {
                 for argument in arguments {
                     validate_type_annotation(argument, scope, generic_names, diagnostics);
@@ -6589,22 +6626,36 @@ fn validate_type_annotation(
     }
 }
 
-fn dimensional_argument_is_declared(
-    argument: &TypeExpr,
+/// `Money<C>` takes one currency: a nominal type that implements the core
+/// `Currency` protocol, or a generic parameter bounded by it
+/// (ORNA-MONEY-004). An unbound name stays unresolved.
+fn validate_money_currency(
+    arguments: &[TypeExpr],
     scope: &Scope,
     generic_names: &BTreeSet<String>,
-) -> bool {
-    let TypeExpr::Name {
-        path, arguments, ..
-    } = argument
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let [
+        currency @ TypeExpr::Name {
+            path,
+            arguments: currency_arguments,
+            ..
+        },
+    ] = arguments
     else {
-        return false;
+        diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+        return;
     };
-    if !arguments.is_empty() {
-        return false;
+    if !currency_arguments.is_empty()
+        || !annotation_type_name_is_declared(path, scope, generic_names)
+    {
+        diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+    } else if !is_currency_type(&resolved_type_of(currency, scope), scope) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Money currency must be a nominal type that implements Currency",
+        ));
     }
-    annotation_type_name_is_declared(path, scope, generic_names)
-        || path.last().is_some_and(|name| is_currency_code(name))
 }
 
 /// How a unit name resolves in the current import context (ORNA-UNIT-008).
@@ -7026,7 +7077,6 @@ fn check_function(
     let Declaration::Function { signature, body } = &item.declaration else {
         unreachable!("function checker called for a non-function declaration");
     };
-    validate_function_signature_annotations(signature, scope, diagnostics);
     let mut function_scope = scope.clone();
     function_scope.generic_type_parameters = signature
         .generics
@@ -7038,6 +7088,8 @@ fn check_function(
         .iter()
         .map(|generic| (generic.name.clone(), generic.bounds.clone()))
         .collect();
+    // Bounds are in scope so `Money<C>` can accept a `C impl Currency`.
+    validate_function_signature_annotations(signature, &function_scope, diagnostics);
     let mut local = BTreeMap::new();
     let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
@@ -8930,7 +8982,13 @@ fn infer_node(
                     effects: base.effects,
                 };
             }
-            if let Some(ty) = infer_numeric_postfix(&base.ty, name, scope) {
+            if let Some(ty) = infer_currency_suffix(&base.ty, name, scope, diagnostics) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
+            if let Some(ty) = infer_numeric_postfix(&base.ty, name) {
                 return Inferred {
                     ty,
                     effects: base.effects,
@@ -9201,7 +9259,7 @@ fn infer_node(
             }
             if let Some(currency) = money_constructor_currency(callee)
                 && let Some(inferred) = infer_money_constructor(
-                    Type::Named(currency.into()),
+                    Type::Named(canonical_nominal_name(currency, scope)),
                     arguments,
                     scope,
                     local,
@@ -16489,7 +16547,7 @@ fn infer_generic_pipeline_stage(
     }
     if let Some(currency) = money_generic_constructor_currency(callee, type_arguments, scope) {
         if arguments.is_empty() {
-            let stage = infer_money_constructor_type(currency, &input.ty, diagnostics);
+            let stage = infer_money_constructor_type(currency, &input.ty, scope, diagnostics);
             effects.join(&stage.effects);
             return Inferred {
                 ty: stage.ty,
@@ -24422,16 +24480,44 @@ fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
     }
 }
 
-fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
-    match base {
-        Type::Int | Type::Decimal
-            if scope.currency_types.contains(name) =>
-        {
-            Some(Type::Applied {
-                base: "Money".into(),
-                arguments: vec![Type::Named(canonical_nominal_name(name, scope))],
-            })
+/// `decimal_expression.CurrencyType` constructs exact `Money<CurrencyType>`
+/// only when that nominal type implements `Currency` (ORNA-LIT-007,
+/// ORNA-MONEY-010). A binary `Float` never becomes money (ORNA-NUM-003).
+fn infer_currency_suffix(
+    base: &Type,
+    name: &str,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if !matches!(base, Type::Int | Type::Decimal | Type::Float) {
+        return None;
+    }
+    let identity = canonical_nominal_name(name, scope);
+    if scope.currency_types.contains(&identity) {
+        if *base == Type::Float {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "Money cannot be constructed from an inexact Float without explicit rounding",
+            ));
+            return Some(Type::Error);
         }
+        return Some(Type::Applied {
+            base: "Money".into(),
+            arguments: vec![Type::Named(identity)],
+        });
+    }
+    if scope.nominal_identities.contains_key(name) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "currency suffix names a type that does not implement Currency",
+        ));
+        return Some(Type::Error);
+    }
+    None
+}
+
+fn infer_numeric_postfix(base: &Type, name: &str) -> Option<Type> {
+    match base {
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
         _ => None,
     }
@@ -24514,10 +24600,6 @@ fn is_calendar_period(ty: &Type) -> bool {
                     [Type::Named(unit)] if INTRINSIC_PERIOD_SUFFIXES.contains(&unit.as_str())
                 )
     )
-}
-
-fn is_currency_code(name: &str) -> bool {
-    name.len() == 3 && name.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 
 fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static str> {
@@ -24637,21 +24719,34 @@ fn infer_money_constructor(
         return None;
     }
     let value = infer(&arguments[0].value, scope, local, diagnostics);
-    let mut inferred = infer_money_constructor_type(currency, &value.ty, diagnostics);
+    let mut inferred = infer_money_constructor_type(currency, &value.ty, scope, diagnostics);
     inferred.effects = value.effects;
     Some(inferred)
 }
 
+/// `Money<C>(value)` constructs exact money from an exact value whose currency
+/// `C` implements `Currency` (ORNA-MONEY-004, ORNA-NUM-003).
 fn infer_money_constructor_type(
     currency: Type,
     value: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if is_binary_float(value) {
+    let currency_is_valid = is_currency_type(&currency, scope);
+    if !currency_is_valid {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Money currency must be a nominal type that implements Currency",
+        ));
+    }
+    let value_is_float = is_binary_float(value);
+    if value_is_float {
         diagnostics.push(diag(
             DIAG_TYPE,
             "Money cannot be constructed from an inexact Float without explicit rounding",
         ));
+    }
+    if !currency_is_valid || value_is_float {
         return Inferred {
             ty: Type::Error,
             effects: EffectSummary::default(),
@@ -25520,6 +25615,7 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             automatic_key: false,
         }),
         conversions: Vec::new(),
+        currency: false,
     })
 }
 
@@ -25577,6 +25673,7 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
             automatic_key: keys.is_empty(),
         }),
         conversions: Vec::new(),
+        currency: false,
     })
 }
 
@@ -25712,10 +25809,14 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
     Some((name.clone(), Type::Record(fields)))
 }
 
-fn currency_types(tree: &SyntaxTree) -> BTreeSet<String> {
-    tree.items
-        .iter()
-        .filter_map(|item| {
+/// Canonical identities of the nominal types in scope that implement the core
+/// `Currency` protocol (ORNA-MONEY-004): this module's declarations whose
+/// nested `impl Currency` names it, and the imported or attached nominal types
+/// exported as currencies. Nothing is inferred from a name.
+fn currency_types(namespace: &Namespace, tree: &SyntaxTree, scope: &Scope) -> BTreeSet<String> {
+    let mut currencies = BTreeSet::new();
+    if currency_is_core_protocol(scope) {
+        currencies.extend(tree.items.iter().filter_map(|item| {
             let Declaration::Type {
                 name,
                 representation: TypeRepresentation::Nominal { members },
@@ -25730,16 +25831,79 @@ fn currency_types(tree: &SyntaxTree) -> BTreeSet<String> {
                     matches!(
                         member,
                         TypeMember::Implementation { implementation, .. }
-                            if matches!(
-                                &implementation.protocol,
-                                TypeExpr::Name { path, arguments, .. }
-                                    if path.as_slice() == ["Currency"] && arguments.is_empty()
-                            )
+                            if names_currency_protocol(&implementation.protocol)
                     )
                 })
-                .then_some(name.clone())
+                .then(|| nominal_identity(namespace, name))
+        }));
+    }
+    let exported = scope.names.values().chain(
+        scope
+            .available_modules
+            .values()
+            .flat_map(|module| module.exports.values()),
+    );
+    currencies.extend(
+        exported.filter_map(|symbol| match (&symbol.ty, &symbol.table_schema) {
+            (Type::Named(identity), Some(schema))
+                if symbol.kind == SymbolKind::Type && schema.currency =>
+            {
+                Some(identity.clone())
+            }
+            _ => None,
+        }),
+    );
+    currencies
+}
+
+/// Whether a protocol reference is the unqualified, argument-free `Currency`.
+fn names_currency_protocol(protocol: &TypeExpr) -> bool {
+    matches!(
+        protocol,
+        TypeExpr::Name { path, arguments, .. }
+            if path.as_slice() == ["Currency"] && arguments.is_empty()
+    )
+}
+
+/// Whether `Currency` names the core protocol in this scope. A declared or
+/// imported protocol named `Currency` takes precedence (ORNA-IMPORT-007), and
+/// it is the core protocol only when its member surface is exactly the core
+/// surface.
+fn currency_is_core_protocol(scope: &Scope) -> bool {
+    match resolve_local_protocol_name("Currency", scope) {
+        Some(protocol) => scope.local_protocols.get(&protocol).is_some_and(|members| {
+            static_protocol_surface(members)
+                == static_protocol_surface(CORE_CURRENCY_SURFACE.as_slice())
+        }),
+        None => !scope.names.contains_key("Currency"),
+    }
+}
+
+/// A protocol's static properties by name and type, or `None` when it also
+/// declares functions. Spans and member order are not part of the surface.
+fn static_protocol_surface(members: &[ProtocolMember]) -> Option<BTreeMap<&str, Type>> {
+    members
+        .iter()
+        .map(|member| match member {
+            ProtocolMember::Static { name, ty, .. } => Some((name.as_str(), type_of(ty))),
+            ProtocolMember::Function { .. } => None,
         })
         .collect()
+}
+
+/// Whether `ty` can parameterize `Money`: a nominal type that implements the
+/// core `Currency` protocol, or a generic parameter bounded by it.
+fn is_currency_type(ty: &Type, scope: &Scope) -> bool {
+    let Type::Named(identity) = ty else {
+        return false;
+    };
+    scope.currency_types.contains(identity)
+        || (scope.generic_type_parameters.contains(identity)
+            && scope
+                .generic_type_bounds
+                .get(identity)
+                .is_some_and(|bounds| bounds.iter().any(names_currency_protocol))
+            && currency_is_core_protocol(scope))
 }
 
 fn enum_variant_types(
