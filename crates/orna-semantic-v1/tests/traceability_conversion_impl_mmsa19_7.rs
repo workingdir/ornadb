@@ -239,3 +239,125 @@ pub fn rejected(): Bare = keep(Bare.from(8080));
 
     assert_eq!(count_protocol_diagnostics(&result), 1, "{:#?}", result.diagnostics);
 }
+
+// Specified: ORNA-CONVERT-001, ORNA-CONVERT-002, ORNA-CONVERT-007, CONVERT-1 steps 2 and 6.
+// Exists: a From<A> implementation whose body stores its nominal argument in a
+// field, reached through an explicit named conversion step B.from(A.from(text)).
+// Passed is bounded to the source parameter being bound as the nominal type A,
+// so the body type-checks and the explicit chain analyzes as B.
+#[test]
+fn from_implementation_stores_its_nominal_source_argument() {
+    let result = analyze(&[ModuleInput::new(
+        "stores-nominal-source.orna",
+        r#"
+pub type A {
+    v: Str,
+    impl From<Str> { fn from(text) = A { v: text }; }
+}
+pub type B {
+    a: A,
+    impl From<A> { fn from(value) = B { a: value }; }
+}
+pub fn explicit(text: Str): B = B.from(A.from(text));
+"#,
+    )]);
+
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    assert!(
+        returns_nominal(&export(&result, "explicit").ty, "B"),
+        "{:?}",
+        export(&result, "explicit").ty
+    );
+}
+
+// Specified: ORNA-NOMINAL-006, ORNA-CONVERT-009.
+// Exists: a From<A> implementation on B reading A's private field v.
+// Passed is bounded to rejecting the read: B's implementation owns B, not A.
+#[test]
+fn from_implementation_cannot_read_private_fields_of_its_nominal_source() {
+    let result = analyze(&[ModuleInput::new(
+        "reads-source-private.orna",
+        r#"
+pub type A {
+    v: Str,
+    impl From<Str> { fn from(text) = A { v: text }; }
+}
+pub type B {
+    a: A,
+    impl From<A> { fn from(value) = B { a: value }; }
+    impl From<Int> { fn from(number) = B { a: A.from("x") }; }
+}
+pub type C {
+    text: Str,
+    impl From<A> { fn from(value) = C { text: value.v }; }
+}
+"#,
+    )]);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:#?}",
+        result.diagnostics
+    );
+}
+
+// Specified: ORNA-IMPL-004, ORNA-REFINE-001, ORNA-CONVERT-001.
+// Exists: a refined type Port = Int with a nested From<Str>, then the base
+// conversion Port.from(8080) and a From<Str> body that calls Port.from(42).
+// Passed is bounded to both base-conversion calls analyzing as Port.
+#[test]
+fn refined_type_keeps_base_conversion_alongside_nested_from() {
+    let result = analyze(&[ModuleInput::new(
+        "refined-base-conversion.orna",
+        r#"
+pub type Port = Int {
+    assert >= 1;
+    assert <= 65_535;
+    impl From<Str> { fn from(text) = Port.from(42); }
+}
+pub fn direct(): Port = Port.from(8080);
+pub fn named(text: Str): Port = Port.from(text);
+"#,
+    )]);
+
+    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    assert!(
+        returns_nominal(&export(&result, "direct").ty, "Port"),
+        "{:?}",
+        export(&result, "direct").ty
+    );
+    assert!(
+        returns_nominal(&export(&result, "named").ty, "Port"),
+        "{:?}",
+        export(&result, "named").ty
+    );
+}
+
+// Specified: ORNA-CONVERT-003, ORNA-IMPL-004.
+// Exists: a refined type Port = Int that also declares From<Int>, which overlaps
+// the base conversion from Int.
+// Passed is bounded to reporting the overlap at the declaration.
+#[test]
+fn refined_type_from_for_its_base_type_overlaps_base_conversion() {
+    let result = analyze(&[ModuleInput::new(
+        "refined-base-overlap.orna",
+        r#"
+pub type Port = Int {
+    assert >= 1;
+    impl From<Int> { fn from(number) = Port.from(number); }
+}
+"#,
+    )]);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        "{:#?}",
+        result.diagnostics
+    );
+}
