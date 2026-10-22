@@ -5220,7 +5220,7 @@ impl Repository {
     /// Captures status and hashes managed content once for this observation.
     fn worktree_scan(&self) -> Result<WorktreeScan, RepositoryError> {
         let status = self.worktree_status()?;
-        let (digest, stamps) = self.worktree_content_scan(&[])?;
+        let (digest, stamps) = self.worktree_content_scan(&[], false)?;
         Ok(WorktreeScan {
             state: WorktreeState(status, digest),
             stamps,
@@ -5285,19 +5285,22 @@ impl Repository {
         0
     }
 
+    /// Digest for checkout force plans. Includes git-ignored bytes, so a force
+    /// plan fences ignored files that the checkout could overwrite.
     fn worktree_content_digest(
         &self,
         extra_paths: &[ManagedPath],
     ) -> Result<[u8; 32], RepositoryError> {
-        Ok(self.worktree_content_scan(extra_paths)?.0)
+        Ok(self.worktree_content_scan(extra_paths, true)?.0)
     }
 
     /// Hashes managed worktree content in bounded chunks and returns each path's
-    /// stamp, taken before its bytes are read. Git-ignored files are never listed
-    /// or read; checkout force plans fence them through `extra_paths`.
+    /// stamp, taken before its bytes are read. Git-ignored files are listed and
+    /// read only when `include_ignored` is set; CWD observation omits them.
     fn worktree_content_scan(
         &self,
         extra_paths: &[ManagedPath],
+        include_ignored: bool,
     ) -> Result<([u8; 32], Vec<ManagedStamp>), RepositoryError> {
         let mut paths = BTreeSet::new();
         for path in self
@@ -5327,6 +5330,22 @@ impl Repository {
             .filter(|path| !path.is_empty())
         {
             paths.insert(path.to_vec());
+        }
+        if include_ignored {
+            for path in self
+                .git_bytes([
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                    "--",
+                ])?
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+            {
+                paths.insert(path.to_vec());
+            }
         }
         for path in extra_paths {
             paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
