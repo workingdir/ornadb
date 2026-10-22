@@ -95,8 +95,9 @@ pub use provider_linkage::{
 
 mod host_context;
 pub use host_context::{
-    BUILD_ID, LANGUAGE_VERSION, PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION,
-    RuntimeMode, SysHostContext, new_runtime_id,
+    BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
+    PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, RuntimeMode, StdSnapshotPin,
+    SysHostContext, new_runtime_id,
 };
 
 mod explain_provider;
