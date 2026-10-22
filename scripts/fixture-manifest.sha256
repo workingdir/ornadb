@@ -206,6 +206,8 @@ c51923175ec365d3db5d77cad486e830b3dc5e7a2074a9ee9ac685731e962b5f  crates/orna-cl
 cad1e74f9b1269d55e6e2467f64effdc9567d0dbe4057a541d85ba6d9be6bb93  crates/orna-cli-v1/tests/fixtures/run/main.orna
 7986d35cde5a9b6baa4c705ca830d74087321434c0476e210958fde86849ec7b  crates/orna-cli-v1/tests/fixtures/run/no-main.orna
 a3465472c8c2edfdb23899f9358b0fb02565316461834fb9eca94b1ee65dbc68  crates/orna-cli-v1/tests/fixtures/run/private-main.orna
+11eeeb0ee2d843233211f21864c4ee4a031df5851f993f056631fc393e16f59e  crates/orna-cli-v1/tests/fixtures/run/sys-enum-library.orna
+14ad1faec0c8b09d5e0d8be057b52a1424f8fd34f8463088d921ff624442bcb9  crates/orna-cli-v1/tests/fixtures/run/sys-enum-mismatch-library.orna
 6680eedf2960d2d93241ff971f30a4d23fc69c020fefa3d84b2701a276f53087  crates/orna-cli-v1/tests/fixtures/secret-surface.orna
 5e73231e4b336b1f4b5644fd068255f48e054b292abfd7957ac34192e0b264fb  crates/orna-cli-v1/tests/fixtures/sensors-deliver.orna
 42d6640afd17c8bdc1d7c3ed9116ec91234859111600dd2553560d6ad2a7246d  crates/orna-cli-v1/tests/fixtures/serve-entry.orna
