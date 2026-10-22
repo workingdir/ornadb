@@ -992,7 +992,7 @@ impl SysHostBindingRegistry {
         // A negative or unrepresentable byte bound is an out-of-range length.
         let max_bytes = max_bytes
             .to_u64()
-            .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::BoundOutOfRange))?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
