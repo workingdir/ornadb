@@ -55,12 +55,13 @@ pub use compact::{
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{CompactPublicationPlan, CompactSegment};
 pub use init::format_context::{
-    CaptureCapabilityError, CommittedTableBinding, FinalFormatCapability, FormatContextError,
-    HistoricalFormatContext, LegacyWriteRefused, RepositoryFormat, RepositoryFormatContext,
-    RepositorySnapshotPin, SchemaRootPin, StoreRootPin,
+    FINAL_REPOSITORY_FORMAT, REPOSITORY_LAYOUT_VERSION, CaptureCapabilityError,
+    CommittedTableBinding, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
+    LegacyWriteRefused, RepositoryFormat, RepositoryFormatContext, RepositorySnapshotPin,
+    SchemaRootPin, StoreRootPin,
 };
 pub use init::{
-    DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
+    STORAGE_PROFILE, DatabaseId, RepositoryInitError, RepositoryInitialization, RepositoryMetadata,
     inspect_metadata, inspect_metadata_for_runtime, initialize_repository,
 };
 pub use mount::{MountError, MountRowBaselines, MountStatus, MountView};

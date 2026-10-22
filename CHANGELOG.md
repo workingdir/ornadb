@@ -19,6 +19,7 @@ been published.
   variant 10, type and variant fields 9), not a private integer. Stores written
   with the private integers are not readable, and the sidecar's version 1 codes
   are mapped only when reading an older commit.
+- `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
 - A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
@@ -328,6 +329,10 @@ been published.
   `return`, including inside anonymous functions, is checked against the
   declared result or joined into the inferred one. Blocks without a final
   expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+- `sys.rt.info()` is linked into the production sys provider, so it evaluates
+  to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
+  of an unlinked callable. Admission no longer reports a version diagnostic for
+  it (ORNA-SYS-006).
 
 ## 1.0.0 — release inventory (publication pending)
 

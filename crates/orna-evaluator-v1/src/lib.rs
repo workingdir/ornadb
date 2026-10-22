@@ -47,6 +47,8 @@ mod source_enums;
 mod sys_bindings;
 #[cfg(feature = "system-host-bindings")]
 mod explain_bindings;
+#[cfg(feature = "system-host-bindings")]
+mod runtime_info;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
@@ -68,6 +70,10 @@ pub use repl::{ReplSession, parse_admitted_repl};
 pub use source_enums::source_enum_definitions;
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
+#[cfg(feature = "system-host-bindings")]
+pub use orna_sys_v1::SysHostContext;
+#[cfg(feature = "system-host-bindings")]
+pub use runtime_info::SysHostAttachment;
 #[cfg(feature = "system-host-bindings")]
 pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 pub use timezone::{
@@ -883,6 +889,13 @@ pub trait EffectHandler {
         None
     }
 
+    /// The activation facts `sys.rt.info()` reports. Handlers without a host
+    /// context leave `sys.rt.info()` reporting `sys.version.incompatible`.
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        None
+    }
+
     /// Forks an activation-owned handler for one structured child task.
     ///
     /// Returning `None` leaves child host effects unavailable. Implementors
@@ -1109,6 +1122,13 @@ pub trait Ovb2EffectHandler {
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         None
     }
+
+    /// The activation facts `sys.rt.info()` reports. Handlers without a host
+    /// context leave `sys.rt.info()` reporting `sys.version.incompatible`.
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        None
+    }
 }
 
 struct Ovb2EffectHandlerAdapter<'a> {
@@ -1135,6 +1155,11 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
     #[cfg(feature = "system-host-bindings")]
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         self.handler.explain_catalogue()
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.handler.sys_host_context()
     }
 }
 
@@ -1316,6 +1341,11 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         self.handler.explain_catalogue()
     }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.handler.sys_host_context()
+    }
 }
 
 impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
@@ -1339,6 +1369,11 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     #[cfg(feature = "system-host-bindings")]
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         self.handler.explain_catalogue()
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.handler.sys_host_context()
     }
 
     fn handle_registered_with_budget(
@@ -1537,6 +1572,7 @@ pub fn planner_metadata(
         namespace: None,
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host: None,
         cancellation: None,
     };
     let mut scope = Scope::from_environment(environment, &mut context)?;
@@ -1671,6 +1707,7 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
         namespace: None,
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host: None,
         cancellation,
     };
     let mut scope = Scope::from_ovb2_environment(environment, &mut context)?;
@@ -1782,6 +1819,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         namespace: None,
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host: None,
         cancellation,
     };
     context.items(functions.len())?;
@@ -1921,6 +1959,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
         namespace: None,
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host: None,
         cancellation: None,
     };
     let result = (|| {
@@ -1964,6 +2003,7 @@ pub fn evaluate_function(
         namespace: None,
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host: None,
         cancellation: None,
     };
     let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
@@ -1998,6 +2038,47 @@ pub fn invoke_named_with_nominals(
     nominal_definitions: &NominalDefinitions,
     limits: Limits,
 ) -> Result<CanonicalValue, EvaluationError> {
+    invoke_named_with_host(
+        name,
+        functions,
+        arguments,
+        nominal_definitions,
+        limits,
+        None,
+    )
+}
+
+/// Invoke an admitted named function with the activation facts a host
+/// attached for `sys.rt.info()` (SYS-022..030). The carrier is read only by
+/// the sys singleton path and grants no other capability.
+#[cfg(feature = "system-host-bindings")]
+pub fn invoke_named_with_sys_host_context(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+    sys_host: &SysHostContext,
+) -> Result<CanonicalValue, EvaluationError> {
+    let attachment = SysHostAttachment::new(sys_host.clone());
+    invoke_named_with_host(
+        name,
+        functions,
+        arguments,
+        nominal_definitions,
+        limits,
+        Some(&attachment),
+    )
+}
+
+fn invoke_named_with_host(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+    sys_host: ActivationSysHost<'_>,
+) -> Result<CanonicalValue, EvaluationError> {
     validate_limits(limits)?;
     let mut context = Context {
         limits,
@@ -2013,6 +2094,7 @@ pub fn invoke_named_with_nominals(
         namespace: function_namespace(name),
         transfer: None,
         reuse: CallReuse::default(),
+        sys_host,
         cancellation: None,
     };
     context.items(functions.len())?;
@@ -2128,6 +2210,7 @@ fn invoke_named_with_effects_and_reuse(
         transfer: None,
         cancellation: None,
         reuse: CallReuse::default(),
+        sys_host: None,
     };
     let result = (|| {
         context.items(functions.len())?;
@@ -2213,6 +2296,7 @@ pub fn invoke_named_with_context_effects(
             namespace: function_namespace(name),
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         };
         let result = (|| {
@@ -3892,6 +3976,13 @@ struct CallReuseKey {
     namespace: Option<String>,
 }
 
+/// Host activation facts for `sys.rt.info()`. Without the
+/// `system-host-bindings` feature no host can attach, so the slot is `None`.
+#[cfg(feature = "system-host-bindings")]
+type ActivationSysHost<'a> = Option<&'a SysHostAttachment>;
+#[cfg(not(feature = "system-host-bindings"))]
+type ActivationSysHost<'a> = Option<&'a std::convert::Infallible>;
+
 struct Context<'functions, 'effects> {
     limits: Limits,
     steps: u64,
@@ -3909,6 +4000,7 @@ struct Context<'functions, 'effects> {
     transfer: Option<Transfer>,
     cancellation: Option<&'functions CancellationToken>,
     reuse: CallReuse,
+    sys_host: ActivationSysHost<'functions>,
 }
 
 impl Context<'_, '_> {
@@ -4071,6 +4163,7 @@ fn invoke_task_callback(
     repl_bindings: bool,
     restrict_function_names: bool,
     reject_unhandled_field_calls: bool,
+    sys_host: ActivationSysHost<'_>,
     active_calls: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
 ) -> Result<Value, EvaluationError> {
@@ -4090,6 +4183,7 @@ fn invoke_task_callback(
         namespace: None,
         transfer: None,
         reuse: CallReuse::disabled(),
+        sys_host,
         cancellation: Some(&cancellation),
     };
     context.invoke_callable(&callback, Vec::new(), 0)
@@ -4111,6 +4205,7 @@ fn run_task_callbacks(
     repl_bindings: bool,
     restrict_function_names: bool,
     reject_unhandled_field_calls: bool,
+    sys_host: ActivationSysHost<'_>,
     cancel_after_failure: bool,
     cancel_after_success: bool,
 ) -> (Vec<Option<Result<Value, EvaluationError>>>, Option<Value>) {
@@ -4158,6 +4253,7 @@ fn run_task_callbacks(
                             repl_bindings,
                             restrict_function_names,
                             reject_unhandled_field_calls,
+                            sys_host,
                             active_calls,
                             effects,
                         )
@@ -5295,7 +5391,7 @@ impl Context<'_, '_> {
                 },
             ) => self
                 .duration_from_total_nanoseconds(-elapsed_total_nanoseconds(&seconds, nanosecond)),
-            ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
+            ("-", Value::Float(value)) => Ok(float_value(-f64::from_bits(value))),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
@@ -5968,31 +6064,12 @@ impl Context<'_, '_> {
     fn float_binary(&self, op: &str, a: u64, b: u64) -> Result<Value, EvaluationError> {
         let (a, b) = (f64::from_bits(a), f64::from_bits(b));
         match op {
-            "+" => finite_float(a + b),
-            "-" => finite_float(a - b),
-            "*" => finite_float(a * b),
-            "/" if b == 0.0 => Err(error("ORNA-EVAL-DIVIDE-BY-ZERO")),
-            "/" => finite_float(a / b),
-            "%" if b == 0.0 => Err(error("ORNA-EVAL-DIVIDE-BY-ZERO")),
-            "%" => finite_float(a % b),
-            "^" => {
-                // Pragmatic real-float semantics use exp(exponent * ln(base)).
-                // Negative bases are outside that domain; 0^0 is chosen as 1,
-                // and zero to a negative power uses the division-by-zero code.
-                if a == 0.0 {
-                    if b < 0.0 {
-                        Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"))
-                    } else if b == 0.0 {
-                        finite_float(1.0)
-                    } else {
-                        finite_float(0.0)
-                    }
-                } else if a < 0.0 {
-                    Err(error("ORNA-EVAL-TYPE"))
-                } else {
-                    finite_float((b * a.ln()).exp())
-                }
-            }
+            "+" => Ok(float_value(a + b)),
+            "-" => Ok(float_value(a - b)),
+            "*" => Ok(float_value(a * b)),
+            "/" => Ok(float_value(a / b)),
+            "%" => Ok(float_value(a % b)),
+            "^" => Ok(float_value(libm::pow(a, b))),
             "<" => Ok(Value::Bool(a < b)),
             "<=" => Ok(Value::Bool(a <= b)),
             ">" => Ok(Value::Bool(a > b)),
@@ -7486,6 +7563,31 @@ impl Context<'_, '_> {
         }
     }
 
+    /// Answers `sys.rt.info()` from the activation facts the host attached.
+    ///
+    /// The call takes no argument and no piped input. Without an attached host
+    /// context the activation cannot describe itself, so it reports
+    /// `sys.version.incompatible` rather than a fabricated record (SYS-022..030).
+    #[cfg(feature = "system-host-bindings")]
+    fn call_sys_rt_info(
+        &self,
+        arguments: &[orna_syntax_v1::Argument],
+        input: Option<Value>,
+    ) -> Result<Value, EvaluationError> {
+        if input.is_some() || !arguments.is_empty() {
+            return Err(error("ORNA-EVAL-ARGUMENT"));
+        }
+        let Some(attachment) = self
+            .effects
+            .as_deref()
+            .and_then(|handler| handler.sys_host_context())
+            .or(self.sys_host)
+        else {
+            return Err(error("sys.version.incompatible"));
+        };
+        attachment.runtime_info()
+    }
+
     /// Dispatches one portable annotated-Blob call declared by the generated
     /// typed registry.
     ///
@@ -7844,6 +7946,15 @@ impl Context<'_, '_> {
         {
             return self.call_sys_explain(arguments, input, scope, depth);
         }
+        // `sys.rt.info()` reports the activation the host attached. Like
+        // `sys.explain`, it is lowered here, never by a provider invoke.
+        #[cfg(feature = "system-host-bindings")]
+        if source_function_name.as_deref() == Some("sys.rt.info")
+            && !scope.0.contains_key("sys")
+        {
+            return self.call_sys_rt_info(arguments, input);
+        }
+
         // A portable Blob call is admitted only when the generated typed
         // registry declares the operation. The resolved name wins when a
         // declaration was reachable; an unresolved, unshadowed source-level
@@ -9792,6 +9903,7 @@ impl Context<'_, '_> {
                     self.repl_bindings,
                     self.restrict_function_names,
                     self.reject_unhandled_field_calls,
+                    self.sys_host,
                     true,
                     false,
                 );
@@ -9845,6 +9957,7 @@ impl Context<'_, '_> {
                     self.repl_bindings,
                     self.restrict_function_names,
                     self.reject_unhandled_field_calls,
+                    self.sys_host,
                     false,
                     true,
                 );
@@ -9892,6 +10005,7 @@ impl Context<'_, '_> {
                 let repl_bindings = self.repl_bindings;
                 let restrict_function_names = self.restrict_function_names;
                 let reject_unhandled_field_calls = self.reject_unhandled_field_calls;
+                let sys_host = self.sys_host;
                 let active_calls = self.calls;
                 self.disable_call_reuse_for_fork();
                 let child_effects = self
@@ -9917,6 +10031,7 @@ impl Context<'_, '_> {
                                 repl_bindings,
                                 restrict_function_names,
                                 reject_unhandled_field_calls,
+                                sys_host,
                                 active_calls,
                                 child_effects,
                             )
@@ -11105,7 +11220,7 @@ impl Context<'_, '_> {
                 let delta = f64::from_bits(*bits) - mean;
                 squares += delta * delta;
             }
-            return finite_float(squares / values.len() as f64);
+            return Ok(float_value(squares / values.len() as f64));
         }
         if !matches!(first, Value::Int(_) | Value::Decimal(_))
             || !values
@@ -11206,7 +11321,7 @@ impl Context<'_, '_> {
         let variance = self.variance(values, options)?;
         match variance {
             Value::Null => Ok(Value::Null),
-            Value::Float(bits) => finite_float(f64::from_bits(bits).sqrt()),
+            Value::Float(bits) => Ok(float_value(f64::from_bits(bits).sqrt())),
             Value::Int(_) | Value::Decimal(_) => {
                 let (variance, preserve_decimal) = self.numeric_decimal(&variance)?;
                 self.square_root(&variance, options, preserve_decimal)
@@ -11362,9 +11477,9 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         let elapsed = self.elapsed_seconds(start_time, end_time)?;
         match (start_value, end_value) {
-            (Value::Float(start), Value::Float(end)) => finite_float(
+            (Value::Float(start), Value::Float(end)) => Ok(float_value(
                 (f64::from_bits(*end) - f64::from_bits(*start)) / decimal_to_f64(&elapsed)?,
-            ),
+            )),
             (Value::Int(_) | Value::Decimal(_), Value::Int(_) | Value::Decimal(_)) => {
                 let (start, start_decimal) = self.numeric_decimal(start_value)?;
                 let (end, end_decimal) = self.numeric_decimal(end_value)?;
@@ -11410,7 +11525,7 @@ impl Context<'_, '_> {
                 let elapsed = decimal_to_f64(&self.elapsed_seconds(pair[0].0, pair[1].0)?)?;
                 total += (f64::from_bits(*left) + f64::from_bits(*right)) * 0.5 * elapsed;
             }
-            return finite_float(total);
+            return Ok(float_value(total));
         }
         let mut total = DecimalValue::new(BigInt::zero(), BigInt::zero())?;
         let mut preserve_decimal = false;
@@ -11567,7 +11682,7 @@ impl Context<'_, '_> {
                     };
                     total += f64::from_bits(*bits);
                 }
-                finite_float(total / values.len() as f64)
+                Ok(float_value(total / values.len() as f64))
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -11642,7 +11757,7 @@ impl Context<'_, '_> {
                 )
             }
             (Value::Float(left), Value::Float(right)) => {
-                finite_float((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0)
+                Ok(float_value((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0))
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -11778,10 +11893,10 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(result, true)
             }
-            (Value::Float(lower), Value::Float(upper)) => finite_float(
+            (Value::Float(lower), Value::Float(upper)) => Ok(float_value(
                 f64::from_bits(*lower)
                     + (f64::from_bits(*upper) - f64::from_bits(*lower)) * decimal_to_f64(fraction)?,
-            ),
+            )),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -11823,15 +11938,15 @@ impl Context<'_, '_> {
             _ => lower,
         };
         if interpolation == "linear" {
-            return finite_float(
+            return Ok(float_value(
                 f64::from_bits(sorted[lower])
                     + (f64::from_bits(sorted[upper]) - f64::from_bits(sorted[lower])) * fraction,
-            );
+            ));
         }
         if interpolation == "midpoint" {
-            return finite_float(
+            return Ok(float_value(
                 (f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0,
-            );
+            ));
         }
         Ok(Value::Float(sorted[choose]))
     }
@@ -15359,12 +15474,12 @@ fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationEr
         Ok(right.clone())
     }
 }
-fn finite_float(value: f64) -> Result<Value, EvaluationError> {
-    if value.is_finite() {
-        Ok(Value::Float(value.to_bits()))
+fn float_value(value: f64) -> Value {
+    Value::Float(if value.is_nan() {
+        CANONICAL_NAN_BITS
     } else {
-        Err(error("ORNA-EVAL-VALUE"))
-    }
+        value.to_bits()
+    })
 }
 fn parse_int(text: &str) -> Result<BigInt, EvaluationError> {
     let text = text.replace('_', "");
@@ -15675,6 +15790,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         }
     }
@@ -17151,6 +17267,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         };
         let mut scope = Scope(
@@ -17226,6 +17343,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         };
         let mut scope = Scope(
@@ -17377,6 +17495,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation,
         };
         let mut scope = Scope(
@@ -17523,6 +17642,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         };
         let mut scope = Scope(
@@ -17559,6 +17679,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: None,
         };
         let plan = RelationPlan::new("Note".into());
@@ -18026,6 +18147,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -18060,6 +18182,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: Some(&cancellation),
         };
         let plan = RelationPlan::new("Note".into());
@@ -18093,6 +18216,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation: Some(&cancellation),
         };
         let mut callbacks = 0;
