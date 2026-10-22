@@ -9473,6 +9473,93 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
 }
 
 #[test]
+fn durable_eval_snapshot_pins_resolve_before_effects() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let capture = block_on(open_durable_state(&repository).capture()).unwrap();
+    let database = capture.database_id();
+    let runtime = capture.runtime_id();
+    let current = CanonicalSnapshot::cwd(database, runtime, capture.generation().clone()).unwrap();
+    let never_issued = CanonicalSnapshot::cwd(database, runtime, 7.into()).unwrap();
+
+    let mut application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    };
+    // 30-protocol.md, Limits: a CWD pin the runtime cannot resolve is answered
+    // with the portable `wire.snapshot_expired` code before any application
+    // effect. The pin is never rebound to the current generation.
+    let rejected = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [26; 16],
+            database,
+            Some(never_issued),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the unresolved pin is retained as a correlated diagnostic");
+    assert_eq!(rejected.request, Some([26; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    let encoded = rejected.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.snapshot_expired".len())
+            .any(|window| window == b"wire.snapshot_expired")
+    );
+    assert_eq!(application.calls, 0);
+
+    // The accepted eval must commit a real mutation; the fixture's empty batch
+    // is rejected by the runtime before it can prove acceptance.
+    application.mutations = vec![
+        TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
+    ];
+    let accepted = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [27; 16],
+            database,
+            Some(current),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .unwrap();
+    assert!(matches!(
+        accepted.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[1])),
+        Ok(Some(vec![2]))
+    );
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_transactional_event_commits_through_the_application_ticket() {
     let (root, repository) = durable_repository();
     let mut host = durable_host(open_durable_state(&repository));
