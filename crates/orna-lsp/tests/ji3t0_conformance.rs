@@ -2030,6 +2030,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     let script = temporary_path("el");
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
+    let emacs_signature_fixture = isolated_fixture("signature-actions-v1.orna", SIGNATURE_SOURCE);
+    let emacs_action_fixture = isolated_fixture("missing-semicolon-code-action-v1.orna", ACTION_SOURCE);
+    let emacs_hover_fixture = isolated_fixture("ji3t0-lsp-v1-self-contained.orna", SOURCE);
+    let emacs_semantic_fixture = isolated_fixture("editor-semantic-tokens.orna", SEMANTIC_SOURCE);
+    let emacs_hints_fixture = isolated_fixture("editor-lsp-hints.orna", HINTS_SOURCE);
     let elisp = format!(
         r#";; -*- lexical-binding: t; -*-
 (require 'package)
@@ -2042,7 +2047,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 (orna-setup-eglot)
 
 (defun orna-test-wait-managed (buffer)
+  ;; `eglot-ensure' defers its connect to a one-shot `post-command-hook'.
+  ;; `--batch' never runs a command loop, so run that hook explicitly.
   (with-current-buffer buffer
+    (run-hooks 'post-command-hook)
     (let ((deadline (+ (float-time) 12.0)))
       (while (and (not (eglot-managed-p)) (< (float-time) deadline))
         (accept-process-output nil 0.05)))
@@ -2132,10 +2140,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 (defun orna-test-folding-selection-positions ()
   (let ((positions (json-parse-string (getenv "ORNA_FOLDING_SELECTION_REQUESTS")
                                       :array-type 'list :object-type 'hash-table)))
-    (mapcar (lambda (position)
-              (list :line (gethash "line" position)
-                    :character (gethash "character" position)))
-            (gethash "selection_positions" positions))))
+    ;; LSP `positions' is a JSON array; a Lisp list would serialize as an object.
+    (apply #'vector
+           (mapcar (lambda (position)
+                     (list :line (gethash "line" position)
+                           :character (gethash "character" position)))
+                   (gethash "selection_positions" positions)))))
 (defun orna-test-location-key (location)
   (let* ((range (orna-test-get location "range"))
          (start (orna-test-get range "start")))
@@ -2677,6 +2687,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             (let ((inhibit-read-only t))
               (erase-buffer)
               (insert (getenv "ORNA_DIAGNOSTIC_RECOVERY_SOURCE")))
+            (eglot--signal-textDocument/didChange)
             (setq diagnostic-recovered
                   (orna-test-get
                    (jsonrpc-request server :textDocument/diagnostic
@@ -2780,11 +2791,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
-        elisp_string(&hover_fixture.display().to_string()),
-        elisp_string(&semantic_fixture.display().to_string()),
-        elisp_string(&hints_fixture.display().to_string()),
-        elisp_string(&signature_fixture.display().to_string()),
-        elisp_string(&action_fixture.display().to_string()),
+        elisp_string(&emacs_hover_fixture.display().to_string()),
+        elisp_string(&emacs_semantic_fixture.display().to_string()),
+        elisp_string(&emacs_hints_fixture.display().to_string()),
+        elisp_string(&emacs_signature_fixture.display().to_string()),
+        elisp_string(&emacs_action_fixture.display().to_string()),
     );
     fs::write(&script, elisp).expect("write Emacs Eglot hover/token probe");
     let output = Command::new(&emacs)
@@ -2848,6 +2859,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
+    remove_isolated_fixture(&emacs_signature_fixture);
+    remove_isolated_fixture(&emacs_action_fixture);
+    remove_isolated_fixture(&emacs_hover_fixture);
+    remove_isolated_fixture(&emacs_semantic_fixture);
+    remove_isolated_fixture(&emacs_hints_fixture);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -3332,6 +3348,21 @@ fn temporary_path(extension: &str) -> PathBuf {
         "orna-ji3t0-{}-{id}.{extension}",
         std::process::id()
     ))
+}
+
+fn isolated_fixture(name: &str, source: &str) -> PathBuf {
+    let dir = temporary_path("d");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    fs::write(&path, source).unwrap();
+    path
+}
+
+fn remove_isolated_fixture(path: &Path) {
+    let _ = fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        let _ = fs::remove_dir(dir);
+    }
 }
 
 fn temporary_fixture(source: &str) -> PathBuf {
