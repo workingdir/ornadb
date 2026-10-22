@@ -5103,14 +5103,8 @@ mod tests {
                 "a CWD row in another layout must not project as HEAD: {projected:?}"
             );
         }
-        let undecodable = select_runtime_row_fields(
-            Some(&[0xff]),
-            pinned_fields.clone(),
-            &pinned_layout,
-            Some(&pinned_layout),
-            [[1; 16], [2; 16]].into_iter(),
-        );
-        assert!(undecodable.is_err(), "an undecodable CWD row is reported");
+        // ORNA-VFS-001: a row is validated under the mounted snapshot's schema, so
+        // with no runtime layout a valid CWD row still projects from the CWD.
         let unresolved_schema = select_runtime_row_fields(
             Some(&runtime_bytes),
             pinned_fields,
@@ -5118,10 +5112,45 @@ mod tests {
             None,
             [[1; 16], [2; 16]].into_iter(),
         );
-        assert!(
-            unresolved_schema.is_err(),
-            "a CWD row without a HEAD schema is reported"
+        let (projected, source) =
+            unresolved_schema.expect("a CWD row valid under the mounted schema projects");
+        assert_eq!(source, RowProjectionSource::RuntimeSnapshot);
+        assert_eq!(
+            projected,
+            Raw::Array(vec![Raw::Text("title".into()), Raw::Int(7.into())])
         );
+    }
+
+    /// W08-08: an undecodable CWD row is reported while the pinned HEAD row
+    /// exists; the projection never falls back to that HEAD row, whether or not
+    /// a runtime layout is resolved.
+    #[test]
+    fn undecodable_cwd_row_is_reported_when_a_head_row_exists() {
+        let pinned_layout = [
+            StoredFieldShape {
+                field_id: [1; 16],
+                field_type: Raw::Text("Str".into()),
+            },
+            StoredFieldShape {
+                field_id: [2; 16],
+                field_type: Raw::Text("Int".into()),
+            },
+        ];
+        let pinned_fields = Raw::Array(vec![Raw::Text("old title".into()), Raw::Int(6.into())]);
+        for runtime_layout in [None, Some(&pinned_layout[..])] {
+            let projected = select_runtime_row_fields(
+                Some(&[0xff]),
+                pinned_fields.clone(),
+                &pinned_layout,
+                runtime_layout,
+                [[1; 16], [2; 16]].into_iter(),
+            );
+            let error = projected.expect_err("an undecodable CWD row is reported");
+            assert!(
+                error.contains("cannot be decoded"),
+                "an undecodable CWD row must not project HEAD: {error}"
+            );
+        }
     }
 
     #[test]
