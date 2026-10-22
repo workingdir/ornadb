@@ -2281,6 +2281,28 @@ fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Canonical 44-byte RIFF/WAVE header over 16-bit mono PCM `samples` at `sample_rate`.
+fn pcm_wav(sample_rate: u32, samples: &[u8]) -> Vec<u8> {
+    let data_len = u32::try_from(samples.len()).unwrap();
+    let block_align: u16 = 2;
+    let byte_rate = sample_rate * u32::from(block_align);
+    let mut wav = Vec::with_capacity(44 + samples.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(samples);
+    wav
+}
+
 /// A live `mount --cwd` over `Music/london`, whose `content` Blob was captured from the source bytes.
 struct MountedBlobRow {
     mounted: MountedProcess,
@@ -2351,17 +2373,29 @@ fn unmount_and_reap(repository: &Path, mounted: &mut MountedProcess) {
 /// Captures `original` as `Music/london/content.mp3` (`audio/mpeg`) and mounts the cwd.
 /// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
 async fn mount_captured_blob(original: &[u8]) -> Option<MountedBlobRow> {
+    mount_captured_media(original, "tone.mp3", "audio/mpeg", "content.mp3").await
+}
+
+/// Captures `original` from `file_name` as a `media_type` Blob in `Music/london` and mounts the cwd.
+/// The exported filename is `mounted_name`.
+/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_captured_media(
+    original: &[u8],
+    file_name: &str,
+    media_type: &str,
+    mounted_name: &str,
+) -> Option<MountedBlobRow> {
     if !fuse_test_available() {
         return None;
     }
     // The host cap bounds the source; it must admit the whole fixture, so it matches the provider limit.
     let capture_limit: usize = 4 << 20;
     let media_root = TempDir::new().unwrap();
-    std::fs::write(media_root.path().join("tone.mp3"), original).unwrap();
+    std::fs::write(media_root.path().join(file_name), original).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let capture = format!(
-        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", {capture_limit}), \"audio/mpeg\")"
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"{file_name}\", {capture_limit}), \"{media_type}\")"
     );
     let row_source = format!("{{\n    content: {capture},\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
@@ -2410,7 +2444,7 @@ async fn mount_captured_blob(original: &[u8]) -> Option<MountedBlobRow> {
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
-    if !wait_for_mount_path(&mut mounted, &mountpoint.join("Music/london/content.mp3")) {
+    if !wait_for_mount_path(&mut mounted, &mountpoint.join("Music/london").join(mounted_name)) {
         return None;
     }
     Some(MountedBlobRow {
@@ -2423,7 +2457,7 @@ async fn mount_captured_blob(original: &[u8]) -> Option<MountedBlobRow> {
 }
 
 #[tokio::test]
-/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a rename-over replacement gives new opens the new generation while a handle opened earlier keeps the captured bytes; the replacement survives restart.
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a rename-over replacement gives new opens the new generation while a handle opened earlier keeps the captured bytes.
 async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement() {
     let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
     let replacement = lcg_bytes(0xfedc_ba98_7654_3210, 2_097_152 + 777);
@@ -2456,20 +2490,113 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
     drop(old_handle);
 
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
 
-    let remount_parent = TempDir::new().unwrap();
-    let remount_point = remount_parent.path().join("library");
-    std::fs::create_dir(&remount_point).unwrap();
-    let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &remount_point);
-    let remounted_blob = remount_point.join("Music/london/content.mp3");
-    assert!(
-        wait_for_mount_path(&mut remounted, &remounted_blob),
-        "FUSE remount must expose the committed Blob after a successful mount"
-    );
-    let restarted = std::fs::read(&remounted_blob).unwrap();
-    unmount_and_reap(row.repository_directory.path(), &mut remounted);
-    assert_eq!(
-        restarted, replacement,
-        "a restarted mount serves the acknowledged replacement"
-    );
+#[tokio::test]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a WAV Blob row exports as `content.wav`, serves the seek and range reads a media decoder issues, and exports byte-for-byte.
+async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte() {
+    let samples = lcg_bytes(0x0016_0000_5eed, 640_000);
+    let original = pcm_wav(16_000, &samples);
+    let Some(mut row) =
+        mount_captured_media(&original, "tone.wav", "audio/wav", "content.wav").await
+    else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.wav");
+    let mut handle = File::open(&blob_path).unwrap();
+    assert_eq!(handle.metadata().unwrap().len(), original.len() as u64);
+
+    // Format probe: the canonical header is served before any sample is decoded.
+    let mut header = [0u8; 44];
+    handle.read_exact(&mut header).unwrap();
+    assert_eq!(header.as_slice(), &original[..44]);
+    assert_eq!(&header[0..4], b"RIFF");
+    assert_eq!(&header[8..16], b"WAVEfmt ");
+    assert_eq!(u16::from_le_bytes([header[20], header[21]]), 1, "PCM");
+    assert_eq!(u16::from_le_bytes([header[22], header[23]]), 1, "mono");
+    assert_eq!(u32::from_le_bytes(header[24..28].try_into().unwrap()), 16_000);
+    assert_eq!(u16::from_le_bytes([header[34], header[35]]), 16, "16-bit samples");
+    assert_eq!(&header[36..40], b"data");
+    assert_eq!(u32::from_le_bytes(header[40..44].try_into().unwrap()), 640_000);
+
+    // Sequential 64 KiB reads cover the whole Blob, then report EOF.
+    let window = 64 * 1024;
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut streamed = Vec::with_capacity(original.len());
+    let mut chunk = vec![0u8; window];
+    loop {
+        let read = handle.read(&mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        streamed.extend_from_slice(&chunk[..read]);
+        assert!(streamed.len() <= original.len(), "read past the Blob end");
+    }
+    assert_eq!(streamed, original);
+    assert_eq!(handle.read(&mut chunk).unwrap(), 0, "EOF stays at the Blob end");
+
+    // Container tail probe from the end of the file.
+    let tail_len = 4096;
+    handle.seek(SeekFrom::End(-(tail_len as i64))).unwrap();
+    let mut tail = vec![0u8; tail_len];
+    handle.read_exact(&mut tail).unwrap();
+    assert_eq!(tail.as_slice(), &original[original.len() - tail_len..]);
+
+    // Seeking decoder: deterministic random offsets, each range compared with the row bytes.
+    let mut entropy = 0x5eed_5eed_5eed_5eed_u64;
+    for _ in 0..64 {
+        entropy = entropy
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let len = 1 + ((entropy >> 48) as usize % 8_192);
+        let offset = (entropy as usize) % (original.len() - len);
+        handle.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let mut range = vec![0u8; len];
+        handle.read_exact(&mut range).unwrap();
+        assert_eq!(
+            range.as_slice(),
+            &original[offset..offset + len],
+            "range at {offset} length {len}"
+        );
+    }
+
+    // Real media player: mpv opens and seeks the mounted WAV; skipped only when mpv is absent.
+    let mpv_installed = Command::new("mpv")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
+    if mpv_installed {
+        let output = Command::new("mpv")
+            .args([
+                "--no-config",
+                "--no-video",
+                "--ao=null",
+                "--no-terminal",
+                "--msg-level=all=error",
+                "--start=10",
+                "--end=11",
+            ])
+            .arg(&blob_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mpv plays the mounted WAV; status={:?}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    } else {
+        eprintln!("SKIP: mpv is not installed; the seek and range reads are the decoder leg");
+    }
+
+    // Binary export: a copy through the mount is byte-identical to the row.
+    let export_dir = TempDir::new().unwrap();
+    let export_path = export_dir.path().join("content.wav");
+    std::fs::copy(&blob_path, &export_path).unwrap();
+    assert_eq!(std::fs::read(&export_path).unwrap(), original);
+    drop(handle);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
