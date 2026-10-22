@@ -1150,7 +1150,7 @@ fn run_migrate_abort<'a>(
         )
     })?;
     let destination = std::path::PathBuf::from(destination);
-    orna_repository_v1::migration_copy::discard_prepared_format3_migration(
+    let outcome = orna_repository_v1::migration_copy::discard_prepared_format3_migration(
         &repository,
         &destination,
     )
@@ -1162,10 +1162,16 @@ fn run_migrate_abort<'a>(
             format!("{error:?}"),
         )
     })?;
-    println!(
-        "discarded prepared format-3 migration copy: destination={}",
-        destination.display()
-    );
+    match outcome {
+        orna_repository_v1::migration_copy::DiscardOutcome::Discarded => println!(
+            "discarded prepared format-3 migration copy: destination={}",
+            destination.display()
+        ),
+        orna_repository_v1::migration_copy::DiscardOutcome::NothingToDiscard => println!(
+            "nothing to discard: no prepared format-3 migration copy at destination={}",
+            destination.display()
+        ),
+    }
     Ok(())
 }
 
