@@ -5129,6 +5129,15 @@ fn validate_nested_implementation_members(
             ));
             return;
         };
+        if let Type::Named(target_name) = target
+            && scope.refined_types.get(target_name) == Some(&source)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "overlapping protocol implementations are invalid",
+            ));
+            return;
+        }
         if let Some(from) = implementation.members.as_slice().first()
             && implementation.members.len() == 1
         {
@@ -5176,16 +5185,7 @@ fn validate_nested_implementation_members(
                 return;
             }
             let mut local = BTreeMap::new();
-            let source_binding = match &source {
-                Type::Named(name) => scope
-                    .nominal_rows
-                    .get(name)
-                    .or_else(|| scope.table_rows.get(name))
-                    .cloned()
-                    .unwrap_or_else(|| source.clone()),
-                _ => source.clone(),
-            };
-            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
+            bind_pattern(&parameter.pattern, source.clone(), scope, &mut local, diagnostics);
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -19961,6 +19961,18 @@ fn infer_nominal_conversion_call(
         return Some(Inferred {
             ty: Type::Named(target.clone()),
             effects,
+        });
+    }
+    // A refined type's base conversion `T.from(base)` is not a nested From
+    // implementation, so an explicit From for other sources must not remove it.
+    if scope
+        .refined_types
+        .get(target)
+        .is_some_and(|underlying| *underlying == argument.ty)
+    {
+        return Some(Inferred {
+            ty: Type::Named(target.clone()),
+            effects: argument.effects,
         });
     }
     diagnostics.push(diag(
