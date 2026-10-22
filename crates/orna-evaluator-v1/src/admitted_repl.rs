@@ -19,15 +19,15 @@ use orna_semantic_v1::{
     SystemProviders, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_syntax_v1::{
-    Declaration, EnumVariant, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
+    Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
     TypeRepresentation, UseTail, Visibility, lex, parse_module, parse_repl,
 };
 use sha2::{Digest as _, Sha256};
 
 use crate::{
     CancellationToken, Environment, EvaluationError, Functions, Limits, NominalDefinition,
-    NominalDefinitions, NominalField, NominalVariant, PureFunction, ReplSession,
-    module_function_alias_key,
+    NominalDefinitions, NominalField, PureFunction, ReplSession, module_function_alias_key,
+    source_enum_definitions,
 };
 use crate::{reference_standard_profile, reference_standard_sources};
 
@@ -672,8 +672,17 @@ fn admitted_runtime_sources(
     }
 
     let mut functions = Functions::new();
-    let mut nominals = NominalDefinitions::new();
+    let mut nominal_definitions = NominalDefinitions::new();
     for (namespace, module) in parsed_modules {
+        let standard = namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
+        if !standard {
+            // ORNA-ENUM-001..003: project enums execute as construction plans
+            // shared by every evaluation in the session.
+            nominal_definitions
+                .extend(source_enum_definitions(namespace.as_deref(), &module.items));
+        }
         for item in module.items {
             match item.declaration {
                 Declaration::Function { signature, body } => {
@@ -693,7 +702,7 @@ fn admitted_runtime_sources(
                         },
                     );
                 }
-                Declaration::Use { .. } | Declaration::Table { .. } => {}
+                Declaration::Use { .. } | Declaration::Table { .. } | Declaration::Enum { .. } => {}
                 // Catalogue-only declarations have no runtime representation.
                 Declaration::Protocol { .. }
                 | Declaration::Dimension { .. }
@@ -702,33 +711,24 @@ fn admitted_runtime_sources(
                     representation: TypeRepresentation::Alias { .. },
                     ..
                 } => {}
-                // Project-root enums and nominal types are ephemeral REPL
-                // definitions keyed by their bare name, like root functions.
-                Declaration::Enum { name, variants, .. } if namespace.is_none() => {
-                    let definition = repl_enum_definition(&name, variants);
-                    insert_repl_nominal(&mut nominals, name, definition)?;
-                }
+                // Project-root nominal types are ephemeral REPL definitions keyed
+                // by their bare name, like root functions. Enums are admitted by
+                // `source_enum_definitions` above.
                 Declaration::Type {
                     name,
                     representation: TypeRepresentation::Nominal { members },
                     ..
                 } if namespace.is_none() => {
                     let definition = repl_nominal_definition(&name, members)?;
-                    insert_repl_nominal(&mut nominals, name, definition)?;
+                    insert_repl_nominal(&mut nominal_definitions, name, definition)?;
                 }
                 // The bounded REPL admits pinned standard functions as
                 // executable source, while declaration-only standard items
                 // remain represented by the semantic catalogue. Keep these
                 // items from preventing unrelated standard functions from
-                // loading; ordinary project declarations remain outside this
+                // loading; other project declarations remain outside this
                 // evaluator boundary.
-                Declaration::Enum { .. }
-                    if namespace
-                        .as_deref()
-                        .is_some_and(|namespace| namespace.starts_with("std.")) => {}
-                _ if namespace.as_deref().is_some_and(|namespace| {
-                    namespace == "std" || namespace.starts_with("std.")
-                }) => {}
+                _ if standard => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
         }
@@ -739,7 +739,7 @@ fn admitted_runtime_sources(
         .map(|session| session.with_table_names(table_names))
         .map_err(ReplError::runtime)?;
     session
-        .with_nominal_definitions(nominals)
+        .with_nominal_definitions(nominal_definitions)
         .map_err(ReplError::runtime)
 }
 
@@ -757,19 +757,6 @@ fn repl_nominal_id(parts: &[&str]) -> [u8; 16] {
     let mut id = [0_u8; 16];
     id.copy_from_slice(&digest[..16]);
     id
-}
-
-fn repl_enum_definition(name: &str, variants: Vec<EnumVariant>) -> NominalDefinition {
-    let variants = variants
-        .into_iter()
-        .map(|variant| {
-            let id = repl_nominal_id(&[name, "variant", variant.name.as_str()]);
-            let payload: Vec<String> = variant.fields.into_iter().map(|field| field.name).collect();
-            NominalVariant::new(id, variant.name).with_payload_fields(payload)
-        })
-        .collect();
-    NominalDefinition::new(repl_nominal_id(&[name, "type"]), None, Vec::new())
-        .with_enum_variants(variants)
 }
 
 fn repl_nominal_definition(
