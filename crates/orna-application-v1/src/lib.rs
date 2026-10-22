@@ -9,8 +9,9 @@
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
-    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry,
-    SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
+    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget,
+    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context,
     reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
@@ -207,7 +208,7 @@ impl ApplicationAuthority {
 
     /// Attaches the host-owned activation facts that `sys.rt.info()` reads for
     /// every evaluation through this authority (SYS-022..030). Without a carrier
-    /// that singleton fails closed with `sys.abi.unavailable`.
+    /// that singleton fails closed with `sys.version.incompatible`.
     #[must_use]
     pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
         self.sys_host = Some(sys_host);
@@ -1074,7 +1075,7 @@ pub struct SourceMutationEffectHandler {
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
-    sys_host: Option<SysHostContext>,
+    sys_host: Option<SysHostAttachment>,
     /// Pins `sys.explain` inputs to the activation's snapshot.
     explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
@@ -1103,7 +1104,7 @@ impl SourceMutationEffectHandler {
     }
 
     fn with_sys_host_context(mut self, sys_host: Option<SysHostContext>) -> Self {
-        self.sys_host = sys_host;
+        self.sys_host = sys_host.map(SysHostAttachment::new);
         self
     }
 
@@ -1848,7 +1849,7 @@ impl AsyncSourceMutationEffectHandler {
 }
 
 impl EffectHandler for AsyncSourceMutationEffectHandler {
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         EffectHandler::sys_host_context(&self.mutations)
     }
 
@@ -2154,7 +2155,7 @@ fn runtime_effect_statement_count(statement: &Statement) -> usize {
 }
 
 impl EffectHandler for SourceMutationEffectHandler {
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.sys_host.as_ref()
     }
 

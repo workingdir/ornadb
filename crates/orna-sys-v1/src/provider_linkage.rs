@@ -68,7 +68,7 @@ const DECLARED_LINKS: [SystemProviderLink; 7] = [
     // `explain_bindings`; the plan pins its source through the catalogue the
     // host installs. No production host installs an `ExplainCatalogue` yet
     // (A10-sys-inventory-03, bead ornadb-5il1.124), so `orna run`, `orna serve`
-    // and REPL calls fail with `sys.abi.unavailable` until one does. The
+    // and REPL calls fail with `sys.version.incompatible` until one does. The
     // `FunctionRef` and `Diagnostic` overloads stay unlinked: the evaluator
     // rejects them.
     SystemProviderLink {
@@ -77,7 +77,7 @@ const DECLARED_LINKS: [SystemProviderLink; 7] = [
     },
     // `orna-evaluator-v1`: `Evaluator::call` answers `sys.rt.info()` natively
     // from the `SysHostContext` the host attaches to the activation. A host
-    // that attaches none reports `sys.abi.unavailable` (SYS-022..030).
+    // that attaches none reports `sys.version.incompatible` (SYS-022..030).
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.rt.info"),
         host: SystemProviderHost::Evaluator,

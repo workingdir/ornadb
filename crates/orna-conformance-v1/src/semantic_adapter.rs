@@ -16,7 +16,8 @@ use num_bigint::{BigInt, Sign};
 use orna_evaluator_v1::{
     ActivationExplainCatalogue, EffectHandler, Environment, EvaluationError, ExplainCatalogue,
     Functions, Limits as EvaluatorLimits, NominalDefinition, NominalDefinitions, NominalField,
-    PureFunction as RetainedFunction, RelationPage, StepBudget, SysHostContext, evaluate_expression,
+    PureFunction as RetainedFunction, RelationPage, StepBudget, SysHostAttachment, SysHostContext,
+    evaluate_expression,
     evaluate_expression_with_functions, evaluate_with_functions_and_budget,
     evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
     invoke_named_with_effects_nominals_and_budget, invoke_named_with_nominals,
@@ -1798,7 +1799,7 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
-    sys_host: Option<std::sync::Arc<SysHostContext>>,
+    sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     explain_catalogue: Option<ActivationExplainCatalogue>,
 }
 
@@ -1826,7 +1827,10 @@ impl TransactionalEvaluator {
         self
     }
 
-    fn with_sys_host_context(mut self, sys_host: Option<std::sync::Arc<SysHostContext>>) -> Self {
+    fn with_sys_host_context(
+        mut self,
+        sys_host: Option<std::sync::Arc<SysHostAttachment>>,
+    ) -> Self {
         self.sys_host = sys_host;
         self
     }
@@ -2071,7 +2075,7 @@ pub struct RuntimeTarget<'a> {
 pub struct DurableTransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
-    sys_host: Option<std::sync::Arc<SysHostContext>>,
+    sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     #[cfg(test)]
     activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
@@ -2163,7 +2167,7 @@ impl DurableTransactionalEvaluator {
     /// during every table activation this evaluator runs.
     #[must_use]
     pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
-        self.sys_host = Some(std::sync::Arc::new(sys_host));
+        self.sys_host = Some(std::sync::Arc::new(SysHostAttachment::new(sys_host)));
         self
     }
 
@@ -5636,12 +5640,12 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
-    sys_host: Option<&'activation SysHostContext>,
+    sys_host: Option<&'activation SysHostAttachment>,
     explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.sys_host
     }
 
