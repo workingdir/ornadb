@@ -3,7 +3,7 @@ if exists("b:current_syntax") | finish | endif
 syntax case match
 syntax match ornaIdentifier /\v<%([_a-zA-Z]|[^\x00-\x7f])%([_a-zA-Z0-9]|[^\x00-\x7f])*/
 syntax keyword ornaKeyword as assert base break case continue dim else enum false fn for if impl in let loop null offset affine protocol pub return self static table true type unit use while
-syntax match ornaPunctuation /\v%([{]|[}]|[(]|[)]|[\[]|[\]]|[,]|[;]|[:]|[.])/
+syntax match ornaPunctuation /\v%([{]|[}]|[(]|[)]|[[]|[\]]|[,]|[;]|[:]|[.])/
 syntax match ornaOperator #\v%([.][.][=]|[=][>]|[=][=]|[!][=]|[<][=]|[>][=]|[?][?]|[|][?]|[&][&]|[|][|]|[+][=]|[\-][=]|[*][=]|[/][=]|[.][.]|[|]|[!]|[=]|[<]|[>]|[+]|[\-]|[*]|[/]|[%]|[\^]|[?])#
 syntax match ornaNumber /\v<%([0-9]{4}[\-][0-9]{2}[\-][0-9]{2}T[0-9]{2}[:][0-9]{2}[:][0-9]{2}%([.][0-9][0-9]*)?%(Z|[+\-][0-9]{2}[:][0-9]{2})|[0-9]{4}[\-][0-9]{2}[\-][0-9]{2}|0x[0-9A-Fa-f]%(_?[0-9A-Fa-f])*|0b[01]%(_?[01])*|[0-9]%(_?[0-9])*%([.][0-9]%(_?[0-9])*)?%([Ee][+\-]?[0-9]%(_?[0-9])*)?f?)>/
 syntax match ornaContextualName /\v%([.])@<![.]%(continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)>/ contains=ornaPunctuation

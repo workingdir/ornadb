@@ -1006,7 +1006,7 @@ NESTED means the string sits inside an interpolation."
                  (if (= depth 0) (throw 'done t) (setq depth (1- depth))))
                 (t (forward-char 1))))))))
 (defun orna-syntax-propertize (start end)
-  "Keep quotes of strings nested in interpolations between START and END
+  "Keep quotes of strings nested in interpolations within the region
 from ending the enclosing string."
   (goto-char start)
   (let ((state (syntax-ppss)))
@@ -1028,7 +1028,7 @@ from ending the enclosing string."
     (when (eq (char-before) ?u) (backward-char))
     (= 1 (% (- (skip-chars-backward "\\\\")) 2))))
 (defun orna--match-interpolation (limit)
-  "Match the opening brace of the next string interpolation before LIMIT."
+  "Match the opening brace of the next string interpolation before limit."
   (let (found)
     (while (and (not found) (re-search-forward "{" limit t))
       (let ((open (match-beginning 0)))
