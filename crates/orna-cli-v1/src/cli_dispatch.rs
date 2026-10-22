@@ -119,7 +119,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             }
             Ok(())
         }
-        Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
+        Command::Serve { port, allow_push } => cli_serve::run(&parsed.endpoint, port, allow_push),
         Command::Mount {
             ref mountpoint,
             ref selector,
