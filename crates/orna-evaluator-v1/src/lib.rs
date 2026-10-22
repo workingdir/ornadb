@@ -1654,7 +1654,9 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
     if context.transfer.is_some() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    ContextValue::new(ValueFormat::Ovb2, value.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+    // A Blob that an effect returned in its format-3 context (a lazy capture)
+    // keeps that context; every other result is OVB-2.
+    Context::contextual_value(value, ValueFormat::Ovb2, None)
 }
 
 /// Evaluate source against explicit values and pure functions, checking source
