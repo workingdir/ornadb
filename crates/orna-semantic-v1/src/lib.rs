@@ -698,6 +698,7 @@ impl Catalogue {
         catalogue.standard_dependency_profile = Some(profile.clone());
         let mut seen = BTreeSet::new();
         let mut supplied = BTreeSet::new();
+        let mut trees = Vec::new();
         for (logical_path, source) in sources {
             profile.verify_source(&logical_path, &source)?;
             if !seen.insert(logical_path.clone()) {
@@ -738,6 +739,7 @@ impl Catalogue {
                     StandardProfileError::InvalidPreludeExport,
                 ));
             }
+            trees.push((namespace.clone(), parsed.value));
             if catalogue.modules.insert(namespace, header).is_some() {
                 return Err(StandardCatalogueError::DuplicateModule);
             }
@@ -755,6 +757,7 @@ impl Catalogue {
                 StandardProfileError::InvalidPreludeExport,
             ));
         }
+        summarize_standard_function_effects(&mut catalogue.modules, &trees);
         Ok(catalogue)
     }
 
@@ -1507,11 +1510,20 @@ where
     let symbols = symbols
         .into_iter()
         .map(|(name, ty)| {
-            let effects = matches!(&ty, Type::Function { .. })
-                .then(|| catalogue_effects(&namespace))
-                .unwrap_or_default();
+            let name: String = name.into();
+            let effects = if matches!(&ty, Type::Function { .. }) {
+                let path = namespace
+                    .0
+                    .iter()
+                    .map(String::as_str)
+                    .chain([name.as_str()])
+                    .collect::<Vec<_>>();
+                standard_function_effects(&path)
+            } else {
+                EffectSummary::default()
+            };
             (
-                name.into(),
+                name,
                 Symbol {
                     table_schema: None,
                     kind: if matches!(ty, Type::Function { .. }) {
@@ -1539,22 +1551,358 @@ where
     }
 }
 
-fn catalogue_effects(namespace: &Namespace) -> EffectSummary {
-    let effect = if namespace.0.first().is_some_and(|part| part == "std")
-        && namespace.0.get(1).is_some_and(|part| part == "net")
-    {
-        "network"
-    } else if namespace.0.first().is_some_and(|part| part == "std")
-        && namespace.0.get(1).is_some_and(|part| part == "io")
-        && namespace.0.get(2).is_some_and(|part| part == "fs")
-    {
-        "filesystem"
-    } else {
-        return EffectSummary::default();
+/// Effect summary of a host-bound standard function, keyed by its fully
+/// qualified path. These declarations are host-bound or wrap host operations,
+/// so the declared path is the classification and the body is not trusted.
+fn standard_function_effects(path: &[&str]) -> EffectSummary {
+    let effect = match path {
+        ["std", "net", ..] => "network",
+        ["std", "io", "fs", ..] => "filesystem",
+        ["std", "io", "process" | "environment", ..] => "process",
+        ["std", "concurrent", "sleep"] => "clock",
+        ["std", "random", ..] => "randomness",
+        ["std", "secret", "open"] => "secret_access",
+        _ => return EffectSummary::default(),
     };
     EffectSummary {
         effects: BTreeSet::from([effect.into()]),
         may_fail: true,
+    }
+}
+
+/// Effect summary of an implementation-provided `sys` host operation, keyed by
+/// its callee path. Names follow the `sys.EffectKind` vocabulary.
+fn portable_sys_effect(path: &[&str]) -> EffectSummary {
+    let effect = match path {
+        ["sys", "io", ..] => "filesystem",
+        ["sys", "net", ..] => "network",
+        ["sys", "process", ..] => "process",
+        ["sys", "ui", ..] => "ui",
+        ["sys", "clock", ..] => "clock",
+        ["sys", "random", ..] => "randomness",
+        _ => return EffectSummary::default(),
+    };
+    EffectSummary {
+        effects: BTreeSet::from([effect.into()]),
+        may_fail: true,
+    }
+}
+
+/// A source-declared function of the standard corpus. `callees` holds every
+/// syntactic `Name`/`Field` path its signature defaults and body reference.
+struct StandardFunction {
+    namespace: Namespace,
+    callees: Vec<Vec<String>>,
+}
+
+/// The `use` declarations of one standard module.
+#[derive(Default)]
+struct StandardImports {
+    aliases: BTreeMap<String, Vec<String>>,
+    globs: Vec<Vec<String>>,
+}
+
+impl StandardImports {
+    fn add(&mut self, path: Vec<String>, tail: &UseTail) {
+        match tail {
+            UseTail::None => {
+                if let Some(last) = path.last().cloned() {
+                    self.aliases.insert(last, path);
+                }
+            }
+            UseTail::Alias { name, .. } => {
+                self.aliases.insert(name.clone(), path);
+            }
+            UseTail::Glob { .. } => self.globs.push(path),
+            UseTail::Names(names) => {
+                for name in names {
+                    let mut target = path.clone();
+                    target.push(name.name.clone());
+                    self.aliases.insert(name.name.clone(), target);
+                }
+            }
+        }
+    }
+}
+
+/// Propagates host effects through the bodies of source-backed standard
+/// functions. A standard wrapper performs whatever host operations its callees
+/// perform, so each function's effects are the least fixed point over its
+/// syntactic callees. Effects are keyed by full path and monotone, so the
+/// iteration terminates.
+fn summarize_standard_function_effects(
+    modules: &mut BTreeMap<Namespace, ModuleHeader>,
+    trees: &[(Namespace, SyntaxTree)],
+) {
+    let mut imports: BTreeMap<Namespace, StandardImports> = BTreeMap::new();
+    let mut functions: BTreeMap<Vec<String>, StandardFunction> = BTreeMap::new();
+    for (namespace, tree) in trees {
+        let module_imports = imports.entry(namespace.clone()).or_default();
+        for item in &tree.items {
+            match &item.declaration {
+                Declaration::Use { path, tail } => module_imports.add(
+                    path.iter().map(|segment| segment.name.clone()).collect(),
+                    tail,
+                ),
+                Declaration::Function { signature, body } => {
+                    let mut callees = Vec::new();
+                    for parameter in &signature.parameters {
+                        if let Some(default) = &parameter.default {
+                            collect_callee_paths(default, &mut callees);
+                        }
+                    }
+                    collect_callee_paths(body, &mut callees);
+                    let key: Vec<String> = namespace
+                        .0
+                        .iter()
+                        .cloned()
+                        .chain([signature.name.clone()])
+                        .collect();
+                    functions.insert(
+                        key,
+                        StandardFunction {
+                            namespace: namespace.clone(),
+                            callees,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let candidates: BTreeMap<Vec<String>, Vec<Vec<String>>> = functions
+        .iter()
+        .map(|(key, function)| {
+            let module_imports = imports.get(&function.namespace);
+            let paths = function
+                .callees
+                .iter()
+                .flat_map(|callee| {
+                    standard_callee_candidates(&function.namespace, module_imports, callee)
+                })
+                .collect();
+            (key.clone(), paths)
+        })
+        .collect();
+
+    let mut summary: BTreeMap<Vec<String>, BTreeSet<String>> = functions
+        .keys()
+        .map(|key| (key.clone(), standard_path_effects(key)))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (key, paths) in &candidates {
+            let mut effects = summary[key].clone();
+            for path in paths {
+                match summary.get(path) {
+                    Some(known) => effects.extend(known.iter().cloned()),
+                    None => effects.extend(standard_path_effects(path)),
+                }
+            }
+            if effects != summary[key] {
+                summary.insert(key.clone(), effects);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (key, effects) in summary {
+        let Some((name, namespace)) = key.split_last() else {
+            continue;
+        };
+        let Some(header) = modules.get_mut(&Namespace(namespace.to_vec())) else {
+            continue;
+        };
+        let effect_summary = EffectSummary {
+            may_fail: !effects.is_empty(),
+            effects,
+        };
+        for symbols in [&mut header.symbols, &mut header.exports] {
+            if let Some(symbol) = symbols.get_mut(name) {
+                symbol.effects = effect_summary.clone();
+            }
+        }
+    }
+}
+
+/// Effects of a full path by its host classification alone, used for paths
+/// that are not source-declared standard functions.
+fn standard_path_effects(path: &[String]) -> BTreeSet<String> {
+    let segments = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut effects = standard_function_effects(&segments).effects;
+    effects.extend(portable_sys_effect(&segments).effects);
+    effects
+}
+
+fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
+    prefix.iter().chain(suffix).cloned().collect()
+}
+
+/// Full paths a syntactic callee may denote from within `namespace`. Paths
+/// rooted at `std` or `sys` are absolute; any other root is tried relative to
+/// the module, its parent, and the module's `use` aliases and globs.
+fn standard_callee_candidates(
+    namespace: &Namespace,
+    imports: Option<&StandardImports>,
+    callee: &[String],
+) -> Vec<Vec<String>> {
+    if callee
+        .first()
+        .is_some_and(|root| root == "std" || root == "sys")
+    {
+        return vec![callee.to_vec()];
+    }
+    let mut candidates = vec![concat_path(&namespace.0, callee)];
+    let Some(imports) = imports else {
+        return candidates;
+    };
+    if let Some((root, rest)) = callee.split_first() {
+        if let Some(target) = imports.aliases.get(root) {
+            push_import_candidates(&mut candidates, namespace, target, rest);
+        }
+    }
+    for glob in &imports.globs {
+        push_import_candidates(&mut candidates, namespace, glob, callee);
+    }
+    candidates
+}
+
+fn push_import_candidates(
+    candidates: &mut Vec<Vec<String>>,
+    namespace: &Namespace,
+    base: &[String],
+    rest: &[String],
+) {
+    let target = concat_path(base, rest);
+    if base
+        .first()
+        .is_some_and(|root| root == "std" || root == "sys")
+    {
+        candidates.push(target);
+        return;
+    }
+    let parent = &namespace.0[..namespace.0.len().saturating_sub(1)];
+    candidates.push(concat_path(&namespace.0, &target));
+    candidates.push(concat_path(parent, &target));
+}
+
+/// Collects the maximal `Name`/`Field` paths an expression references.
+/// Paths are syntactic, so they may name callees, function values, or locals;
+/// resolution against standard modules happens in `standard_callee_candidates`.
+fn collect_callee_paths(expr: &Expr, out: &mut Vec<Vec<String>>) {
+    if let Some(path) = qualified_path(expr) {
+        out.push(path.into_iter().map(str::to_owned).collect());
+        return;
+    }
+    match expr {
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    collect_callee_paths(value, out);
+                }
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_callee_paths(rhs, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_callee_paths(lhs, out);
+            collect_callee_paths(rhs, out);
+        }
+        Expr::Range { lower, upper, .. } => {
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_callee_paths(bound, out);
+            }
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            collect_callee_paths(callee, out);
+            for argument in arguments {
+                collect_callee_paths(&argument.value, out);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_callee_paths(base, out);
+            collect_callee_paths(index, out);
+        }
+        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => {
+            collect_callee_paths(base, out);
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                collect_callee_paths(element, out);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_callee_paths(&field.value, out);
+            }
+        }
+        Expr::Lambda { body, .. } => collect_callee_paths(body, out),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                collect_statement_paths(statement, out);
+            }
+            if let Some(tail) = tail {
+                collect_callee_paths(tail, out);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            for inner in [condition, body, alternate].into_iter().flatten() {
+                collect_callee_paths(inner, out);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_callee_paths(guard, out);
+                }
+                collect_callee_paths(&arm.body, out);
+            }
+        }
+    }
+}
+
+fn collect_statement_paths(statement: &Statement, out: &mut Vec<Vec<String>>) {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => collect_callee_paths(value, out),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            if let Some(value) = value {
+                collect_callee_paths(value, out);
+            }
+        }
+        Statement::Continue { .. } => {}
+        Statement::Assignment { target, value, .. } => {
+            collect_target_paths(target, out);
+            collect_callee_paths(value, out);
+        }
+    }
+}
+
+fn collect_target_paths(target: &AssignmentTarget, out: &mut Vec<Vec<String>>) {
+    match target {
+        AssignmentTarget::Name { .. } => {}
+        AssignmentTarget::Field { base, .. } => collect_target_paths(base, out),
+        AssignmentTarget::Index { base, index, .. } => {
+            collect_target_paths(base, out);
+            collect_callee_paths(index, out);
+        }
     }
 }
 
@@ -25214,22 +25562,11 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let Some(path) = qualified_path(callee) else {
         return EffectSummary::default();
     };
-    let effect = match path.as_slice() {
-        ["sys", "io", ..] | ["std", "io", "fs", ..] => Some("filesystem"),
-        ["sys", "net", ..] => Some("network"),
-        ["std", "net", ..] => Some("network"),
-        ["sys", "process", ..] => Some("process"),
-        ["sys", "ui", ..] => Some("ui"),
-        ["sys", "clock", ..] => Some("clock"),
-        ["sys", "random", ..] => Some("random"),
-        _ => None,
-    };
-    match effect {
-        Some(effect) => EffectSummary {
-            effects: BTreeSet::from([effect.into()]),
-            may_fail: true,
-        },
-        None => EffectSummary::default(),
+    let effects = standard_function_effects(&path);
+    if effects.effects.is_empty() {
+        portable_sys_effect(&path)
+    } else {
+        effects
     }
 }
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
