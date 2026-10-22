@@ -121,11 +121,14 @@ fn write_cli_line(
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "CLI output could not be written",
-                "check the output stream, then retry the command",
-            )
+            Diagnostic {
+                code: "E2200",
+                title: Cow::Borrowed("CLI output could not be written"),
+                help: "check the output stream, then retry the command",
+                exit: Exit::Presentation,
+                detail: None,
+                body: None,
+            }
         })
 }
 #[allow(
@@ -2918,6 +2921,25 @@ fn initialize_repository(
         .map_err(|error| repository_init_diagnostic(&error))?;
     write_success_line("initialized Orna repository", color_enabled)
 }
+/// Maps a fetch failure to its documented exit status: an unavailable remote is a
+/// connection failure (3) and a malformed advertisement is a protocol failure (7);
+/// every other fetch refusal keeps the target status.
+fn fetch_failure(error: &orna_repository_v1::FetchError) -> Diagnostic {
+    let exit = match error {
+        orna_repository_v1::FetchError::RemoteUnavailable => Exit::Connection,
+        orna_repository_v1::FetchError::MalformedAdvertisement => Exit::Protocol,
+        _ => Exit::Target,
+    };
+    Diagnostic {
+        code: "E2100",
+        title: Cow::Borrowed("Git fetch failed"),
+        help: "check the configured remote and retry `fetch`",
+        exit,
+        detail: Some(error.to_string()),
+        body: None,
+    }
+}
+
 fn run_fetch(
     endpoint: &Endpoint,
     remote: &str,
@@ -2944,14 +2966,7 @@ fn run_fetch(
     )?;
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "Git fetch failed",
-                "check the configured remote and retry `fetch`",
-                error.to_string(),
-            )
-        })?;
+        .map_err(|error| fetch_failure(&error))?;
     if let Some(continuity) = report.continuity() {
         if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);
