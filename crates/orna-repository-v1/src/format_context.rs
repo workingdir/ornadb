@@ -26,6 +26,15 @@ use super::DatabaseId;
 /// The final repository writer coordinate from the consolidated publication.
 pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 
+/// The `repository_layout_version` coordinate reported by `sys.rt.info()`: the
+/// 1.1.0 `repository_format` value, which equals [`FINAL_REPOSITORY_FORMAT`].
+pub const REPOSITORY_LAYOUT_VERSION: &str = "3";
+
+const _: () = assert!(
+    REPOSITORY_LAYOUT_VERSION.len() == 1
+        && REPOSITORY_LAYOUT_VERSION.as_bytes()[0] == b'0' + FINAL_REPOSITORY_FORMAT
+);
+
 /// The bounded size of the tracked `database.orna` record.
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 /// Per-module source bound compatible with project loading's aggregate budget.
