@@ -21,7 +21,7 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
 fn initialize_legacy_source(root: &Path) {
     initialize_legacy_source_with_format(
         root,
-        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
     );
 }
 
@@ -369,8 +369,8 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
 fn cli_migration_copy_rejects_mixed_worktree_metadata() {
     let oversized = vec![b'x'; 64 * 1024 + 1];
     for (label, metadata_file, marker) in [
-        ("mixed", ".orna/format.orna", &b"format 3\n"[..]),
-        ("unknown", ".orna/format.orna", &b"format 99\n"[..]),
+        ("mixed", ".orna/format.orna", &b"{repository_format: 3, storage_profile: \"compact-storage-v1\"}\n"[..]),
+        ("unknown", ".orna/format.orna", &b"{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n"[..]),
         (
             "changed database identity",
             ".orna/database.orna",
@@ -425,6 +425,32 @@ fn cli_migration_copy_rejects_mixed_worktree_metadata() {
         );
         assert_eq!(fs::read(metadata_path).unwrap(), marker);
     }
+}
+
+#[test]
+fn cli_migration_copy_names_unparseable_committed_format_record() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    // The bare `format 1` spelling is never written by a repository writer, so
+    // committed metadata holding it must fail with its own cause, not a generic
+    // copy failure.
+    initialize_legacy_source_with_format(&source, "format 1\n");
+    let destination = parent.path().join("migrated");
+    let trace = parent.path().join("git-trace.log");
+
+    let output = run_copy(&source, &destination, "0", &trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "migration source could not be admitted: repository metadata is invalid"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ORNA-REPO-CONTEXT-002"), "{stderr}");
+    assert!(!destination.exists(), "{stderr}");
 }
 
 /// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: a source whose
