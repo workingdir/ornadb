@@ -141,7 +141,7 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
     let loaded = match ProjectLoader::default().load_with_overlays(&project.repository, &overlays) {
         Ok(loaded) => loaded,
         // The syntax diagnostics of the open buffer explain why loading failed.
-        Err(ProjectLoadError::InvalidModule)
+        Err(ProjectLoadError::InvalidModule { .. })
             if open.iter().any(|module| module.has_syntax_errors) =>
         {
             return ProjectCheck { diagnostics };
