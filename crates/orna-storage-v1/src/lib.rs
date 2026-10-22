@@ -1802,11 +1802,12 @@ mod tests {
     fn legacy_repository(format: u8) -> (TempDir, Repository) {
         let (temp, _) = repository();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
-        fs::write(
-            temp.path().join(".orna/format.orna"),
-            format!("format {format}\n"),
-        )
-        .unwrap();
+        let record = match format {
+            1 => "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+            2 => "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n",
+            other => panic!("no legacy record for format {other}"),
+        };
+        fs::write(temp.path().join(".orna/format.orna"), record).unwrap();
         fs::write(
             temp.path().join(".orna/database.orna"),
             "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",

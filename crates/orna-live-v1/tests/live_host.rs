@@ -8820,7 +8820,7 @@ fn decoded_server_result_is_rejected_before_durable_admission_or_application() {
 }
 
 #[test]
-fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
+fn detached_attachment_past_its_lease_rejects_a_binary_request_before_admission() {
     let (root, repository) = durable_repository();
     let mut host = durable_host_with_owner(open_durable_state(&repository), [86; 16]);
     let mut issuer = Issuer(1, None);
@@ -8843,13 +8843,18 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
         now: 1,
     }))
     .unwrap();
+    // An attached session is governed by its reconnection lease, which starts
+    // at WebSocket loss (30-protocol); detaching at 2 starts that lease.
+    block_on(host.close_attachment([85; 16], 2)).unwrap();
+    // The reconnect lease `durable_host_with_owner` configures (10 ms).
+    let lease_end = 2 + 10;
 
     let request = [84; 16];
     let mut application = UnitApplication::default();
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            3,
+            lease_end,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
@@ -8869,7 +8874,7 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            4,
+            lease_end + 1,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
@@ -9463,6 +9468,93 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
         }
     ));
     assert_eq!(replay_application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_eval_snapshot_pins_resolve_before_effects() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let capture = block_on(open_durable_state(&repository).capture()).unwrap();
+    let database = capture.database_id();
+    let runtime = capture.runtime_id();
+    let current = CanonicalSnapshot::cwd(database, runtime, capture.generation().clone()).unwrap();
+    let never_issued = CanonicalSnapshot::cwd(database, runtime, 7.into()).unwrap();
+
+    let mut application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    };
+    // 30-protocol.md, Limits: a CWD pin the runtime cannot resolve is answered
+    // with the portable `wire.snapshot_expired` code before any application
+    // effect. The pin is never rebound to the current generation.
+    let rejected = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [26; 16],
+            database,
+            Some(never_issued),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the unresolved pin is retained as a correlated diagnostic");
+    assert_eq!(rejected.request, Some([26; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    let encoded = rejected.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.snapshot_expired".len())
+            .any(|window| window == b"wire.snapshot_expired")
+    );
+    assert_eq!(application.calls, 0);
+
+    // The accepted eval must commit a real mutation; the fixture's empty batch
+    // is rejected by the runtime before it can prove acceptance.
+    application.mutations = vec![
+        TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
+    ];
+    let accepted = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [27; 16],
+            database,
+            Some(current),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .unwrap();
+    assert!(matches!(
+        accepted.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[1])),
+        Ok(Some(vec![2]))
+    );
     drop(host);
     remove_test_repository(&root);
 }
@@ -11640,6 +11732,79 @@ fn cancelling_a_terminal_request_is_idempotent_and_preserves_its_result() {
         Ok(target_outcome)
     );
     assert_eq!(application.calls, 1);
+}
+
+fn assert_unit_acknowledgement(response: Option<&Envelope>, request: [u8; 16]) {
+    assert!(matches!(
+        response,
+        Some(Envelope {
+            request: Some(returned),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            },
+            ..
+        }) if *returned == request && *value == CanonicalValue::unit()
+    ));
+}
+
+#[test]
+fn cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    // 30-protocol.md, Complete message registry: a terminal or unknown target
+    // is never turned into another request; cancellation acknowledges with a
+    // typed Unit and the connection stays open.
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+}
+
+#[test]
+fn durable_cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+    remove_test_repository(&root);
 }
 
 #[test]

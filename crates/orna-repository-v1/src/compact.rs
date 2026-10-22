@@ -4845,7 +4845,7 @@ mod tests {
         test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
-        fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
         test_git(temp.path(), &["add", "."]);
         test_git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
