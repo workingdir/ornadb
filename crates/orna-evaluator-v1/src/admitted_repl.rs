@@ -742,7 +742,10 @@ fn admitted_runtime_sources(
                 // remain represented by the semantic catalogue. Keep these
                 // items from preventing unrelated standard functions from
                 // loading; other project declarations remain outside this
-                // evaluator boundary.
+                // evaluator boundary. This arm also admits standard Protocol,
+                // Dimension, Unit and alias declarations, which have no runtime
+                // representation. Non-standard namespaced declarations of those
+                // kinds do not match it and fall through to the unsupported arm.
                 _ if standard => {}
                 _ => return Err(ReplError::fixed("ORNA-REPL-UNSUPPORTED")),
             }
@@ -2317,6 +2320,32 @@ mod tests {
             panic!("a namespaced protocol must not be admitted into the REPL");
         };
         assert_eq!(error.code(), "ORNA-REPL-UNSUPPORTED");
+    }
+
+    #[test]
+    fn namespaced_dimensions_units_and_aliases_are_rejected_before_repl_admission() {
+        let cases = [
+            ("dim", "pub dim Length;\n"),
+            ("unit", "pub dim Length;\npub unit meter: Length base;\n"),
+            ("alias", "pub type Label = Str;\n"),
+        ];
+        for (kind, source) in cases {
+            let (_directory, project) = loaded_project(
+                &[
+                    ("main.orna", "use sensors.greenhouse;\npub fn answer() = 1;\n"),
+                    ("sensors/greenhouse/main.orna", source),
+                ],
+                None,
+            );
+            let Err(error) = AdmittedReplSession::from_loaded_project(
+                &project,
+                std::iter::empty::<(String, String)>(),
+                Limits::default(),
+            ) else {
+                panic!("a namespaced {kind} must not be admitted into the REPL");
+            };
+            assert_eq!(error.code(), "ORNA-REPL-UNSUPPORTED", "{kind}");
+        }
     }
 }
 
