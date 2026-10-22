@@ -410,6 +410,9 @@ impl Repository {
             .cloned()
             .ok_or(RelationAdmissionError::EmptyIndex)?;
         let index_digest = self.index_file_digest()?;
+        // Refused on trees, before the private candidate commit is written, so
+        // an invalid candidate leaves no commit object behind.
+        self.refuse_dropped_committed_store(index.head(), &tree)?;
         let candidate = self.private_commit_for_tree(&tree, index.head())?;
         let format = self.open_private_candidate_format_context(&candidate)?;
         if format.repository_format() != RepositoryFormat::Format3 {
@@ -424,6 +427,32 @@ impl Repository {
             database_id,
             store_root,
         })
+    }
+
+    /// Refuses a staged tree that has no `.orna/store` while `HEAD` commits a
+    /// relation in one: that candidate drops rows the commit holds, so
+    /// 16-administration treats it as invalid (`sys.admin.assertion_failed`).
+    fn refuse_dropped_committed_store(
+        &self,
+        head: Option<&GitCommitRef>,
+        tree: &IndexTreeRef,
+    ) -> Result<(), RelationAdmissionError> {
+        let Some(head) = head else {
+            return Ok(());
+        };
+        if self.tree_store_root(tree.as_str())?.is_some() {
+            return Ok(());
+        }
+        let format = self.open_pinned_format_context(head.as_str())?;
+        if format.repository_format() != RepositoryFormat::Format3 {
+            return Ok(());
+        }
+        match self.committed_store_relations(head)?.into_iter().next() {
+            Some(relation_id) => {
+                Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id })
+            }
+            None => Ok(()),
+        }
     }
 
     /// Stages the format-3 store for the captured candidate's admitted tables
