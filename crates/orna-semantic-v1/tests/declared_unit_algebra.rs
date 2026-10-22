@@ -3,8 +3,9 @@
 //! Assertions compare diagnostic codes; nothing depends on a unit's spelling.
 
 use orna_semantic_v1::{
-    Analysis, Catalogue, DIAG_AFFINE_ADDITION, DIAG_AFFINE_SUM, DIAG_AMBIGUOUS, DIAG_FLOAT_MONEY,
-    DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_UNRESOLVED, ModuleInput, analyze, analyze_with_catalogue,
+    Analysis, Catalogue, DIAG_ABSOLUTE_QUANTITY_SUM, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_AMBIGUOUS,
+    DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_MONEY_BINARY_FLOAT, DIAG_UNRESOLVED, ModuleInput, analyze,
+    analyze_with_catalogue,
 };
 
 const LENGTH: &str = "
@@ -122,14 +123,14 @@ fn affine_units_follow_point_and_vector_algebra_whatever_their_name() {
         "pub fn bad(a: Float<C>, b: Float<C>) = a + b;",
         "pub fn bad() = 20.F + 5.F;",
     ] {
-        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_AFFINE_ADDITION);
+        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_AFFINE_TEMPERATURE_ADD);
     }
     for body in [
         "pub fn bad() = [20.C, 22.C] | sum();",
         "pub fn bad(values: [Float<C>]) = values | sum;",
         "pub fn bad(values: [Float<F>]) = values | sum;",
     ] {
-        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_AFFINE_SUM);
+        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_ABSOLUTE_QUANTITY_SUM);
     }
     assert!(!analysis(&format!("{TEMPERATURE}pub fn bad() = 2 * 20.C;\n")).is_ok());
     assert!(!analysis(&format!("{TEMPERATURE}pub fn bad(): Int<C> = 30.C - 20.C;\n")).is_ok());
@@ -142,7 +143,7 @@ fn money_rates_reduce_over_declared_units() {
     ));
     assert_code(
         &format!("{CURRENCY}pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;\n"),
-        DIAG_FLOAT_MONEY,
+        DIAG_MONEY_BINARY_FLOAT,
     );
 }
 
@@ -172,7 +173,12 @@ fn undeclared_and_ambiguous_units_are_rejected() {
 #[test]
 fn fixture_environment_supplies_the_corpus_units() {
     let catalogue = Catalogue::authoritative_fixture();
-    let check = |source: &str| analyze_with_catalogue(&[ModuleInput::new("fixture.orna", source)], &catalogue);
+    let check = |source: &str| {
+        analyze_with_catalogue(
+            &[ModuleInput::new("fixture.orna", format!("use fixture.units.*;\n{source}"))],
+            &catalogue,
+        )
+    };
     for source in [
         "pub fn hottest(values: [Float<C>]) = values | max;\n",
         "pub fn converted(speed: Float<mph>) = speed.mph;\npub fn duration() = 90.min;\n",
@@ -188,6 +194,6 @@ fn fixture_environment_supplies_the_corpus_units() {
         "{:?}",
         dimensions.diagnostics
     );
-    assert!(codes(&check("pub fn bad() = 20.C + 5.C;\n")).contains(&DIAG_AFFINE_ADDITION));
-    assert!(codes(&check("pub fn bad(values: [Float<C>]) = values | sum;\n")).contains(&DIAG_AFFINE_SUM));
+    assert!(codes(&check("pub fn bad() = 20.C + 5.C;\n")).contains(&DIAG_AFFINE_TEMPERATURE_ADD));
+    assert!(codes(&check("pub fn bad(values: [Float<C>]) = values | sum;\n")).contains(&DIAG_ABSOLUTE_QUANTITY_SUM));
 }

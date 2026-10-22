@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use orna_semantic_v1::{
-    Analysis, DIAG_AFFINE_ADDITION, DIAG_FLOAT_MONEY, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_TYPE,
-    DIAG_TYPE_MISMATCH, ModuleInput, Type, analyze,
+    Analysis, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_CURRENCY_MISMATCH, DIAG_INCOMPATIBLE_DIMENSIONS,
+    DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, DIAG_TYPE_MISMATCH, ModuleInput, Type, analyze,
 };
 
 fn analysis(source: &str) -> Analysis {
@@ -210,15 +210,15 @@ pub fn converted(left: Money<GBP>, right: Money<EUR>) = left - right;
     assert_eq!(
         found[1],
         (
-            DIAG_FLOAT_MONEY,
-            "binary Float cannot enter an exact Money calculation implicitly"
+            DIAG_CURRENCY_MISMATCH,
+            "cannot subtract different currencies without conversion"
         )
     );
     assert_eq!(
         found[2],
         (
-            DIAG_TYPE,
-            "cannot subtract different currencies without conversion"
+            DIAG_MONEY_BINARY_FLOAT,
+            "binary Float cannot enter an exact Money calculation implicitly"
         )
     );
 }
@@ -334,7 +334,7 @@ pub fn absolute(left: Float<C>, right: Float<C>) = left + right;
         vec![
             (DIAG_INCOMPATIBLE_DIMENSIONS, "cannot add Length and Time"),
             (
-                DIAG_AFFINE_ADDITION,
+                DIAG_AFFINE_TEMPERATURE_ADD,
                 "cannot add two absolute affine temperatures"
             ),
         ]
