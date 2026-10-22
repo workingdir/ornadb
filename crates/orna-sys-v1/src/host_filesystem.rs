@@ -42,6 +42,10 @@ pub enum CaptureFileError {
     UnauthorizedRoot,
     InvalidPath,
     SourceUnavailable,
+    /// The requested byte bound is negative or otherwise outside the range a
+    /// capture length can take (`sys.blob.bounds`). Callers that accept an
+    /// `Int` bound construct this before the provider is reached.
+    BoundOutOfRange,
     LimitExceeded,
     SourceChanged,
 }
@@ -57,6 +61,7 @@ impl CaptureFileError {
             Self::UnauthorizedRoot | Self::InvalidPath | Self::SourceUnavailable => {
                 "sys.blob.source_denied"
             }
+            Self::BoundOutOfRange => "sys.blob.bounds",
             Self::LimitExceeded => "sys.blob.limit",
             Self::SourceChanged => "sys.blob.source_changed",
         }
