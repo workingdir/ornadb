@@ -72,6 +72,21 @@ fn run_copy(
         .unwrap()
 }
 
+fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            source.to_str().unwrap(),
+            "--debug",
+            "migrate",
+            "abort",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let parent = TempDir::new().unwrap();
@@ -580,5 +595,66 @@ fn cli_migration_copy_runtime_intent_is_identical_across_preparations() {
     assert_eq!(
         runtime_intent(first.as_path()),
         runtime_intent(second.as_path())
+    );
+}
+
+#[test]
+fn cli_migration_copy_abort_discards_only_the_prepared_candidate() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_format = fs::read(source.join(".orna/format.orna")).unwrap();
+
+    // The source worktree, and the directory that contains it, are never a
+    // discard target.
+    for refused in [source.as_path(), parent.path()] {
+        let output = run_abort(&source, refused);
+        assert!(!output.status.success(), "abort of {}", refused.display());
+    }
+    assert!(source.join("main.orna").is_file());
+
+    // An unrelated directory is refused and keeps its contents.
+    let unrelated = parent.path().join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    fs::write(unrelated.join("keep.txt"), b"keep\n").unwrap();
+    let output = run_abort(&source, &unrelated);
+    assert!(!output.status.success(), "abort of an unrelated directory");
+    assert_eq!(fs::read(unrelated.join("keep.txt")).unwrap(), b"keep\n");
+
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!destination.exists());
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        fs::read(source.join(".orna/format.orna")).unwrap(),
+        source_format
+    );
+
+    let recopied = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        recopied.status.success(),
+        "migration copy after abort: {}",
+        String::from_utf8_lossy(&recopied.stderr)
+    );
+    assert!(
+        Repository::discover(&destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .is_some()
     );
 }
