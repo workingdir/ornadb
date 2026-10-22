@@ -5,6 +5,9 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
+- A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
+- A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
 - Enum values can be written in source: `Level.low` references a payload-free
   variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
   through named imports and module bindings. `orna check` reports an unknown

@@ -29,6 +29,13 @@ fn analyze_corpus(inputs: &[ModuleInput]) -> orna_semantic_v1::Analysis {
     analyze_with_catalogue(inputs, &Catalogue::authoritative_fixture())
 }
 
+/// ORNA-UNIT-001: unit names never resolve from spelling. Snippets that name corpus units
+/// import them from `fixture.units`, because the conformance manifest's `fixture_environment.snippets`
+/// says semantic support "must be supplied explicitly before implementation execution".
+fn with_fixture_units(source: &str) -> String {
+    format!("use fixture.units.*;\n{source}")
+}
+
 // ORNA-TYPE-005: closed variants are declared as nominal enums, while pipe-separated types are rejected.
 #[test]
 fn closed_variants_are_nominal_enums_not_type_unions() {
@@ -2043,15 +2050,17 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
 
 #[test]
 fn table_rows_reject_overlapping_protocol_implementations() {
+    // A key-less table's row includes its automatic `id` (ORNA-AUTOID-001,
+    // ORNA-KEY-002), so these structural conversion rows use an explicit key.
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/ddc1070ae1fd.orna"),
+        include_str!("fixtures/inline-semantic_graph/e6cba2ed225f.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/6f9f39aac506.orna"),
+        include_str!("fixtures/inline-semantic_graph/e12bf9706073.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
@@ -2146,9 +2155,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 
 #[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
-    let affine_sum = analyze(&[ModuleInput::new(
+    let affine_sum = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
     )]);
     assert!(
         affine_sum
@@ -2404,9 +2413,9 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
         diagnostic.message() == "cannot add different currencies without conversion"
     }));
 
-    let dimensions = analyze(&[ModuleInput::new(
+    let dimensions = analyze_corpus(&[ModuleInput::new(
         "dimensions.orna",
-        include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna")),
     )]);
     assert!(
         dimensions
@@ -2418,24 +2427,42 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
 #[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
-    let result = analyze(&[ModuleInput::new(
+    // ORNA-UNIT-001: unit spellings do not resolve by name alone. Without a
+    // supplied environment the postfix units are unresolved and the literals
+    // are rejected.
+    let unsupplied = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/7f039374396b.orna"),
     )]);
+    assert!(!unsupplied.is_ok(), "{:?}", unsupplied.diagnostics);
+    assert!(
+        has(&unsupplied, DIAG_UNRESOLVED),
+        "{:?}",
+        unsupplied.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
 
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let rates = analyze(&[ModuleInput::new(
+        "rates.orna",
+        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
+    )]);
+    assert!(
+        has(&rates, DIAG_UNRESOLVED),
+        "{:?}",
+        rates.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
+
+    // With the corpus environment supplied, the same postfix literals succeed.
+    let supplied = analyze_corpus(&[ModuleInput::new(
+        "literals.orna",
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/7f039374396b.orna")),
+    )]);
+    assert!(supplied.is_ok(), "{:?}", supplied.diagnostics);
 
     let non_currency = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/4f50dc5cff02.orna"),
     )]);
     assert!(has(&non_currency, DIAG_TYPE));
-
-    let unsupported = analyze(&[ModuleInput::new(
-        "rates.orna",
-        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
-    )]);
-    assert!(has(&unsupported, DIAG_UNSUPPORTED));
 }
 
 #[test]
@@ -17883,9 +17910,9 @@ fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
     )]);
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
 
-    let absolute = analyze(&[ModuleInput::new(
+    let absolute = analyze_corpus(&[ModuleInput::new(
         "temperatures.orna",
-        include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna")),
     )]);
     assert!(
         absolute
