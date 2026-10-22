@@ -10,8 +10,9 @@ use orna_foundation_v1::Diagnostic;
 use orna_syntax_v1::{Declaration, EntryPoint, Item, ReplInput, SyntaxSpan, SyntaxTree};
 
 use crate::{
-    Analysis, Catalogue, DIAG_DUPLICATE, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, Namespace,
-    Scope, Symbol, SymbolKind, SystemProviders, Type, check_item, declared_symbol, diag, infer,
+    Analysis, Catalogue, DIAG_DUPLICATE, DIAG_UNSUPPORTED, EffectSummary, EnumVariantRows,
+    ModuleHeader, Namespace, Scope, Symbol, SymbolKind, SystemProviders, Type,
+    add_qualified_enum_bindings, check_item, declared_symbol, diag, imported_enum_bindings, infer,
     report_unlinked_system_members, resolve_imports,
 };
 
@@ -26,6 +27,7 @@ pub struct ReplContext {
     identity: Arc<()>,
     revision: u64,
     modules: BTreeMap<Namespace, ModuleHeader>,
+    source_enums: BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     symbols: BTreeMap<String, Symbol>,
     imports: Vec<Item>,
     last_result: Option<Type>,
@@ -74,6 +76,7 @@ impl ReplContext {
             identity: Arc::new(()),
             revision: 0,
             modules,
+            source_enums: analysis.source_enums.clone(),
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
@@ -90,6 +93,7 @@ impl ReplContext {
             identity: Arc::new(()),
             revision: 0,
             modules: Catalogue::authoritative_core().modules,
+            source_enums: BTreeMap::new(),
             symbols: BTreeMap::new(),
             imports: Vec::new(),
             last_result: None,
@@ -326,6 +330,30 @@ impl ReplContext {
             &BTreeMap::new(),
             diagnostics,
         );
+        let mut imported_enums = imported_enum_bindings(&tree, &self.source_enums, &self.modules);
+        // `main` addresses the root module whether it is a source module or the
+        // implicit alias of the project root, so its enums bind under `main.`.
+        if let Some(main) = self.modules.get(&Namespace(vec!["main".into()])) {
+            let target = if main.implicit {
+                Namespace(Vec::new())
+            } else {
+                Namespace(vec!["main".into()])
+            };
+            add_qualified_enum_bindings(
+                &mut imported_enums,
+                "main",
+                &target,
+                &self.source_enums,
+                &self.modules,
+            );
+        }
+        scope.payload_enum_types.extend(
+            imported_enums
+                .iter()
+                .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
+                .map(|(spelling, _)| spelling.clone()),
+        );
+        scope.imported_enum_variants = imported_enums;
         scope.unlinked_system_members = self.system_providers.admission_record();
         scope
     }
