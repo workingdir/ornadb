@@ -157,7 +157,7 @@ fn durable_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },

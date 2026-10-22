@@ -247,13 +247,6 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
                     assert_eq!(message, Some("static types are incompatible"));
                     assert_eq!(actual_native_code, "ORNA-S021-TYPE");
                 }
-                "examples/invalid/legacy-postfix-question.orna" => {
-                    // The frozen sidecar expects "remove postfix `?`; failure propagation is automatic";
-                    // the emitter's wording states the same removal with different text.
-                    assert_eq!(actual_code, Some("ORNA091-E-POSTFIX-QUESTION"));
-                    assert_eq!(message, Some("postfix propagation `?` was removed; failures propagate automatically"));
-                    assert_eq!(actual_native_code, "ORNA091-E-POSTFIX-QUESTION");
-                }
                 other => panic!("unexpected payload mismatch for {other}"),
             }
             mismatches.push(format!("{}: {}", fixture.path, fields.join(",")));
@@ -263,7 +256,6 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
     println!("PAYLOAD TOTAL fixtures={} mismatches={}", FIXTURES.len(), mismatches.len());
     let observed: BTreeSet<_> = mismatches.iter().map(String::as_str).collect();
     let attributed = BTreeSet::from([
-        "examples/invalid/legacy-postfix-question.orna: message_contains(emission)",
         "examples/invalid/currency-addition.orna: primary_diagnostic(emission),message_contains(emission)",
         "examples/invalid/two-durable-sources.orna: primary_diagnostic(emission)",
     ]);
