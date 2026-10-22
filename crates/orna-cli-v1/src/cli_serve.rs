@@ -661,6 +661,16 @@ fn refuse_connection(mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
 }
 
+/// Maps a live WebSocket failure to the RFC 6455 close code the socket is
+/// closed with: 1009 when a message exceeds its size bound, 1002 for any
+/// other protocol violation (30-protocol close codes).
+fn close_code_for_failure(error: orna_live_v1::Error) -> u16 {
+    match error {
+        orna_live_v1::Error::Limit => 1009,
+        _ => 1002,
+    }
+}
+
 /// Starts the owner sweep (30-protocol, Session creation and ownership:
 /// expiry terminates the owner and cancels its children). Every
 /// [`SESSION_SWEEP_INTERVAL`] it ends each session whose lease has elapsed
@@ -1021,12 +1031,19 @@ impl WebSocketWorker<'_> {
                     })?;
                     match completed {
                         Ok(output) => Some(output),
-                        Err(_) => return Ok(false),
+                        Err(error) => {
+                            self.close(close_code_for_failure(error));
+                            return Ok(false);
+                        }
                     }
                 }
-                // A framing or attachment failure ends this socket; dropping
-                // the worker closes its attachment.
-                Err(_) => return Ok(false),
+                // A framing or attachment failure closes this socket with the
+                // code the WebSocket protocol assigns to it; dropping the
+                // worker then releases its attachment.
+                Err(error) => {
+                    self.close(close_code_for_failure(error));
+                    return Ok(false);
+                }
             };
             if let Some(output) = output {
                 self.write(&output)?;
@@ -2230,6 +2247,25 @@ mod tests {
     use super::*;
     use orna_live_v1::LiveApplication;
     use std::process::Command;
+
+    #[test]
+    fn websocket_failures_close_with_size_or_protocol_code() {
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::Limit),
+            1009,
+            "an oversized message closes with 1009"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidFrame),
+            1002,
+            "a malformed frame closes with 1002"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidMessage),
+            1002,
+            "a malformed message closes with 1002"
+        );
+    }
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
     const SERVE_ENTRY_FIXTURE: &str = include_str!("../tests/fixtures/serve-entry.orna");
