@@ -165,6 +165,8 @@ been published.
   `orna run` and the other write verbs exit with `E2200`. The one exception is
   a prepared migration copy (ORNA-UPGRADE-001).
 
+- `orna migrate copy` reports a source whose format context cannot be admitted as `E2100` titled `migration source could not be admitted: <cause>`, with the cause's `ORNA-REPO-CONTEXT-*` code, and creates no destination.
+
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
 
