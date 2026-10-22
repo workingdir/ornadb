@@ -581,7 +581,11 @@ impl SessionBoundary {
         now: u64,
     ) -> Result<(), BoundaryError> {
         let record = self.sessions.get(&session).ok_or(BoundaryError::Denied)?;
-        if now >= record.expires_at {
+        let unattached = matches!(
+            &record.state,
+            State::Open { attachment: None, .. }
+        );
+        if unattached && now >= record.expires_at {
             return Err(BoundaryError::Expired);
         }
         match &record.state {
@@ -712,12 +716,22 @@ impl SessionBoundary {
         }
     }
 
+    /// Applies the creation deadline only while no socket has ever attached.
+    /// Per `30-protocol.md` the reconnection lease starts when the WebSocket is
+    /// lost, so an attached or disconnected session is governed by its lease.
     fn expire(&mut self, session: SessionId, now: u64) -> Result<(), BoundaryError> {
         let record = self
             .sessions
             .get_mut(&session)
             .ok_or(BoundaryError::Denied)?;
-        if now >= record.expires_at {
+        let attached = matches!(
+            &record.state,
+            State::Open {
+                attachment: Some(_),
+                ..
+            }
+        );
+        if !attached && now >= record.expires_at {
             record.state = State::Closed;
             return Err(BoundaryError::Expired);
         }
@@ -950,8 +964,12 @@ mod tests {
         );
     }
 
+    /// `30-protocol.md`: "Loss of the WebSocket starts the advertised finite
+    /// reconnection lease." An attached session is therefore not closed at its
+    /// creation deadline; only a detached session expires, `reconnect_for`
+    /// milliseconds after detachment.
     #[test]
-    fn active_attachment_cannot_outlive_the_session_lease() {
+    fn attached_session_is_governed_by_the_reconnect_lease() {
         let mut boundary = boundary();
         let mut issuer = Issuer(1);
         let session = id(7);
@@ -969,12 +987,25 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            boundary.validate_active_attachment(session, active, 3),
-            Err(BoundaryError::Expired)
+            boundary.validate_active_attachment(session, active, 100),
+            Ok(())
         );
+
+        boundary.disconnect(session, active, 100).unwrap();
+        let reconnect = attachment(8);
+        assert!(matches!(
+            boundary.attach(session, &app, &credential, reconnect, 104),
+            Ok(AttachOutcome::Reconnected)
+        ));
         assert_eq!(
-            boundary.validate_active_attachment(session, active, 2),
-            Err(BoundaryError::Closed)
+            boundary.validate_active_attachment(session, reconnect, 104),
+            Ok(())
+        );
+
+        boundary.disconnect(session, reconnect, 104).unwrap();
+        assert_eq!(
+            boundary.attach(session, &app, &credential, attachment(9), 109),
+            Err(BoundaryError::Expired)
         );
     }
 
