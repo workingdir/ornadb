@@ -65,7 +65,7 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -1003,7 +1003,7 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     fs::write(seed.join("main.orna"), "module main;\n").ok()?;
     fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
     fs::create_dir_all(seed.join(".orna")).ok()?;
-    fs::write(seed.join(".orna/format.orna"), "format 1\n").ok()?;
+    fs::write(seed.join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").ok()?;
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-m", "initial"]);
 
