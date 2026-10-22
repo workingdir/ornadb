@@ -10,7 +10,11 @@ use std::{
 use tempfile::TempDir;
 
 const PROJECT_ITEMS: &str = include_str!("fixtures/repl-project-items.orna");
-const READY_ENTRY: &str = "\npub fn ready_label(): Str = describe(Availability.ready);\n";
+const READY_ENTRY: &str = r#"
+pub fn ready_label(): Str = describe(Availability.ready);
+pub fn ready_matches(): Bool = if describe(Availability.ready) == "ready" { true } else { fail(error(code: "fixture.ready", message: "run arm disagrees with the REPL value")) };
+pub fn expects_waiting(): Bool = if describe(Availability.ready) == "waiting" { true } else { fail(error(code: "fixture.waiting", message: "ready is not waiting")) };
+"#;
 
 fn initialized() -> TempDir {
     let directory = tempfile::tempdir().expect("project directory");
@@ -58,9 +62,22 @@ fn repl_qualified_root_enum_matches_the_run_entry_arm() {
         &orna(directory, &["repl", "main.ready_label()"]),
         "\"ready\" : Str\n",
     );
+    // The run entry fails unless its bare `Availability.ready` arm yields "ready",
+    // the same string the REPL's `main.Availability.ready` produced above.
     assert_stdout(
-        &orna(directory, &["run", "main.ready_label"]),
+        &orna(directory, &["run", "main.ready_matches"]),
         "invocation completed\n",
+    );
+}
+
+#[test]
+fn run_self_check_fails_when_the_bare_run_value_differs() {
+    let project = initialized();
+    let output = orna(project.path(), &["run", "main.expects_waiting"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("invocation completed"),
+        "{output:?}"
     );
 }
 
