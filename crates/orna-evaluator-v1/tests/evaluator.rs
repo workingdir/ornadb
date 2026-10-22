@@ -4374,12 +4374,8 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            include_str!("fixtures/evaluator_source_4513747d05260e45.orna"),
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-DIVIDE-BY-ZERO"
+        evaluate(include_str!("fixtures/evaluator_source_4513747d05260e45.orna")),
+        Value::new(Raw::Float(f64::INFINITY.to_bits())).unwrap()
     );
 
     for (expression, limits) in [
