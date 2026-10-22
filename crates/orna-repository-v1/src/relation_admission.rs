@@ -410,9 +410,6 @@ impl Repository {
             .cloned()
             .ok_or(RelationAdmissionError::EmptyIndex)?;
         let index_digest = self.index_file_digest()?;
-        // Refused on trees, before the private candidate commit is written, so
-        // an invalid candidate leaves no commit object behind.
-        self.refuse_dropped_committed_store(index.head(), &tree)?;
         let candidate = self.private_commit_for_tree(&tree, index.head())?;
         let format = self.open_private_candidate_format_context(&candidate)?;
         if format.repository_format() != RepositoryFormat::Format3 {
@@ -429,15 +426,15 @@ impl Repository {
         })
     }
 
-    /// Refuses a staged tree that has no `.orna/store` while `HEAD` commits a
-    /// relation in one: that candidate drops rows the commit holds, so
-    /// 16-administration treats it as invalid (`sys.admin.assertion_failed`).
-    fn refuse_dropped_committed_store(
-        &self,
-        head: Option<&GitCommitRef>,
-        tree: &IndexTreeRef,
-    ) -> Result<(), RelationAdmissionError> {
-        let Some(head) = head else {
+    /// Refuses the staged index, before any commit object is written, when it
+    /// has no `.orna/store` while `HEAD` commits a relation in one: that
+    /// candidate drops rows the commit holds, so 16-administration treats it
+    /// as invalid (`sys.admin.assertion_failed`). The capture itself stays a
+    /// pure observation; the commit path calls this first.
+    pub fn refuse_unretained_committed_store(&self) -> Result<(), RelationAdmissionError> {
+        self.ensure_no_git_operation_in_progress()?;
+        let index = self.index_generation()?;
+        let (Some(head), Some(tree)) = (index.head(), index.tree()) else {
             return Ok(());
         };
         if self.tree_store_root(tree.as_str())?.is_some() {
