@@ -185,6 +185,10 @@ been published.
   `return`, including inside anonymous functions, is checked against the
   declared result or joined into the inferred one. Blocks without a final
   expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+- `sys.rt.info()` is linked into the production sys provider, so it evaluates
+  to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
+  of an unlinked callable. Admission no longer reports a version diagnostic for
+  it (ORNA-SYS-006, ORNA-SYS-008).
 
 ## 1.0.0 — release inventory (publication pending)
 
