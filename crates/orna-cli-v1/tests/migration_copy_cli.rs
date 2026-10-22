@@ -550,3 +550,35 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
         );
     }
 }
+
+#[test]
+fn cli_migration_copy_runtime_intent_is_identical_across_preparations() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    for destination in [&first, &second] {
+        let output = run_copy(&source, destination, "0", &git_trace);
+        assert!(
+            output.status.success(),
+            "migration copy: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let runtime_intent = |destination: &Path| {
+        Repository::discover(destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .expect("prepared migration journal")
+            .runtime_intent_id()
+            .expect("prepared migration runtime intent")
+    };
+    assert_eq!(
+        runtime_intent(first.as_path()),
+        runtime_intent(second.as_path())
+    );
+}
