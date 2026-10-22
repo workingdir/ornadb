@@ -4843,7 +4843,7 @@ d1ed4165830722f07c68846f43cc89b89424fbfd421a62ea872c9afacccc2345  crates/orna-se
 b02c516455b43dde4445ffc346b408c7b2efbc74a125ddaa3c0f4d367ef2261b  crates/orna-semantic-v1/tests/fixtures/source-row-contact-grace.orna
 7231f8be954bcaa3b6bf9dfea764c9dd4544f946b3adda7b6f0646e5e3c2560f  crates/orna-semantic-v1/tests/fixtures/source-row-contact.orna
 9ce25e23e4569e643c2e10f1695b9c654d4e4f696ec09cc024b0e13fb4ba89ec  crates/orna-semantic-v1/tests/fixtures/source-row-object-pixel.orna
-913f7081a766eede1d895f3f7fffff9a858147dbbcb0d4bc41a4fb7f4d6af785  crates/orna-semantic-v1/tests/fixtures/source-row-object-schema.orna
+2d3318f8a92b777af0cd371db0d935558d116ad83d244556cc79f199789cd639  crates/orna-semantic-v1/tests/fixtures/source-row-object-schema.orna
 96c2d6104c1976ed6fb62c987de3eb9ec5513e58013bf9b5e809a1283cb266b8  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a-content-variant.orna
 1d878346651541c7e44b5faa68316284e621a1061f5cad9113691800a8bedde2  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a-digest-mismatch.orna
 96a467c60d97920c24f5e36aa8d0a998c1adf810c9d9b5210cb8d9963ef0c151  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a.orna
