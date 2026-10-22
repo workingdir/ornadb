@@ -364,6 +364,13 @@ fn prepare_format3_migration_in(
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
     )?;
+    let runtime_intent_id = migration_runtime_intent_id(
+        source_index_generation
+            .tree()
+            .ok_or(RepositoryError::InvalidFormatMigration)?,
+        &record,
+        &continuity,
+    );
     let candidate_journal = PublicationJournal::new_with_runtime_intent(
         source_commit.clone(),
         candidate.commit().clone(),
@@ -371,7 +378,7 @@ fn prepare_format3_migration_in(
             .tree()
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
-        fresh_runtime_intent_id()?,
+        runtime_intent_id,
         vec![
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(".orna/database.orna")?,
@@ -1163,12 +1170,46 @@ fn require_index_tree(generation: &IndexGeneration) -> Result<(), RepositoryErro
     Ok(())
 }
 
-fn fresh_runtime_intent_id() -> Result<[u8; 16], RepositoryError> {
-    let uuid = crate::Uuid::new_v4().into_bytes();
-    if uuid == [0; 16] {
-        return Err(RepositoryError::InvalidFormatMigration);
+/// Names the migration's inputs, so a retried preparation of the same source
+/// carries the same runtime intent instead of a fresh random one. The candidate
+/// commit is excluded: the intent identifies the migration, not one written commit.
+fn migration_runtime_intent_id(
+    index_tree: &crate::IndexTreeRef,
+    record: &[u8],
+    continuity: &MigrationContinuityRecord,
+) -> [u8; 16] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.migration-runtime-intent.v1\0");
+    hash_length_prefixed(&mut hash, index_tree.as_str().as_bytes());
+    hash_length_prefixed(&mut hash, record);
+    hash.update((continuity.predecessors().len() as u64).to_be_bytes());
+    for predecessor in continuity.predecessors() {
+        hash.update(predecessor.legacy_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.legacy_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.legacy_partition_identity());
+        hash.update(predecessor.format3_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.format3_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.format3_partition_identity());
     }
-    Ok(uuid)
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut intent = [0; 16];
+    intent.copy_from_slice(&digest[..16]);
+    intent
+}
+
+fn hash_length_prefixed(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn hash_optional_length_prefixed(hash: &mut Sha256, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            hash.update([1]);
+            hash_length_prefixed(hash, bytes);
+        }
+        None => hash.update([0]),
+    }
 }
 
 /// Settles the copy's index, repairing the stat entries its own checkout left
