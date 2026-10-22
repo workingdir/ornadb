@@ -52,8 +52,8 @@ fn string_formatting_helpers_preserve_scalar_width_and_edge_cases() {
     let mut session = pinned_session();
     for expression in [
         "text.split(\"ha\", \"\") == [\"h\", \"a\"]",
-        "collection.count([\"h\", \"a\"]) == 2",
-        "collection.union([\"h\"], [\"a\"]) == [\"h\", \"a\"]",
+        "count([\"h\", \"a\"]) == 2",
+        "union([\"h\"], [\"a\"]) == [\"h\", \"a\"]",
     ] {
         assert_eq!(
             session.submit(expression).unwrap_or_else(|error| {

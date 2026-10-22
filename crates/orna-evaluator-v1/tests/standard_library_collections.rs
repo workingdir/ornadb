@@ -38,32 +38,32 @@ fn pinned_collection_count_source_handles_empty_lists() {
 fn pinned_core_collection_source_executes_the_documented_list_operations() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     for expression in [
-        "std.collection.filter([1, 2, 3, 4], value => value % 2 == 0) == [2, 4]",
-        "std.collection.map([1, 2, 3], value => value * 2) == [2, 4, 6]",
-        "std.collection.flat_map([2, 1], value => [value, value + 10]) == [2, 12, 1, 11]",
-        "std.collection.sort_by([3, 2, 1, 4], value => value % 2) == [2, 4, 3, 1]",
-        "std.collection.take([1, 2, 3], 2) == [1, 2]",
-        "std.collection.drop([1, 2, 3], 2) == [3]",
-        "std.collection.distinct([1, 2, 1, 3, 2]) == [1, 2, 3]",
-        "std.collection.union([1, 2], [2, 3]) == [1, 2, 2, 3]",
-        "std.collection.count([1, 2, 3]) == 3",
-        "std.collection.first(std.collection.drop([4, 5], 2)) == null && std.collection.first([4, 5]) == Some(4)",
-        "std.collection.one([4, 5], value => value == 5) == 5",
-        "(std.collection.one([1, 2], value => value > 5) |? (failure => if failure.code == \"std.collection.one.none\" { 1 } else { 0 })) == 1",
-        "(std.collection.one([1, 2], value => value > 0) |? (failure => if failure.code == \"std.collection.one.multiple\" { 1 } else { 0 })) == 1",
-        "std.collection.sum([]) == 0 && std.collection.sum([9007199254740993, 1]) == 9007199254740994",
-        "std.collection.min([]) == null && std.collection.max([]) == null",
-        "std.collection.every(std.collection.take([1], 0), value => value > 0) && !std.collection.exists(std.collection.take([1], 0), value => value > 0)",
-        "std.collection.every([0, 1], value => if value == 0 { false } else { 1 / (value - 1) > 0 }) == false",
-        "std.collection.exists([1, 0], value => if value == 1 { true } else { 1 / value > 0 })",
+        "filter([1, 2, 3, 4], value => value % 2 == 0) == [2, 4]",
+        "map([1, 2, 3], value => value * 2) == [2, 4, 6]",
+        "flat_map([2, 1], value => [value, value + 10]) == [2, 12, 1, 11]",
+        "sort_by([3, 2, 1, 4], value => value % 2) == [2, 4, 3, 1]",
+        "take([1, 2, 3], 2) == [1, 2]",
+        "drop([1, 2, 3], 2) == [3]",
+        "distinct([1, 2, 1, 3, 2]) == [1, 2, 3]",
+        "union([1, 2], [2, 3]) == [1, 2, 2, 3]",
+        "count([1, 2, 3]) == 3",
+        "first(drop([4, 5], 2)) == null && first([4, 5]) == Some(4)",
+        "one([4, 5], value => value == 5) == 5",
+        "(one([1, 2], value => value > 5) |? (failure => if failure.code == \"ORNA-EVAL-RELATION-ONE-ZERO\" { 1 } else { 0 })) == 1",
+        "(one([1, 2], value => value > 0) |? (failure => if failure.code == \"ORNA-EVAL-RELATION-ONE-MULTIPLE\" { 1 } else { 0 })) == 1",
+        "sum([]) == 0 && sum([9007199254740993, 1]) == 9007199254740994",
+        "min([]) == null && max([]) == null",
+        "every(take([1], 0), value => value > 0) && !exists(take([1], 0), value => value > 0)",
+        "every([0, 1], value => if value == 0 { false } else { 1 / (value - 1) > 0 }) == false",
+        "exists([1, 0], value => if value == 1 { true } else { 1 / value > 0 })",
     ] {
         assert_reference_collection_true(&mut session, expression);
     }
 
     for expression in [
-        "std.collection.take([1, 2], -1)",
-        "std.collection.drop([1, 2], -1)",
-        "std.collection.filter([1], value => value)",
+        "take([1, 2], -1)",
+        "drop([1, 2], -1)",
+        "filter([1], value => value)",
     ] {
         assert!(
             session.submit(expression).is_err(),
@@ -73,13 +73,13 @@ fn pinned_core_collection_source_executes_the_documented_list_operations() {
 
     let failed_one = session
         .submit(
-            "std.collection.one([1, 2, 3], value => if value < 3 { true } else { 1 / (value - 3) == 0 })",
+            "one([1, 2, 3], value => if value < 3 { true } else { 1 / (value - 3) == 0 })",
         )
         .expect_err("one must propagate callback failures after multiple matches");
     assert_eq!(failed_one.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
 
     let failed_map = session
-        .submit("std.collection.map([1, 0, 2], value => 1 / value)")
+        .submit("map([1, 0, 2], value => 1 / value)")
         .expect_err("map must propagate a callback failure");
     assert_eq!(failed_map.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
 }

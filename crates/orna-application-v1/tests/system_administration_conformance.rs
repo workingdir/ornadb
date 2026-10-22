@@ -132,8 +132,11 @@ fn explicit_admin_capability_returns_host_outcome_for_fixture_source() {
     .expect("trusted host effect should complete");
 
     assert_eq!(staged.value().raw(), &OvbRaw::Bool(false));
-    assert_eq!(staged.mutations().len(), 1);
-    assert_eq!(staged.mutations()[0].table(), "Note");
+    // The pause fixture writes no table. ORNA-ADMIN-002 forbids an
+    // administrative call inside an activation holding uncommitted writes;
+    // that case (fixtures/admin-pause-staged.orna) is covered by
+    // async_source_effect.rs administrative_effect_is_busy_until_staged_table_writes_finish.
+    assert!(staged.mutations().is_empty());
     assert_eq!(
         effects.lock().unwrap().as_slice(),
         &[ApplicationEffectRequest::PauseStream {
@@ -181,14 +184,14 @@ fn removed_sys_runtime_name_keeps_its_normative_diagnostic_at_application_admiss
 }
 
 #[test]
-fn portable_runtime_info_signature_is_admitted_by_the_application_authority() {
-    // ORNA-SYS-006 (source/15-system.md:46): the portable sys.RuntimeInfo
-    // function signature is available to application source.
-    let application = authority()
+fn portable_runtime_info_is_admitted_with_its_linked_provider() {
+    // ORNA-SYS-006 (source/15-system.md:46) requires sys.RuntimeInfo to expose
+    // the runtime's coordinates. The production host links the provider that
+    // produces it, so the callable is admitted. ORNA-SYS-008 governs only
+    // consumers that require an unavailable coordinate.
+    authority()
         .admit_module("sys-rt-info.orna", SYS_RT_INFO_SOURCE, "runtime_info")
-        .expect("the checked-in sys.rt.info fixture resolves against sys.RuntimeInfo");
-
-    assert_eq!(application.entry(), "runtime_info");
+        .expect("sys.rt.info has a linked production provider");
 }
 
 fn assert_placement_rejected(source: &str, logical_path: &str) {

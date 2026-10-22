@@ -8,9 +8,11 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, Ovb2EffectHandler,
-    PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget, SysHostBindingRegistry, invoke_named,
-    invoke_named_with_effects, reference_standard_profile, reference_standard_sources,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
+    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget,
+    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context,
+    reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
@@ -30,7 +32,7 @@ use orna_runtime_v1::{
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
-    Catalogue, ModuleInput, Namespace, SymbolKind, TableSchema, analyze_with_catalogue,
+    Catalogue, ModuleInput, Namespace, SymbolKind, SystemProviders, TableSchema, analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
@@ -194,13 +196,23 @@ impl AdmittedTableSchema {
 pub struct ApplicationAuthority {
     catalogue: Catalogue,
     limits: Limits,
+    sys_host: Option<SysHostContext>,
 }
 
 impl ApplicationAuthority {
     /// Creates an authority with an explicit declaration catalogue and limits.
     #[must_use]
     pub fn new(catalogue: Catalogue, limits: Limits) -> Self {
-        Self { catalogue, limits }
+        Self { catalogue, limits, sys_host: None }
+    }
+
+    /// Attaches the host-owned activation facts that `sys.rt.info()` reads for
+    /// every evaluation through this authority (SYS-022..030). Without a carrier
+    /// that singleton fails closed with `sys.version.incompatible`.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
+        self.sys_host = Some(sys_host);
+        self
     }
 
     /// Admits one source module through parser, resolver and type/effect checks.
@@ -229,9 +241,10 @@ impl ApplicationAuthority {
             ));
         }
 
-        let analysis = analyze_with_catalogue(
+        let analysis = analyze_with_providers(
             &[ModuleInput::new(logical_path.clone(), source.clone())],
             &self.catalogue,
+            SystemProviders::Production,
         );
         if !analysis.is_ok() {
             return Err(ApplicationError::Semantic(
@@ -333,13 +346,18 @@ impl ApplicationAuthority {
         application: &AdmittedApplication,
         arguments: &Environment,
     ) -> Result<CanonicalValue, ApplicationError> {
-        invoke_named(
-            &application.entry,
-            &application.functions,
-            arguments,
-            application.limits,
-        )
-        .map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
+        let result = match &self.sys_host {
+            Some(sys_host) => invoke_named_with_sys_host_context(
+                &application.entry,
+                &application.functions,
+                arguments,
+                &NominalDefinitions::new(),
+                application.limits,
+                sys_host,
+            ),
+            None => invoke_named(&application.entry, &application.functions, arguments, application.limits),
+        };
+        result.map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
     }
 
     /// Executes the admitted entry while staging every admitted table effect
@@ -385,7 +403,8 @@ impl ApplicationAuthority {
                     application.table_insert_defaults.clone(),
                     application.functions.clone(),
                     application.limits,
-                );
+                )
+                .with_sys_host_context(self.sys_host.clone());
         for row in source_rows {
             let value_context = value_context.ok_or(ApplicationError::InvalidTableMetadata)?;
             handler.record_admitted_source_row(row, value_context)?;
@@ -425,7 +444,8 @@ impl ApplicationAuthority {
             application.table_insert_defaults.clone(),
             application.functions.clone(),
             application.limits,
-        );
+        )
+        .with_sys_host_context(self.sys_host.clone());
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -463,7 +483,8 @@ impl ApplicationAuthority {
             application.table_insert_defaults.clone(),
             application.functions.clone(),
             application.limits,
-        );
+        )
+        .with_sys_host_context(self.sys_host.clone());
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -500,16 +521,35 @@ impl ApplicationAuthority {
             .publication_metadata_rows()
             .await
             .map_err(ApplicationError::SourceEffectFailed)?;
+        // The activation can name its admitted tables and the system relations
+        // it serves from publication metadata, at its pinned CWD snapshot.
+        let explain_catalogue = orna_evaluator_v1::ActivationExplainCatalogue::new(
+            context.capture().snapshot(),
+            tables.keys().map(String::as_str).chain(
+                publication_rows
+                    .is_some()
+                    .then_some(["sys.Storage", "sys.MaintenanceJob"])
+                    .into_iter()
+                    .flatten(),
+            ),
+        )
+        .map_err(|_| {
+            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
+        })?;
         let mut handler = AsyncSourceMutationEffectHandler::new_with_table_object_ids(
             tables,
             publication_rows,
             table_object_ids,
         )?;
-        handler.mutations = handler.mutations.with_insert_defaults(
-            application.table_insert_defaults.clone(),
-            application.functions.clone(),
-            application.limits,
-        );
+        handler.explain_catalogue = Some(explain_catalogue);
+        handler.mutations = handler
+            .mutations
+            .with_insert_defaults(
+                application.table_insert_defaults.clone(),
+                application.functions.clone(),
+                application.limits,
+            )
+            .with_sys_host_context(self.sys_host.clone());
         let mut value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -1035,6 +1075,9 @@ pub struct SourceMutationEffectHandler {
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    sys_host: Option<SysHostAttachment>,
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
 
 impl SourceMutationEffectHandler {
@@ -1055,7 +1098,14 @@ impl SourceMutationEffectHandler {
             overlay: BTreeMap::new(),
             source_row_schemas: Vec::new(),
             protected_field_pins: Vec::new(),
+            sys_host: None,
+            explain_catalogue: None,
         }
+    }
+
+    fn with_sys_host_context(mut self, sys_host: Option<SysHostContext>) -> Self {
+        self.sys_host = sys_host.map(SysHostAttachment::new);
+        self
     }
 
     fn new_with_table_object_ids(
@@ -1207,8 +1257,9 @@ impl SourceMutationEffectHandler {
         let OvbRaw::Array(declared_fields) = declared_fields else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
-        let role_stored = BigInt::from(1);
         let role_key = BigInt::from(0);
+        let role_stored = BigInt::from(1);
+        let role_computed = BigInt::from(2);
         let mut stored_field_ids = Vec::new();
         for declared_field in declared_fields {
             let OvbRaw::Array(parts) = declared_field else {
@@ -1228,7 +1279,9 @@ impl SourceMutationEffectHandler {
                 Some(OvbRaw::Int(role)) if role == &role_stored => {
                     stored_field_ids.push(field_object_id);
                 }
-                Some(OvbRaw::Int(role)) if role == &role_key => {}
+                // Keys travel in the row key, and a computed selector has no
+                // stored value (ORNA-FIELD-006, ORNA-FIELD-011).
+                Some(OvbRaw::Int(role)) if role == &role_key || role == &role_computed => {}
                 _ => return Err(ApplicationError::InvalidTableMetadata),
             }
         }
@@ -1754,6 +1807,8 @@ struct AsyncSourceMutationEffectHandler {
     mutations: SourceMutationEffectHandler,
     effects: Vec<ApplicationEffectRequest>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    explain_catalogue: Option<orna_evaluator_v1::ActivationExplainCatalogue>,
 }
 
 impl AsyncSourceMutationEffectHandler {
@@ -1765,6 +1820,7 @@ impl AsyncSourceMutationEffectHandler {
             mutations: SourceMutationEffectHandler::new(tables),
             effects: Vec::new(),
             publication_rows,
+            explain_catalogue: None,
         }
     }
 
@@ -1783,6 +1839,7 @@ impl AsyncSourceMutationEffectHandler {
             )?,
             effects: Vec::new(),
             publication_rows,
+            explain_catalogue: None,
         })
     }
 
@@ -1792,6 +1849,10 @@ impl AsyncSourceMutationEffectHandler {
 }
 
 impl EffectHandler for AsyncSourceMutationEffectHandler {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        EffectHandler::sys_host_context(&self.mutations)
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -1926,6 +1987,12 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
             rows: vec![row.clone()],
             next: None,
         }))
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        self.explain_catalogue
+            .as_ref()
+            .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
     }
 }
 
@@ -2088,6 +2155,10 @@ fn runtime_effect_statement_count(statement: &Statement) -> usize {
 }
 
 impl EffectHandler for SourceMutationEffectHandler {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host.as_ref()
+    }
+
     fn handle(
         &mut self,
         callee: &Expr,
@@ -2299,6 +2370,12 @@ impl EffectHandler for SourceMutationEffectHandler {
             rows: vec![row.clone()],
             next: None,
         }))
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        self.explain_catalogue
+            .as_ref()
+            .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
     }
 }
 
@@ -2553,21 +2630,24 @@ impl ApplicationLiveAdapter {
     }
 
     /// Submits one REPL input. When the host installed a repository capture
-    /// capability, native sys operations bind to that same authority; otherwise
-    /// this is the plain submit path.
+    /// capability or a sys host context, native sys operations bind to those
+    /// authorities; otherwise this is the plain submit path.
     fn submit_repl_input(
         &self,
         repl: &mut AdmittedReplSession,
         source: &str,
     ) -> Result<Option<CanonicalValue>, ReplError> {
-        match &self.repository_capture {
-            Some(capability) => {
-                let mut bindings = SysHostBindingRegistry::default()
-                    .with_repository_capture_capability(capability.clone());
-                repl.submit_with_sys_host_bindings(source, &mut bindings)
-            }
-            None => repl.submit(source),
+        if self.repository_capture.is_none() && self.authority.sys_host.is_none() {
+            return repl.submit(source);
         }
+        let mut bindings = SysHostBindingRegistry::default();
+        if let Some(capability) = &self.repository_capture {
+            bindings = bindings.with_repository_capture_capability(capability.clone());
+        }
+        if let Some(sys_host) = &self.authority.sys_host {
+            bindings = bindings.with_sys_host_context(sys_host.clone());
+        }
+        repl.submit_with_sys_host_bindings(source, &mut bindings)
     }
 
     /// Sets the logical module path and entry used for future Eval messages.
@@ -2670,7 +2750,7 @@ impl ApplicationLiveAdapter {
     }
 
     fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
-        analyze_with_catalogue(&[], &self.authority.catalogue)
+        analyze_with_providers(&[], &self.authority.catalogue, SystemProviders::Production)
             .modules
             .values()
             .flat_map(admitted_table_schemas)
@@ -2963,6 +3043,19 @@ impl LiveApplication for ApplicationLiveAdapter {
                     }
                 };
                 let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                // The REPL serves `sys.explain` from the activation's pinned CWD
+                // snapshot (ORNA-SYS-008), as the module activation does. A pure
+                // evaluation has no activation context, so no catalogue is pinned
+                // and explain reports the coordinate unavailable.
+                if let Some(context) = context {
+                    handler.explain_catalogue = Some(
+                        orna_evaluator_v1::ActivationExplainCatalogue::new(
+                            context.capture().snapshot(),
+                            handler.tables.keys().map(String::as_str),
+                        )
+                        .map_err(|_| LiveError::ApplicationRejected)?,
+                    );
+                }
                 let (value, successor) =
                     match repl.evaluate_staged_with_effects(staged, &mut handler) {
                         Ok(result) => result,
@@ -4307,7 +4400,7 @@ mod tests {
         let staged = session
             .stage_activation(source)
             .expect("table insert should be admitted");
-        let tables = analyze_with_catalogue(&[], &catalogue)
+        let tables = analyze_with_providers(&[], &catalogue, SystemProviders::Production)
             .modules
             .values()
             .flat_map(admitted_table_schemas)

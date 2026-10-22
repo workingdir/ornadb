@@ -1532,6 +1532,7 @@ dependencies = [
  "base64",
  "getrandom 0.3.4",
  "icu_properties",
+ "libm",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
@@ -1653,7 +1654,6 @@ name = "orna-repository-v1"
 version = "1.0.0"
 dependencies = [
  "bytes",
- "ed25519-dalek",
  "fs2",
  "libc",
  "num-bigint 0.4.8",
@@ -1669,6 +1669,7 @@ dependencies = [
  "orna-value-v1",
  "parquet",
  "rustix 0.38.44",
+ "serde_json",
  "sha1",
  "sha2 0.11.0",
  "tempfile",
@@ -1698,6 +1699,7 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",

@@ -1,5 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
+use orna_repository_v1::Repository;
 use tempfile::TempDir;
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
@@ -18,6 +19,15 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Vec<u8> {
 }
 
 fn initialize_legacy_source(root: &Path) {
+    initialize_legacy_source_with_format(
+        root,
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+    );
+}
+
+/// Commits a legacy source whose `.orna/format.orna` holds `format_record`,
+/// beside the legacy `database_id` sidecar.
+fn initialize_legacy_source_with_format(root: &Path, format_record: &str) {
     git_output(root, &["init", "-b", "main"]);
     git_output(root, &["config", "user.name", "kierandrewett"]);
     git_output(root, &["config", "user.email", "kieran@drewett.dev"]);
@@ -28,11 +38,7 @@ fn initialize_legacy_source(root: &Path) {
     )
     .unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
-    fs::write(
-        root.join(".orna/format.orna"),
-        include_str!("fixtures/format-context/format-1.orna"),
-    )
-    .unwrap();
+    fs::write(root.join(".orna/format.orna"), format_record).unwrap();
     fs::write(
         root.join(".orna/database.orna"),
         include_str!("fixtures/format-context/database-sidecar.orna"),
@@ -363,8 +369,8 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
 fn cli_migration_copy_rejects_mixed_worktree_metadata() {
     let oversized = vec![b'x'; 64 * 1024 + 1];
     for (label, metadata_file, marker) in [
-        ("mixed", ".orna/format.orna", &b"format 3\n"[..]),
-        ("unknown", ".orna/format.orna", &b"format 99\n"[..]),
+        ("mixed", ".orna/format.orna", &b"{repository_format: 3, storage_profile: \"compact-storage-v1\"}\n"[..]),
+        ("unknown", ".orna/format.orna", &b"{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n"[..]),
         (
             "changed database identity",
             ".orna/database.orna",
@@ -418,5 +424,129 @@ fn cli_migration_copy_rejects_mixed_worktree_metadata() {
             source_status
         );
         assert_eq!(fs::read(metadata_path).unwrap(), marker);
+    }
+}
+
+#[test]
+fn cli_migration_copy_names_unparseable_committed_format_record() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    // The bare `format 1` spelling is never written by a repository writer, so
+    // committed metadata holding it must fail with its own cause, not a generic
+    // copy failure.
+    initialize_legacy_source_with_format(&source, "format 1\n");
+    let destination = parent.path().join("migrated");
+    let trace = parent.path().join("git-trace.log");
+
+    let output = run_copy(&source, &destination, "0", &trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "migration source could not be admitted: repository metadata is invalid"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ORNA-REPO-CONTEXT-002"), "{stderr}");
+    assert!(!destination.exists(), "{stderr}");
+}
+
+/// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: a source whose
+/// `format.orna` holds a record a legacy writer actually produced migrates
+/// like any other legacy source. OrnaDB 1.0's `orna init` wrote the format-1
+/// record. The format-2 record is the closed record of the previous 1.1.0
+/// draft. The journal names the committed record bytes as the file the
+/// migration removes. The legacy source stays read-only, and only the
+/// prepared copy admits a runtime, so `migrate copy` can carry checkpoints
+/// into it.
+#[test]
+fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
+    for (format_record, format) in [
+        (
+            include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+            1,
+        ),
+        (
+            include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+            2,
+        ),
+    ] {
+        let parent = TempDir::new().unwrap();
+        let source = parent.path().join("source");
+        fs::create_dir(&source).unwrap();
+        initialize_legacy_source_with_format(&source, format_record);
+        let source_head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let source_status = git_output(
+            &source,
+            &["status", "--porcelain=v2", "--untracked-files=all"],
+        );
+        let refusal = Repository::discover(&source)
+            .unwrap()
+            .require_writable_head_format()
+            .expect_err("a legacy source is read-only");
+        assert_eq!(refusal.format(), format);
+        let destination = parent.path().join("migrated");
+        let git_trace = parent.path().join("git-trace.log");
+
+        let output = run_copy(&source, &destination, "0", &git_trace);
+        assert!(
+            output.status.success(),
+            "format-{format} migration copy: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout.starts_with(&format!(
+                "prepared or recovered format-3 migration copy: source_format={format} source_commit={source_head} "
+            )),
+            "{stdout}"
+        );
+        assert_eq!(
+            git_output(
+                &source,
+                &["status", "--porcelain=v2", "--untracked-files=all"]
+            ),
+            source_status
+        );
+
+        let migrated = Repository::discover(&destination).unwrap();
+        let journal = migrated
+            .read_publication_journal()
+            .unwrap()
+            .expect("the migration copy journals its candidate");
+        let format_entry = journal
+            .entries()
+            .iter()
+            .find(|entry| entry.path().as_path() == Path::new(".orna/format.orna"))
+            .expect("the journal removes the legacy format record");
+        assert_eq!(format_entry.expected(), Some(format_record.as_bytes()));
+        assert_eq!(format_entry.next(), None);
+        assert_eq!(
+            migrated
+                .open_format_context()
+                .unwrap()
+                .repository_format_number(),
+            format
+        );
+        assert_eq!(migrated.require_writable_head_format(), Ok(()));
+
+        let retry = run_copy(&source, &destination, "0", &git_trace);
+        assert!(
+            retry.status.success(),
+            "format-{format} migration retry: {}",
+            String::from_utf8_lossy(&retry.stderr)
+        );
+        assert_eq!(
+            Repository::discover(&destination)
+                .unwrap()
+                .read_publication_journal()
+                .unwrap(),
+            Some(journal)
+        );
     }
 }
