@@ -2681,7 +2681,7 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
                   (orna-test-get
                    (jsonrpc-request server :textDocument/diagnostic
                                     (list :textDocument (list :uri uri)))
-                   "items")))
+                   "items"))))
         (setq document-links-buffer
               (find-file-noselect (getenv "ORNA_DOCUMENT_LINKS_FIXTURE")))
         (with-current-buffer document-links-buffer
