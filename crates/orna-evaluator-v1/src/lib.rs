@@ -5391,7 +5391,7 @@ impl Context<'_, '_> {
                 },
             ) => self
                 .duration_from_total_nanoseconds(-elapsed_total_nanoseconds(&seconds, nanosecond)),
-            ("-", Value::Float(value)) => finite_float(-f64::from_bits(value)),
+            ("-", Value::Float(value)) => Ok(float_value(-f64::from_bits(value))),
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
@@ -6064,31 +6064,12 @@ impl Context<'_, '_> {
     fn float_binary(&self, op: &str, a: u64, b: u64) -> Result<Value, EvaluationError> {
         let (a, b) = (f64::from_bits(a), f64::from_bits(b));
         match op {
-            "+" => finite_float(a + b),
-            "-" => finite_float(a - b),
-            "*" => finite_float(a * b),
-            "/" if b == 0.0 => Err(error("ORNA-EVAL-DIVIDE-BY-ZERO")),
-            "/" => finite_float(a / b),
-            "%" if b == 0.0 => Err(error("ORNA-EVAL-DIVIDE-BY-ZERO")),
-            "%" => finite_float(a % b),
-            "^" => {
-                // Pragmatic real-float semantics use exp(exponent * ln(base)).
-                // Negative bases are outside that domain; 0^0 is chosen as 1,
-                // and zero to a negative power uses the division-by-zero code.
-                if a == 0.0 {
-                    if b < 0.0 {
-                        Err(error("ORNA-EVAL-DIVIDE-BY-ZERO"))
-                    } else if b == 0.0 {
-                        finite_float(1.0)
-                    } else {
-                        finite_float(0.0)
-                    }
-                } else if a < 0.0 {
-                    Err(error("ORNA-EVAL-TYPE"))
-                } else {
-                    finite_float((b * a.ln()).exp())
-                }
-            }
+            "+" => Ok(float_value(a + b)),
+            "-" => Ok(float_value(a - b)),
+            "*" => Ok(float_value(a * b)),
+            "/" => Ok(float_value(a / b)),
+            "%" => Ok(float_value(a % b)),
+            "^" => Ok(float_value(libm::pow(a, b))),
             "<" => Ok(Value::Bool(a < b)),
             "<=" => Ok(Value::Bool(a <= b)),
             ">" => Ok(Value::Bool(a > b)),
@@ -11239,7 +11220,7 @@ impl Context<'_, '_> {
                 let delta = f64::from_bits(*bits) - mean;
                 squares += delta * delta;
             }
-            return finite_float(squares / values.len() as f64);
+            return Ok(float_value(squares / values.len() as f64));
         }
         if !matches!(first, Value::Int(_) | Value::Decimal(_))
             || !values
@@ -11340,7 +11321,7 @@ impl Context<'_, '_> {
         let variance = self.variance(values, options)?;
         match variance {
             Value::Null => Ok(Value::Null),
-            Value::Float(bits) => finite_float(f64::from_bits(bits).sqrt()),
+            Value::Float(bits) => Ok(float_value(f64::from_bits(bits).sqrt())),
             Value::Int(_) | Value::Decimal(_) => {
                 let (variance, preserve_decimal) = self.numeric_decimal(&variance)?;
                 self.square_root(&variance, options, preserve_decimal)
@@ -11496,9 +11477,9 @@ impl Context<'_, '_> {
     ) -> Result<Value, EvaluationError> {
         let elapsed = self.elapsed_seconds(start_time, end_time)?;
         match (start_value, end_value) {
-            (Value::Float(start), Value::Float(end)) => finite_float(
+            (Value::Float(start), Value::Float(end)) => Ok(float_value(
                 (f64::from_bits(*end) - f64::from_bits(*start)) / decimal_to_f64(&elapsed)?,
-            ),
+            )),
             (Value::Int(_) | Value::Decimal(_), Value::Int(_) | Value::Decimal(_)) => {
                 let (start, start_decimal) = self.numeric_decimal(start_value)?;
                 let (end, end_decimal) = self.numeric_decimal(end_value)?;
@@ -11544,7 +11525,7 @@ impl Context<'_, '_> {
                 let elapsed = decimal_to_f64(&self.elapsed_seconds(pair[0].0, pair[1].0)?)?;
                 total += (f64::from_bits(*left) + f64::from_bits(*right)) * 0.5 * elapsed;
             }
-            return finite_float(total);
+            return Ok(float_value(total));
         }
         let mut total = DecimalValue::new(BigInt::zero(), BigInt::zero())?;
         let mut preserve_decimal = false;
@@ -11701,7 +11682,7 @@ impl Context<'_, '_> {
                     };
                     total += f64::from_bits(*bits);
                 }
-                finite_float(total / values.len() as f64)
+                Ok(float_value(total / values.len() as f64))
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -11776,7 +11757,7 @@ impl Context<'_, '_> {
                 )
             }
             (Value::Float(left), Value::Float(right)) => {
-                finite_float((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0)
+                Ok(float_value((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0))
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
@@ -11912,10 +11893,10 @@ impl Context<'_, '_> {
                 };
                 self.exact_decimal_result(result, true)
             }
-            (Value::Float(lower), Value::Float(upper)) => finite_float(
+            (Value::Float(lower), Value::Float(upper)) => Ok(float_value(
                 f64::from_bits(*lower)
                     + (f64::from_bits(*upper) - f64::from_bits(*lower)) * decimal_to_f64(fraction)?,
-            ),
+            )),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -11957,15 +11938,15 @@ impl Context<'_, '_> {
             _ => lower,
         };
         if interpolation == "linear" {
-            return finite_float(
+            return Ok(float_value(
                 f64::from_bits(sorted[lower])
                     + (f64::from_bits(sorted[upper]) - f64::from_bits(sorted[lower])) * fraction,
-            );
+            ));
         }
         if interpolation == "midpoint" {
-            return finite_float(
+            return Ok(float_value(
                 (f64::from_bits(sorted[lower]) + f64::from_bits(sorted[upper])) / 2.0,
-            );
+            ));
         }
         Ok(Value::Float(sorted[choose]))
     }
@@ -15493,12 +15474,12 @@ fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationEr
         Ok(right.clone())
     }
 }
-fn finite_float(value: f64) -> Result<Value, EvaluationError> {
-    if value.is_finite() {
-        Ok(Value::Float(value.to_bits()))
+fn float_value(value: f64) -> Value {
+    Value::Float(if value.is_nan() {
+        CANONICAL_NAN_BITS
     } else {
-        Err(error("ORNA-EVAL-VALUE"))
-    }
+        value.to_bits()
+    })
 }
 fn parse_int(text: &str) -> Result<BigInt, EvaluationError> {
     let text = text.replace('_', "");

@@ -104,6 +104,7 @@ pub enum Error {
     /// fenced owner.
     ApplicationDeferred,
     RuntimeUnavailable,
+    SnapshotExpired,
 }
 
 impl Error {
@@ -125,6 +126,7 @@ impl Error {
             Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
+            Self::SnapshotExpired => "wire.snapshot_expired",
         }
     }
 }
@@ -1672,6 +1674,7 @@ impl HttpResponse {
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
                 | Error::ApplicationRejected
+                | Error::SnapshotExpired
                 | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
@@ -2700,6 +2703,20 @@ impl LiveHost {
         } else {
             None
         };
+        if let Err(error) = self.verify_snapshot_pin(&envelope.message).await {
+            work.complete();
+            // Durable admission has already begun this request, so the pin
+            // rejection is a terminal correlated diagnostic, not a bare failure.
+            if let Some(outcome) =
+                self.operational_error_outcome(Some(session), &envelope, error, true)?
+            {
+                return Ok(ApplicationPreparation::Completed(
+                    self.complete(session, request, &envelope, outcome).await?,
+                ));
+            }
+            self.retain_failure(session, request, fingerprint).await?;
+            return Err(error);
+        }
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
@@ -3069,6 +3086,7 @@ impl LiveHost {
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3593,6 +3611,10 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        // A CWD pin must resolve before any activation or application effect.
+        // The caller's rejection path turns SnapshotExpired into the retained
+        // correlated diagnostic; no lease or activation may be taken first.
+        self.verify_snapshot_pin(message).await?;
         let activation_runtime = self.runtime.clone();
         let activation_lease = if activation_runtime.is_some() {
             Some(self.writer_lease().await?)
@@ -4014,8 +4036,11 @@ impl LiveHost {
                 orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
             ) => Ok(false),
             Err(ServingError::RequestUnknown) => {
+                // An id the host has never admitted is not an active target.
+                // 30-protocol.md: a cancel that names no live request is still a
+                // correlated control operation and acknowledges with Unit.
                 let Some(runtime) = &self.runtime else {
-                    return Err(Error::Denied);
+                    return Ok(false);
                 };
                 let status = runtime
                     .request_status_for_identity(RequestIdentity {
@@ -4023,9 +4048,8 @@ impl LiveHost {
                         request_id: request,
                     })
                     .await
-                    .map_err(|error| map_runtime(&error))?
-                    .ok_or(Error::Denied)?;
-                Ok(!status.state.is_terminal())
+                    .map_err(|error| map_runtime(&error))?;
+                Ok(status.is_some_and(|status| !status.state.is_terminal()))
             }
             Err(error) => Err(map_serving(error)),
         }
@@ -4774,6 +4798,56 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Resolves a client-supplied CWD pin before any application effect runs.
+    /// Only the admitted writable generation is exact here. Any other
+    /// generation is never evaluated against current state: a generation the
+    /// runtime cannot resolve is expired, and a retained historical generation
+    /// is unsupported because read-only historical evaluation is not wired.
+    /// Commit pins are unsupported on durable hosts because the runtime cannot
+    /// read their objects.
+    async fn verify_snapshot_pin(&self, message: &Message) -> Result<()> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => {
+                database.snapshot.as_ref()
+            }
+            _ => None,
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let CanonicalSnapshot::Cwd {
+            database,
+            runtime: pinned_runtime,
+            generation,
+            ..
+        } = snapshot
+        else {
+            return Err(Error::UnsupportedOperation);
+        };
+        let current = runtime
+            .capture()
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        if current.database_id() == *database
+            && current.runtime_id() == *pinned_runtime
+            && current.generation() == generation
+        {
+            return Ok(());
+        }
+        match runtime.resolve_historical_snapshot(snapshot).await {
+            Ok(_) => Err(Error::UnsupportedOperation),
+            Err(
+                RuntimeError::SnapshotNotFound
+                | RuntimeError::SnapshotIncomplete
+                | RuntimeError::SnapshotContextMismatch,
+            ) => Err(Error::SnapshotExpired),
+            Err(error) => Err(map_runtime(&error)),
+        }
     }
 
     /// The execution host calls these around work it has accepted from a
