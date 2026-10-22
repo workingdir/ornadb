@@ -1,0 +1,3 @@
+main.describe(main.Availability.waiting { reason: "queue" })
+main.depth_of(main.Queue { name: "jobs", depth: 2 })
+main.describe(main.Availability.ready)

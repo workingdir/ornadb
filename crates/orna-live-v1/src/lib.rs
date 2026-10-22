@@ -104,6 +104,7 @@ pub enum Error {
     /// fenced owner.
     ApplicationDeferred,
     RuntimeUnavailable,
+    SnapshotExpired,
 }
 
 impl Error {
@@ -125,6 +126,7 @@ impl Error {
             Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
+            Self::SnapshotExpired => "wire.snapshot_expired",
         }
     }
 }
@@ -1672,6 +1674,7 @@ impl HttpResponse {
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
                 | Error::ApplicationRejected
+                | Error::SnapshotExpired
                 | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
@@ -2700,6 +2703,20 @@ impl LiveHost {
         } else {
             None
         };
+        if let Err(error) = self.verify_snapshot_pin(&envelope.message).await {
+            work.complete();
+            // Durable admission has already begun this request, so the pin
+            // rejection is a terminal correlated diagnostic, not a bare failure.
+            if let Some(outcome) =
+                self.operational_error_outcome(Some(session), &envelope, error, true)?
+            {
+                return Ok(ApplicationPreparation::Completed(
+                    self.complete(session, request, &envelope, outcome).await?,
+                ));
+            }
+            self.retain_failure(session, request, fingerprint).await?;
+            return Err(error);
+        }
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
@@ -3069,6 +3086,7 @@ impl LiveHost {
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3593,6 +3611,10 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        // A CWD pin must resolve before any activation or application effect.
+        // The caller's rejection path turns SnapshotExpired into the retained
+        // correlated diagnostic; no lease or activation may be taken first.
+        self.verify_snapshot_pin(message).await?;
         let activation_runtime = self.runtime.clone();
         let activation_lease = if activation_runtime.is_some() {
             Some(self.writer_lease().await?)
@@ -4014,8 +4036,11 @@ impl LiveHost {
                 orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
             ) => Ok(false),
             Err(ServingError::RequestUnknown) => {
+                // An id the host has never admitted is not an active target.
+                // 30-protocol.md: a cancel that names no live request is still a
+                // correlated control operation and acknowledges with Unit.
                 let Some(runtime) = &self.runtime else {
-                    return Err(Error::Denied);
+                    return Ok(false);
                 };
                 let status = runtime
                     .request_status_for_identity(RequestIdentity {
@@ -4023,9 +4048,8 @@ impl LiveHost {
                         request_id: request,
                     })
                     .await
-                    .map_err(|error| map_runtime(&error))?
-                    .ok_or(Error::Denied)?;
-                Ok(!status.state.is_terminal())
+                    .map_err(|error| map_runtime(&error))?;
+                Ok(status.is_some_and(|status| !status.state.is_terminal()))
             }
             Err(error) => Err(map_serving(error)),
         }
@@ -4774,6 +4798,56 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Resolves a client-supplied CWD pin before any application effect runs.
+    /// Only the admitted writable generation is exact here. Any other
+    /// generation is never evaluated against current state: a generation the
+    /// runtime cannot resolve is expired, and a retained historical generation
+    /// is unsupported because read-only historical evaluation is not wired.
+    /// Commit pins are unsupported on durable hosts because the runtime cannot
+    /// read their objects.
+    async fn verify_snapshot_pin(&self, message: &Message) -> Result<()> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => {
+                database.snapshot.as_ref()
+            }
+            _ => None,
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let CanonicalSnapshot::Cwd {
+            database,
+            runtime: pinned_runtime,
+            generation,
+            ..
+        } = snapshot
+        else {
+            return Err(Error::UnsupportedOperation);
+        };
+        let current = runtime
+            .capture()
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        if current.database_id() == *database
+            && current.runtime_id() == *pinned_runtime
+            && current.generation() == generation
+        {
+            return Ok(());
+        }
+        match runtime.resolve_historical_snapshot(snapshot).await {
+            Ok(_) => Err(Error::UnsupportedOperation),
+            Err(
+                RuntimeError::SnapshotNotFound
+                | RuntimeError::SnapshotIncomplete
+                | RuntimeError::SnapshotContextMismatch,
+            ) => Err(Error::SnapshotExpired),
+            Err(error) => Err(map_runtime(&error)),
+        }
     }
 
     /// The execution host calls these around work it has accepted from a
@@ -6264,6 +6338,7 @@ impl LiveTransport {
             .iter()
             .filter_map(|(session, record)| {
                 (!self.delivering_upgrades.contains_key(session)
+                    && !self.host.attachments.values().any(|owner| owner == session)
                     && record.metadata.expires_at <= now)
                     .then_some(*session)
             })
@@ -6477,6 +6552,16 @@ impl LiveTransport {
         {
             self.queue_retired_attachment(session, attachment);
         }
+        // The lease is the finite reconnection grace that starts when the
+        // session loses its socket (30-protocol, Session creation and
+        // ownership), so it is measured from this detachment.
+        if let Some(session) = session
+            && outcome.is_ok()
+            && !self.host.attachments.values().any(|owner| *owner == session)
+            && let Some(record) = self.sessions.get_mut(&session)
+        {
+            record.metadata.expires_at = now.saturating_add(self.limits.lease_ms);
+        }
         outcome
     }
 
@@ -6538,8 +6623,10 @@ impl LiveTransport {
         let Ok(origin) = required_origin(&request.headers) else {
             return wire_error(403, "live.origin_denied");
         };
+        // 30-protocol, Session creation and ownership: requests are
+        // `application/json`, so a charset parameter may only name UTF-8.
         if request.method == "POST"
-            && !header_eq(&request.headers, "content-type", "application/json")
+            && !header(&request.headers, "content-type").is_some_and(is_json_media_type)
         {
             return wire_error(400, "live.malformed_request");
         }
@@ -6692,6 +6779,13 @@ impl LiveTransport {
                             headers: Vec::new(),
                             body: Vec::new(),
                         };
+                    }
+                    // 30-protocol, Session creation and ownership: the token
+                    // must be the session's current one. Any other token for
+                    // a live session is unauthenticated; 410 is for a session
+                    // that has ended.
+                    if self.sessions.contains_key(&id) {
+                        return wire_error(401, "live.unauthenticated");
                     }
                     return wire_error(410, "live.expired");
                 }
@@ -7579,6 +7673,11 @@ impl LiveTransport {
         if credential != record.credential {
             return Err(wire_error(401, "live.unauthenticated"));
         }
+        // 30-protocol, Session creation and ownership: an upgrade from
+        // another origin is prohibited (403); it is not an expired session.
+        if origin != record.origin {
+            return Err(wire_error(403, "live.origin_denied"));
+        }
         self.host
             .validate_resume(&ResumeRequest {
                 id,
@@ -7978,6 +8077,20 @@ fn header_token(headers: &[(String, String)], name: &str, expected: &str) -> boo
             .any(|token| token.trim().eq_ignore_ascii_case(expected))
     })
 }
+/// Whether a Content-Type value names JSON: `application/json` in any case,
+/// with no parameter other than `charset=utf-8`.
+fn is_json_media_type(value: &str) -> bool {
+    let mut parts = value.split(';');
+    parts
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+        && parts.all(|parameter| {
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("charset")
+                    && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            })
+        })
+}
 fn required_origin(headers: &[(String, String)]) -> std::result::Result<Origin, ()> {
     header(headers, "origin")
         .ok_or(())
@@ -8158,6 +8271,10 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
+        // A session whose application work must first be joined is
+        // temporarily unavailable on a route that cannot join it; the
+        // request itself is well formed.
+        Error::ApplicationDrainRequired => (503, "live.unavailable"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
@@ -10810,6 +10927,11 @@ mod tests {
                 origin,
             },
         );
+        // Expiry only applies to detached sessions; the socket's detachment
+        // starts the lease, which the test then pins to an expired deadline.
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion::default();
         let mut children = ExpiryChildren {
             fail: true,
@@ -10850,6 +10972,89 @@ mod tests {
         assert!(transport.take_retired_attachments().is_empty());
     }
 
+    fn attached_session_transport() -> LiveTransport {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = subscribed_host(None);
+        host.application_sessions.insert([1; 16]);
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential,
+                origin,
+            },
+        );
+        transport
+    }
+
+    #[test]
+    fn attached_session_is_not_expired_by_its_lease_deadline() {
+        let mut transport = attached_session_transport();
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                10,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+
+        assert_eq!(children.calls, 0);
+        assert_eq!(deletion.calls, 0);
+        assert!(transport.sessions.contains_key(&[1; 16]));
+    }
+
+    #[test]
+    fn detaching_the_socket_restarts_the_lease_from_detachment() {
+        let mut transport = attached_session_transport();
+        // The security session is valid through 10, so the detach happens
+        // inside that window; the lease then runs from the detach time.
+        let lease_ms = transport.limits.lease_ms;
+
+        futures::executor::block_on(transport.close_attachment([4; 16], 5))
+            .expect("detaching the attachment starts the reconnection lease");
+        assert_eq!(
+            transport.sessions[&[1; 16]].metadata.expires_at,
+            5 + lease_ms
+        );
+
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                5 + lease_ms - 1,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(transport.sessions.contains_key(&[1; 16]));
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                5 + lease_ms,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(!transport.sessions.contains_key(&[1; 16]));
+    }
+
     #[test]
     fn expiry_retries_failed_durable_deletion_while_fencing_attachment() {
         let origin = Origin::parse("https://app.example").unwrap();
@@ -10874,6 +11079,11 @@ mod tests {
                 origin,
             },
         );
+        // The resumed socket must detach first: an attached session is governed
+        // by its reconnection lease, which starts at WebSocket loss (30-protocol).
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion {
             fail: true,
             ..ExpiryDeletion::default()

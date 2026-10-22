@@ -1,0 +1,22 @@
+pub enum Availability {
+    ready,
+    waiting { reason: Str },
+}
+
+pub type Queue {
+    pub name: Str,
+    pub depth: Int,
+}
+
+pub type Label = Str;
+
+pub protocol Zero {
+    fn is_zero(self): Bool;
+}
+
+pub fn describe(value: Availability): Str = case value {
+    Availability.ready: "ready",
+    Availability.waiting { reason }: "waiting: {reason}",
+};
+
+pub fn depth_of(queue: Queue): Int = queue.depth;

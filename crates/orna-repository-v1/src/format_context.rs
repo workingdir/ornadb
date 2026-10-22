@@ -26,6 +26,15 @@ use super::DatabaseId;
 /// The final repository writer coordinate from the consolidated publication.
 pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 
+/// The `repository_layout_version` coordinate reported by `sys.rt.info()`: the
+/// 1.1.0 `repository_format` value, which equals [`FINAL_REPOSITORY_FORMAT`].
+pub const REPOSITORY_LAYOUT_VERSION: &str = "3";
+
+const _: () = assert!(
+    REPOSITORY_LAYOUT_VERSION.len() == 1
+        && REPOSITORY_LAYOUT_VERSION.as_bytes()[0] == b'0' + FINAL_REPOSITORY_FORMAT
+);
+
 /// The bounded size of the tracked `database.orna` record.
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 /// Per-module source bound compatible with project loading's aggregate budget.
@@ -673,7 +682,8 @@ impl RepositoryFormatContext {
 
     /// Issues capture authority using this admitted snapshot and its graph
     /// owner identity. A runtime-scoped context therefore writes scratch refs
-    /// under the owner that will reclaim them after a crash.
+    /// under the owner that will reclaim them after a crash. Captured
+    /// candidates become lazy values pinned to this context's exact commit.
     pub fn capture_capability(
         &self,
         relation_id: [u8; 16],
@@ -688,7 +698,11 @@ impl RepositoryFormatContext {
         let scope = graph
             .open_read_scope()
             .map_err(CaptureCapabilityError::Graph)?;
-        RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
+        let pin = self.value_pin().map_err(CaptureCapabilityError::Format)?;
+        RepositoryCaptureCapability::new(graph, scope)
+            .map_err(CaptureCapabilityError::Graph)?
+            .with_capture_pin(pin)
+            .map_err(|_| CaptureCapabilityError::Format(FormatContextError::GraphContextInvalid))
     }
 
     /// Opens a snapshot-pinned format-3 value context for one relation.
@@ -700,7 +714,6 @@ impl RepositoryFormatContext {
         relation_id: [u8; 16],
     ) -> Result<Format3Context, FormatContextError> {
         self.require_format3()?;
-        let database_id = self.require_database_id()?;
         let rows = self.load_row_map(relation_id)?;
         let graph = std::sync::Arc::new(self.open_native_graph(&rows)?);
         let scope = graph
@@ -708,20 +721,25 @@ impl RepositoryFormatContext {
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
         let capability = RepositoryCaptureCapability::new(graph, scope)
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        capability
+            .value_context(self.value_pin()?)
+            .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// The value-layer pin for this context's exact commit.
+    fn value_pin(&self) -> Result<ValueSnapshot, FormatContextError> {
+        let database_id = self.require_database_id()?;
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let commit = NativeOid::from_hex(algorithm, self.snapshot.commit.as_str())
             .map_err(|_| FormatContextError::SnapshotInvalid)?;
-        let pin = ValueSnapshot::Commit {
+        Ok(ValueSnapshot::Commit {
             database: *database_id.as_bytes(),
             algorithm: match algorithm {
                 GitHashAlgorithm::Sha1 => ValueGitHash::Sha1,
                 GitHashAlgorithm::Sha256 => ValueGitHash::Sha256,
             },
             oid: commit.as_bytes().to_vec(),
-        };
-        capability
-            .value_context(pin)
-            .map_err(|_| FormatContextError::GraphContextInvalid)
+        })
     }
 
     /// Resolves the committed descriptor selected by its authenticated table ID.
@@ -1528,19 +1546,6 @@ const LEGACY_FORMAT_RECORDS: [(RepositoryFormat, &[(&str, LegacyRecordValue)]); 
 ];
 
 pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
-    let source = std::str::from_utf8(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
-    let line = source
-        .strip_suffix('\n')
-        .unwrap_or(source)
-        .strip_suffix('\r')
-        .unwrap_or_else(|| source.strip_suffix('\n').unwrap_or(source));
-    match line {
-        "format 1" => return Ok(RepositoryFormat::Legacy1),
-        "format 2" => return Ok(RepositoryFormat::Legacy2),
-        "format 3" => return Err(FormatContextError::UnknownFormat),
-        _ => {}
-    }
-
     let fields = parse_record(bytes).map_err(|()| FormatContextError::MetadataInvalid)?;
     LEGACY_FORMAT_RECORDS
         .iter()
