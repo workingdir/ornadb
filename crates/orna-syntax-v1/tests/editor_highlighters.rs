@@ -537,6 +537,7 @@ fn sublime_syntax_loads_and_classifies_the_shared_sample() {
             let scopes = stack
                 .as_slice()
                 .iter()
+                .copied()
                 .map(Scope::build_string)
                 .collect::<Vec<_>>();
             classes.set(index, position, offset, scope_class(&scopes));
@@ -546,6 +547,7 @@ fn sublime_syntax_loads_and_classifies_the_shared_sample() {
         let scopes = stack
             .as_slice()
             .iter()
+            .copied()
             .map(Scope::build_string)
             .collect::<Vec<_>>();
         classes.set(index, position, line.len(), scope_class(&scopes));
