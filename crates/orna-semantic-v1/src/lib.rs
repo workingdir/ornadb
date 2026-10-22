@@ -4338,7 +4338,7 @@ fn check_item(
             {
                 let inferred =
                     infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
-                require_same(&expected, &inferred.ty, diagnostics);
+                require_same(scope, &expected, &inferred.ty, diagnostics);
                 bind_pattern(pattern, inferred.ty.clone(), scope, symbols, diagnostics);
                 return Some(inferred);
             } else {
@@ -4526,7 +4526,7 @@ fn check_item(
                 };
                 let expected = resolved_type_of(annotation, scope);
                 let inferred = infer_contextual(default, &expected, scope, &row_locals, diagnostics);
-                require_same(&expected, &inferred.ty, diagnostics);
+                require_same(scope, &expected, &inferred.ty, diagnostics);
             }
             validate_non_overlapping_implementations(
                 members.iter().filter_map(|member| match member {
@@ -4586,7 +4586,7 @@ fn check_item(
                                 "computed field must be deterministic and row-local",
                             ));
                         }
-                        require_same(&expected, &inferred.ty, diagnostics);
+                        require_same(scope, &expected, &inferred.ty, diagnostics);
                     }
                     _ => {}
                 }
@@ -4669,7 +4669,7 @@ fn check_item(
                 if let Some(initializer) = initializer {
                     let inferred =
                         infer_contextual(initializer, &expected, scope, &field_locals, diagnostics);
-                    require_same(&expected, &inferred.ty, diagnostics);
+                    require_same(scope, &expected, &inferred.ty, diagnostics);
                 }
                 field_locals.insert(
                     name.clone(),
@@ -4880,11 +4880,11 @@ fn validate_nested_implementation_members(
                     &local,
                     diagnostics,
                 );
-                require_same(target, &inferred.ty, diagnostics);
+                require_same(scope, target, &inferred.ty, diagnostics);
             } else {
                 let expected_body = target_shape.unwrap_or(target);
                 let inferred = infer_contextual(body, expected_body, scope, &local, diagnostics);
-                require_same(expected_body, &inferred.ty, diagnostics);
+                require_same(scope, expected_body, &inferred.ty, diagnostics);
             }
             return;
         }
@@ -5044,7 +5044,7 @@ fn validate_nested_implementation_members(
                 }
                 let inferred =
                     infer_contextual(value, &expected, scope, &BTreeMap::new(), diagnostics);
-                require_same(&expected, &inferred.ty, diagnostics);
+                require_same(scope, &expected, &inferred.ty, diagnostics);
             }
             _ => {}
         }
@@ -5292,7 +5292,7 @@ fn validate_nested_implementation_function(
         let before = diagnostics.len();
         let inferred = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
         if diagnostics.len() == before {
-            require_same(&expected, &inferred.ty, diagnostics);
+            require_same(scope, &expected, &inferred.ty, diagnostics);
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
         infer_function_body(body, None, scope, &local, diagnostics);
@@ -5330,7 +5330,7 @@ fn validate_default_expression(
         let before = diagnostics.len();
         let inferred = infer_contextual(expression, expected, scope, local, diagnostics);
         if diagnostics.len() == before {
-            require_same(expected, &inferred.ty, diagnostics);
+            require_same(scope, expected, &inferred.ty, diagnostics);
         }
         Some(expected.clone())
     } else {
@@ -6711,7 +6711,7 @@ fn infer_return_statement(
     };
     if let Some(index) = owner {
         if let Some(expected) = &expected {
-            require_same(expected, &returned.ty, diagnostics);
+            require_same(scope, expected, &returned.ty, diagnostics);
         }
         scope.return_frames.borrow_mut()[index]
             .returned
@@ -6801,6 +6801,7 @@ fn check_function(
                 diagnostics,
             );
             require_same(
+                scope,
                 ty.as_ref().unwrap_or(&Type::Error),
                 &inferred.ty,
                 diagnostics,
@@ -6830,7 +6831,7 @@ fn check_function(
         let mut inferred =
             infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        require_same(&expected, &inferred.ty, diagnostics);
+        require_same(scope, &expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
@@ -7600,7 +7601,7 @@ fn validate_loop_transfers(
                             let actual = value.as_ref().map_or(Type::Unit, |value| {
                                 infer(value, scope, &block_locals, &mut Vec::new()).ty
                             });
-                            require_same(expected, &actual, diagnostics);
+                            require_same(scope, expected, &actual, diagnostics);
                         }
                         // `loop` has no inferred result contract yet. Reject
                         // transfers explicitly instead of silently accepting a
@@ -8016,7 +8017,7 @@ fn infer_contextual(
         let mut effects = EffectSummary::default();
         for element in elements {
             let inferred = infer_contextual(element, element_type, scope, local, diagnostics);
-            require_same(element_type, &inferred.ty, diagnostics);
+            require_same(scope, element_type, &inferred.ty, diagnostics);
             effects.join(&inferred.effects);
         }
         return Inferred {
@@ -8039,7 +8040,7 @@ fn infer_contextual(
         for endpoint in [lower.as_deref(), upper.as_deref()].into_iter().flatten() {
             let inferred = infer_contextual(endpoint, element_type, scope, local, diagnostics);
             effects.join(&inferred.effects);
-            require_same(element_type, &inferred.ty, diagnostics);
+            require_same(scope, element_type, &inferred.ty, diagnostics);
         }
         return Inferred {
             ty: expected.clone(),
@@ -8212,7 +8213,7 @@ fn infer_contextual_lambda(
         &callback_locals,
         diagnostics,
     );
-    require_same(expected_result, &inferred.ty, diagnostics);
+    require_same(scope, expected_result, &inferred.ty, diagnostics);
     Inferred {
         ty: Type::Function {
             parameters: types,
@@ -8275,7 +8276,7 @@ fn infer_node(
                 if let StringSegment::Expression { value, .. } = segment {
                     let value = infer(value, scope, local, diagnostics);
                     effects.join(&value.effects);
-                    require_same(&Type::Text, &value.ty, diagnostics);
+                    require_same(scope, &Type::Text, &value.ty, diagnostics);
                 }
             }
             Inferred {
@@ -8465,7 +8466,7 @@ fn infer_node(
                         )
                         .map(|mut fold| {
                             if fold.rejected_scope {
-                                require_same(prior, &value, diagnostics);
+                                require_same(scope, prior, &value, diagnostics);
                                 if checkpoint_reanchor_recovery {
                                     fold.merged = merge_unpaired_checkpoint_record_siblings(
                                         &fold.merged,
@@ -8526,7 +8527,7 @@ fn infer_node(
                     if let Some(merged) = merged {
                         ty = Some(merged);
                     } else {
-                        require_same(prior, &value, diagnostics);
+                        require_same(scope, prior, &value, diagnostics);
                         rejected_checkpoint_parent |= transactional_checkpoint_fold;
                     }
                 } else {
@@ -9283,7 +9284,7 @@ fn infer_node(
             if op == "in" {
                 let ty = match &right.ty {
                     Type::Range(element) => {
-                        require_same(element, &left.ty, diagnostics);
+                        require_same(scope, element, &left.ty, diagnostics);
                         Type::Bool
                     }
                     _ => {
@@ -17066,20 +17067,56 @@ fn resolve_qualified_module_member(
         }
     }
 }
-fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic>) {
+fn require_same(scope: &Scope, expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic>) {
     if !types_match(expected, actual)
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
         let (code, message) = match (expected, actual) {
-            (Type::Named(expected), Type::Named(actual)) if expected != actual => (
-                DIAG_CONVERSION_CHAIN,
-                "implicit conversion chains are not searched; name each conversion explicitly",
-            ),
+            (Type::Named(target), Type::Named(source))
+                if nominal_conversion_chain_exists(scope, source, target) =>
+            {
+                (
+                    DIAG_CONVERSION_CHAIN,
+                    "implicit conversion chains are not searched; name each conversion explicitly",
+                )
+            }
             _ => (DIAG_TYPE, "static types are incompatible"),
         };
         diagnostics.push(type_mismatch(code, message, expected, actual));
     }
+}
+
+/// ORNA-CONVERT-007: a chain is two or more declared `From` steps from `source`
+/// to `target`. A direct conversion is not a chain, and a source with no path
+/// to the target is a plain static mismatch.
+fn nominal_conversion_chain_exists(scope: &Scope, source: &str, target: &str) -> bool {
+    let converts_to = |node: &str| -> Vec<String> {
+        let node_type = Type::Named(node.to_owned());
+        scope
+            .nominal_conversions
+            .iter()
+            .filter(|(_, sources)| sources.contains(&node_type))
+            .map(|(converted_to, _)| converted_to.clone())
+            .collect()
+    };
+    let direct = converts_to(source);
+    if direct.iter().any(|node| node.as_str() == target) {
+        return false;
+    }
+    let mut visited: BTreeSet<String> = direct.iter().cloned().collect();
+    let mut frontier = direct;
+    while let Some(node) = frontier.pop() {
+        for next in converts_to(&node) {
+            if next.as_str() == target {
+                return true;
+            }
+            if visited.insert(next.clone()) {
+                frontier.push(next);
+            }
+        }
+    }
+    false
 }
 
 /// A static type mismatch that names both types, so the person can see which
@@ -24257,7 +24294,7 @@ fn infer_currency_suffix(
     if scope.currency_types.contains(&identity) {
         if *base == Type::Float {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_MONEY_FROM_FLOAT,
                 "Money cannot be constructed from an inexact Float without explicit rounding",
             ));
             return Some(Type::Error);
