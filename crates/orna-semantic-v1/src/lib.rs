@@ -2747,17 +2747,14 @@ fn collect_header(
         let Some((name, kind, mut ty)) = declared_symbol(item) else {
             continue;
         };
-        // Nominal types, tables and units carry their module-qualified identity, so
-        // rows of `a.Item` and `b.Item` are never the same row type (08-relations:
-        // row values compare table ObjectId; ORNA-ROW-001), and imports keep their
-        // declaring module rather than a bare spelling.
+        // Nominal types and units carry their declaring module so imports
+        // keep their identity rather than a bare spelling.
         if matches!(
             &item.declaration,
             Declaration::Type {
                 representation: TypeRepresentation::Nominal { .. },
                 ..
-            } | Declaration::Table { .. }
-            | Declaration::Unit { .. }
+            } | Declaration::Unit { .. }
         ) {
             ty = Type::Named(nominal_identity(namespace, &name));
         }
@@ -3418,12 +3415,6 @@ fn is_nominal_symbol(symbol: &Symbol) -> bool {
     symbol.kind == SymbolKind::Type && symbol.table_schema.is_some()
 }
 
-/// Declarations whose source spellings canonicalise to a module-qualified
-/// identity: nominal record types and tables.
-fn has_qualified_identity(symbol: &Symbol) -> bool {
-    is_nominal_symbol(symbol) || symbol.kind == SymbolKind::Table
-}
-
 fn canonical_nominal_name(name: &str, scope: &Scope) -> String {
     scope
         .nominal_identities
@@ -3434,24 +3425,22 @@ fn canonical_nominal_name(name: &str, scope: &Scope) -> String {
 
 fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &SyntaxTree) {
     for item in &tree.items {
-        let name = match &item.declaration {
-            Declaration::Type {
-                name,
-                representation: TypeRepresentation::Nominal { .. },
-                ..
-            }
-            | Declaration::Table { name, .. } => name,
-            _ => continue,
-        };
-        scope
-            .nominal_identities
-            .insert(name.clone(), nominal_identity(namespace, name));
+        if let Declaration::Type {
+            name,
+            representation: TypeRepresentation::Nominal { .. },
+            ..
+        } = &item.declaration
+        {
+            scope
+                .nominal_identities
+                .insert(name.clone(), nominal_identity(namespace, name));
+        }
     }
     let named_symbols = scope
         .names
         .iter()
         .filter_map(|(name, symbol)| {
-            (has_qualified_identity(symbol))
+            (is_nominal_symbol(symbol))
                 .then(|| match &symbol.ty {
                     Type::Named(identity) => Some((name.clone(), identity.clone())),
                     _ => None,
@@ -3469,7 +3458,7 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
             module
                 .exports
                 .iter()
-                .filter(|(_, symbol)| has_qualified_identity(symbol))
+                .filter(|(_, symbol)| is_nominal_symbol(symbol))
                 .map(|(name, _)| {
                     (
                         module_namespace.clone(),
@@ -3506,7 +3495,7 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
                     module.exports.iter().filter_map({
                         let alias = alias.clone();
                         move |(name, symbol)| {
-                            has_qualified_identity(symbol).then(|| {
+                            is_nominal_symbol(symbol).then(|| {
                                 let mut path = vec![alias.clone()];
                                 path.extend(suffix.iter().cloned());
                                 path.push(name.clone());
@@ -3879,15 +3868,11 @@ fn resolve_imports_with_dependencies(
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
         historical_modules: historical_modules.clone(),
-        // Row shapes and automatic-key tables are keyed by the same qualified
-        // identity that table symbols carry, never by the bare declared name.
         table_rows: tree
             .items
             .iter()
             .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, .. } => {
-                    Some((nominal_identity(namespace, name), table_row_type(item)))
-                }
+                Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
                 _ => None,
             })
             .collect(),
@@ -3895,9 +3880,7 @@ fn resolve_imports_with_dependencies(
             .items
             .iter()
             .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, keys, .. } if keys.is_empty() => {
-                    Some(nominal_identity(namespace, name))
-                }
+                Declaration::Table { name, keys, .. } if keys.is_empty() => Some(name.clone()),
                 _ => None,
             })
             .collect(),
@@ -4018,7 +4001,8 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
-    for (module_namespace, module) in modules {
+    for (namespace, module) in modules {
+        let prefix = namespace.display();
         for (name, symbol) in &module.exports {
             if symbol.kind != SymbolKind::Table {
                 continue;
@@ -4026,13 +4010,14 @@ fn resolve_imports_with_dependencies(
             let Some(row) = symbol.table_fields() else {
                 continue;
             };
-            let identity = match &symbol.ty {
-                Type::Named(identity) => identity.clone(),
-                _ => nominal_identity(module_namespace, name),
+            let table_name = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
             };
             scope
                 .table_rows
-                .entry(identity)
+                .entry(table_name)
                 .or_insert_with(|| Type::Record(row.clone()));
         }
         for (name, symbol) in &module.exports {
@@ -4805,7 +4790,7 @@ fn check_item(
                 }
             }
             let row = table_row_type(item);
-            let target = Type::Named(canonical_nominal_name(name, scope));
+            let target = Type::Named(name.clone());
             let mut row_locals = match &row {
                 Type::Record(fields) => fields
                     .iter()
@@ -6919,8 +6904,20 @@ fn annotation_type_name_is_declared(
         return true;
     }
 
-    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
-    qualified_module_symbol(&parts, scope)
+    let Some(root) = scope.modules.get(&path[0]) else {
+        return false;
+    };
+    let namespace = Namespace(
+        root.0
+            .iter()
+            .cloned()
+            .chain(path[1..path.len() - 1].iter().cloned())
+            .collect(),
+    );
+    scope
+        .available_modules
+        .get(&namespace)
+        .and_then(|module| module.exports.get(last))
         .is_some_and(|symbol| {
             matches!(
                 symbol.kind,
