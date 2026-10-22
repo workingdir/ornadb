@@ -233,12 +233,12 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
         if !fields.is_empty() {
             match fixture.path {
                 "examples/invalid/two-durable-sources.orna" => {
-                    assert_eq!(actual_code, Some("ORNA-S021-TYPE"));
+                    assert_eq!(actual_code, Some("E9102"));
                     assert_eq!(
                         message,
                         Some("a durable consumer function may own only one checkpointed source root; extract separate named consumer functions")
                     );
-                    assert_eq!(actual_native_code, "ORNA-S021-TYPE");
+                    assert_eq!(actual_native_code, "E9102");
                 }
                 other => panic!("unexpected payload mismatch for {other}"),
             }
