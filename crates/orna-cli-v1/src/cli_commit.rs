@@ -82,6 +82,9 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
 /// keeps its IDs; new declarations get new IDs and removed ones retire
 /// (ORNA-OBJECT-001, ORNA-OBJECT-005).
 fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String>, Diagnostic> {
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
     let staged = repository
         .capture_staged_candidate()
         .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
