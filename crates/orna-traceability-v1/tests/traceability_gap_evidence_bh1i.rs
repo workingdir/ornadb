@@ -11,12 +11,13 @@
 //! `.orna` fixture. The report must keep each requirement partially executed
 //! because this stage does not prove the full requirement.
 
+
+mod support;
 use orna_conformance_v1::{
     BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage,
 };
 use orna_traceability_v1::{generate_with_engine_witnesses, Status};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -27,13 +28,7 @@ const IMPLEMENTATION_REF: &str =
     "crates/orna-conformance-v1/src/lib.rs::Harness::run_fixture";
 const TEST_REF: &str =
     "crates/orna-traceability-v1/tests/traceability_gap_evidence_bh1i.rs::ten_fixture_typecheck_boundaries_remain_per_requirement";
-const PUBLICATION_DIGEST: &str =
-    "f2847c9090ea2360118ec4a00dfa9a0480ff18de051c590047b37c98b33d5f73";
 
-fn canonical_markdown_digest(root: &Path) -> String {
-    let bytes = fs::read(root.join("Orna-1.1.0.md")).expect("read canonical markdown");
-    format!("{:x}", Sha256::digest(bytes))
-}
 
 // These are exact frozen-reference examples, compiled into this new test and
 // loaded by the conformance Harness after being copied byte-for-byte.
@@ -262,11 +257,7 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
         !corpus.publication_digests.keys().any(|key| key.starts_with("Orna-")),
         "1.1.0 normative map pins no markdown publication key"
     );
-    assert_eq!(
-        canonical_markdown_digest(copied.path()),
-        PUBLICATION_DIGEST,
-        "fixture-backed evidence stays pinned to the frozen publication"
-    );
+    support::assert_markdown_publication_digest(copied.path());
 
     let harness = Harness::new(corpus);
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());

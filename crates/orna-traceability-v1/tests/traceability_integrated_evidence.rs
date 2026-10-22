@@ -1,7 +1,6 @@
 use orna_conformance_v1::{BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage};
 use orna_traceability_v1::{generate_with_engine_witnesses, Status};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -14,18 +13,12 @@ const FIXTURE_PATH: &str = "examples/valid/minimal-root.orna";
 const IMPLEMENTATION_REF: &str =
     "crates/orna-conformance-v1/src/lib.rs::Harness::engine_witnesses";
 const TEST_REF: &str = "crates/orna-traceability-v1/tests/traceability_integrated_evidence.rs::declared_parse_witness_preserves_publication_identity_and_partial_requirement_boundary";
-const CANONICAL_MARKDOWN_DIGEST: &str =
-    "f2847c9090ea2360118ec4a00dfa9a0480ff18de051c590047b37c98b33d5f73";
+mod support;
 
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
-}
-
-fn canonical_markdown_digest(root: &Path) -> String {
-    let bytes = fs::read(root.join("Orna-1.1.0.md")).expect("read canonical markdown");
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 struct CopiedReference {
@@ -99,11 +92,7 @@ fn declared_parse_witness_preserves_publication_identity_and_partial_requirement
         !expected_digests.keys().any(|key| key.starts_with("Orna-")),
         "1.1.0 normative map pins no markdown publication key"
     );
-    assert_eq!(
-        canonical_markdown_digest(&copied.path),
-        CANONICAL_MARKDOWN_DIGEST,
-        "copied corpus keeps the canonical publication identity"
-    );
+    support::assert_markdown_publication_digest(&copied.path);
 
     let harness = Harness::new(corpus);
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
