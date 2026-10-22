@@ -122,6 +122,31 @@ const FOLLOW_UP_61_144: &[&str] = &[
     "UNIT-002",
 ];
 
+const LEGACY_ONLY_ACROSS_144: &[&str] = &[
+    "ASSERT-REWRITE-091",
+    "AUTOID-REFS-001",
+    "COMPACT-GENERATION-001",
+    "COMPACT-MERGE-GENERATION-001",
+    "COMPACT-SCHEMA-PROJECTION-001",
+    "FIELD-002",
+    "FLOAT-STATS-001",
+    "KEY-004",
+    "KEY-005",
+    "MERGE-001",
+    "MERGE-002",
+    "MERGE-003",
+    "MERGE-004",
+    "MERGE-PRUNE-001",
+    "ORDER-001",
+    "PATH-CASE-001",
+    "PATH-EMPTY-001",
+    "PROFILE-001",
+    "PROJECT-LIFE-001",
+    "ROW-002",
+    "STORAGE-DISJOINT-001",
+    "SYS-STORAGE-ADMIN-100",
+];
+
 #[test]
 fn executes_batch_two_and_pins_unexecuted_follow_up() {
     let legacy: serde_json::Value = serde_json::from_str(LEGACY_REFERENCE_SCENARIOS).unwrap();
@@ -150,6 +175,12 @@ fn executes_batch_two_and_pins_unexecuted_follow_up() {
         .map(|scenario| scenario["id"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(corpus_ids.len(), 279);
+    let legacy_only_all = legacy_scenarios
+        .iter()
+        .map(|scenario| scenario["id"].as_str().unwrap())
+        .filter(|id| !corpus_ids.contains(id))
+        .collect::<Vec<_>>();
+    assert_eq!(legacy_only_all, LEGACY_ONLY_ACROSS_144);
 
     let output = Command::new(env!("CARGO_BIN_EXE_orna-conformance"))
         .args(["--profile", "bounded-expression-runtime"])
