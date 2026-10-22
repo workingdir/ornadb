@@ -6919,6 +6919,12 @@ fn annotation_type_name_is_declared(
         return true;
     }
 
+    // Annotation names resolve only through an explicit `use` binding of the
+    // first segment (ORNA-IMPORT-001, ORNA-IMPORT-002). Full namespace paths
+    // stay expression-only, so an unimported `vault.Box` remains unresolved.
+    if !scope.modules.contains_key(&path[0]) {
+        return false;
+    }
     let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
     qualified_module_symbol(&parts, scope)
         .is_some_and(|symbol| {
