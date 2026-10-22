@@ -1,6 +1,5 @@
 
-            pub table Note {
-                value: Str,
+            pub table Note(value: Str) {
                 impl From<Str> {
                     fn from(value): Note = { value: value };
                 }

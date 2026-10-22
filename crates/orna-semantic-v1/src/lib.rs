@@ -27,6 +27,7 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
+pub use system_api::system_enum_constant;
 mod source_row;
 
 pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
@@ -80,6 +81,45 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Published typecheck classifications for construction fields
+/// (`tests/invalid-metadata.json`: wrong-field-type, missing-required-field
+/// and unknown-field). Enum payload construction emits them at the source.
+pub const DIAG_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_FIELD: &str = "E2002";
+pub const DIAG_UNKNOWN_FIELD: &str = "E2003";
+pub const DIAG_ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
+/// Spec diagnostic codes (`33-diagnostics.md`) emitted directly at the rule
+/// that detects the violation; the message text never selects the code.
+pub const DIAG_RESERVED_SYS: &str = "E1008";
+pub const DIAG_RESERVED_STD: &str = "E1009";
+pub const DIAG_PRIMARY_KEY_IMMUTABLE: &str = "E3002";
+pub const DIAG_PRIMARY_KEY_FLOAT: &str = "E3003";
+pub const DIAG_PRIMARY_KEY_RANGE: &str = "E3010";
+pub const DIAG_COMPUTED_INSERT: &str = "E3010";
+pub const DIAG_COMPUTED_DIRECT_WRITE: &str = "E3011";
+pub const DIAG_COMPUTED_NONDETERMINISTIC: &str = "E3012";
+pub const DIAG_AUTOMATIC_KEY_REKEY: &str = "E3013";
+pub const DIAG_RELATION_EQUALITY_AMBIGUOUS: &str = "E4107";
+pub const DIAG_TIME_ENERGY_ADD: &str = "E5001";
+pub const DIAG_AFFINE_TEMPERATURE_ADD: &str = "E5002";
+pub const DIAG_ABSOLUTE_QUANTITY_SUM: &str = "E5003";
+pub const DIAG_CURRENCY_MISMATCH: &str = "E5003";
+pub const DIAG_MONEY_FROM_FLOAT: &str = "E5004";
+pub const DIAG_MONEY_BINARY_FLOAT: &str = "E5103";
+pub const DIAG_CALENDAR_BUCKET_ZONE: &str = "E6001";
+pub const DIAG_SYS_COMMIT_READ_ONLY: &str = "E7001";
+pub const DIAG_SECRET_DISPLAY: &str = "E7002";
+pub const DIAG_DISPLAY_READ_ONLY: &str = "E7201";
+pub const DIAG_CROSS_DATABASE_WRITE: &str = "E9001";
+pub const DIAG_AMBIGUOUS_DURABLE_CONSUMER: &str = "E9101";
+pub const DIAG_DURABLE_CONSUMER_SOURCE_ROOTS: &str = "E9102";
+pub const DIAG_CURRENCY_SYMBOL: &str = "ORNA091-E-CURRENCY-SYMBOL";
+pub const DIAG_CONVERSION_CHAIN: &str = "ORNA091-E-CONVERSION-CHAIN";
+pub const DIAG_SYS_ADMIN_METHOD: &str = "ORNA100-E-SYS-ADMIN-METHOD";
+pub const DIAG_SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
+pub const DIAG_TABLE_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_REQUIRED_FIELD: &str = "E2002";
+pub const DIAG_TABLE_UNKNOWN_FIELD: &str = "E2003";
 /// Published typecheck classification for an operand whose static type does
 /// not fit its operator (the spec's "expected X, found Y" type mismatch).
 pub const DIAG_TYPE_MISMATCH: &str = "E2001";
@@ -555,6 +595,12 @@ pub struct Catalogue {
     /// The verified source provenance used to admit the source-backed
     /// standard modules, when this catalogue contains any.
     standard_dependency_profile: Option<StandardDependencyProfile>,
+    /// Dimension and unit declarations supplied with the caller's environment,
+    /// such as the semantic support the reference fixtures require. They
+    /// resolve through module exports and attached symbols exactly like
+    /// source declarations; nothing is inferred from a unit's spelling.
+    source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
+    source_dimensions: BTreeMap<SourceDimensionIdentity, DimensionBasis>,
 }
 impl Catalogue {
     pub fn empty() -> Self {
@@ -586,6 +632,50 @@ impl Catalogue {
             self.historical_modules
                 .insert(module.namespace.clone(), module);
         }
+        self
+    }
+
+    /// Adds dimension and unit declarations supplied by the environment as
+    /// the given modules, so qualified paths such as `std.units.si.kWh`
+    /// resolve through ordinary module exports. The public units of a module
+    /// marked attached are also visible unqualified, like the attached tables
+    /// of a fixture environment; lexical declarations and imports still take
+    /// precedence (ORNA-UNIT-008).
+    fn with_unit_support(mut self, modules: &[(Namespace, &str, bool)]) -> Self {
+        let mut items = Vec::new();
+        for (namespace, source, attached) in modules {
+            let logical_path = format!("{}.orna", namespace.0.join("/"));
+            let parsed = parse_module_with_file(source, &logical_path);
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "catalogue unit support must be valid module source"
+            );
+            let header = collect_header(namespace, &parsed.value, &BTreeSet::new(), &mut Vec::new());
+            if *attached {
+                for (name, symbol) in &header.exports {
+                    if symbol.kind == SymbolKind::Unit {
+                        self.attached_symbols.insert(name.clone(), symbol.clone());
+                    }
+                }
+            }
+            items.extend(
+                parsed
+                    .value
+                    .items
+                    .into_iter()
+                    .filter(|item| {
+                        matches!(
+                            item.declaration,
+                            Declaration::Dimension { .. } | Declaration::Unit { .. }
+                        )
+                    })
+                    .map(|item| (namespace.clone(), logical_path.clone(), item)),
+            );
+            self.modules.insert(namespace.clone(), header);
+        }
+        let (units, dimensions) = analyze_source_units(&items);
+        self.source_units.extend(units);
+        self.source_dimensions.extend(dimensions);
         self
     }
 
@@ -1039,6 +1129,8 @@ impl Catalogue {
             attached_symbols: BTreeMap::new(),
             historical_modules: BTreeMap::new(),
             standard_dependency_profile: None,
+            source_units: BTreeMap::new(),
+            source_dimensions: BTreeMap::new(),
         }
     }
 
@@ -1346,9 +1438,60 @@ impl Catalogue {
                 false,
             ),
         );
-        catalogue
+        // The reference fixtures use these units without declaring them; the
+        // conformance manifest requires their semantic support to be supplied
+        // explicitly. `work` is the attached database of
+        // `examples/valid/unit-cross-database.orna`.
+        catalogue.modules.insert(
+            Namespace(vec!["work".into()]),
+            fixture_module(Namespace(vec!["work".into()]), [], true),
+        );
+        catalogue.with_unit_support(&[
+            (
+                Namespace(vec!["fixture".into(), "units".into()]),
+                FIXTURE_UNIT_SUPPORT,
+                true,
+            ),
+            (
+                Namespace(vec!["std".into(), "units".into(), "si".into()]),
+                "pub unit kWh : Energy = 3.6e6.J;",
+                false,
+            ),
+            (
+                Namespace(vec!["work".into(), "units".into()]),
+                "pub unit kWh : Energy = 3.6e6.J;",
+                false,
+            ),
+        ])
     }
 }
+
+/// Dimension and unit support for the reference fixtures, following the
+/// declaration block of `05-types.md` "Dimensions and units". Only the units
+/// the fixtures name are public, so the private helpers never shadow the
+/// intrinsic temporal suffixes such as `90.min`.
+const FIXTURE_UNIT_SUPPORT: &str = "\
+pub dim Length;
+pub dim Mass;
+pub dim Time;
+pub dim Temperature;
+pub dim Information;
+pub dim Speed = Length / Time;
+pub dim Energy = Mass * Length^2 / Time^2;
+unit m : Length base;
+unit kg : Mass base;
+unit s : Time base;
+unit hour : Time = 3600.s;
+unit mile : Length = 1609.344.m;
+unit J : Energy = kg * m^2 / s^2;
+unit B : Information base;
+pub unit K : Temperature base;
+pub unit C : Temperature = K offset 273.15 affine;
+pub unit deltaC : Temperature = K;
+pub unit kWh : Energy = 3.6e6.J;
+pub unit mph : Speed = mile / hour;
+pub unit MiB : Information = 1048576.B;
+";
 
 fn catalogue_module<I, N, P, Q>(
     namespace: Namespace,
@@ -1582,6 +1725,8 @@ impl SourceDimensionIdentity {
         format!("{}.{}", self.namespace.display(), self.name)
     }
 }
+/// Reduced exponents over declared base dimensions.
+type DimensionBasis = BTreeMap<SourceDimensionIdentity, i64>;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceUnitRational {
     /// Canonical base-10 integer numerator.
@@ -1900,7 +2045,7 @@ pub fn admit_row_unit_with_owner_fields(
         {
             result
                 .diagnostics
-                .push(diag(DIAG_TYPE, "project row omits a required stored field"));
+                .push(diag(DIAG_MISSING_REQUIRED_FIELD, "project row omits a required stored field"));
         }
     }
     result
@@ -2021,11 +2166,22 @@ fn analyze_retaining_context_with_providers(
         }));
         parsed.push((namespace, parse.value));
     }
-    result.source_units = analyze_source_units(&source_unit_items);
+    let (source_units, source_dimensions) = analyze_source_units(&source_unit_items);
+    // Catalogue-supplied declarations resolve like source ones; a source
+    // declaration with the same identity takes precedence.
+    let mut units = catalogue.source_units.clone();
+    units.extend(source_units.iter().map(|(identity, unit)| (identity.clone(), unit.clone())));
+    let mut dimensions = catalogue.source_dimensions.clone();
+    dimensions.extend(source_dimensions);
+    let units = UnitEnvironment {
+        units: Rc::new(units),
+        dimensions: Rc::new(dimensions),
+    };
+    result.source_units = source_units;
     let mut dependency_summaries = BTreeMap::new();
-    let source_payload_enums = parsed
+    let source_enums = parsed
         .iter()
-        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .map(|(namespace, tree)| (namespace.clone(), source_enum_variant_rows(namespace, tree)))
         .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
@@ -2033,6 +2189,7 @@ fn analyze_retaining_context_with_providers(
         &catalogue.historical_modules,
         &catalogue.attached_symbols,
         &mut dependency_summaries,
+        &units,
     );
     // Every module of one analysis belongs to a single admission, so each
     // unlinked `sys` member is reported once.
@@ -2049,35 +2206,37 @@ fn analyze_retaining_context_with_providers(
             &catalogue.historical_modules,
             &catalogue.attached_symbols,
             &dependency_summaries,
+            &units,
             &mut result.diagnostics,
         );
         scope.current_namespace = Some(namespace.clone());
         scope.unlinked_system_members = unlinked_system_members.clone();
-        let mut visible_unit_namespaces = BTreeSet::from([namespace.clone()]);
-        visible_unit_namespaces.extend(scope.modules.values().cloned());
-        scope.source_units = result
-            .source_units
-            .iter()
-            .filter(|(identity, _)| visible_unit_namespaces.contains(&identity.namespace))
-            .map(|(identity, metadata)| (identity.clone(), metadata.clone()))
-            .collect();
-        scope
-            .payload_enum_types
-            .extend(imported_payload_enum_bindings(
-                tree,
-                &source_payload_enums,
-                &result.modules,
-            ));
+        // Import visibility is enforced by `scope.names`; every unit a name
+        // can reach is in the merged environment, including wildcard-imported
+        // catalogue units whose module never becomes a `scope.modules` alias.
+        scope.source_units = Rc::clone(&units.units);
+        let imported_enums = imported_enum_bindings(tree, &source_enums, &result.modules);
+        scope.payload_enum_types.extend(
+            imported_enums
+                .iter()
+                .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
+                .map(|(spelling, _)| spelling.clone()),
+        );
+        scope.imported_enum_variants = imported_enums;
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
+            normalize_symbol_quantities(symbol, &scope);
         }
         stabilize_local_function_dependencies(tree, &scope);
         let table_rows = tree
             .items
             .iter()
             .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
+                Declaration::Table { name, .. } => Some((
+                    name.clone(),
+                    normalize_source_quantities(&table_row_type(item), &scope, None),
+                )),
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
@@ -2223,7 +2382,15 @@ struct SourceUnitDecl {
     provenance: SourceUnitProvenance,
 }
 
-fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceUnitIdentity, SourceUnitMetadata> {
+/// Resolves dimension and unit declarations to their reduced dimension bases
+/// and unit metadata. Declarations that cannot be reduced are omitted, so
+/// every use of them stays unresolved instead of guessing from a spelling.
+fn analyze_source_units(
+    items: &[(Namespace, String, Item)],
+) -> (
+    BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
+    BTreeMap<SourceDimensionIdentity, DimensionBasis>,
+) {
     let mut dimensions = BTreeMap::new();
     let mut units = BTreeMap::new();
     let mut duplicate_dimensions = BTreeSet::new();
@@ -2281,7 +2448,14 @@ fn analyze_source_units(items: &[(Namespace, String, Item)]) -> BTreeMap<SourceU
             provenance: declaration.provenance.clone(),
         });
     }
-    result
+    let bases = dimensions
+        .keys()
+        .filter_map(|identity| {
+            source_dimension_basis(identity, &dimensions, &mut BTreeSet::new())
+                .map(|basis| (identity.clone(), basis))
+        })
+        .collect();
+    (result, bases)
 }
 
 fn source_dimension_path(ty: &TypeExpr) -> Option<Vec<String>> {
@@ -2421,6 +2595,7 @@ fn stabilize_function_summaries(
     historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
     dependency_summaries: &mut BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+    units: &UnitEnvironment,
 ) {
     let pass_limit = parsed
         .iter()
@@ -2443,11 +2618,13 @@ fn stabilize_function_summaries(
                 historical_modules,
                 attached_symbols,
                 dependency_summaries,
+                units,
                 &mut discarded,
             );
             let mut symbols = header.symbols;
             for symbol in symbols.values_mut() {
                 canonicalize_symbol(symbol, &scope.nominal_identities);
+                normalize_symbol_quantities(symbol, &scope);
             }
             for item in &tree.items {
                 if matches!(item.declaration, Declaration::Function { .. }) {
@@ -2564,12 +2741,14 @@ fn collect_header(
         let Some((name, kind, mut ty)) = declared_symbol(item) else {
             continue;
         };
+        // Nominal types and units carry their declaring module so imports
+        // keep their identity rather than a bare spelling.
         if matches!(
             &item.declaration,
             Declaration::Type {
                 representation: TypeRepresentation::Nominal { .. },
                 ..
-            }
+            } | Declaration::Unit { .. }
         ) {
             ty = Type::Named(nominal_identity(namespace, &name));
         }
@@ -2826,9 +3005,29 @@ fn type_of(ty: &TypeExpr) -> Type {
                         unit: Box::new(unit),
                     }
                 }
+                // A compound unit such as the `m / s` of `Float<m / s>`. It
+                // resolves against declared units when the type is
+                // canonicalized; anywhere else it is not a type.
+                (lhs, "*" | "/", rhs) if is_unit_term(&lhs) && is_unit_term(&rhs) => {
+                    Type::Applied {
+                        base: op.clone(),
+                        arguments: vec![lhs, rhs],
+                    }
+                }
                 _ => Type::Error,
             }
         }
+    }
+}
+
+/// A unit name or compound unit as `type_of` records it inside a type.
+fn is_unit_term(ty: &Type) -> bool {
+    match ty {
+        Type::Named(_) => true,
+        Type::Applied { base, arguments } => {
+            matches!(base.as_str(), "*" | "/") && arguments.iter().all(is_unit_term)
+        }
+        _ => false,
     }
 }
 
@@ -2938,108 +3137,182 @@ fn resolve_type_aliases(
 }
 
 fn canonicalize_type(ty: &Type, scope: &Scope) -> Type {
-    fn source_quantity_type(numeric: Type, unit_type: &Type, scope: &Scope) -> Option<Type> {
-        let Type::Named(unit_name) = unit_type else {
-            return None;
-        };
-        let path = unit_name.split('.').map(str::to_owned).collect::<Vec<_>>();
-        let unit = source_unit_for_path(&path, scope)?;
-        Some(Type::Quantity {
-            numeric: Box::new(numeric),
-            dimension_basis: unit.dimension_basis.clone(),
-            scale: unit.scale.clone(),
-            offset: unit.offset.clone(),
-            affine: unit.affine,
-        })
-    }
-
-    fn normalize_source_quantities(ty: &Type, scope: &Scope) -> Type {
-        match ty {
-            Type::List(inner) => Type::List(Box::new(normalize_source_quantities(inner, scope))),
-            Type::Range(inner) => Type::Range(Box::new(normalize_source_quantities(inner, scope))),
-            Type::Relation(inner) => {
-                Type::Relation(Box::new(normalize_source_quantities(inner, scope)))
-            }
-            Type::Stream(inner) => Type::Stream(Box::new(normalize_source_quantities(inner, scope))),
-            Type::Record(fields) => Type::Record(
-                fields
-                    .iter()
-                    .map(|(name, field)| {
-                        (name.clone(), normalize_source_quantities(field, scope))
-                    })
-                    .collect(),
-            ),
-            Type::Tuple(elements) => Type::Tuple(
-                elements
-                    .iter()
-                    .map(|element| normalize_source_quantities(element, scope))
-                    .collect(),
-            ),
-            Type::Optional(inner) => {
-                Type::Optional(Box::new(normalize_source_quantities(inner, scope)))
-            }
-            Type::Applied { base, arguments } => {
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| normalize_source_quantities(argument, scope))
-                    .collect::<Vec<_>>();
-                let quantity = match base.as_str() {
-                    "Int" if arguments.len() == 1 => {
-                        source_quantity_type(Type::Int, &arguments[0], scope)
-                    }
-                    "Decimal" if arguments.len() == 1 => {
-                        source_quantity_type(Type::Decimal, &arguments[0], scope)
-                    }
-                    "Float" if arguments.len() == 1 => {
-                        source_quantity_type(Type::Float, &arguments[0], scope)
-                    }
-                    "Quantity" if arguments.len() == 2 => {
-                        source_quantity_type(arguments[0].clone(), &arguments[1], scope)
-                    }
-                    _ => None,
-                };
-                quantity.unwrap_or_else(|| Type::Applied {
-                    base: base.clone(),
-                    arguments,
-                })
-            }
-            Type::Quantity {
-                numeric,
-                dimension_basis,
-                scale,
-                offset,
-                affine,
-            } => Type::Quantity {
-                numeric: Box::new(normalize_source_quantities(numeric, scope)),
-                dimension_basis: dimension_basis.clone(),
-                scale: scale.clone(),
-                offset: offset.clone(),
-                affine: *affine,
-            },
-            Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
-                currency: Box::new(normalize_source_quantities(currency, scope)),
-                unit: Box::new(normalize_source_quantities(unit, scope)),
-            },
-            Type::Function {
-                parameters,
-                parameter_names,
-                default_parameters,
-                result,
-            } => Type::Function {
-                parameters: parameters
-                    .iter()
-                    .map(|parameter| normalize_source_quantities(parameter, scope))
-                    .collect(),
-                parameter_names: parameter_names.clone(),
-                default_parameters: default_parameters.clone(),
-                result: Box::new(normalize_source_quantities(result, scope)),
-            },
-            _ => ty.clone(),
-        }
-    }
-
     let canonical = canonicalize_type_with_identities(ty, &scope.nominal_identities);
-    normalize_source_quantities(&canonical, scope)
+    normalize_source_quantities(&canonical, scope, None)
+}
+
+/// Rewrites `Int<m>`, `Float<m / s>`, `Quantity<Float, m>` and the unit of a
+/// money rate to structural quantities resolved from declared units
+/// (ORNA-UNIT-001). `home` names the module that wrote the type when that is
+/// not the module of `scope`, such as the declaring module of an imported
+/// table row. A unit that does not resolve stays as written, for annotation
+/// validation to report.
+fn normalize_source_quantities(ty: &Type, scope: &Scope, home: Option<&Namespace>) -> Type {
+    let normalize = |ty: &Type| normalize_source_quantities(ty, scope, home);
+    match ty {
+        Type::List(inner) => Type::List(Box::new(normalize(inner))),
+        Type::Range(inner) => Type::Range(Box::new(normalize(inner))),
+        Type::Relation(inner) => Type::Relation(Box::new(normalize(inner))),
+        Type::Stream(inner) => Type::Stream(Box::new(normalize(inner))),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), normalize(field)))
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(elements.iter().map(normalize).collect()),
+        Type::Optional(inner) => Type::Optional(Box::new(normalize(inner))),
+        Type::Applied { base, arguments } => {
+            let quantity = match (base.as_str(), arguments.as_slice()) {
+                ("Int", [unit]) => unit_quantity_type(Type::Int, unit, scope, home),
+                ("Decimal", [unit]) => unit_quantity_type(Type::Decimal, unit, scope, home),
+                ("Float", [unit]) => unit_quantity_type(Type::Float, unit, scope, home),
+                ("Quantity", [numeric @ (Type::Int | Type::Decimal | Type::Float), unit]) => {
+                    unit_quantity_type(numeric.clone(), unit, scope, home)
+                }
+                _ => None,
+            };
+            quantity.unwrap_or_else(|| Type::Applied {
+                base: base.clone(),
+                arguments: arguments.iter().map(normalize).collect(),
+            })
+        }
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        } => Type::Quantity {
+            numeric: Box::new(normalize(numeric)),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: offset.clone(),
+            affine: *affine,
+        },
+        // Money is exact, so the rate's unit is recorded as a Decimal quantity.
+        Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+            currency: Box::new(normalize(currency)),
+            unit: Box::new(
+                unit_quantity_type(Type::Decimal, unit, scope, home)
+                    .unwrap_or_else(|| normalize(unit)),
+            ),
+        },
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters.iter().map(normalize).collect(),
+            parameter_names: parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: Box::new(normalize(result)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// The quantity type of `numeric` values measured in `unit`, a unit name or
+/// compound unit recorded by `type_of`.
+fn unit_quantity_type(
+    numeric: Type,
+    unit: &Type,
+    scope: &Scope,
+    home: Option<&Namespace>,
+) -> Option<Type> {
+    let shape = unit_shape(unit, scope, home)?;
+    // A compound unit that cancels completely, such as `m / m`, is a plain
+    // number, as the matching product of quantities is.
+    if shape.dimension_basis.is_empty() && shape.scale == UnitFraction::one() && !shape.affine {
+        return Some(numeric);
+    }
+    Some(Type::Quantity {
+        numeric: Box::new(numeric),
+        dimension_basis: shape.dimension_basis,
+        scale: shape.scale.public(),
+        offset: shape.offset.public(),
+        affine: shape.affine,
+    })
+}
+
+/// The structural meaning of a unit: reduced dimension exponents, exact
+/// scale and affine offset (ORNA-UNIT-001).
+struct UnitShape {
+    dimension_basis: DimensionBasis,
+    scale: UnitFraction,
+    offset: UnitFraction,
+    affine: bool,
+}
+
+fn unit_shape(unit: &Type, scope: &Scope, home: Option<&Namespace>) -> Option<UnitShape> {
+    match unit {
+        Type::Named(name) => {
+            let path = name.split('.').map(str::to_owned).collect::<Vec<_>>();
+            let declared = home
+                .filter(|_| path.len() == 1)
+                .and_then(|home| {
+                    scope.source_units.get(&SourceUnitIdentity {
+                        namespace: home.clone(),
+                        name: name.clone(),
+                    })
+                })
+                .or_else(|| match lookup_unit(&path, scope) {
+                    UnitLookup::Declared(unit) => Some(unit),
+                    UnitLookup::Ambiguous | UnitLookup::Unresolved => None,
+                })?;
+            Some(UnitShape {
+                dimension_basis: declared.dimension_basis.clone(),
+                scale: unit_fraction(&declared.scale)?,
+                offset: unit_fraction(&declared.offset)?,
+                affine: declared.affine,
+            })
+        }
+        // Only linear units combine (ORNA-UNIT-005).
+        Type::Applied { base, arguments } if matches!(base.as_str(), "*" | "/") => {
+            let [left, right] = arguments.as_slice() else {
+                return None;
+            };
+            let left = unit_shape(left, scope, home).filter(|shape| !shape.affine)?;
+            let right = unit_shape(right, scope, home).filter(|shape| !shape.affine)?;
+            let divide = base == "/";
+            Some(UnitShape {
+                dimension_basis: combine_dimension_bases(
+                    &left.dimension_basis,
+                    &right.dimension_basis,
+                    divide,
+                )?,
+                scale: if divide {
+                    left.scale.divide(&right.scale)?
+                } else {
+                    left.scale.multiply(&right.scale)?
+                },
+                offset: UnitFraction::zero(),
+                affine: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Adds (or, when dividing, subtracts) dimension exponents, dropping the
+/// dimensions that cancel.
+fn combine_dimension_bases(
+    left: &DimensionBasis,
+    right: &DimensionBasis,
+    divide: bool,
+) -> Option<DimensionBasis> {
+    let mut basis = left.clone();
+    for (dimension, exponent) in right {
+        let current = basis.entry(dimension.clone()).or_insert(0);
+        *current = if divide {
+            current.checked_sub(*exponent)?
+        } else {
+            current.checked_add(*exponent)?
+        };
+    }
+    basis.retain(|_, exponent| *exponent != 0);
+    Some(basis)
 }
 
 fn canonicalize_type_with_identities(ty: &Type, identities: &BTreeMap<String, String>) -> Type {
@@ -3232,6 +3505,14 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
     }
 }
 
+/// Resolves the units of a signature in its declaring module, so an importer
+/// never resolves another module's unit names in its own import context.
+fn normalize_symbol_quantities(symbol: &mut Symbol, scope: &Scope) {
+    if matches!(symbol.kind, SymbolKind::Function | SymbolKind::Let) {
+        symbol.ty = normalize_source_quantities(&symbol.ty, scope, None);
+    }
+}
+
 fn canonicalize_symbol(symbol: &mut Symbol, identities: &BTreeMap<String, String>) {
     symbol.ty = canonicalize_type_with_identities(&symbol.ty, identities);
     if let Some(schema) = &mut symbol.table_schema {
@@ -3329,6 +3610,58 @@ fn canonicalize_scope_metadata(scope: &mut Scope, namespace: &Namespace, tree: &
             }
         }
     }
+    normalize_scope_quantities(scope);
+}
+
+/// Resolves declared units in the types this module consumes: signatures,
+/// table and nominal rows, refined bases and enum payloads become structural
+/// quantities (ORNA-UNIT-001). A row keyed by its declaring module resolves
+/// that module's units first. Table schemas keep their written units, which
+/// schema descriptors identify by name.
+fn normalize_scope_quantities(scope: &mut Scope) {
+    let names = scope
+        .names
+        .iter()
+        .filter(|(_, symbol)| matches!(symbol.kind, SymbolKind::Function | SymbolKind::Let))
+        .map(|(name, symbol)| {
+            (name.clone(), normalize_source_quantities(&symbol.ty, scope, None))
+        })
+        .collect::<Vec<_>>();
+    for (name, ty) in names {
+        if let Some(symbol) = scope.names.get_mut(&name) {
+            symbol.ty = ty;
+        }
+    }
+    let home = |key: &str| {
+        key.rsplit_once('.')
+            .map(|(namespace, _)| Namespace(namespace.split('.').map(str::to_owned).collect()))
+    };
+    let normalize_rows = |rows: &BTreeMap<String, Type>| {
+        rows.iter()
+            .map(|(key, row)| {
+                let home = home(key);
+                (key.clone(), normalize_source_quantities(row, scope, home.as_ref()))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let table_rows = normalize_rows(&scope.table_rows);
+    let nominal_rows = normalize_rows(&scope.nominal_rows);
+    let refined_types = normalize_rows(&scope.refined_types);
+    let enum_variants = scope
+        .enum_variants
+        .iter()
+        .map(|(name, variants)| {
+            let variants = variants
+                .iter()
+                .map(|(variant, fields)| (variant.clone(), normalize_rows(fields)))
+                .collect();
+            (name.clone(), variants)
+        })
+        .collect();
+    scope.table_rows = table_rows;
+    scope.nominal_rows = nominal_rows;
+    scope.refined_types = refined_types;
+    scope.enum_variants = enum_variants;
 }
 fn primitive(name: &str) -> Option<Type> {
     Some(match name {
@@ -3375,7 +3708,11 @@ fn primitive(name: &str) -> Option<Type> {
 struct Scope {
     names: BTreeMap<String, Symbol>,
     current_namespace: Option<Namespace>,
-    source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
+    /// Every dimension and unit declared by the analysed sources or supplied
+    /// by the catalogue, keyed by identity. Names reach them only through
+    /// `names` and module exports (`lookup_unit`).
+    source_units: Rc<BTreeMap<SourceUnitIdentity, SourceUnitMetadata>>,
+    source_dimensions: Rc<BTreeMap<SourceDimensionIdentity, DimensionBasis>>,
     /// Per-module summaries used while resolving table provenance through
     /// pure helper calls. This remains semantic-loader state rather than a
     /// public Symbol field so existing catalogue/value contracts stay stable.
@@ -3438,6 +3775,10 @@ struct Scope {
     /// Local or explicitly imported enum types whose variants carry payloads.
     /// This compact admission metadata is kept separately from public Symbols.
     payload_enum_types: BTreeSet<String>,
+    /// Payload rows of explicitly imported source enums, keyed by the
+    /// spelling that names the enum here (`Level`, or `alias.Level` through a
+    /// module binding). Construction checks qualified variants against them.
+    imported_enum_variants: BTreeMap<String, EnumVariantRows>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -3468,6 +3809,15 @@ struct Scope {
     /// joins the `return` statements that it owns.
     return_frames: RefCell<Vec<ReturnFrame>>,
 }
+
+/// The dimension and unit declarations an analysis resolves units against:
+/// those of the analysed sources plus those supplied by the catalogue.
+#[derive(Clone, Default)]
+struct UnitEnvironment {
+    units: Rc<BTreeMap<SourceUnitIdentity, SourceUnitMetadata>>,
+    dimensions: Rc<BTreeMap<SourceDimensionIdentity, DimensionBasis>>,
+}
+
 fn resolve_imports(
     namespace: &Namespace,
     tree: &SyntaxTree,
@@ -3485,6 +3835,7 @@ fn resolve_imports(
         historical_modules,
         attached_symbols,
         &BTreeMap::new(),
+        &UnitEnvironment::default(),
         diagnostics,
     )
 }
@@ -3496,12 +3847,14 @@ fn resolve_imports_with_dependencies(
     historical_modules: &BTreeMap<Namespace, ModuleHeader>,
     attached_symbols: &BTreeMap<String, Symbol>,
     dependency_summaries: &BTreeMap<Namespace, BTreeMap<String, BTreeSet<String>>>,
+    units: &UnitEnvironment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Scope {
     let mut scope = Scope {
         names: header.symbols.clone(),
         current_namespace: None,
-        source_units: BTreeMap::new(),
+        source_units: Rc::clone(&units.units),
+        source_dimensions: Rc::clone(&units.dimensions),
         function_dependencies: RefCell::new(BTreeMap::new()),
         unlinked_system_members: None,
         ambiguous: BTreeSet::new(),
@@ -3561,6 +3914,7 @@ fn resolve_imports_with_dependencies(
         currency_types: BTreeSet::new(),
         enum_variants: enum_variant_types(tree, diagnostics),
         payload_enum_types: payload_enum_names(tree),
+        imported_enum_variants: BTreeMap::new(),
         type_aliases: tree
             .items
             .iter()
@@ -4315,7 +4669,7 @@ fn check_item(
                     && name == "symbol"
                 {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_CURRENCY_SYMBOL,
                         "currency symbols belong to locale-aware formatting, not Currency identity",
                     ));
                 }
@@ -4340,9 +4694,9 @@ fn check_item(
             ..
         } => {
             if name == "std" {
-                diagnostics.push(diag(DIAG_TYPE, "`std` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_STD, "`std` is reserved"));
             } else if name == "sys" {
-                diagnostics.push(diag(DIAG_TYPE, "`sys` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_SYS, "`sys` is reserved"));
             }
             let mut key_names = BTreeSet::new();
             for key in keys {
@@ -4360,21 +4714,29 @@ fn check_item(
                         "primary-key fields must have simple names",
                     )),
                 }
-                if let Some(annotation) = &key.annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "primary-key fields must declare a type",
-                    ));
-                }
+                let annotation_resolved = match &key.annotation {
+                    Some(annotation) => {
+                        let before = diagnostics.len();
+                        validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                        diagnostics.len() == before
+                    }
+                    None => {
+                        diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
+                        false
+                    }
+                };
                 let ty = key
                     .annotation
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
-                    diagnostics.push(diag(DIAG_TYPE, message));
+                // A key type that failed annotation validation already carries
+                // its diagnostic; it has no encoding left to judge.
+                if annotation_resolved
+                    && let Some((code, message)) =
+                        primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+                {
+                    diagnostics.push(diag(code, message));
                 }
             }
             // Keep the catalogue's key encoding types transparent through
@@ -4535,7 +4897,7 @@ fn check_item(
                             && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
                         {
                             diagnostics.push(diag(
-                                DIAG_TYPE,
+                                DIAG_COMPUTED_NONDETERMINISTIC,
                                 "computed field must be deterministic and row-local",
                             ));
                         }
@@ -5930,7 +6292,7 @@ fn validate_implementation_restrictions(
                 && implementation_has_write(implementation, scope) =>
         {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_DISPLAY_READ_ONLY,
                 "Display and Present implementations must be read-only",
             ));
         }
@@ -6223,12 +6585,11 @@ fn validate_type_annotation(
         TypeExpr::Name {
             path, arguments, ..
         } => {
-            // Numeric unit and currency arguments use the dimensional
-            // identity surface rather than ordinary generic type arguments.
-            // A unit must resolve to a declared type or one of the closed
-            // unit identities; `Money` takes a currency type.
-            let dimensional_constructor = path.len() == 1
-                && matches!(path[0].as_str(), "Int" | "Decimal" | "Float" | "Money");
+            // Numeric arguments name units rather than types; `Money` takes a
+            // currency type (ORNA-MONEY-004).
+            let numeric_constructor = path.len() == 1
+                && matches!(path[0].as_str(), "Int" | "Decimal" | "Float");
+            let money_constructor = path.len() == 1 && path[0] == "Money";
             if !annotation_type_name_is_declared(path, scope, generic_names) {
                 diagnostics.push(diag(
                     if path.len() == 1 && path[0] == "Result" {
@@ -6243,14 +6604,23 @@ fn validate_type_annotation(
                     },
                 ));
             }
-            if dimensional_constructor && !arguments.is_empty() {
-                if path[0] == "Money" {
-                    validate_money_currency(arguments, scope, generic_names, diagnostics);
-                } else if arguments.len() != 1
-                    || !dimensional_argument_is_declared(&arguments[0], scope, generic_names)
-                {
+            if numeric_constructor && !arguments.is_empty() {
+                if let [unit] = arguments.as_slice() {
+                    validate_unit_annotation(unit, scope, diagnostics);
+                } else {
                     diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
                 }
+            } else if path.len() == 1 && path[0] == "Quantity" {
+                // `Quantity<N, U>` is the spelled-out form of `N<U>`.
+                if let [numeric, unit] = arguments.as_slice()
+                    && matches!(type_of(numeric), Type::Int | Type::Decimal | Type::Float)
+                {
+                    validate_unit_annotation(unit, scope, diagnostics);
+                } else {
+                    diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+                }
+            } else if money_constructor && !arguments.is_empty() {
+                validate_money_currency(arguments, scope, generic_names, diagnostics);
             } else {
                 for argument in arguments {
                     validate_type_annotation(argument, scope, generic_names, diagnostics);
@@ -6260,20 +6630,16 @@ fn validate_type_annotation(
         TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
             validate_type_annotation(inner, scope, generic_names, diagnostics);
         }
-        // Products are also used for dimensional/unit identities whose
-        // qualified declarations are deliberately opaque in this scope.
-        // Validate their leaves, then reject only a product the closed type
-        // model cannot represent. Otherwise an unsupported product becomes
-        // the internal error sentinel and silently bypasses later checks.
+        // A product type is a money rate such as `Money<GBP> / kWh`, whose
+        // divisor is a declared unit (ORNA-MONEY-003). Any other product is
+        // rejected rather than becoming the internal error sentinel, which
+        // would silently bypass later checks.
         TypeExpr::Product { lhs, rhs, .. } => {
             validate_type_annotation(lhs, scope, generic_names, diagnostics);
-            let product = type_of(type_expr);
-            if !matches!(product, Type::MoneyPerUnit { .. })
-                || !dimensional_argument_is_declared(rhs, scope, generic_names)
-            {
+            if matches!(type_of(type_expr), Type::MoneyPerUnit { .. }) {
+                validate_unit_annotation(rhs, scope, diagnostics);
+            } else {
                 validate_type_annotation(rhs, scope, generic_names, diagnostics);
-            }
-            if product == Type::Error {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     "type product is not a supported static type",
@@ -6299,25 +6665,6 @@ fn validate_type_annotation(
             validate_type_annotation(result, scope, generic_names, diagnostics);
         }
     }
-}
-
-fn dimensional_argument_is_declared(
-    argument: &TypeExpr,
-    scope: &Scope,
-    generic_names: &BTreeSet<String>,
-) -> bool {
-    let TypeExpr::Name {
-        path, arguments, ..
-    } = argument
-    else {
-        return false;
-    };
-    if !arguments.is_empty() {
-        return false;
-    }
-    annotation_type_name_is_declared(path, scope, generic_names)
-        || source_unit_for_path(path, scope).is_some()
-        || path.last().is_some_and(|name| is_implicit_unit(name))
 }
 
 /// `Money<C>` takes one currency: a nominal type that implements the core
@@ -6352,47 +6699,109 @@ fn validate_money_currency(
     }
 }
 
-fn source_unit_for_path<'a>(path: &[String], scope: &'a Scope) -> Option<&'a SourceUnitMetadata> {
-    let name = path.last()?;
-    if path.len() > 1 {
-        return scope.source_units.get(&SourceUnitIdentity {
-            namespace: Namespace(path[..path.len() - 1].to_vec()),
-            name: name.clone(),
-        });
-    }
-    if let Some(namespace) = &scope.current_namespace
-        && let Some(unit) = scope.source_units.get(&SourceUnitIdentity {
-            namespace: namespace.clone(),
-            name: name.clone(),
-        })
-    {
-        return Some(unit);
-    }
-    let mut candidates = scope.source_units.values().filter(|unit| unit.identity.name == *name);
-    let candidate = candidates.next()?;
-    candidates.next().is_none().then_some(candidate)
+/// How a unit name resolves in the current import context (ORNA-UNIT-008).
+enum UnitLookup<'a> {
+    Declared(&'a SourceUnitMetadata),
+    Ambiguous,
+    Unresolved,
 }
 
-fn is_implicit_unit(name: &str) -> bool {
-    matches!(
-        name,
-        "C" | "K"
-            | "day"
-            | "days"
-            | "hour"
-            | "hours"
-            | "minute"
-            | "minutes"
-            | "min"
-            | "second"
-            | "seconds"
-            | "s"
-            | "m"
-            | "km"
-            | "kWh"
-            | "mph"
-    )
+/// Resolves a unit path through the ordinary lexical environment: local
+/// declarations, explicit imports and attached declarations, then wildcard
+/// imports, where two candidates are ambiguous. A qualified path names a unit
+/// exported by an available module. A unit never resolves from its spelling
+/// alone (ORNA-UNIT-001).
+fn lookup_unit<'a>(path: &[String], scope: &'a Scope) -> UnitLookup<'a> {
+    let symbol = match path {
+        [] => None,
+        [name] if scope.ambiguous.contains(name) && !scope.names.contains_key(name) => {
+            return UnitLookup::Ambiguous;
+        }
+        [name] => scope.names.get(name),
+        [root, members @ .., name] => scope.modules.get(root).and_then(|root| {
+            let namespace = Namespace(root.0.iter().chain(members).cloned().collect());
+            scope
+                .available_modules
+                .get(&namespace)
+                .and_then(|module| module.exports.get(name))
+        }),
+    };
+    symbol
+        .filter(|symbol| symbol.kind == SymbolKind::Unit)
+        .and_then(|symbol| match &symbol.ty {
+            Type::Named(identity) => scope.source_units.get(&unit_identity(identity)),
+            _ => None,
+        })
+        .map_or(UnitLookup::Unresolved, UnitLookup::Declared)
 }
+
+/// Splits the `namespace.name` identity a unit symbol carries.
+fn unit_identity(identity: &str) -> SourceUnitIdentity {
+    match identity.rsplit_once('.') {
+        Some((namespace, name)) => SourceUnitIdentity {
+            namespace: Namespace(namespace.split('.').map(str::to_owned).collect()),
+            name: name.to_owned(),
+        },
+        None => SourceUnitIdentity {
+            namespace: Namespace(Vec::new()),
+            name: identity.to_owned(),
+        },
+    }
+}
+
+/// The units a module can name without qualification.
+fn visible_units(scope: &Scope) -> impl Iterator<Item = &SourceUnitMetadata> {
+    scope.names.values().filter_map(|symbol| match &symbol.ty {
+        Type::Named(identity) if symbol.kind == SymbolKind::Unit => {
+            scope.source_units.get(&unit_identity(identity))
+        }
+        _ => None,
+    })
+}
+
+/// Checks a unit written in a type: `m`, `units.m` or a compound such as
+/// `m / s`. Each name must resolve to a declared unit in the current import
+/// context (ORNA-UNIT-008), and only linear units combine into a compound
+/// unit (ORNA-UNIT-005). Returns whether a valid unit is affine.
+fn validate_unit_annotation(
+    unit: &TypeExpr,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    match unit {
+        TypeExpr::Name {
+            path, arguments, ..
+        } if arguments.is_empty() => match lookup_unit(path, scope) {
+            UnitLookup::Declared(unit) => Some(unit.affine),
+            UnitLookup::Ambiguous => {
+                diagnostics.push(diag(DIAG_AMBIGUOUS, AMBIGUOUS_UNIT));
+                None
+            }
+            UnitLookup::Unresolved => {
+                diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+                None
+            }
+        },
+        TypeExpr::Product { lhs, op, rhs, .. } if matches!(op.as_str(), "*" | "/") => {
+            let left = validate_unit_annotation(lhs, scope, diagnostics);
+            let right = validate_unit_annotation(rhs, scope, diagnostics);
+            if left == Some(true) || right == Some(true) {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "an absolute affine unit cannot form a compound unit",
+                ));
+                return None;
+            }
+            left.and(right)
+        }
+        _ => {
+            diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+            None
+        }
+    }
+}
+
+const AMBIGUOUS_UNIT: &str = "unit has multiple wildcard-import candidates";
 
 fn annotation_type_name_is_declared(
     path: &[String],
@@ -6408,17 +6817,13 @@ fn annotation_type_name_is_declared(
             || system_api::embedded_system_api().describes_type(last)
             || matches!(
                 last.as_str(),
-                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Locale"
+                "List" | "Range" | "Relation" | "Query" | "Stream" | "Money" | "Quantity"
+                    | "Locale"
             )
             || scope.names.get(last).is_some_and(|symbol| {
                 matches!(
                     symbol.kind,
-                    SymbolKind::Type
-                        | SymbolKind::Enum
-                        | SymbolKind::Table
-                        | SymbolKind::Protocol
-                        | SymbolKind::Dimension
-                        | SymbolKind::Unit
+                    SymbolKind::Type | SymbolKind::Enum | SymbolKind::Table | SymbolKind::Protocol
                 )
             });
     }
@@ -6458,12 +6863,7 @@ fn annotation_type_name_is_declared(
         .is_some_and(|symbol| {
             matches!(
                 symbol.kind,
-                SymbolKind::Type
-                    | SymbolKind::Enum
-                    | SymbolKind::Table
-                    | SymbolKind::Protocol
-                    | SymbolKind::Dimension
-                    | SymbolKind::Unit
+                SymbolKind::Type | SymbolKind::Enum | SymbolKind::Table | SymbolKind::Protocol
             )
         })
 }
@@ -8531,6 +8931,9 @@ fn infer_node(
             if let Some(projection) = infer_table_projection(expr, scope, local) {
                 return projection;
             }
+            if let Some(variant) = infer_enum_variant_reference(expr, scope, local, diagnostics) {
+                return variant;
+            }
             if let Some(path) = qualified_path(expr)
                 && scope.modules.contains_key(path[0])
                 && !local.contains_key(path[0])
@@ -8586,7 +8989,7 @@ fn infer_node(
                 };
             }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
-                diagnostics.push(diag(DIAG_TYPE, message));
+                diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8611,7 +9014,7 @@ fn infer_node(
                 };
             }
             if name == "display" && contains_secret_value_type(&base.ty) {
-                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
+                diagnostics.push(diag(DIAG_SECRET_DISPLAY, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8630,6 +9033,12 @@ fn infer_node(
                 };
             }
             if let Some(ty) = infer_numeric_postfix(&base.ty, name) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
+            if let Some(ty) = infer_unit_suffix(&base.ty, name, scope, diagnostics) {
                 return Inferred {
                     ty,
                     effects: base.effects,
@@ -8812,7 +9221,7 @@ fn infer_node(
                 .is_some_and(|path| path == ["work", "Contact", "insert"])
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_CROSS_DATABASE_WRITE,
                     "cross-database writes are not atomic/supported",
                 ));
                 return Inferred {
@@ -8830,7 +9239,7 @@ fn infer_node(
                         && !consumers.insert(path.join("."))
                     {
                         diagnostics.push(diag(
-                            DIAG_TYPE,
+                            DIAG_AMBIGUOUS_DURABLE_CONSUMER,
                             "same durable source consumed twice without distinct consumer identity",
                         ));
                         break;
@@ -8843,7 +9252,7 @@ fn infer_node(
                 && elements.len() > 1
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_DURABLE_CONSUMER_SOURCE_ROOTS,
                     "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
                 ));
             }
@@ -8864,7 +9273,7 @@ fn infer_node(
             }
             if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_SYS_STORAGE_CALL,
                     "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
                 ));
                 return Inferred {
@@ -8873,7 +9282,7 @@ fn infer_node(
                 };
             }
             if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
-                diagnostics.push(diag(DIAG_TYPE, "sys.Commit is read-only"));
+                diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
                 return Inferred {
                     ty: Type::Error,
                     effects: EffectSummary::default(),
@@ -9210,7 +9619,7 @@ fn infer_node(
                 && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_RELATION_EQUALITY_AMBIGUOUS,
                     "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
                 ));
                 return Inferred {
@@ -9276,6 +9685,7 @@ fn infer_node(
                     && !types_match(&right.ty, &left.ty)
                 {
                     diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
                         "static types are incompatible",
                         &left.ty,
                         &right.ty,
@@ -9289,6 +9699,7 @@ fn infer_node(
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
                     diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
                         "static types are incompatible",
                         &left.ty,
                         &right.ty,
@@ -9298,7 +9709,7 @@ fn infer_node(
                     Type::Bool
                 }
             } else {
-                binary_arithmetic_type(op, &left.ty, &right.ty, diagnostics)
+                binary_arithmetic_type(op, &left.ty, &right.ty, scope, diagnostics)
             };
             Inferred { ty, effects }
         }
@@ -9550,6 +9961,7 @@ fn binary_arithmetic_type(
     op: &str,
     left: &Type,
     right: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Type {
     if matches!(left, Type::Error) || matches!(right, Type::Error) {
@@ -9567,7 +9979,7 @@ fn binary_arithmetic_type(
             || (is_money_rate(left) && is_binary_float(right))
         {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_MONEY_BINARY_FLOAT,
                 "binary Float cannot enter an exact Money calculation implicitly",
             ));
             return Type::Error;
@@ -9575,18 +9987,11 @@ fn binary_arithmetic_type(
         if let Some(ty) = reduce_exact_money_rate(left, right) {
             return ty;
         }
-        if matches!(left, Type::MoneyPerUnit { .. }) || matches!(right, Type::MoneyPerUnit { .. }) {
-            diagnostics.push(diag(
-                DIAG_UNSUPPORTED,
-                "dimensional algebra is outside this semantic slice",
-            ));
-            return Type::Error;
-        }
     }
     if op == "+"
-        && let Some(message) = incompatible_addition_message(left, right)
+        && let Some((code, message)) = incompatible_addition_message(left, right)
     {
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(diag(code, message));
         return Type::Error;
     }
     // Subtracting is adding the negation, so it needs the same conversion
@@ -9599,19 +10004,18 @@ fn binary_arithmetic_type(
         && !matches!(right_currency, Type::Error)
     {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_CURRENCY_MISMATCH,
             "cannot subtract different currencies without conversion",
         ));
         return Type::Error;
     }
-    if op == "+" && left == right && is_absolute_affine_temperature(left) {
-        diagnostics.push(diag(
-            DIAG_TYPE,
-            "cannot add two absolute affine temperatures",
-        ));
+    if matches!(op, "+" | "-")
+        && let Some(message) = temporal_quantity_mismatch(op, left, right, scope)
+    {
+        diagnostics.push(diag(DIAG_TIME_ENERGY_ADD, message));
         return Type::Error;
     }
-    if let Some(ty) = arithmetic_operator_type(op, left, right, diagnostics) {
+    if let Some(ty) = arithmetic_operator_type(op, left, right, scope, diagnostics) {
         return ty;
     }
     diagnostics.push(diag(
@@ -9639,13 +10043,8 @@ fn elapsed_time_operator_type(op: &str, left: &Type, right: &Type) -> Option<Typ
         // rejects results finer than its nanosecond grid.
         ("*" | "/", left, Type::Int | Type::Decimal) if left == &duration => Some(duration),
         ("*", Type::Int | Type::Decimal, right) if right == &duration => Some(duration),
-        // A look-back window such as `now() - 7.days`; only a Time-dimension
-        // unit can move an Instant.
-        ("-", Type::Instant, unit)
-            if numeric_unit(unit).and_then(unit_dimension) == Some("Time") =>
-        {
-            Some(Type::Instant)
-        }
+        // A look-back window such as `now() - 7.days`.
+        ("-", Type::Instant, period) if is_calendar_period(period) => Some(Type::Instant),
         _ => None,
     }
 }
@@ -9656,6 +10055,7 @@ fn arithmetic_operator_type(
     op: &str,
     left: &Type,
     right: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
     match (left, right) {
@@ -9669,8 +10069,15 @@ fn arithmetic_operator_type(
         (Type::MoneyPerUnit { .. }, Type::MoneyPerUnit { .. }) => {
             (matches!(op, "+" | "-") && left == right).then(|| left.clone())
         }
+        // A rate scales by an exact number and stays a rate.
+        (Type::MoneyPerUnit { .. }, Type::Int | Type::Decimal) if matches!(op, "*" | "/") => {
+            Some(left.clone())
+        }
+        (Type::Int | Type::Decimal, Type::MoneyPerUnit { .. }) if op == "*" => {
+            Some(right.clone())
+        }
         (Type::Quantity { .. }, _) | (_, Type::Quantity { .. }) => {
-            quantity_operator_type(op, left, right, diagnostics)
+            quantity_operator_type(op, left, right, scope, diagnostics)
         }
         _ => unit_suffix_operator_type(op, left, right, diagnostics),
     }
@@ -9684,13 +10091,9 @@ fn money_operator_type(
     right: &Type,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    let binary_float = |ty: &Type| {
-        is_binary_float(ty)
-            || matches!(ty, Type::Quantity { numeric, .. } if **numeric == Type::Float)
-    };
-    if binary_float(left) || binary_float(right) {
+    if is_binary_float(left) || is_binary_float(right) {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_MONEY_BINARY_FLOAT,
             "binary Float cannot enter an exact Money calculation implicitly",
         ));
         return Some(Type::Error);
@@ -9717,11 +10120,12 @@ fn quantity_operator_type(
     op: &str,
     left: &Type,
     right: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
     match (op, left, right) {
         ("+" | "-", Type::Quantity { .. }, Type::Quantity { .. }) => {
-            quantity_sum_type(op, left, right, diagnostics)
+            quantity_sum_type(op, left, right, scope, diagnostics)
         }
         ("*" | "/", Type::Quantity { .. }, Type::Quantity { .. }) => {
             quantity_product_type(op == "/", left, right)
@@ -9759,10 +10163,15 @@ fn quantity_operator_type(
     }
 }
 
+/// `+` and `-` over quantities (ORNA-UNIT-001, ORNA-UNIT-004). Dimensions
+/// must agree; linear units of different scales meet exactly at their common
+/// unit, so `1.km + 1.m` is `1001.m`. Absolute affine values follow the
+/// point/vector algebra of ORNA-UNIT-005 within one unit.
 fn quantity_sum_type(
     op: &str,
     left: &Type,
     right: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
     let (
@@ -9787,41 +10196,155 @@ fn quantity_sum_type(
     if dimension_basis != right_basis {
         diagnostics.push(diag(
             DIAG_INCOMPATIBLE_DIMENSIONS,
-            if op == "+" {
-                "cannot add quantities with incompatible dimensions"
-            } else {
-                "cannot subtract quantities with incompatible dimensions"
-            },
+            incompatible_dimensions_message(
+                op,
+                &dimension_name(dimension_basis, scope),
+                &dimension_name(right_basis, scope),
+            ),
         ));
         return Some(Type::Error);
     }
-    // Different scales need an explicit unit conversion first.
-    if numeric != right_numeric || scale != right_scale {
+    // Absolute<U> + Absolute<U> -> error, whatever the operands' numerics.
+    if op == "+" && *affine && *right_affine {
+        diagnostics.push(diag(
+            DIAG_AFFINE_TEMPERATURE_ADD,
+            "cannot add two absolute affine temperatures",
+        ));
+        return Some(Type::Error);
+    }
+    if numeric != right_numeric {
         return None;
     }
     let zero = UnitFraction::zero().public();
-    match (op, *affine, *right_affine) {
-        ("+", true, true) => {
-            diagnostics.push(diag(
-                DIAG_TYPE,
-                "cannot add two absolute affine temperatures",
-            ));
-            Some(Type::Error)
+    if *affine || *right_affine || *offset != zero || *right_offset != zero {
+        if scale != right_scale {
+            return None;
         }
-        // Absolute<U> - Absolute<U> -> Delta<U>
-        ("-", true, true) if offset == right_offset => Some(Type::Quantity {
-            numeric: numeric.clone(),
-            dimension_basis: dimension_basis.clone(),
-            scale: scale.clone(),
-            offset: zero,
-            affine: false,
-        }),
-        // Absolute<U> + Delta<U> and Absolute<U> - Delta<U> -> Absolute<U>
-        (_, true, false) if *right_offset == zero => Some(left.clone()),
-        // Delta<U> + Absolute<U> -> Absolute<U>
-        ("+", false, true) if *offset == zero => Some(right.clone()),
-        (_, false, false) if offset == right_offset => Some(left.clone()),
-        _ => None,
+        return match (op, *affine, *right_affine) {
+            // Absolute<U> - Absolute<U> -> Delta<U>
+            ("-", true, true) if offset == right_offset => Some(Type::Quantity {
+                numeric: numeric.clone(),
+                dimension_basis: dimension_basis.clone(),
+                scale: scale.clone(),
+                offset: zero,
+                affine: false,
+            }),
+            // Absolute<U> + Delta<U> and Absolute<U> - Delta<U> -> Absolute<U>
+            (_, true, false) if *right_offset == zero => Some(left.clone()),
+            // Delta<U> + Absolute<U> -> Absolute<U>
+            ("+", false, true) if *offset == zero => Some(right.clone()),
+            (_, false, false) if offset == right_offset => Some(left.clone()),
+            _ => None,
+        };
+    }
+    let scale = common_scale(&unit_fraction(scale)?, &unit_fraction(right_scale)?)?;
+    Some(Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis: dimension_basis.clone(),
+        scale: scale.public(),
+        offset: zero,
+        affine: false,
+    })
+}
+
+/// The largest scale that measures both scales a whole number of times, so
+/// converting either operand to it is exact: `km` and `m` meet at `m`.
+fn common_scale(left: &UnitFraction, right: &UnitFraction) -> Option<UnitFraction> {
+    let mut divisor = (&left.numerator * &right.denominator).abs();
+    let mut remainder = (&right.numerator * &left.denominator).abs();
+    while !remainder.is_zero() {
+        let next = &divisor % &remainder;
+        divisor = remainder;
+        remainder = next;
+    }
+    UnitFraction::new(divisor, &left.denominator * &right.denominator)
+}
+
+/// Elapsed `Duration` values and calendar periods measure intrinsic time; a
+/// declared quantity of another dimension cannot be added to them
+/// (ORNA-UNIT-004).
+fn temporal_quantity_mismatch(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    scope: &Scope,
+) -> Option<String> {
+    let (time, quantity, time_first) = match (left, right) {
+        (time, Type::Quantity { dimension_basis, .. }) if is_intrinsic_time(time) => {
+            (time, dimension_basis, true)
+        }
+        (Type::Quantity { dimension_basis, .. }, time) if is_intrinsic_time(time) => {
+            (time, dimension_basis, false)
+        }
+        _ => return None,
+    };
+    debug_assert!(is_intrinsic_time(time));
+    let quantity = dimension_name(quantity, scope);
+    if quantity == "Time" {
+        return None;
+    }
+    Some(if time_first {
+        incompatible_dimensions_message(op, "Time", &quantity)
+    } else {
+        incompatible_dimensions_message(op, &quantity, "Time")
+    })
+}
+
+fn is_intrinsic_time(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name) if name == "std.DURATION") || is_calendar_period(ty)
+}
+
+fn incompatible_dimensions_message(op: &str, left: &str, right: &str) -> String {
+    if op == "+" {
+        format!("cannot add {left} and {right}")
+    } else {
+        format!("cannot subtract {right} from {left}")
+    }
+}
+
+/// Names a reduced dimension for diagnostics: the declared dimension with
+/// exactly this basis (the current module's when several match), otherwise
+/// its base dimensions, such as `Length / Time`.
+fn dimension_name(basis: &DimensionBasis, scope: &Scope) -> String {
+    let declared = scope
+        .source_dimensions
+        .iter()
+        .filter(|(_, candidate)| *candidate == basis)
+        .map(|(identity, _)| identity)
+        .collect::<Vec<_>>();
+    let local = declared
+        .iter()
+        .copied()
+        .filter(|identity| scope.current_namespace.as_ref() == Some(&identity.namespace))
+        .collect::<Vec<_>>();
+    if let [identity] = declared.as_slice() {
+        return identity.name.clone();
+    }
+    if let [identity] = local.as_slice() {
+        return identity.name.clone();
+    }
+    let term = |dimension: &SourceDimensionIdentity, exponent: u64| {
+        if exponent == 1 {
+            dimension.name.clone()
+        } else {
+            format!("{}^{exponent}", dimension.name)
+        }
+    };
+    let numerator = basis
+        .iter()
+        .filter(|(_, exponent)| **exponent > 0)
+        .map(|(dimension, exponent)| term(dimension, exponent.unsigned_abs()))
+        .collect::<Vec<_>>();
+    let denominator = basis
+        .iter()
+        .filter(|(_, exponent)| **exponent < 0)
+        .map(|(dimension, exponent)| term(dimension, exponent.unsigned_abs()))
+        .collect::<Vec<_>>();
+    match (numerator.is_empty(), denominator.is_empty()) {
+        (true, true) => "a dimensionless quantity".into(),
+        (false, true) => numerator.join(" * "),
+        (true, false) => format!("1 / {}", denominator.join(" / ")),
+        (false, false) => format!("{} / {}", numerator.join(" * "), denominator.join(" / ")),
     }
 }
 
@@ -9850,16 +10373,7 @@ fn quantity_product_type(divide: bool, left: &Type, right: &Type) -> Option<Type
     if numeric != right_numeric {
         return None;
     }
-    let mut basis = dimension_basis.clone();
-    for (dimension, exponent) in right_basis {
-        let current = basis.entry(dimension.clone()).or_insert(0);
-        *current = if divide {
-            current.checked_sub(*exponent)?
-        } else {
-            current.checked_add(*exponent)?
-        };
-    }
-    basis.retain(|_, exponent| *exponent != 0);
+    let basis = combine_dimension_bases(dimension_basis, right_basis, divide)?;
     let left_scale = unit_fraction(scale)?;
     let right_scale = unit_fraction(right_scale)?;
     let scale = if divide {
@@ -9886,9 +10400,9 @@ fn unit_fraction(rational: &SourceUnitRational) -> Option<UnitFraction> {
     )
 }
 
-/// Unit-suffixed numerics such as `Int<kWh>` keep their unit through
-/// same-unit addition and exact scalar scaling. Their dimensions are not
-/// resolved here, so products of two such quantities are unsupported.
+/// Calendar periods such as `7.days` keep their unit through same-unit
+/// addition and exact scalar scaling; they have no declared dimensions, so
+/// products of two periods are unsupported.
 fn unit_suffix_operator_type(
     op: &str,
     left: &Type,
@@ -9921,7 +10435,7 @@ fn unit_suffix_operator_type(
     }
 }
 
-/// The scalar of a unit-suffixed numeric such as `Int<kWh>`.
+/// The scalar of a calendar period such as `Int<days>`.
 fn unit_suffix_scalar(ty: &Type) -> Option<Type> {
     match ty {
         Type::Applied { base, arguments } if arguments.len() == 1 => match base.as_str() {
@@ -10551,7 +11065,8 @@ fn infer_assignment(
                     AssignmentOperator::Divide => "/",
                     AssignmentOperator::Set => unreachable!("`=` has its own assignment arm"),
                 };
-                let result = binary_arithmetic_type(op, &symbol.ty, &value.ty, diagnostics);
+                let result =
+                    binary_arithmetic_type(op, &symbol.ty, &value.ty, scope, diagnostics);
                 require_same(&symbol.ty, &result, diagnostics);
             }
             None => diagnostics.push(diag(
@@ -11649,6 +12164,10 @@ fn infer_nominal(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Some(variant) = infer_enum_payload_construction(path, fields, scope, local, diagnostics)
+    {
+        return variant;
+    }
     let mut actual = BTreeMap::new();
     let mut supplied = Vec::with_capacity(fields.len());
     let mut effects = EffectSummary::default();
@@ -11787,6 +12306,184 @@ fn infer_nominal(
         // unrelated modules.
         ty: constructor_type,
         effects,
+    }
+}
+
+/// Declared payload rows of one enum, by variant name. A payload-free
+/// variant has an empty row.
+type EnumVariantRows = BTreeMap<String, BTreeMap<String, Type>>;
+
+/// A closed source enum named by a value path, with the static type its
+/// constructed values carry.
+struct EnumConstructor<'a> {
+    ty: Type,
+    variants: &'a EnumVariantRows,
+}
+
+/// Resolves the owner of `Enum.variant` or `module.Enum.variant`. An
+/// unqualified and a qualified name follow the same construction rule, and
+/// resolution must identify a constructible enum (lexical construction
+/// rule; ORNA-ENUM-002/003). A local binding shadows an enum of the same
+/// name, so field access on that value keeps ordinary record semantics.
+fn enum_constructor<'a>(
+    owner: &[&str],
+    scope: &'a Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<EnumConstructor<'a>> {
+    if local.contains_key(*owner.first()?) {
+        return None;
+    }
+    let symbol = match owner {
+        [name] => scope.names.get(*name),
+        _ => qualified_module_symbol(owner, scope),
+    }
+    .filter(|symbol| symbol.kind == SymbolKind::Enum)?;
+    let variants = match owner {
+        [name] => scope.enum_variants.get(*name),
+        _ => None,
+    }
+    .or_else(|| scope.imported_enum_variants.get(&owner.join(".")))?;
+    Some(EnumConstructor {
+        ty: symbol.ty.clone(),
+        variants,
+    })
+}
+
+/// ORNA-ENUM-002: `Enum.variant` references a payload-free variant. A
+/// payload variant has no bare reference form (ORNA-ENUM-003 constructs it
+/// with its named fields), so each omitted payload field is missing.
+fn infer_enum_variant_reference(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(expr)?;
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let ty = match constructor.variants.get(*variant) {
+        Some(payload) if payload.is_empty() => constructor.ty,
+        Some(payload) => {
+            for name in payload.keys() {
+                diagnostics.push(missing_payload_field(name));
+            }
+            Type::Error
+        }
+        None => {
+            diagnostics.push(unknown_enum_variant(owner, variant));
+            Type::Error
+        }
+    };
+    Some(Inferred {
+        ty,
+        effects: EffectSummary::default(),
+    })
+}
+
+/// ORNA-ENUM-003 and ORNA-SYNTAX-001: `Enum.variant { field: value }` checks
+/// each supplied field once, in written order, against the declared payload
+/// row. Unknown, duplicated, missing and mistyped fields are rejected, and a
+/// payload-free variant accepts no field. Returns `None` when the path does
+/// not name an enum, leaving nominal record construction unchanged.
+fn infer_enum_payload_construction(
+    path: &[orna_syntax_v1::NameSegment],
+    fields: &[orna_syntax_v1::RecordField],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>();
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let payload = constructor.variants.get(*variant);
+    let mut valid = payload.is_some();
+    if !valid {
+        diagnostics.push(unknown_enum_variant(owner, variant));
+    }
+    let mut effects = EffectSummary::default();
+    let mut supplied = BTreeSet::new();
+    for field in fields {
+        let expected = payload.and_then(|payload| payload.get(&field.name));
+        let value = match expected {
+            Some(expected) => infer_contextual(&field.value, expected, scope, local, diagnostics),
+            None => infer(&field.value, scope, local, diagnostics),
+        };
+        effects.join(&value.effects);
+        if !supplied.insert(field.name.as_str()) {
+            diagnostics.push(diag(
+                DIAG_DUPLICATE,
+                format!(
+                    "duplicate payload field `{}`",
+                    diagnostic_field_name(&field.name)
+                ),
+            ));
+            valid = false;
+            continue;
+        }
+        match expected {
+            Some(expected) if !types_match(expected, &value.ty) => {
+                diagnostics.push(diag(
+                    DIAG_FIELD_TYPE,
+                    format!(
+                        "expected {}, found {}",
+                        diagnostic_type_name(expected),
+                        diagnostic_type_name(&value.ty),
+                    ),
+                ));
+                valid = false;
+            }
+            None if payload.is_some() => {
+                diagnostics.push(diag(
+                    DIAG_UNKNOWN_FIELD,
+                    format!("unknown field `{}`", diagnostic_field_name(&field.name)),
+                ));
+                valid = false;
+            }
+            _ => {}
+        }
+    }
+    for name in payload
+        .into_iter()
+        .flat_map(BTreeMap::keys)
+        .filter(|name| !supplied.contains(name.as_str()))
+    {
+        diagnostics.push(missing_payload_field(name));
+        valid = false;
+    }
+    Some(Inferred {
+        ty: if valid { constructor.ty } else { Type::Error },
+        effects,
+    })
+}
+
+fn missing_payload_field(name: &str) -> Diagnostic {
+    diag(
+        DIAG_MISSING_FIELD,
+        format!("missing required field `{}`", diagnostic_field_name(name)),
+    )
+}
+
+/// ORNA-ENUM-001: an enum is closed to the variants declared in its body.
+fn unknown_enum_variant(owner: &[&str], variant: &str) -> Diagnostic {
+    let owner = owner.join(".");
+    diag(
+        DIAG_UNRESOLVED,
+        if diagnostic_identifier(&owner) && diagnostic_identifier(variant) {
+            format!("enum `{owner}` has no variant `{variant}`")
+        } else {
+            "enum variant cannot be resolved".to_owned()
+        },
+    )
+}
+
+fn diagnostic_field_name(name: &str) -> &str {
+    if diagnostic_identifier(name) {
+        name
+    } else {
+        "<field>"
     }
 }
 
@@ -11990,15 +12687,47 @@ fn is_portable_statistics_operation(operation: &str) -> bool {
     )
 }
 
-// The pinned collection source declares one generic finite-list signature.
-// Nonempty calls get their element type from the rows; empty aggregates use
-// the caller's context where available and otherwise keep the Int zero rule.
-fn finite_list_aggregate_element(
-    _callee: &Expr,
-    _operation: &str,
-    _scope: &Scope,
-) -> Option<Type> {
-    None
+// The pinned collection source declares each aggregate. A generic export such
+// as `sum<T>(rows: [T]): T` takes its element type from the rows; a
+// monomorphic export such as `sum(rows: [Decimal]): Decimal` pins the element
+// type every call must supply and, with it, the declared result.
+fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
+    if !matches!(operation, "sum" | "min" | "max") {
+        return None;
+    }
+    let namespace = match qualified_path(callee)?.as_slice() {
+        ["std", module @ ("collection" | "query"), _] => {
+            Namespace(vec!["std".into(), (*module).into()])
+        }
+        [alias, _] => scope.modules.get(*alias)?.clone(),
+        _ => return None,
+    };
+    if !(namespace.0.len() == 2
+        && namespace.0[0] == "std"
+        && matches!(namespace.0[1].as_str(), "collection" | "query"))
+    {
+        return None;
+    }
+    let symbol = scope
+        .available_modules
+        .get(&namespace)?
+        .exports
+        .get(operation)?;
+    let Type::Function {
+        parameters, result, ..
+    } = &symbol.ty
+    else {
+        return None;
+    };
+    let [Type::List(element)] = parameters.as_slice() else {
+        return None;
+    };
+    let pinned_result = if operation == "sum" {
+        result.as_ref() == element.as_ref()
+    } else {
+        matches!(result.as_ref(), Type::Optional(inner) if inner == element)
+    };
+    (symbol.generic_parameters.is_empty() && pinned_result).then(|| element.as_ref().clone())
 }
 
 /// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
@@ -13072,9 +13801,10 @@ fn infer_finite_list_numeric_aggregate(
         _ => false,
     };
     if !valid {
-        if matches!(&rows, Type::List(element) if is_absolute_affine_temperature(element)) {
+        if operation == "sum" && matches!(&rows, Type::List(element) if is_absolute_affine(element))
+        {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_ABSOLUTE_QUANTITY_SUM,
                 format!("cannot {operation} absolute affine quantities"),
             ));
         } else {
@@ -13104,9 +13834,12 @@ fn infer_finite_list_numeric_aggregate(
     }
 }
 
+/// `sum` admits money and numeric quantities, but not absolute affine values
+/// (ORNA-UNIT-007).
 fn is_sum_element_type(element: &Type) -> bool {
-    matches!(element, Type::Applied { base, .. } if base == "Money")
-        || is_statistics_numeric_type(element)
+    !is_absolute_affine(element)
+        && (matches!(element, Type::Applied { base, .. } if base == "Money")
+            || is_statistics_numeric_type(element))
 }
 
 fn infer_finite_list_aggregate_rows(
@@ -13719,6 +14452,13 @@ fn infer_relation_statistics_call(
                 valid = false;
             }
         }
+        "sum" if is_absolute_affine(&element) => {
+            diagnostics.push(diag(
+                DIAG_ABSOLUTE_QUANTITY_SUM,
+                "cannot sum absolute affine quantities",
+            ));
+            valid = false;
+        }
         "sum" if !is_sum_element_type(&element) => {
             diagnostics.push(diag(
                 DIAG_TYPE,
@@ -13868,7 +14608,7 @@ fn infer_relation_statistics_call(
                     _ => Type::Error,
                 }
             } else {
-                element.clone()
+                affine_statistic_type(operation, &element)
             }))
         }
         _ => Type::Error,
@@ -13877,6 +14617,35 @@ fn infer_relation_statistics_call(
         ty: if valid { result } else { Type::Error },
         effects,
     })
+}
+
+/// The result of a spread statistic over absolute affine values
+/// (ORNA-UNIT-007): `range` and `standard_deviation` are the corresponding
+/// delta quantity and `variance` is its square. Every other statistic, and
+/// every statistic over linear values, keeps the element type.
+fn affine_statistic_type(operation: &str, element: &Type) -> Type {
+    let Type::Quantity {
+        numeric,
+        dimension_basis,
+        scale,
+        affine: true,
+        ..
+    } = element
+    else {
+        return element.clone();
+    };
+    let delta = Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis: dimension_basis.clone(),
+        scale: scale.clone(),
+        offset: UnitFraction::zero().public(),
+        affine: false,
+    };
+    match operation {
+        "range" | "standard_deviation" => delta,
+        "variance" => quantity_product_type(false, &delta, &delta).unwrap_or(Type::Error),
+        _ => element.clone(),
+    }
 }
 
 fn integrate_quantity_type(
@@ -13894,6 +14663,13 @@ fn integrate_quantity_type(
     else {
         return value.clone();
     };
+    if *affine {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "std.stats.integrate of absolute affine values needs an explicit linear reference",
+        ));
+        return Type::Error;
+    }
     let time_dimensions = dimension_basis
         .keys()
         .filter(|dimension| dimension.name == "Time")
@@ -13902,9 +14678,7 @@ fn integrate_quantity_type(
     let time_dimension = match time_dimensions.len() {
         1 => time_dimensions.into_iter().next(),
         0 => {
-            let time_dimensions = scope
-                .source_units
-                .values()
+            let time_dimensions = visible_units(scope)
                 .flat_map(|unit| unit.dimension_basis.keys())
                 .filter(|dimension| dimension.name == "Time")
                 .cloned()
@@ -15559,10 +16333,7 @@ fn infer_success_pipeline(
         let positional_period = arguments
             .first()
             .is_some_and(|argument| argument.name.is_none());
-        let calendar = values
-            .first()
-            .and_then(numeric_unit)
-            .is_some_and(|unit| matches!(unit, "day" | "days"));
+        let calendar = values.first().is_some_and(is_calendar_period);
         let elapsed = values
             .first()
             .is_some_and(|ty| ty == &Type::Named("std.DURATION".into()));
@@ -15570,18 +16341,27 @@ fn infer_success_pipeline(
             && arguments[1].name.as_deref() == Some("zone")
             && values[1] == Type::Named("std.TimeZone".into());
         let message = if !instant {
-            Some("bucket_by requires Instant values or rows with an Instant time field")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires Instant values or rows with an Instant time field",
+            ))
         } else if !positional_period || !(calendar || elapsed) {
-            Some("bucket_by requires an elapsed Duration or calendar-day period")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires an elapsed Duration or calendar-day period",
+            ))
         } else if calendar && arguments.len() == 1 {
-            Some("calendar bucketing of Instant requires a time zone")
+            Some((
+                DIAG_CALENDAR_BUCKET_ZONE,
+                "calendar bucketing of Instant requires a time zone",
+            ))
         } else if !(zone || elapsed && arguments.len() == 1) {
-            Some("bucket_by requires a named TimeZone argument")
+            Some((DIAG_TYPE, "bucket_by requires a named TimeZone argument"))
         } else {
             None
         };
-        if let Some(message) = message {
-            diagnostics.push(diag(DIAG_TYPE, message));
+        if let Some((code, message)) = message {
+            diagnostics.push(diag(code, message));
             return Inferred {
                 ty: Type::Error,
                 effects,
@@ -16098,34 +16878,30 @@ fn is_evaluator_ordered_comparison_type(ty: &Type) -> bool {
         ty,
         Type::Applied { base, arguments }
             if base == "Money" && arguments.len() == 1
+    ) || matches!(
+        ty,
+        Type::Quantity { numeric, .. }
+            if matches!(**numeric, Type::Int | Type::Decimal | Type::Float)
     )
 }
 
-/// Applies the closed affine-absolute aggregation rule for the operations that
-/// remain outside the integer-only finite-list aggregate slice. This is
-/// deliberately limited to the core Celsius identity: user-defined unit
-/// declaration resolution remains outside this read-only slice, and
-/// unrecognised collection pipelines retain their prior conservative
-/// diagnostics.
+/// Applies the affine-absolute aggregation matrix (ORNA-UNIT-007) for the
+/// operations outside the integer-only finite-list aggregate slice: selection
+/// and `mean` return an absolute value, and `sum` is invalid. Unrecognised
+/// collection pipelines retain their prior conservative diagnostics.
 fn infer_affine_collection_aggregate(
     operation: &str,
     element: &Type,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Type> {
-    let is_celsius = matches!(
-        element,
-        Type::Applied { base, arguments }
-            if base == "Float"
-                && matches!(arguments.as_slice(), [Type::Named(unit)] if unit == "C")
-    );
-    if !is_celsius {
+    if !is_absolute_affine(element) {
         return None;
     }
     match operation {
         "mean" => Some(Type::Optional(Box::new(element.clone()))),
         "min" | "max" => Some(Type::Optional(Box::new(element.clone()))),
         "sum" => {
-            diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+            diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
             Some(Type::Error)
         }
         _ => None,
@@ -16142,8 +16918,8 @@ fn infer_relation_sum(
     if operation != "sum" {
         return None;
     }
-    if is_absolute_affine_temperature(element) {
-        diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+    if is_absolute_affine(element) {
+        diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
         return Some(Type::Error);
     }
     if is_sum_numeric(element) {
@@ -16405,7 +17181,7 @@ fn infer_table_operation(
     );
     if name == "rekey" && automatic_key {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_AUTOMATIC_KEY_REKEY,
             "an automatic-key table cannot be explicitly re-keyed",
         ));
     }
@@ -16483,7 +17259,7 @@ fn infer_table_operation(
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -16502,7 +17278,7 @@ fn infer_table_operation(
                                 && !supplied.contains_key(field)
                             {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -16516,7 +17292,11 @@ fn infer_table_operation(
                         for field in &schema.computed {
                             if supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    if insertion_like {
+                                        DIAG_COMPUTED_INSERT
+                                    } else {
+                                        DIAG_COMPUTED_DIRECT_WRITE
+                                    },
                                     if authoritative_contact {
                                         if insertion_like {
                                             format!(
@@ -16545,7 +17325,7 @@ fn infer_table_operation(
                     {
                         diagnostics
                             .push(diag(
-                                DIAG_TYPE,
+                                DIAG_PRIMARY_KEY_IMMUTABLE,
                                 if authoritative_contact {
                                     "primary keys are immutable through update"
                                 } else {
@@ -16621,7 +17401,7 @@ fn infer_table_row_input(
         for (name, actual) in actual {
             match fields.get(name) {
                 None => diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_TABLE_UNKNOWN_FIELD,
                     format!(
                         "table write contains an unknown field `{}`",
                         if diagnostic_identifier(name) {
@@ -16633,7 +17413,7 @@ fn infer_table_row_input(
                 )),
                 Some(expected) if !types_match(expected, actual) => {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_TABLE_FIELD_TYPE,
                         format!(
                             "table write field has an incompatible type: expected {}, found {}",
                             diagnostic_type_name(expected),
@@ -16824,20 +17604,21 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
-        let message = match (expected, actual) {
-            (Type::Named(expected), Type::Named(actual)) if expected != actual => {
-                "implicit conversion chains are not searched; name each conversion explicitly"
-            }
-            _ => "static types are incompatible",
+        let (code, message) = match (expected, actual) {
+            (Type::Named(expected), Type::Named(actual)) if expected != actual => (
+                DIAG_CONVERSION_CHAIN,
+                "implicit conversion chains are not searched; name each conversion explicitly",
+            ),
+            _ => (DIAG_TYPE, "static types are incompatible"),
         };
-        diagnostics.push(type_mismatch(message, expected, actual));
+        diagnostics.push(type_mismatch(code, message, expected, actual));
     }
 }
 
 /// A static type mismatch that names both types, so the person can see which
 /// side has which type. The message stays stable; the types ride in a note.
-fn type_mismatch(message: &str, expected: &Type, actual: &Type) -> Diagnostic {
-    diag(DIAG_TYPE, message).with_note(
+fn type_mismatch(code: &'static str, message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(code, message).with_note(
         SafeText::new(format!(
             "expected {}, found {}",
             type_label(expected),
@@ -16953,26 +17734,6 @@ fn types_match(expected: &Type, actual: &Type) -> bool {
             && expected_arguments.first() == Some(&Type::Error) =>
         {
             true
-        }
-        (
-            Type::Applied {
-                base: expected_base,
-                arguments: expected_arguments,
-            },
-            Type::Applied {
-                base: actual_base,
-                arguments: actual_arguments,
-            },
-        ) if expected_base == actual_base
-            && expected_arguments.len() == 1
-            && actual_arguments.len() == 1 =>
-        {
-            matches!(
-                (expected_arguments.first(), actual_arguments.first()),
-                (Some(Type::Named(expected_unit)), Some(Type::Named(actual_unit)))
-                    if expected_unit.rsplit('.').next() == Some("kWh")
-                        && actual_unit.rsplit('.').next() == Some("kWh")
-            )
         }
         (
             Type::Function {
@@ -23867,74 +24628,52 @@ fn descriptor_member_type(
     substitutions: &BTreeMap<String, Type>,
 ) -> Option<Type> {
     let field = system_api::embedded_system_api().field(system_type, member)?;
-    descriptor_type_with_records(field, substitutions, &mut BTreeSet::new())
+    descriptor_type_with_substitutions(field, substitutions)
 }
 
-fn descriptor_type_with_records(
+/// A described member keeps the nominal identity of its descriptor type, so a
+/// read such as `checkpoint.position` agrees with a `sys.CheckpointPosition`
+/// annotation or signature parameter (ORNA-NOMINAL-002), and an opaque
+/// `sys.Value` is never unboxed into a structural record. Chained reads resolve
+/// each step through `infer_system_member`; only type parameters substitute.
+fn descriptor_type_with_substitutions(
     ty: &system_api::SystemType,
     substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
 ) -> Option<Type> {
     match ty {
-        system_api::SystemType::Named(name) => {
-            if let Some(ty) = substitutions.get(name) {
-                return Some(ty.clone());
-            }
-            descriptor_relation_record_type(name, substitutions, expanding)
-                .or_else(|| Some(descriptor_type(ty)))
-        }
+        system_api::SystemType::Named(name) => Some(
+            substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| descriptor_type(ty)),
+        ),
         system_api::SystemType::Applied { base, arguments }
             if matches!(base.as_str(), "Relation" | "Query") =>
         {
-            Some(Type::Relation(Box::new(descriptor_type_with_records(
-                arguments.first()?,
-                substitutions,
-                expanding,
-            )?)))
+            Some(Type::Relation(Box::new(
+                descriptor_type_with_substitutions(arguments.first()?, substitutions)?,
+            )))
         }
         system_api::SystemType::Applied { base, arguments } if base == "Stream" => {
-            Some(Type::Stream(Box::new(descriptor_type_with_records(
+            Some(Type::Stream(Box::new(descriptor_type_with_substitutions(
                 arguments.first()?,
                 substitutions,
-                expanding,
             )?)))
         }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
                 .iter()
-                .map(|argument| descriptor_type_with_records(argument, substitutions, expanding))
+                .map(|argument| descriptor_type_with_substitutions(argument, substitutions))
                 .collect::<Option<Vec<_>>>()?,
         }),
         system_api::SystemType::List(element) => Some(Type::List(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
         system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
     }
-}
-
-fn descriptor_relation_record_type(
-    system_type: &str,
-    substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
-) -> Option<Type> {
-    let fields = system_api::embedded_system_api().record_fields(system_type)?;
-    if fields.is_empty() || !expanding.insert(system_type.to_owned()) {
-        return None;
-    }
-    let fields = fields
-        .iter()
-        .map(|(name, ty)| {
-            Some((
-                name.clone(),
-                descriptor_type_with_records(ty, substitutions, expanding)?,
-            ))
-        })
-        .collect::<Option<BTreeMap<_, _>>>();
-    expanding.remove(system_type);
-    fields.map(Type::Record)
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
@@ -24032,48 +24771,101 @@ fn infer_currency_suffix(
 fn infer_numeric_postfix(base: &Type, name: &str) -> Option<Type> {
     match base {
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
-        // These postfix units are evaluated as elapsed Duration values. Keep
-        // their static type aligned with the runtime representation so the
-        // ordinary Duration APIs (including optional std formatters) accept
-        // them without requiring std to define the core temporal value.
-        Type::Int | Type::Decimal
-            if matches!(name, "hour" | "hours" | "minute" | "minutes" | "min" | "second" | "seconds" | "s") =>
-        {
-            Some(Type::Named("std.DURATION".into()))
-        }
-        Type::Int | Type::Decimal | Type::Float => Some(Type::Applied {
-            base: numeric_base(base)?.into(),
-            arguments: vec![Type::Named(name.into())],
-        }),
-        Type::Applied { base, arguments }
-            if arguments.len() == 1
-                && arguments
-                    .first()
-                    .is_some_and(|unit| unit == &Type::Named(name.into())) =>
-        {
-            Some(Type::Applied {
-                base: base.clone(),
-                arguments: arguments.clone(),
-            })
-        }
         _ => None,
     }
 }
 
-fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static str> {
+/// Elapsed `Duration` suffixes of the root intrinsic environment, such as
+/// `now() - 1.hour`; the evaluator constructs these values directly.
+const INTRINSIC_DURATION_SUFFIXES: &[&str] = &[
+    "hour", "hours", "minute", "minutes", "min", "second", "seconds", "s",
+];
+
+/// Currency mismatch for addition; time-versus-energy is reported by the
+/// dimension check (ORNA-UNIT-004).
+fn incompatible_addition_message(left: &Type, right: &Type) -> Option<(&'static str, &'static str)> {
     if let (Some(left), Some(right)) = (money_currency(left), money_currency(right))
         && left != right
     {
-        return Some("cannot add different currencies without conversion");
+        return Some((
+            DIAG_CURRENCY_MISMATCH,
+            "cannot add different currencies without conversion",
+        ));
     }
-    let (Some(left), Some(right)) = (numeric_unit(left), numeric_unit(right)) else {
-        return None;
+    None
+}
+
+/// Calendar-day period suffixes of the root intrinsic environment, such as
+/// `bucket_by(1.day, zone: ...)`; a period is distinct from an elapsed
+/// `Duration` (ORNA-TIME-004).
+const INTRINSIC_PERIOD_SUFFIXES: &[&str] = &["day", "days"];
+
+/// Types `value.unit` on a numeric value (ORNA-UNIT-008). A unit visible
+/// through a declaration or import gives a structural quantity, and naming
+/// the unit a quantity already has keeps it; a suffix never converts. An
+/// unshadowed intrinsic temporal suffix gives an elapsed `Duration` or a
+/// calendar-day period. Any other suffix is rejected: a unit is never
+/// inferred from its spelling.
+fn infer_unit_suffix(
+    base: &Type,
+    name: &str,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let numeric = match base {
+        Type::Int | Type::Decimal | Type::Float => base,
+        Type::Quantity { numeric, .. } => numeric.as_ref(),
+        _ => return None,
     };
-    let (Some(left), Some(right)) = (unit_dimension(left), unit_dimension(right)) else {
-        return None;
-    };
-    (matches!((left, right), ("Time", "Energy") | ("Energy", "Time")))
-        .then_some("cannot add Time and Energy")
+    match lookup_unit(&[name.to_owned()], scope) {
+        UnitLookup::Declared(unit) => {
+            let quantity = Type::Quantity {
+                numeric: Box::new(numeric.clone()),
+                dimension_basis: unit.dimension_basis.clone(),
+                scale: unit.scale.clone(),
+                offset: unit.offset.clone(),
+                affine: unit.affine,
+            };
+            if matches!(base, Type::Quantity { .. }) && *base != quantity {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    "a unit suffix does not convert a quantity to another unit",
+                ));
+                return Some(Type::Error);
+            }
+            Some(quantity)
+        }
+        UnitLookup::Ambiguous => {
+            diagnostics.push(diag(DIAG_AMBIGUOUS, AMBIGUOUS_UNIT));
+            Some(Type::Error)
+        }
+        UnitLookup::Unresolved => match base {
+            Type::Int | Type::Decimal if INTRINSIC_DURATION_SUFFIXES.contains(&name) => {
+                Some(Type::Named("std.DURATION".into()))
+            }
+            Type::Int if INTRINSIC_PERIOD_SUFFIXES.contains(&name) => Some(Type::Applied {
+                base: "Int".into(),
+                arguments: vec![Type::Named(name.into())],
+            }),
+            _ => {
+                diagnostics.push(diag(DIAG_UNRESOLVED, "unit suffix cannot be resolved"));
+                Some(Type::Error)
+            }
+        },
+    }
+}
+
+/// A calendar-day period written `n.day` or `n.days`.
+fn is_calendar_period(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Applied { base, arguments }
+            if base == "Int"
+                && matches!(
+                    arguments.as_slice(),
+                    [Type::Named(unit)] if INTRINSIC_PERIOD_SUFFIXES.contains(&unit.as_str())
+                )
+    )
 }
 
 fn money_currency(ty: &Type) -> Option<&Type> {
@@ -24083,63 +24875,74 @@ fn money_currency(ty: &Type) -> Option<&Type> {
     }
 }
 
-fn numeric_unit(ty: &Type) -> Option<&str> {
-    match ty {
-        Type::Applied { base, arguments }
-            if matches!(base.as_str(), "Int" | "Decimal" | "Float") && arguments.len() == 1 =>
-        {
-            match arguments.first() {
-                Some(Type::Named(unit)) => Some(unit),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+/// An absolute value of an affine unit such as `C` (ORNA-UNIT-005).
+fn is_absolute_affine(ty: &Type) -> bool {
+    matches!(ty, Type::Quantity { affine: true, .. })
 }
 
-fn unit_dimension(unit: &str) -> Option<&'static str> {
-    match unit.rsplit('.').next().unwrap_or(unit) {
-        "day" | "days" | "hour" | "hours" | "minute" | "minutes" => Some("Time"),
-        "kWh" => Some("Energy"),
-        _ => None,
-    }
-}
-
-fn is_absolute_affine_temperature(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Applied { base, arguments }
-            if matches!(base.as_str(), "Int" | "Decimal" | "Float")
-                && matches!(arguments.as_slice(), [Type::Named(unit)] if unit == "C")
-    )
-}
-
-fn numeric_base(ty: &Type) -> Option<&'static str> {
-    match ty {
-        Type::Int => Some("Int"),
-        Type::Decimal => Some("Decimal"),
-        Type::Float => Some("Float"),
-        _ => None,
-    }
-}
-
+/// `Decimal<kWh> * (Money<GBP> / kWh)` reduces to `Money<GBP>`
+/// (ORNA-MONEY-003): an exact quantity whose dimensions match the rate's unit
+/// leaves only the currency. Units of one dimension with different scales
+/// reduce when their exact ratio is a finite decimal, so no rounding is
+/// implied.
 fn reduce_exact_money_rate(left: &Type, right: &Type) -> Option<Type> {
-    match (left, right) {
-        (Type::Applied { base, arguments }, Type::MoneyPerUnit { currency, unit })
-        | (Type::MoneyPerUnit { currency, unit }, Type::Applied { base, arguments })
-            if base == "Decimal" && arguments.as_slice() == [unit.as_ref().clone()] =>
-        {
-            Some(Type::Applied {
-                base: "Money".into(),
-                arguments: vec![currency.as_ref().clone()],
-            })
-        }
-        _ => None,
+    let ((
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            affine: false,
+            ..
+        },
+        Type::MoneyPerUnit { currency, unit },
+    )
+    | (
+        Type::MoneyPerUnit { currency, unit },
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            affine: false,
+            ..
+        },
+    )) = (left, right)
+    else {
+        return None;
+    };
+    let Type::Quantity {
+        dimension_basis: rate_basis,
+        scale: rate_scale,
+        affine: false,
+        ..
+    } = unit.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(numeric.as_ref(), Type::Int | Type::Decimal) || dimension_basis != rate_basis {
+        return None;
     }
+    let ratio = unit_fraction(scale)?.divide(&unit_fraction(rate_scale)?)?;
+    is_finite_decimal(&ratio).then(|| Type::Applied {
+        base: "Money".into(),
+        arguments: vec![currency.as_ref().clone()],
+    })
+}
+
+/// Whether an exact ratio has a finite decimal expansion.
+fn is_finite_decimal(value: &UnitFraction) -> bool {
+    let mut denominator = value.denominator.clone();
+    for factor in [BigInt::from(2u8), BigInt::from(5u8)] {
+        while (&denominator % &factor).is_zero() {
+            denominator /= &factor;
+        }
+    }
+    denominator.is_one()
 }
 
 fn is_binary_float(ty: &Type) -> bool {
-    matches!(ty, Type::Float) || matches!(ty, Type::Applied { base, .. } if base == "Float")
+    matches!(ty, Type::Float)
+        || matches!(ty, Type::Applied { base, .. } if base == "Float")
+        || matches!(ty, Type::Quantity { numeric, .. } if **numeric == Type::Float)
 }
 
 fn money_constructor_currency(expr: &Expr) -> Option<&str> {
@@ -24198,7 +25001,7 @@ fn infer_money_constructor_type(
     let value_is_float = is_binary_float(value);
     if value_is_float {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_MONEY_FROM_FLOAT,
             "Money cannot be constructed from an inexact Float without explicit rounding",
         ));
     }
@@ -24490,7 +25293,7 @@ fn infer_table_assertion(
             _ => None,
         };
         if let Some(message) = message {
-            diagnostics.push(diag(DIAG_ASSERTION, message));
+            diagnostics.push(diag(DIAG_ASSERTION_OWNER_PIPE, message));
             return Inferred {
                 ty: Type::Bool,
                 effects: EffectSummary::default(),
@@ -25160,34 +25963,41 @@ fn table_row_type(item: &Item) -> Type {
     Type::Record(fields)
 }
 
+/// Returns the spec diagnostic code and message for a primary-key type
+/// violation. Other primary-key rejections keep the generic type code.
 fn primary_key_type_error(
     ty: &Type,
     scope: &Scope,
     visiting_tables: &mut BTreeSet<String>,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'static str)> {
     let resolved = resolve_type_aliases(ty, &scope.type_aliases, &mut BTreeSet::new());
     if &resolved != ty {
         return primary_key_type_error(&resolved, scope, visiting_tables);
     }
     match ty {
         Type::Int | Type::Decimal | Type::Date | Type::Instant | Type::Text | Type::Bool => None,
-        Type::Tuple(elements) if elements.is_empty() => {
-            Some("Unit is not a primary-key type in version 1.0")
-        }
+        Type::Tuple(elements) if elements.is_empty() => Some((
+            DIAG_TYPE,
+            "Unit is not a primary-key type in version 1.0",
+        )),
         Type::Tuple(elements) => elements
             .iter()
             .find_map(|element| primary_key_type_error(element, scope, visiting_tables)),
         Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => None,
-        Type::Named(name) if scope.payload_enum_types.contains(name) => {
-            Some("payload-bearing enums cannot be primary-key types")
-        }
+        Type::Named(name) if scope.payload_enum_types.contains(name) => Some((
+            DIAG_TYPE,
+            "payload-bearing enums cannot be primary-key types",
+        )),
         Type::Named(name) => {
             let symbol = scope_named_symbol(name, scope);
             match symbol {
                 Some(symbol) if symbol.kind == SymbolKind::Enum => None,
                 Some(symbol) if symbol.kind == SymbolKind::Table => {
                     if !visiting_tables.insert(name.clone()) {
-                        return Some("table reference key type is recursively defined");
+                        return Some((
+                            DIAG_TYPE,
+                            "table reference key type is recursively defined",
+                        ));
                     }
                     let result = match symbol
                         .table_schema
@@ -25196,33 +26006,39 @@ fn primary_key_type_error(
                     {
                         Some(admission) => {
                             if admission.keys.is_empty() {
-                                Some("table reference has no canonical primary key")
+                                Some((DIAG_TYPE, "table reference has no canonical primary key"))
                             } else {
                                 admission.keys.iter().find_map(|(_, key_type)| {
                                     primary_key_type_error(key_type, scope, visiting_tables)
                                 })
                             }
                         }
-                        None => Some("table reference has no canonical primary key"),
+                        None => Some((DIAG_TYPE, "table reference has no canonical primary key")),
                     };
                     visiting_tables.remove(name);
                     result
                 }
-                _ => Some("type has no canonical primary-key encoding"),
+                _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
             }
         }
-        Type::Float => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Applied { base, .. } if base == "Float" => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Range(_) => Some("Range<T> is not a primary-key type in version 1.0"),
-        Type::Applied { base, .. } if base == "Range" => {
-            Some("Range<T> is not a primary-key type in version 1.0")
-        }
+        Type::Float => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Applied { base, .. } if base == "Float" => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Range(_) => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
+        Type::Applied { base, .. } if base == "Range" => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
         Type::Error => None,
-        _ => Some("type has no canonical primary-key encoding"),
+        _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
     }
 }
 
@@ -25408,12 +26224,46 @@ fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
         .collect()
 }
 
-fn imported_payload_enum_bindings(
+/// Declared payload rows of every enum in one source module. Payload field
+/// types name that module's own nominal records by their module identity, so
+/// an importer checks construction against the same types the declaring
+/// module uses. Duplicate declarations are reported by the declaring module.
+fn source_enum_variant_rows(
+    namespace: &Namespace,
     tree: &SyntaxTree,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+) -> BTreeMap<String, EnumVariantRows> {
+    let identities = tree
+        .items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            } => Some((name.clone(), nominal_identity(namespace, name))),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut enums = enum_variant_types(tree, &mut Vec::new());
+    for field in enums
+        .values_mut()
+        .flat_map(BTreeMap::values_mut)
+        .flat_map(BTreeMap::values_mut)
+    {
+        *field = canonicalize_type_with_identities(field, &identities);
+    }
+    enums
+}
+
+/// Payload rows of the source enums each `use` declaration makes visible,
+/// keyed by the spelling that names the enum in this module: `Level` for a
+/// named, glob or prelude import, and `alias.Level` through a module binding.
+fn imported_enum_bindings(
+    tree: &SyntaxTree,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
-) -> BTreeSet<String> {
-    let mut bindings = BTreeSet::new();
+) -> BTreeMap<String, EnumVariantRows> {
+    let mut bindings = BTreeMap::new();
     for item in &tree.items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
@@ -25422,70 +26272,52 @@ fn imported_payload_enum_bindings(
         let Some(module) = modules.get(&target) else {
             continue;
         };
+        let enums = source_enums.get(&target).into_iter().flatten();
         match tail {
             UseTail::None => {
                 if let Some(binding) = target.0.last() {
-                    add_qualified_payload_enum_bindings(
+                    add_qualified_enum_bindings(
                         &mut bindings,
                         binding,
                         &target,
-                        payload_enums,
+                        source_enums,
                         modules,
                     );
                 }
             }
             UseTail::Alias { name, .. } if name != "_" => {
-                add_qualified_payload_enum_bindings(
-                    &mut bindings,
-                    name,
-                    &target,
-                    payload_enums,
-                    modules,
-                );
+                add_qualified_enum_bindings(&mut bindings, name, &target, source_enums, modules);
             }
-            UseTail::Alias { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    for name in names {
-                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
-                            bindings.insert(name.clone());
-                        }
-                    }
-                }
-            }
-            UseTail::Glob { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        names
-                            .iter()
-                            .filter(|name| is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
-            UseTail::Names(imports) => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        imports
-                            .iter()
-                            .map(|import| &import.name)
-                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
+            UseTail::Alias { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| {
+                        module.prelude_exports.contains(*name) && is_exported_enum(module, name)
+                    })
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Glob { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| is_exported_enum(module, name))
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Names(imports) => bindings.extend(imports.iter().filter_map(|import| {
+                let variants = source_enums.get(&target)?.get(&import.name)?;
+                is_exported_enum(module, &import.name)
+                    .then(|| (import.name.clone(), variants.clone()))
+            })),
         }
     }
     bindings
 }
 
-fn add_qualified_payload_enum_bindings(
-    bindings: &mut BTreeSet<String>,
+fn add_qualified_enum_bindings(
+    bindings: &mut BTreeMap<String, EnumVariantRows>,
     binding: &str,
     target: &Namespace,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
 ) {
-    for (namespace, names) in payload_enums {
+    for (namespace, enums) in source_enums {
         if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
             continue;
         }
@@ -25494,11 +26326,11 @@ fn add_qualified_payload_enum_bindings(
         };
         let mut prefix = vec![binding.to_owned()];
         prefix.extend(namespace.0[target.0.len()..].iter().cloned());
-        for name in names {
+        for (name, variants) in enums {
             if is_exported_enum(module, name) {
                 let mut qualified = prefix.clone();
                 qualified.push(name.clone());
-                bindings.insert(qualified.join("."));
+                bindings.insert(qualified.join("."), variants.clone());
             }
         }
     }
@@ -26968,7 +27800,7 @@ mod tests {
             analysis.diagnostics
         );
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }));
         assert!(
             !has(&analysis, DIAG_UNRESOLVED),

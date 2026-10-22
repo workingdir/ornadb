@@ -19,7 +19,8 @@ use orna_evaluator_v1::{
     PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression,
     evaluate_expression_with_functions, evaluate_with_functions_and_budget,
     evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
-    invoke_named_with_nominals,
+    invoke_named_with_effects_nominals_and_budget, invoke_named_with_nominals,
+    source_enum_definitions,
 };
 use orna_foundation_v1::{
     Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
@@ -68,69 +69,6 @@ use std::{
 pub struct SemanticAdapter {
     syntax: SyntaxAdapter,
     catalogue: Catalogue,
-}
-
-fn published_diagnostic_code(diagnostic: &Diagnostic) -> String {
-    match diagnostic.message() {
-        "calendar bucketing of Instant requires a time zone" => "E6001".into(),
-        message if message.starts_with("table write contains an unknown field `") => "E2003".into(),
-        message if message.starts_with("table write field has an incompatible type:") => {
-            "E2001".into()
-        }
-        message if message.starts_with("missing required field `") => "E2002".into(),
-        message
-            if message.starts_with("computed field `") && message.ends_with("during insert") =>
-        {
-            "E3010".into()
-        }
-        message if message.starts_with("computed field `") && message.ends_with("directly") => {
-            "E3011".into()
-        }
-        "primary keys are immutable through update" => "E3002".into(),
-        "cannot add Time and Energy" => "E5001".into(),
-        "cannot add two absolute affine temperatures" => "E5002".into(),
-        "cannot sum absolute affine quantities" => "E5003".into(),
-        "cannot add different currencies without conversion" => "E5003".into(),
-        "currency symbols belong to locale-aware formatting, not Currency identity" => {
-            "ORNA091-E-CURRENCY-SYMBOL".into()
-        }
-        "binary Float cannot enter an exact Money calculation implicitly" => "E5103".into(),
-        "Money cannot be constructed from an inexact Float without explicit rounding" => {
-            "E5004".into()
-        }
-        message if message.starts_with("system rows are read-only; use `sys.admin.") => {
-            "ORNA100-E-SYS-ADMIN-METHOD".into()
-        }
-        "implicit conversion chains are not searched; name each conversion explicitly" => {
-            "ORNA091-E-CONVERSION-CHAIN".into()
-        }
-        "Result/Ok/Err control plumbing was removed; return the success type directly" => {
-            "ORNA091-E-RESULT".into()
-        }
-        "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions" => {
-            "ORNA100-E-SYS-STORAGE-CALL".into()
-        }
-        "`std` is reserved" => "E1009".into(),
-        "`sys` is reserved" => "E1008".into(),
-        "Range<T> is not a primary-key type in version 1.0" => "E3010".into(),
-        "an automatic-key table cannot be explicitly re-keyed" => "E3013".into(),
-        "Display and Present implementations must be read-only" => "E7201".into(),
-        "secret values cannot be displayed" => "E7002".into(),
-        "computed field must be deterministic and row-local" => "E3012".into(),
-        "sys.Commit is read-only" => "E7001".into(),
-        "remove `self |`; the table already supplies its candidate relation"
-        | "remove the repeated table owner before the assertion predicate" => {
-            "ORNA-A091-002".into()
-        }
-        "Float is not a valid primary-key type" => "E3003".into(),
-        "relation equality is ambiguous; choose sequence or row-set comparison explicitly" => {
-            "E4107".into()
-        }
-        "same durable source consumed twice without distinct consumer identity" => "E9101".into(),
-        "cross-database writes are not atomic/supported" => "E9001".into(),
-        "a durable consumer function may own only one checkpointed source root" => "E9102".into(),
-        _ => diagnostic.code().into(),
-    }
 }
 
 impl Default for SemanticAdapter {
@@ -226,6 +164,9 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
     matches!(
         diagnostic.code(),
         "ORNA091-E-RESULT"
+            | "E2001"
+            | "E2002"
+            | "E2003"
             | "ORNA-S020-ANNOTATION"
             | "ORNA-S021-TYPE"
             | "ORNA-S022-UNSUPPORTED"
@@ -233,22 +174,54 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
             | "ORNA-A091-003"
             | "ORNA-A091-007"
             | "ORNA-A091-012"
+            | "ORNA-A091-002"
+            | "ORNA091-E-CURRENCY-SYMBOL"
+            | "ORNA091-E-CONVERSION-CHAIN"
+            | "ORNA100-E-SYS-ADMIN-METHOD"
+            | "ORNA100-E-SYS-STORAGE-CALL"
+            | "E1008"
+            | "E1009"
             | "E2001"
+            | "E2002"
+            | "E2003"
+            | "E3002"
+            | "E3003"
+            | "E3010"
+            | "E3011"
+            | "E3012"
+            | "E3013"
+            | "E4107"
             | "E5001"
+            | "E5002"
+            | "E5003"
+            | "E5103"
+            | "E5004"
+            | "E6001"
+            | "E7001"
+            | "E7002"
+            | "E7201"
+            | "E9001"
+            | "E9101"
+            | "E9102"
     ) || diagnostic.message() == "type name cannot be resolved"
 }
 
-/// Picks one diagnostic for the stage: an explicitly published mapping or
-/// the spec-mandated Result diagnostic wins over incidental internal codes;
-/// otherwise the first accepted diagnostic does.
+/// Spec-published codes win over the generic internal `ORNA-S*`/`ORNA-A091-*`
+/// codes, which keep emission order.
+fn is_published_code(code: &str) -> bool {
+    !code.starts_with("ORNA-") || code == "ORNA-A091-002"
+}
+
+/// Picks one diagnostic for the stage: a published code or the spec-mandated
+/// Result diagnostic wins over generic internal codes; otherwise the first
+/// accepted diagnostic does.
 fn select_diagnostic(
     diagnostics: Vec<Diagnostic>,
     phase: SemanticPhase,
 ) -> StageOutcome<Diagnostic> {
     let mut first_accepted = None;
     for diagnostic in diagnostics {
-        if diagnostic.code() == "ORNA091-E-RESULT"
-            || published_diagnostic_code(&diagnostic) != diagnostic.code() {
+        if is_published_code(diagnostic.code()) {
             if phase.accepts(&diagnostic) {
                 return StageOutcome::Failed(diagnostic);
             }
@@ -267,7 +240,7 @@ fn select_diagnostic(
 impl ConformanceAdapter for SemanticAdapter {
     type Diagnostic = Diagnostic;
     fn diagnostic_code(&self, diagnostic: &Diagnostic) -> String {
-        published_diagnostic_code(diagnostic)
+        diagnostic.code().into()
     }
     fn diagnostic_message(&self, diagnostic: &Diagnostic) -> String {
         diagnostic.message().into()
@@ -1998,6 +1971,7 @@ impl TransactionalEvaluator {
             table_fields,
             table_assertions,
             module_assertions,
+            nominal_definitions,
         } = admitted;
         let entry = self.entry.clone();
         let limits = self.limits;
@@ -2017,10 +1991,11 @@ impl TransactionalEvaluator {
                 explain_catalogue: self.explain_catalogue.as_ref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
-            let result = invoke_named_with_effects_and_budget(
+            let result = invoke_named_with_effects_nominals_and_budget(
                 &entry,
                 &functions,
                 arguments,
+                nominal_definitions,
                 limits,
                 &mut effects,
                 &mut budget,
@@ -4924,6 +4899,7 @@ fn admit_list_stream_source(
         table_fields,
         mut table_assertions,
         module_assertions,
+        ..
     } = admit_transaction_source(unit, limits, entry)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
@@ -5080,6 +5056,7 @@ fn admit_project_list_stream(
         table_fields,
         table_assertions,
         module_assertions,
+        ..
     } = admitted;
     let root = functions.get(root_entry).ok_or_else(|| {
         Box::new(StageOutcome::Skipped {
@@ -6322,6 +6299,8 @@ struct AdmittedTransaction {
     table_fields: TableFields,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
+    /// Construction plans of the admitted source enums (ORNA-ENUM-001..003).
+    nominal_definitions: NominalDefinitions,
 }
 
 type AdmissionFailure = Box<StageOutcome<Diagnostic>>;
@@ -6397,6 +6376,7 @@ fn admit_transaction_source_inner(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     } = admitted;
     if let Err(error) = limits.check_items(functions.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6413,6 +6393,7 @@ fn admit_transaction_source_inner(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     })
 }
 
@@ -6500,6 +6481,7 @@ fn admit_transaction_project(
     let mut table_fields = TableFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
+    let mut nominal_definitions = NominalDefinitions::new();
     for unit in &project.modules {
         if let Err(error) = limits.check_source(&unit.source) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6521,6 +6503,7 @@ fn admit_transaction_project(
             table_fields: module_table_fields,
             table_assertions: mut module_assertions_by_table,
             module_assertions: mut module_assertions_only,
+            nominal_definitions: module_nominal_definitions,
         } = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
@@ -6566,6 +6549,9 @@ fn admit_transaction_project(
         table_fields.extend(module_table_fields);
         table_assertions.extend(module_assertions_by_table);
         module_assertions.extend(module_assertions_only);
+        if !is_standard_source(unit) {
+            nominal_definitions.extend(module_nominal_definitions);
+        }
     }
     let mut standard_aliases = BTreeMap::<String, String>::new();
     for unit in &project.modules {
@@ -6616,6 +6602,7 @@ fn admit_transaction_project(
         table_fields,
         table_assertions,
         module_assertions,
+        nominal_definitions,
     })
 }
 
@@ -6843,11 +6830,13 @@ fn admitted_transaction_module(
             // graph before this per-module retention pass. Qualified calls are
             // resolved by the evaluator against the retained function map.
             Declaration::Use { .. } => {}
+            // Enums execute as construction plans built for the whole module
+            // below (ORNA-ENUM-001..003).
+            Declaration::Enum { .. } => {}
             // Types and related declarations affect semantic admission but
             // have no activation-time effect in this bounded table runtime.
             // Retaining them as inert preserves project module boundaries.
             Declaration::Protocol { .. }
-            | Declaration::Enum { .. }
             | Declaration::Dimension { .. }
             | Declaration::Unit { .. }
             | Declaration::Type { .. } => {}
@@ -6865,6 +6854,7 @@ fn admitted_transaction_module(
         table_fields,
         table_assertions: assertions,
         module_assertions,
+        nominal_definitions: source_enum_definitions(namespace, items),
     })
 }
 
@@ -9782,7 +9772,7 @@ impl RuntimeAdapter<BoundedEvaluator> {
 impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
     type Diagnostic = Diagnostic;
     fn diagnostic_code(&self, diagnostic: &Diagnostic) -> String {
-        published_diagnostic_code(diagnostic)
+        diagnostic.code().into()
     }
     fn diagnostic_message(&self, diagnostic: &Diagnostic) -> String {
         diagnostic.message().into()
