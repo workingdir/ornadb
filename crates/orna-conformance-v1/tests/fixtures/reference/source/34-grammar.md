@@ -1,9 +1,9 @@
-# 35. Complete grammar {#grammar}
+# 42. Complete grammar {#grammar}
 
 The grammar has three entry points: `module_unit`, `row_unit` and `repl_input`. It specifies syntactic structure; contextual lexical classification, type/effect checking, value validity and resource limits remain additional requirements. The complete grammar is included below and also distributed as `grammar/orna.ebnf`.
 
 ```ebnf
-(* Orna 1.0.0 syntactic grammar. Lexical classification and contextual
+(* Orna 1.1.0 syntactic grammar. Lexical classification and contextual
    restrictions are specified in the Lexical structure and Expressions chapters.
    Entry points: module_unit, row_unit, repl_input. This grammar does not
    substitute for resolution, type checking, effect checking or evaluation. *)
@@ -315,4 +315,3 @@ binary_digit       = "0" | "1" ;
 digit2             = ascii_digit , ascii_digit ;
 digit4             = digit2 , digit2 ;
 ```
-

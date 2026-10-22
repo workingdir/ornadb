@@ -49,7 +49,7 @@ fn populated_format1_dirty_workspace_is_preserved_in_copy() {
     fs::create_dir_all(source.path().join(".orna")).unwrap();
     fs::write(
         source.path().join(".orna/format.orna"),
-        include_str!("fixtures/format-context/format-1.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
     )
     .unwrap();
     fs::write(
@@ -331,7 +331,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
     fs::create_dir_all(source.path().join(".orna")).unwrap();
     fs::write(
         source.path().join(".orna/format.orna"),
-        include_str!("fixtures/format-context/format-2.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
     )
     .unwrap();
     fs::write(
@@ -392,12 +392,12 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         &["show", &format!("{source_head}:.orna/format.orna")],
     );
     assert_ne!(
-        include_bytes!("fixtures/format-context/format-2.orna").as_slice(),
-        include_bytes!("fixtures/format-context/format-1.orna").as_slice()
+        include_bytes!("fixtures/format-context/format-2-draft-1.1.0.orna").as_slice(),
+        include_bytes!("fixtures/format-context/format-1-ornadb-1.0.orna").as_slice()
     );
     assert_eq!(
         source_format_bytes,
-        include_bytes!("fixtures/format-context/format-2.orna")
+        include_bytes!("fixtures/format-context/format-2-draft-1.1.0.orna")
     );
     let source_status = git_output(
         source.path(),
@@ -488,7 +488,7 @@ fn populated_format2_dirty_workspace_is_preserved_in_copy() {
         .unwrap();
     assert_eq!(
         legacy_format_entry.expected(),
-        Some(b"format 2\n".as_slice())
+        Some(include_bytes!("fixtures/format-context/format-2-draft-1.1.0.orna").as_slice())
     );
     assert_eq!(legacy_format_entry.next(), None);
     assert_eq!(

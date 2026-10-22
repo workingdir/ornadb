@@ -1,0 +1,1101 @@
+{
+  "scope": "Python reference policy/encoding/graph and isolated native Git; NOT Orna evaluator, FUSE, real editor, crash safety or large-scale conformance",
+  "passed": true,
+  "checks": 214,
+  "results": [
+    {
+      "name": "MIME Text/Plain; Charset=\"UTF-8\"",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME application/javascript",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME text/plain;z=\"Mixed Case\";a=X",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME application/example;q=\"a;B\"",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME application/example;x=\"a\\\"b\"",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME audio/x-wav",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME application/example;x=\"\"",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME ''",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME '/plain'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/*'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME '*/plain'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain\\r\\nx:x'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain\\x00'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/pl\u00e4in'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain;a=1;A=2'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain; a'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain; x=\"unterminated'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain;a=1;'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'text/plain;a =1'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'a/b\\t'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject MIME 'a/b;x=1 2'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/gzip",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/gzip gz",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/gzip tar.gz",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/gzip tgz",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/json json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/octet-stream",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/octet-stream bin",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/pdf",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/pdf pdf",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/wasm",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/wasm wasm",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred application/zip",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint application/zip zip",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred audio/flac",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/flac flac",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred audio/mp4",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mp4 m4a",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mp4 m4b",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mp4 mp4",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mp4 mpg4",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred audio/mpeg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mpeg mp1",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mpeg mp2",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/mpeg mp3",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred audio/ogg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/ogg oga",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/ogg ogg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/ogg opus",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred audio/wav",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint audio/wav wav",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred image/gif",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/gif gif",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred image/jpeg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/jpeg jpe",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/jpeg jpeg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/jpeg jpg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred image/png",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/png png",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred image/svg+xml",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/svg+xml svg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred image/webp",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint image/webp webp",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred text/css",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint text/css css",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred text/javascript",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint text/javascript js",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint text/javascript mjs",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred text/plain",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint text/plain text",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint text/plain txt",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred video/mp4",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint video/mp4 m4v",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint video/mp4 mp4",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "preferred video/webm",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "hint video/webm webm",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix '../mp3'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix '.mp3'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'a/b'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'a\\\\b'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'a..b'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'a\\nb'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'a b'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject suffix ''",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "MIME/suffix incompatibility",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "default hint canonical",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "module hint retained",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "gzip not tar default",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "unknown preserved",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "empty key",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "slash encoding",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "literal empty alias distinct",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "case preserved",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "unicode distinct",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "blob/document collision",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "literal escape cannot alias",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "long key deterministic",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip NoneType101",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip bool102",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip bool103",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip int104",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip int105",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip int106",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip int107",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip int108",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip str109",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip bytes110",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip list111",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip dict112",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "CBOR roundtrip Tag113",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject CBOR 1800",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject CBOR 9fff",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject CBOR 0000",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject CBOR 580178",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reject CBOR a2616101616102",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden codec ovb2-empty",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden codec ovb2-text",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden codec sov3-text",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden codec rov3-text",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden codec ovb2-js-module",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path ",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path .",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path ..",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path london",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path a/b",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path %64ata",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path data",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path ~empty",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path \u00e9",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path e\u0301",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden path xxxxxxxxxxxxxxxxxxxx",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME audio/mpeg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME audio/mpeg",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME application/javascript",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME IMAGE/JPEG",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME application/gzip",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME application/gzip",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden MIME application/x-example",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object 1370e5336",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object 7013767e3",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object 7ff2f0974",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object 936e88a28",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object 9ed066a34",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object f2ba8f84a",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "golden native object fa62ea668",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 annotations share graph",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 descriptor does not fetch payload",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 range bytes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 range partial",
+      "passed": true,
+      "detail": {
+        "fetched_chunks": 1,
+        "total_chunks": 7,
+        "payload_bytes": 383211
+      }
+    },
+    {
+      "name": "sha1 full reconstruction",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 range reject (-1, 1)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 range reject (2097153, 1)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 range reject (0, 8388609)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 exact EOF",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 empty bytes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 indexed lookup",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 absent lookup",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 row metadata no payload",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 replacement root",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 update payload stable",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 duplicate keys",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha1 missing native dependency",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 annotations share graph",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 descriptor does not fetch payload",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 range bytes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 range partial",
+      "passed": true,
+      "detail": {
+        "fetched_chunks": 1,
+        "total_chunks": 7,
+        "payload_bytes": 383211
+      }
+    },
+    {
+      "name": "sha256 full reconstruction",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 range reject (-1, 1)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 range reject (2097153, 1)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 range reject (0, 8388609)",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 exact EOF",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 empty bytes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 indexed lookup",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 absent lookup",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 row metadata no payload",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 replacement root",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 update payload stable",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 duplicate keys",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "sha256 missing native dependency",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "invalid edit",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "invalid edit no mutation",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "accept good edit",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "idempotent retry",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "request reuse mismatch",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "stale baseline",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object c9f68fa12",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object d9cb30f8a",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 92d5bf68e",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 48b603a41",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 1e5360d00",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 2ced66220",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object ec803cffc",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object aa40225ab",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object f612c13ea",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object ebad4920a",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 8a75b894d",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object b05d16909",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object d3ce8212f",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object a0acfdb40",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 8de35dc4f",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object 5ae770a07",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object ef745b04b",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Git native object a9f56bc47",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "partial clone omits all chunks",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "partial row query title",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "partial row query omits all chunks",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "native partial range exact",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "native range fetch subset",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "mirror old/new metadata",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "mirror content exact",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "native_git": {
+    "payload_bytes": 2097152,
+    "sha256": "ca0b721f19c6ddef262806d54fa1514a96e6c4803c9ea9b89bffcf51b0ab2ace",
+    "chunks": 7,
+    "initial_local_media_chunks": 0,
+    "after_title_read_media_chunks": 0,
+    "requested_bytes": 131072,
+    "range_media_chunks": 1,
+    "range_fetched_payload_bytes": 383211,
+    "git_fsck": true,
+    "offline_mirror_exact": true,
+    "metadata_versions": 2,
+    "limitations": "Two-MiB reference content; map directly at store for transport proof, no full database schema admission, FUSE or fault-injection."
+  },
+  "engine_execution": "not-executed",
+  "fuse_execution": "not-executed"
+}

@@ -917,6 +917,23 @@ fn mv_partial_update_error() -> Diagnostic {
     )
 }
 
+/// Names why the migration source failed format admission. The title carries
+/// the `FormatContextError` message, so the cause is user-visible; the stable
+/// code is kept in the detail.
+fn migration_source_admission_diagnostic(
+    error: orna_repository_v1::FormatContextError,
+) -> Diagnostic {
+    let title = format!("migration source could not be admitted: {error}");
+    Diagnostic {
+        code: "E2100",
+        title: std::borrow::Cow::Owned(title),
+        help: "verify the source worktree and retry with the same migration coordinates",
+        exit: Exit::Target,
+        detail: Some(format!("{} ({error:?})", error.code())),
+        body: None,
+    }
+}
+
 fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let usage = || {
         Diagnostic::usage(
@@ -1042,13 +1059,16 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         continuity,
         annotation_defaults,
     )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
+    .map_err(|error| match error {
+        orna_repository_v1::RepositoryError::FormatContext(context) => {
+            migration_source_admission_diagnostic(context)
+        }
+        other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
             "verify the source worktree and retry with the same migration coordinates",
-            format!("{error:?}"),
-        )
+            format!("{other:?}"),
+        ),
     })?;
     let destination_repository =
         orna_repository_v1::Repository::discover(copy.destination()).map_err(|error| {
