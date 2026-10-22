@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/relation-equality.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E4107",
+  "message_contains": "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
+  "status": "expected-not-executed"
+}

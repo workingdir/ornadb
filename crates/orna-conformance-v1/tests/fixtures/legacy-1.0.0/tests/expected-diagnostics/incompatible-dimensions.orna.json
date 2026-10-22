@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/incompatible-dimensions.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5001",
+  "message_contains": "cannot add Time and Energy",
+  "status": "expected-not-executed"
+}
