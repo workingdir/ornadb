@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-pipe-lambda.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1011",
+  "message_contains": "pipe-delimited anonymous functions are not valid; use `=>`",
+  "status": "expected-not-executed"
+}

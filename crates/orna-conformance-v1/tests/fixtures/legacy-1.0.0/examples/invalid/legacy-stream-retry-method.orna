@@ -1,0 +1,2 @@
+pub fn bad(stream: sys.Stream) =
+    stream.retry();
