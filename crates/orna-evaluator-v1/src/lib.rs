@@ -73,6 +73,8 @@ pub use sys_bindings::SysHostBindingRegistry;
 #[cfg(feature = "system-host-bindings")]
 pub use orna_sys_v1::SysHostContext;
 #[cfg(feature = "system-host-bindings")]
+pub use runtime_info::SysHostAttachment;
+#[cfg(feature = "system-host-bindings")]
 pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
@@ -888,9 +890,9 @@ pub trait EffectHandler {
     }
 
     /// The activation facts `sys.rt.info()` reports. Handlers without a host
-    /// context report `sys.abi.unavailable`.
+    /// context leave `sys.rt.info()` reporting `sys.version.incompatible`.
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         None
     }
 
@@ -1122,9 +1124,9 @@ pub trait Ovb2EffectHandler {
     }
 
     /// The activation facts `sys.rt.info()` reports. Handlers without a host
-    /// context report `sys.abi.unavailable`.
+    /// context leave `sys.rt.info()` reporting `sys.version.incompatible`.
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         None
     }
 }
@@ -1156,7 +1158,7 @@ impl EffectHandler for Ovb2EffectHandlerAdapter<'_> {
     }
 
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.handler.sys_host_context()
     }
 }
@@ -1341,7 +1343,7 @@ impl Ovb2EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     }
 
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.handler.sys_host_context()
     }
 }
@@ -1370,7 +1372,7 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
     }
 
     #[cfg(feature = "system-host-bindings")]
-    fn sys_host_context(&self) -> Option<&SysHostContext> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
         self.handler.sys_host_context()
     }
 
@@ -2058,13 +2060,14 @@ pub fn invoke_named_with_sys_host_context(
     limits: Limits,
     sys_host: &SysHostContext,
 ) -> Result<CanonicalValue, EvaluationError> {
+    let attachment = SysHostAttachment::new(sys_host.clone());
     invoke_named_with_host(
         name,
         functions,
         arguments,
         nominal_definitions,
         limits,
-        Some(sys_host),
+        Some(&attachment),
     )
 }
 
@@ -3974,7 +3977,7 @@ struct CallReuseKey {
 /// Host activation facts for `sys.rt.info()`. Without the
 /// `system-host-bindings` feature no host can attach, so the slot is `None`.
 #[cfg(feature = "system-host-bindings")]
-type ActivationSysHost<'a> = Option<&'a SysHostContext>;
+type ActivationSysHost<'a> = Option<&'a SysHostAttachment>;
 #[cfg(not(feature = "system-host-bindings"))]
 type ActivationSysHost<'a> = Option<&'a std::convert::Infallible>;
 
@@ -7581,7 +7584,7 @@ impl Context<'_, '_> {
     ///
     /// The call takes no argument and no piped input. Without an attached host
     /// context the activation cannot describe itself, so it reports
-    /// `sys.abi.unavailable` rather than a fabricated record (SYS-022..030).
+    /// `sys.version.incompatible` rather than a fabricated record (SYS-022..030).
     #[cfg(feature = "system-host-bindings")]
     fn call_sys_rt_info(
         &self,
@@ -7591,15 +7594,15 @@ impl Context<'_, '_> {
         if input.is_some() || !arguments.is_empty() {
             return Err(error("ORNA-EVAL-ARGUMENT"));
         }
-        let Some(context) = self
+        let Some(attachment) = self
             .effects
             .as_deref()
             .and_then(|handler| handler.sys_host_context())
             .or(self.sys_host)
         else {
-            return Err(error("sys.abi.unavailable"));
+            return Err(error("sys.version.incompatible"));
         };
-        runtime_info::runtime_info(context)
+        attachment.runtime_info()
     }
 
     /// Dispatches one portable annotated-Blob call declared by the generated

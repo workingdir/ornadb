@@ -70,7 +70,7 @@ pub enum StdSnapshotPin {
     /// SHA-1 or 32 bytes for SHA-256.
     Commit(Vec<u8>),
     /// A standard profile is pinned but its commit id cannot be read back.
-    /// The evaluator reports `sys.abi.provider_failed` rather than guessing.
+    /// The evaluator reports `sys.snapshot.incomplete` rather than guessing.
     Unreadable,
 }
 
