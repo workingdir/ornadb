@@ -1601,6 +1601,29 @@ impl IndexGeneration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorktreeState(Vec<u8>, [u8; 32]);
 
+/// Stat identity of one managed worktree path, captured before its bytes are read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedFileStamp {
+    file_type: fs::FileType,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    change: (u64, u64, i64, i64, u32),
+}
+
+/// Stamp of one managed path; `None` records that the path is absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedStamp {
+    path: ManagedPath,
+    stamp: Option<ManagedFileStamp>,
+}
+
+/// Worktree status and content digest, plus the stamps of every digested path.
+struct WorktreeScan {
+    state: WorktreeState,
+    stamps: Vec<ManagedStamp>,
+}
+
 impl WorktreeState {
     pub fn as_porcelain_v2_z(&self) -> &[u8] {
         &self.0
@@ -5191,8 +5214,64 @@ impl Repository {
 
     /// Captures Git's ordinary worktree/index status in machine-readable form.
     pub fn worktree_state(&self) -> Result<WorktreeState, RepositoryError> {
-        let status = self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])?;
-        Ok(WorktreeState(status, self.worktree_content_digest(&[])?))
+        Ok(self.worktree_scan()?.state)
+    }
+
+    /// Captures status and hashes managed content once for this observation.
+    fn worktree_scan(&self) -> Result<WorktreeScan, RepositoryError> {
+        let status = self.worktree_status()?;
+        let (digest, stamps) = self.worktree_content_scan(&[])?;
+        Ok(WorktreeScan {
+            state: WorktreeState(status, digest),
+            stamps,
+        })
+    }
+
+    /// Reports whether `scan` still describes the worktree. Compares status and
+    /// managed-path stamps only, so managed bytes are never read a second time.
+    fn worktree_scan_stable(&self, scan: &WorktreeScan) -> Result<bool, RepositoryError> {
+        if self.worktree_status()? != scan.state.0 {
+            return Ok(false);
+        }
+        for managed in &scan.stamps {
+            if self.managed_stamp(&managed.path)? != managed.stamp {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn worktree_status(&self) -> Result<Vec<u8>, RepositoryError> {
+        self.git_bytes(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
+    }
+
+    fn managed_stamp(
+        &self,
+        path: &ManagedPath,
+    ) -> Result<Option<ManagedFileStamp>, RepositoryError> {
+        match fs::symlink_metadata(self.worktree.join(path.as_path())) {
+            Ok(metadata) => Ok(Some(Self::managed_file_stamp(&metadata))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(RepositoryError::LocalStateUnavailable),
+        }
+    }
+
+    fn managed_file_stamp(metadata: &fs::Metadata) -> ManagedFileStamp {
+        #[cfg(unix)]
+        let change = (
+            std::os::unix::fs::MetadataExt::dev(metadata),
+            std::os::unix::fs::MetadataExt::ino(metadata),
+            std::os::unix::fs::MetadataExt::ctime(metadata),
+            std::os::unix::fs::MetadataExt::ctime_nsec(metadata),
+            std::os::unix::fs::MetadataExt::mode(metadata),
+        );
+        ManagedFileStamp {
+            file_type: metadata.file_type(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            change,
+        }
     }
     #[cfg(unix)]
     fn worktree_executable_marker(metadata: &fs::Metadata) -> u8 {
@@ -5210,6 +5289,16 @@ impl Repository {
         &self,
         extra_paths: &[ManagedPath],
     ) -> Result<[u8; 32], RepositoryError> {
+        Ok(self.worktree_content_scan(extra_paths)?.0)
+    }
+
+    /// Hashes managed worktree content in bounded chunks and returns each path's
+    /// stamp, taken before its bytes are read. Git-ignored files are never listed
+    /// or read; checkout force plans fence them through `extra_paths`.
+    fn worktree_content_scan(
+        &self,
+        extra_paths: &[ManagedPath],
+    ) -> Result<([u8; 32], Vec<ManagedStamp>), RepositoryError> {
         let mut paths = BTreeSet::new();
         for path in self
             .git_bytes(["diff", "--no-renames", "--name-only", "-z", "--"])?
@@ -5239,25 +5328,12 @@ impl Repository {
         {
             paths.insert(path.to_vec());
         }
-        for path in self
-            .git_bytes([
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-                "--",
-            ])?
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-        {
-            paths.insert(path.to_vec());
-        }
         for path in extra_paths {
             paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
         }
         let mut digest = Sha256::new();
         digest.update(b"ORNA-WORKTREE-CONTENT\0");
+        let mut stamps = Vec::with_capacity(paths.len());
         for encoded_path in paths {
             let path =
                 String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
@@ -5266,8 +5342,17 @@ impl Repository {
             digest.update((encoded_path.len() as u64).to_be_bytes());
             digest.update(encoded_path);
             let target = self.worktree.join(path.as_path());
-            match fs::symlink_metadata(&target) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+            let metadata = match fs::symlink_metadata(&target) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            };
+            stamps.push(ManagedStamp {
+                path,
+                stamp: metadata.as_ref().map(Self::managed_file_stamp),
+            });
+            match metadata {
+                Some(metadata) if metadata.file_type().is_symlink() => {
                     digest.update([1]);
                     let link = fs::read_link(&target)
                         .map_err(|_| RepositoryError::LocalStateUnavailable)?;
@@ -5275,22 +5360,44 @@ impl Repository {
                     digest.update((link.len() as u64).to_be_bytes());
                     digest.update(link);
                 }
-                Ok(metadata) if metadata.is_file() => {
+                Some(metadata) if metadata.is_file() => {
                     digest.update([2]);
                     digest.update([Self::worktree_executable_marker(&metadata)]);
-                    let contents =
-                        fs::read(&target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-                    digest.update((contents.len() as u64).to_be_bytes());
-                    digest.update(contents);
+                    Self::digest_file_contents(&target, &mut digest)?;
                 }
-                Ok(_) => digest.update([3]),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    digest.update([0]);
-                }
-                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+                Some(_) => digest.update([3]),
+                None => digest.update([0]),
             }
         }
-        Ok(digest.finalize().into())
+        Ok((digest.finalize().into(), stamps))
+    }
+
+    /// Streams a regular file's length and bytes into `digest` through a fixed
+    /// chunk. A file that shrinks while it is read fails the observation.
+    fn digest_file_contents(target: &Path, digest: &mut Sha256) -> Result<(), RepositoryError> {
+        let file = fs::File::open(target).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        let len = file
+            .metadata()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?
+            .len();
+        digest.update(len.to_be_bytes());
+        let mut reader = file.take(len);
+        let mut chunk = [0_u8; 64 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&chunk[..read]);
+            copied += read as u64;
+        }
+        if copied != len {
+            return Err(RepositoryError::StaleCwd);
+        }
+        Ok(())
     }
 
     /// Observes CWD. The runtime generation must come from the runtime owner,
@@ -5307,22 +5414,22 @@ impl Repository {
         &self,
         runtime: RuntimeGeneration,
     ) -> Result<CwdGeneration, RepositoryError> {
-        // Do not return a torn CWD if another Git process changes the index
-        // while status is being read.  The lock serializes Orna writers; the
-        // bounded recheck detects external Git writers.
+        // Do not return a torn CWD if another Git process changes the index,
+        // branch, status, or a managed file while it is observed.  The lock
+        // serializes Orna writers; the bounded recheck detects external Git
+        // writers by stamp, so managed bytes are hashed once per attempt.
         for _ in 0..3 {
             let before = self.index_generation()?;
             let branch = self.current_branch()?;
-            let worktree = self.worktree_state()?;
+            let scan = self.worktree_scan()?;
             let after = self.index_generation()?;
             let branch_after = self.current_branch()?;
-            let worktree_after = self.worktree_state()?;
-            if before == after && branch == branch_after && worktree == worktree_after {
+            if before == after && branch == branch_after && self.worktree_scan_stable(&scan)? {
                 return Ok(CwdGeneration {
                     head: before.head.clone(),
                     branch,
                     index: before,
-                    worktree,
+                    worktree: scan.state,
                     runtime,
                 });
             }
@@ -10129,6 +10236,71 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn repository_with_ignored_big_directory() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        fs::write(root.path().join(".gitignore"), "big/\n").unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", ".gitignore", "main.orna"]);
+        git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=Orna Test",
+                "-c",
+                "user.email=orna@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        );
+        fs::create_dir(root.path().join("big")).unwrap();
+        root
+    }
+
+    #[test]
+    fn cwd_generation_ignores_git_ignored_content() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("big/app.log"), b"one").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        fs::write(root.path().join("big/app.log"), b"two, longer").unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert!(
+            before == after,
+            "git-ignored content must not enter the CWD observation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_generation_survives_non_utf8_git_ignored_names() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let root = repository_with_ignored_big_directory();
+        fs::write(
+            root.path().join("big").join(OsStr::from_bytes(b"\xff.bin")),
+            b"x",
+        )
+        .unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+    }
+
+    #[test]
+    fn cwd_generation_detects_managed_dirty_content_change() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("main.orna"), "module main;\n// one\n").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        fs::write(root.path().join("main.orna"), "module main;\n// two\n").unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert!(
+            before != after,
+            "a dirty managed file must change the CWD observation"
+        );
     }
 
     #[cfg(target_os = "linux")]
