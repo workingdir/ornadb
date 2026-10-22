@@ -232,7 +232,7 @@ pub struct ReferenceProjectNegativeEvidence {
 fn expected_reference_failure_code(expectation: &str) -> Option<&'static str> {
     match expectation {
         "cross-table assertion failure; no new loan" => Some("ORNA-EVAL-MODULE-ASSERT"),
-        "assertion failure; both stock rows unchanged" => Some("ORNA-EVAL-ASSERT"),
+        "assertion failure; both stock rows unchanged" => Some("ORNA-A091-008"),
         "duplicate key; existing loan unchanged" => Some("ORNA-EVAL-TABLE-DUPLICATE"),
         _ => None,
     }
