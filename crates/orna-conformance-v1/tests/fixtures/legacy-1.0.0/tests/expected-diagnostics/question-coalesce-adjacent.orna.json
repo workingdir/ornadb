@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/question-coalesce-adjacent.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+  "message_contains": "standalone postfix `?` has no expression meaning in Orna 1.0",
+  "status": "expected-not-executed"
+}

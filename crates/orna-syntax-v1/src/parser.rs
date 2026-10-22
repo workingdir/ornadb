@@ -4223,10 +4223,14 @@ impl Parser {
             // every expression shape gets the targeted code without flagging
             // optional types in declarations.
             if self.is_punct("?") {
-                self.error_here(
-                    "ORNA091-E-POSTFIX-QUESTION",
-                    "postfix propagation `?` was removed; failures propagate automatically",
-                );
+                // A call result is the legacy propagation form; other operands
+                // keep the generic removal wording.
+                let message = if matches!(lhs, Expr::Call { .. }) {
+                    "remove postfix `?`; failure propagation is automatic"
+                } else {
+                    "postfix propagation `?` was removed; failures propagate automatically"
+                };
+                self.error_here("ORNA091-E-POSTFIX-QUESTION", message);
                 self.bump();
                 continue;
             }
