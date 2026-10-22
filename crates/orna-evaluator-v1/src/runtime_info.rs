@@ -7,10 +7,10 @@
 
 use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, GitHash, snapshot_reference};
 use orna_sys_v1::{
-    BUILD_ID, CANONICAL_VALUE_CODEC_V1, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION,
-    LANGUAGE_VERSION, PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION,
-    StdSnapshotPin, SysHostContext,
+    BUILD_ID, IMPLEMENTATION_NAME, IMPLEMENTATION_VERSION, LANGUAGE_VERSION,
+    PRESENTATION_PROTOCOL_VERSION, SUPPORTED_PROFILES, SYS_VERSION, StdSnapshotPin, SysHostContext,
 };
+use orna_value_v1::OVB2_VERSION;
 
 use crate::{EvaluationError, TIMEZONE_DATASET_VERSION, Value, error};
 
@@ -29,7 +29,7 @@ pub(crate) fn runtime_info(context: &SysHostContext) -> Result<Value, Evaluation
         ("sys_version", Value::String(SYS_VERSION.to_owned())),
         (
             "canonical_orna_codec_version",
-            Value::String(CANONICAL_VALUE_CODEC_V1.to_owned()),
+            Value::String(OVB2_VERSION.to_owned()),
         ),
         (
             "repository_layout_version",
