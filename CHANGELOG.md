@@ -337,6 +337,15 @@ been published.
   to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
   of an unlinked callable. Admission no longer reports a version diagnostic for
   it (ORNA-SYS-006).
+- The CLI's `migrate abort DEST` discards a prepared format-3 migration copy only
+  after verifying that DEST is the copy prepared from the current source. The
+  source is unchanged. Until the verified copy is renamed to its reserved
+  sibling quarantine, a change to the source commit, index, or working tree
+  since preparation makes the command refuse and remove nothing. That rename is
+  the commit point: a repeated `migrate abort DEST` finishes an interrupted
+  removal without rechecking the source, reports nothing to discard once nothing
+  remains, and `migrate copy` refuses the destination while the quarantine
+  exists.
 
 ## 1.0.0 — release inventory (publication pending)
 
