@@ -22,7 +22,8 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 
 use orna_semantic_v1::{
     Analysis, AssertionOwner, Catalogue, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader,
+    DIAG_DISPLAY_READ_ONLY, DIAG_DUPLICATE, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    EffectSummary, ModuleHeader,
     ModuleInput, Namespace, Symbol, SymbolKind, Type, analyze,
 };
 use orna_syntax_v1::parse_module_with_file;
@@ -844,7 +845,7 @@ fn table_display_and_present_writes_require_type_diagnostics() {
             include_str!("fixtures/inline-v1_review_regressions/8b311ae59082.orna"),
             &[("protocol", &protocol), ("member", &member)],
         );
-        expect_diagnostics(&analyze_main(&source), &[DIAG_TYPE]);
+        expect_diagnostics(&analyze_main(&source), &[DIAG_DISPLAY_READ_ONLY]);
     }
 }
 
@@ -870,7 +871,7 @@ fn presentation_direct_return_terminates_write_scan() {
             include_str!("fixtures/inline-v1_review_regressions/dd5e785cd9c3.orna"),
             &[("protocol", &protocol), ("member", &member)],
         );
-        expect_diagnostics(&analyze_main(&rejected), &[DIAG_TYPE]);
+        expect_diagnostics(&analyze_main(&rejected), &[DIAG_DISPLAY_READ_ONLY]);
     }
 }
 
@@ -883,7 +884,7 @@ fn presentation_nested_control_return_does_not_terminate_write_scan() {
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         include_str!("fixtures/inline-v1_review_regressions/2b18ac9922cb.orna"),
         result.diagnostics
     );
@@ -898,7 +899,7 @@ fn presentation_lambda_block_return_does_not_terminate_write_scan() {
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         include_str!("fixtures/inline-v1_review_regressions/be4c29c7125d.orna"),
         result.diagnostics
     );
@@ -909,7 +910,7 @@ fn presentation_effect_summaries_propagate_through_helpers() {
     let indirect_write = analyze_main(include_str!(
         "fixtures/inline-v1_review_regressions/719b99d4ee69.orna"
     ));
-    expect_diagnostics(&indirect_write, &[DIAG_TYPE]);
+    expect_diagnostics(&indirect_write, &[DIAG_DISPLAY_READ_ONLY]);
 
     // The spelling `insert` is not a write when scope resolution identifies a
     // local function with a proven empty effect summary.
@@ -927,7 +928,7 @@ fn presentation_effect_summaries_propagate_through_helpers() {
             include_str!("fixtures/inline-v1_review_regressions/ca8d532ef690.orna"),
         ),
     ]);
-    expect_diagnostics(&imported_write, &[DIAG_TYPE]);
+    expect_diagnostics(&imported_write, &[DIAG_DISPLAY_READ_ONLY]);
 
     let imported_pure = analyze(&[
         ModuleInput::new(

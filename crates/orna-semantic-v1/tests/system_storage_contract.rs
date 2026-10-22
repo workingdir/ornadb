@@ -1,44 +1,43 @@
-//! Semantic conformance for the distinct observed and desired storage fields.
+//! Semantic conformance for the storage profile surface after ORNA-SYS-115.
 //!
-//! ORNA-SYS-115 requires `sys.Storage.profile` to report observed placement
-//! and `sys.Storage.preference` to report future automatic placement policy.
-//! Keep the source under test in checked-in `.orna` fixtures.
+//! ORNA-SYS-115 requires `sys.Storage.profile` to identify the one recorded row
+//! profile; no new-format future-placement preference is exposed. ORNA-SYS-116
+//! requires New-format admission to reject retired storage-preference functions
+//! (see the retired API list in the sys API contract). Keep the source under test
+//! in checked-in `.orna` fixtures.
 
-use orna_semantic_v1::{DIAG_TYPE, ModuleInput, analyze};
+use orna_semantic_v1::{ModuleInput, analyze};
 
 #[test]
-fn storage_profile_and_preference_are_independently_typed() {
+fn storage_preference_is_not_exposed_in_new_format() {
     let result = analyze(&[ModuleInput::new(
         "sys-storage-observed-vs-preference.orna",
         include_str!("fixtures/publication/sys-storage-observed-vs-preference.orna"),
     )]);
 
-    assert!(result.is_ok(), "{:#?}", result.diagnostics);
+    assert!(
+        !result.is_ok(),
+        "ORNA-SYS-115/116: a preference read must not type check in the new format"
+    );
+    assert!(
+        !result.diagnostics.is_empty(),
+        "ORNA-SYS-115/116: the preference read must produce a rejection diagnostic"
+    );
 }
 
 #[test]
-fn storage_profile_and_preference_cannot_be_conflated() {
+fn storage_preference_cannot_be_conflated_with_profile() {
     let result = analyze(&[ModuleInput::new(
         "sys-storage-cross-assignment.orna",
         include_str!("fixtures/publication/sys-storage-cross-assignment.orna"),
     )]);
 
-    assert!(!result.is_ok(), "cross-assignments unexpectedly type checked");
+    assert!(
+        !result.is_ok(),
+        "ORNA-SYS-115/116: cross-assignments involving the retired preference must be rejected"
+    );
     assert!(
         !result.diagnostics.is_empty(),
-        "cross-assignment and cross-comparison must be rejected"
-    );
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.code() == DIAG_TYPE),
-        "expected only type diagnostics, got {:#?}",
-        result.diagnostics
-    );
-    assert_eq!(
-        result.diagnostics.len(),
-        2,
-        "expected one type error for the cross-assignment and one for the cross-comparison"
+        "ORNA-SYS-115/116: cross-assignment and cross-comparison must be rejected"
     );
 }
