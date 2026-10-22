@@ -10946,20 +10946,22 @@ mod tests {
     #[test]
     fn detaching_the_socket_restarts_the_lease_from_detachment() {
         let mut transport = attached_session_transport();
+        // The security session is valid through 10, so the detach happens
+        // inside that window; the lease then runs from the detach time.
         let lease_ms = transport.limits.lease_ms;
 
-        futures::executor::block_on(transport.close_attachment([4; 16], 20))
+        futures::executor::block_on(transport.close_attachment([4; 16], 5))
             .expect("detaching the attachment starts the reconnection lease");
         assert_eq!(
             transport.sessions[&[1; 16]].metadata.expires_at,
-            20 + lease_ms
+            5 + lease_ms
         );
 
         let mut deletion = ExpiryDeletion::default();
         let mut children = ExpiryChildren::default();
         assert_eq!(
             futures::executor::block_on(transport.expire_sessions_with_children(
-                20 + lease_ms - 1,
+                5 + lease_ms - 1,
                 &mut deletion,
                 &mut children,
             )),
@@ -10969,7 +10971,7 @@ mod tests {
 
         assert_eq!(
             futures::executor::block_on(transport.expire_sessions_with_children(
-                20 + lease_ms,
+                5 + lease_ms,
                 &mut deletion,
                 &mut children,
             )),
