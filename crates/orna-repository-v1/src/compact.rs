@@ -2913,6 +2913,125 @@ impl Repository {
     }
 }
 
+/// One live row of a format-1 compact table after generation resolution.
+///
+/// Only rows whose winning mutation carries a value are materialized. A
+/// winning deletion leaves its key absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeRow {
+    key: CanonicalValue,
+    value: CanonicalValue,
+}
+
+impl LegacyAuthoritativeRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> &CanonicalValue {
+        &self.value
+    }
+}
+
+/// The authoritative live rows of one format-1 compact table, ordered by the
+/// encoded key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeTable {
+    table: Uuid,
+    schema: [u8; 32],
+    rows: Vec<LegacyAuthoritativeRow>,
+}
+
+impl LegacyAuthoritativeTable {
+    pub fn table(&self) -> Uuid {
+        self.table
+    }
+
+    pub fn schema(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    pub fn rows(&self) -> &[LegacyAuthoritativeRow] {
+        &self.rows
+    }
+}
+
+/// Resolves committed mutations to authoritative state. For each encoded key
+/// the mutation with the greatest generation wins, and a winning deletion
+/// leaves the key absent. Two mutations of one key at one generation are
+/// corruption.
+fn resolve_legacy_authoritative_rows(
+    mutations: Vec<(u64, Vec<CompactCommittedRow>)>,
+) -> Result<Vec<LegacyAuthoritativeRow>, RepositoryError> {
+    let mut winners: BTreeMap<Vec<u8>, (u64, CompactCommittedRow)> = BTreeMap::new();
+    for (generation, rows) in mutations {
+        for row in rows {
+            let key = row
+                .key()
+                .encode()
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if let Some((winner, _)) = winners.get(&key) {
+                if *winner == generation {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if *winner > generation {
+                    continue;
+                }
+            }
+            winners.insert(key, (generation, row));
+        }
+    }
+    Ok(winners
+        .into_values()
+        .filter_map(|(_, row)| {
+            let CompactCommittedRow { key, value } = row;
+            value.map(|value| LegacyAuthoritativeRow { key, value })
+        })
+        .collect())
+}
+
+impl Repository {
+    /// Reads the authoritative live rows of every compact table in a
+    /// format-1 commit without mutating the repository.
+    ///
+    /// The commit must open as `RepositoryFormat::Legacy1`; format-2 and
+    /// format-3 commits are refused with `InvalidFormatMigration`. Each table
+    /// is read through the verified committed-manifest boundary, so every
+    /// segment is checked before its rows take part in resolution.
+    pub fn read_legacy_authoritative_tables(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<LegacyAuthoritativeTable>, RepositoryError> {
+        let snapshot = self
+            .pin_snapshot(commit.as_str())
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        let context = self
+            .open_format_context_at(&snapshot)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if context.repository_format() != crate::RepositoryFormat::Legacy1 {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let inventory = self.read_compact_manifest_inventory(commit)?;
+        let mut tables = Vec::with_capacity(inventory.len());
+        for (table, manifest) in inventory {
+            let schema = manifest.schema();
+            let mutations = self.read_compact_committed_base_from_commit(
+                commit,
+                table,
+                schema,
+                COMPACT_PROFILE,
+                |entry, projection| Ok((entry.generation(), projection.rows().to_vec())),
+            )?;
+            tables.push(LegacyAuthoritativeTable {
+                table,
+                schema,
+                rows: resolve_legacy_authoritative_rows(mutations)?,
+            });
+        }
+        Ok(tables)
+    }
+}
+
 impl Repository {
     /// Reads every compact manifest tracked by `commit` as one committed
     /// snapshot inventory.
@@ -4845,7 +4964,7 @@ mod tests {
         test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
-        fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
         test_git(temp.path(), &["add", "."]);
         test_git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
