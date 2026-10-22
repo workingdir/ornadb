@@ -4283,7 +4283,7 @@ impl Repository {
     /// from configured Git identity; missing identity fails before creating a
     /// commit." Both identities are resolved by Git itself, exactly as the
     /// following `commit-tree` resolves them.
-    fn require_configured_commit_identity(&self) -> Result<(), RepositoryError> {
+    pub fn require_configured_commit_identity(&self) -> Result<(), RepositoryError> {
         for identity in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
             let mut command = self.configured_identity_command();
             command

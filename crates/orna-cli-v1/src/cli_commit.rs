@@ -42,7 +42,7 @@ fn staging_error(title: &'static str, detail: String) -> Diagnostic {
 /// A retained publication or checkout recovery record owns the index, so
 /// staging refuses without touching it; the diagnostic names that condition
 /// and its remedy before any generic staging failure.
-fn store_admission_error(error: RelationAdmissionError) -> Diagnostic {
+fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagnostic {
     use orna_repository_v1::RepositoryError;
     match error {
         RelationAdmissionError::Repository(RepositoryError::PublicationPending) => {
@@ -59,10 +59,15 @@ fn store_admission_error(error: RelationAdmissionError) -> Diagnostic {
                 "resolve the interrupted checkout first, then retry `orna commit -m MESSAGE`; no commit was created",
             )
         }
-        other => staging_error(
-            "staged store could not admit the staged tables",
-            other.to_string(),
-        ),
+        other @ RelationAdmissionError::CommittedRelationUnstaged { .. } => {
+            Diagnostic::target_with_detail(
+                "E2302",
+                "staged candidate is not a valid format-3 snapshot",
+                "restore the staged `.orna` metadata, `.orna/store` and `main.orna`, then retry; no commit was created",
+                other.to_string(),
+            )
+        }
+        other => staging_error(title, other.to_string()),
     }
 }
 
@@ -77,9 +82,9 @@ fn store_admission_error(error: RelationAdmissionError) -> Diagnostic {
 /// keeps its IDs; new declarations get new IDs and removed ones retire
 /// (ORNA-OBJECT-001, ORNA-OBJECT-005).
 fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String>, Diagnostic> {
-    let staged = repository.capture_staged_candidate().map_err(|error| {
-        staging_error("staged candidate could not be captured", error.to_string())
-    })?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
     let project = orna_project_v1::ProjectLoader::default()
         .load_private_candidate(repository, staged.candidate())
         .map_err(|error| {
@@ -140,7 +145,9 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
     }
     let admission = repository
         .stage_store_admission(&staged, &relations, &identities.to_stored())
-        .map_err(store_admission_error)?;
+        .map_err(|error| {
+            relation_failure(error, "staged store could not admit the staged tables")
+        })?;
     Ok(admission
         .admitted()
         .iter()
@@ -211,6 +218,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("{error:?}"),
         )
     })?;
+    repository
+        .require_configured_commit_identity()
+        .map_err(|error| failure(&error, "Git identity could not be checked"))?;
     let admitted = stage_store(&repository)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
