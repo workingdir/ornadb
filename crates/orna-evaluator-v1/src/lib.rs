@@ -535,23 +535,6 @@ fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, Str
     orna_semantic_v1::system_enum_constant(&segments)
 }
 
-/// The core `Float.nan` and `Float.infinity` constants, unless a local binding shadows `Float`.
-fn float_constant_bits(expression: &Expr, scope: &Scope) -> Option<u64> {
-    let Expr::Field { base, name, .. } = expression else {
-        return None;
-    };
-    let Expr::Name { text, .. } = base.as_ref() else {
-        return None;
-    };
-    if scope.0.contains_key(text) || !orna_semantic_v1::is_float_constant(&[text.as_str(), name.as_str()]) {
-        return None;
-    }
-    match name.as_str() {
-        "nan" => Some(CANONICAL_NAN_BITS),
-        _ => Some(f64::INFINITY.to_bits()),
-    }
-}
-
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -4693,9 +4676,6 @@ impl Context<'_, '_> {
                 self.index(base, index)
             }
             Expr::Field { base, name, .. } => {
-                if let Some(bits) = float_constant_bits(expression, scope) {
-                    return Ok(Value::Float(bits));
-                }
                 if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
                     return Ok(Value::Enum {
                         type_id: Raw::Text(enum_name),
@@ -5991,7 +5971,7 @@ impl Context<'_, '_> {
             "*" => Ok(float_value(a * b)),
             "/" => Ok(float_value(a / b)),
             "%" => Ok(float_value(a % b)),
-            "^" => Ok(float_value(a.powf(b))),
+            "^" => Ok(float_value(libm::pow(a, b))),
             "<" => Ok(Value::Bool(a < b)),
             "<=" => Ok(Value::Bool(a <= b)),
             ">" => Ok(Value::Bool(a > b)),

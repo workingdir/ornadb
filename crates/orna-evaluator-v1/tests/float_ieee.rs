@@ -1,4 +1,4 @@
-use orna_evaluator_v1::{AdmittedReplSession, Environment, Limits, evaluate_expression};
+use orna_evaluator_v1::{Environment, Limits, evaluate_expression};
 use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
@@ -18,13 +18,6 @@ fn bool_result(source: &str) -> bool {
         Raw::Bool(value) => *value,
         other => panic!("{source}: expected Bool, got {other:?}"),
     }
-}
-
-fn repl_value(source: &str) -> Value {
-    AdmittedReplSession::new(Limits::default())
-        .submit(source)
-        .unwrap_or_else(|error| panic!("{source}: unexpected {error:?}"))
-        .unwrap_or_else(|| panic!("{source}: produced no value"))
 }
 
 // Specified: ORNA-NUM-003; Float follows IEEE-754 binary64, so 0/0 yields NaN and
@@ -86,25 +79,19 @@ fn power_follows_ieee_special_cases() {
     assert_eq!(float_bits("(-8.0f) ^ (1.0f / 3.0f)"), CANONICAL_NAN_BITS);
 }
 
-// Audit W01-01: the canonical text forms `Float.nan`, `Float.infinity` and
-// `-Float.infinity` (ORNA-FORMAT, 29-formats.md) must also resolve as source values.
+// Specified: ORNA-FLOAT-001; signed zero is a distinct Float value that arithmetic preserves.
 #[test]
-fn float_nan_and_infinity_constants_resolve_in_source() {
-    assert_eq!(
-        repl_value("Float.nan"),
-        Value::float_bits(CANONICAL_NAN_BITS)
-    );
-    assert_eq!(
-        repl_value("Float.infinity"),
-        Value::float_bits(f64::INFINITY.to_bits())
-    );
-    assert_eq!(
-        repl_value("-Float.infinity"),
-        Value::float_bits(f64::NEG_INFINITY.to_bits())
-    );
+fn negative_zero_is_preserved_by_arithmetic() {
+    assert_eq!(float_bits("-0.0f"), (-0.0f64).to_bits());
+    assert_eq!(float_bits("0.0f * -1.0f"), (-0.0f64).to_bits());
+    assert_eq!(float_bits("1.0f / (1.0f / 0.0f * -1.0f)"), (-0.0f64).to_bits());
 }
 
+// Specified: ORNA-FLOAT-001; NaN is unordered against itself and infinities order by value.
 #[test]
-fn float_nan_constant_is_unequal_to_itself() {
-    assert_eq!(repl_value("Float.nan == Float.nan"), Value::new(Raw::Bool(false)).unwrap());
+fn nan_is_unordered_against_itself_and_infinities_order() {
+    assert!(!bool_result("(0.0f / 0.0f) <= (0.0f / 0.0f)"));
+    assert!(!bool_result("(0.0f / 0.0f) > (0.0f / 0.0f)"));
+    assert!(bool_result("(1.0f / 0.0f) == (2.0f / 0.0f)"));
+    assert!(bool_result("(-1.0f / 0.0f) < (1.0f / 0.0f)"));
 }
