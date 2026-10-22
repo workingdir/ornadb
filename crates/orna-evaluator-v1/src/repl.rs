@@ -321,6 +321,7 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation,
         };
         context.items(self.functions.len())?;
@@ -454,6 +455,7 @@ impl ReplSession {
             namespace: None,
             transfer: None,
             reuse: CallReuse::default(),
+            sys_host: None,
             cancellation,
         };
         let mut scope = Scope::from_repl_environment(
