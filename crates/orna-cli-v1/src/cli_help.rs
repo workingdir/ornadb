@@ -44,7 +44,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  migrate copy exit status: 0 prepared/recovered; 1 migration conflict; 2 missing or invalid coordinates",
     "  migrate abort DEST",
     "  discards the prepared format-3 copy in DEST after verifying it; the source stays unchanged",
-    "  migrate abort exit status: 0 discarded; 1 DEST is not the prepared copy of this source, the source changed since preparation, or the local worktree is unavailable; 2 missing or invalid arguments",
+    "  migrate abort exit status: 0 discarded or nothing to discard; 1 DEST is not the prepared copy of this source, the source changed before the copy was quarantined, DEST and its quarantine both exist, or the local worktree is unavailable; 2 missing or invalid arguments",
     "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
     "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "  commit -m MESSAGE                           review and publish exactly the staged candidate",
