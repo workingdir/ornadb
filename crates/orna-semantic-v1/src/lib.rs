@@ -27029,10 +27029,6 @@ mod tests {
     fn unlinked_sys_members_are_rejected_with_version_incompatible() {
         for (source, member) in [
             (
-                "pub fn info() = sys.rt.info();",
-                "portable system callable `sys.rt.info`",
-            ),
-            (
                 "pub fn head() = sys.snapshot(\"HEAD~1\");",
                 "portable system callable `sys.snapshot(Str)`",
             ),
@@ -27081,6 +27077,7 @@ mod tests {
             pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
             pub fn storage() = sys.Storage;
             pub fn maintenance() = sys.MaintenanceJob;
+            pub fn info() = sys.rt.info();
             pub fn plan() = sys.Storage | sys.explain();",
         )]);
         assert!(
@@ -27095,23 +27092,26 @@ mod tests {
         let analysis = admitted(&[
             ModuleInput::new(
                 "a.orna",
-                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+                "pub fn first() = sys.snapshot(\"HEAD~1\"); pub fn second() = sys.snapshot(\"HEAD~1\");",
             ),
-            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+            ModuleInput::new("b.orna", "pub fn third() = sys.snapshot(\"HEAD~1\");"),
         ]);
         assert_eq!(
             diagnostic_texts(&analysis.diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
     }
 
     #[test]
     fn provider_linkage_leaves_type_checking_unchanged() {
-        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let source = [ModuleInput::new(
+            "typed.orna",
+            "pub fn head(): Int = sys.snapshot(\"HEAD~1\");",
+        )];
         let declared = diagnostic_texts(&checked(&source).diagnostics);
         let mut production = diagnostic_texts(&admitted(&source).diagnostics);
         assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
-        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        let unlinked_member = unlinked("portable system callable `sys.snapshot(Str)`");
         assert!(production.contains(&unlinked_member), "{production:#?}");
         production.retain(|text| *text != unlinked_member);
         assert_eq!(production, declared);
@@ -27119,14 +27119,14 @@ mod tests {
 
     #[test]
     fn repl_admission_rejects_unlinked_sys_members() {
-        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        let rejected = orna_syntax_v1::parse_repl("sys.snapshot(\"HEAD~1\")");
         assert!(rejected.is_ok());
         let diagnostics = ReplContext::with_providers(SystemProviders::Production)
             .stage(&rejected.value)
-            .expect_err("no production provider is linked for sys.rt.info");
+            .expect_err("no production provider is linked for sys.snapshot(Str)");
         assert_eq!(
             diagnostic_texts(&diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
 
         assert!(ReplContext::empty().stage(&rejected.value).is_ok());
