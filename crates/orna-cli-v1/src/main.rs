@@ -3990,10 +3990,10 @@ mod tests {
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
         assert_eq!(error.exit, Exit::Target);
         let rendered = error.to_string();
-        assert!(rendered.starts_with("error[ORNA-S012-UNRESOLVED]: "), "{rendered}");
-        assert!(rendered.contains("missing"), "{rendered}");
-        assert!(rendered.contains("line 1, column 1"), "{rendered}");
-        assert!(rendered.contains("\nhelp: "), "{rendered}");
+        assert_eq!(
+            rendered,
+            "error[ORNA-S012-UNRESOLVED]: name `missing` cannot be resolved\n  --> line 1, column 1\n  |\n1 | missing()\n  | ^^^^^^^\nnote: `missing` is not declared in this session and is not imported\nhelp: declare `missing` before using it, for example `let missing = <value>`"
+        );
         assert_eq!(
             run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
