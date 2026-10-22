@@ -4014,8 +4014,11 @@ impl LiveHost {
                 orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
             ) => Ok(false),
             Err(ServingError::RequestUnknown) => {
+                // An id the host has never admitted is not an active target.
+                // 30-protocol.md: a cancel that names no live request is still a
+                // correlated control operation and acknowledges with Unit.
                 let Some(runtime) = &self.runtime else {
-                    return Err(Error::Denied);
+                    return Ok(false);
                 };
                 let status = runtime
                     .request_status_for_identity(RequestIdentity {
@@ -4023,9 +4026,8 @@ impl LiveHost {
                         request_id: request,
                     })
                     .await
-                    .map_err(|error| map_runtime(&error))?
-                    .ok_or(Error::Denied)?;
-                Ok(!status.state.is_terminal())
+                    .map_err(|error| map_runtime(&error))?;
+                Ok(status.is_some_and(|status| !status.state.is_terminal()))
             }
             Err(error) => Err(map_serving(error)),
         }
