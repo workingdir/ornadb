@@ -6,7 +6,7 @@ A developing CLI for the current Orna 1.0 source language.
 
 This binary currently accepts `init`, `status`, `fetch`, `push`, `serve`,
 `mount`, `unmount`, `diff`, `log`, `annotate`, `import`, `export`, `migrate copy`,
-`migrate abort`, `migrate activate`, `publish`, `semantic-legend`, `history`,
+`migrate abort`, `publish`, `semantic-legend`, `history`,
 `query`, `check`, `invoke`, `explain`,
 `repl`, and `run`, plus help and version options. The available command groups and
 option forms are listed by `orna --help`; that list describes this bounded
@@ -65,11 +65,6 @@ owns is never a discard target. The source repository is unchanged. If the
 source commit, index, or working tree has changed since preparation, the
 command refuses and removes nothing; restore the source or remove DEST
 manually.
-
-`migrate activate DEST` runs the same verification and then refuses. Activating
-a writable format-3 repository needs the protected format transition, which
-this build does not perform. The source and DEST both remain unchanged, and
-DEST can be reviewed or discarded with `migrate abort DEST`.
 
 `check` loads and checks reachable source modules from a local Git worktree.
 `invoke TARGET` executes a reachable zero-argument pure function. The optional

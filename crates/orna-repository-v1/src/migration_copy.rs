@@ -301,29 +301,6 @@ pub fn discard_prepared_format3_migration(
     source: &Repository,
     destination: &Path,
 ) -> Result<(), RepositoryError> {
-    let destination = verified_prepared_copy(source, destination)?;
-    let parent = destination
-        .parent()
-        .ok_or(RepositoryError::LocalStateUnavailable)?;
-    fs::remove_dir_all(&destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-    sync_directory(parent)
-}
-
-/// Verifies that `destination` is the prepared format-3 migration copy of
-/// `source` without removing it or changing either worktree.
-pub fn verify_prepared_format3_migration(
-    source: &Repository,
-    destination: &Path,
-) -> Result<(), RepositoryError> {
-    verified_prepared_copy(source, destination).map(|_| ())
-}
-
-/// Applies the checks shared by discard and verify and returns the canonical
-/// destination. The candidate is not removed.
-fn verified_prepared_copy(
-    source: &Repository,
-    destination: &Path,
-) -> Result<PathBuf, RepositoryError> {
     let destination = canonical_destination(destination)?;
     let source_root = source
         .worktree()
@@ -360,7 +337,11 @@ fn verified_prepared_copy(
         .migration_annotation_defaults()
         .ok_or(RepositoryError::PublicationRecoveryConflict)?;
     recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
-    Ok(destination)
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    fs::remove_dir_all(&destination).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    sync_directory(parent)
 }
 
 fn prepare_format3_migration_in(
