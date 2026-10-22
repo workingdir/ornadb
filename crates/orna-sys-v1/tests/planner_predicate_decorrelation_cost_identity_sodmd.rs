@@ -500,9 +500,12 @@ fn changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain() {
     let decorrelated_label = "subquery:orders-for-owner";
     let baseline_decorrelated = baseline_joins[decorrelated_label];
     let changed_decorrelated = changed_joins[decorrelated_label];
+    // Pin refreshed for ornadb-5il1.13: the fold composition gained optional
+    // inputs after 2cff622b1 (#7556..#7863), so every digest absent-encodes
+    // a new zero byte. The spec defines no fold-identity literal.
     assert_eq!(
         text(baseline_decorrelated, "join_cost_fold_identity"),
-        "join-fold:c37eb43dc6d463e892791bc10a4ff4ab30104d4307d0a5cb1a8f66f0e69c5f44",
+        "join-fold:cbbd4a52e0316f6b4cc0f024c611d76b2053c0529b8529708278244f694cf0f4",
         "the paired decorrelation/index and anchor inputs contribute to the fold identity"
     );
     let baseline_nodes = baseline
