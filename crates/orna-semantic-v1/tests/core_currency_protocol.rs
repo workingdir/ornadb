@@ -4,7 +4,9 @@
 //! such a type parameterizes `Money` or selects a currency literal
 //! (ORNA-LIT-007), and a binary `Float` never becomes money (ORNA-NUM-003).
 
-use orna_semantic_v1::{Analysis, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze};
+use orna_semantic_v1::{
+    Analysis, DIAG_MONEY_FROM_FLOAT, DIAG_TYPE, DIAG_UNRESOLVED, ModuleInput, Type, analyze,
+};
 
 const NOT_A_CURRENCY: &str = "Money currency must be a nominal type that implements Currency";
 const SUFFIX_NOT_A_CURRENCY: &str = "currency suffix names a type that does not implement Currency";
@@ -248,7 +250,9 @@ pub fn p(): Money<GBP> = 12.34.GBP;
 fn a_float_currency_literal_is_rejected() {
     let analysis = analysis(&format!("{GBP}\npub fn bad() = 12.34f.GBP;\n"));
     assert!(
-        has_message(&analysis, FLOAT_MONEY),
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_MONEY_FROM_FLOAT && diagnostic.message() == FLOAT_MONEY
+        }),
         "{:?}",
         analysis.diagnostics
     );
