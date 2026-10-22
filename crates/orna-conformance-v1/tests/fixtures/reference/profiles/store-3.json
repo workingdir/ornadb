@@ -1,0 +1,51 @@
+{
+  "repository_format": 3,
+  "graph": "OGS-1",
+  "header_limit": 65536,
+  "node_data_limit": 65536,
+  "maximum_refs": 256,
+  "maximum_graph_height": 64,
+  "row_inline_limit": 8192,
+  "row_inline_ref_limit": 32,
+  "key_canonical_limit": 1048576,
+  "row_canonical_limit": 1073741824,
+  "ordered_partition": {
+    "profile": "ORP-1",
+    "minimum_entries": 16,
+    "maximum_entries": 256,
+    "anchor_bits": 6,
+    "domain": "orna.orp.boundary.v1\u0000",
+    "cut": "after entry whose low 6 SHA256 bits are zero after minimum; forced before exceeding bounds; final tail allowed"
+  },
+  "blob_chunker": {
+    "profile": "OGB-2",
+    "gear_seed": "orna.gear.v1\u0000",
+    "minimum": 65536,
+    "mask": 262143,
+    "maximum": 1048576,
+    "reset_after_cut": true
+  },
+  "tags": {
+    "portable_annotated_blob": 60110,
+    "stored_annotated_blob": 60111,
+    "semantic_annotated_blob": 60112,
+    "stored_value_overflow": 60113
+  },
+  "max_blob_length": 9223372036854775807,
+  "max_bounded_read": 8388608,
+  "node_kinds": {
+    "0": "store root",
+    "1": "ordered map leaf",
+    "2": "ordered map branch",
+    "3": "value overflow",
+    "4": "byte index",
+    "5": "blob descriptor",
+    "6": "schema descriptor",
+    "7": "dependency index"
+  },
+  "git_hashes": [
+    "sha1",
+    "sha256"
+  ],
+  "native_paths": "database.orna + store; Git owns its physical object fanout"
+}
