@@ -1,0 +1,7 @@
+pub fn count(values: [Int]): Int {
+    let total = 0;
+    for value in values {
+        total += value;
+    }
+    total
+}
