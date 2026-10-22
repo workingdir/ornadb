@@ -1181,9 +1181,12 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
     assert!(reads.effects.may_fail);
 
     let fallible = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/4a6f31b2f192.orna"
+        "fixtures/inline-v1_review_regressions/e29002c2593a.orna"
     ));
-    assert!(fallible.diagnostics.iter().any(|diagnostic| {
+    // ORNA-A091-007 and ORNA-ASSERT-039 forbid effects and nondeterminism only.
+    // ORNA-ASSERT-049 admits evaluation failure inside an assertion, so a
+    // failure-only generic call must not raise the forbidden-effect diagnostic.
+    assert!(!fallible.diagnostics.iter().any(|diagnostic| {
         diagnostic.message() == "assertion has forbidden effects or failure"
     }));
     let maybe = fallible
