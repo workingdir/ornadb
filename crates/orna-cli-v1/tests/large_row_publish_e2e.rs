@@ -197,13 +197,23 @@ fn store_nodes(root: &Path) -> Vec<(u8, usize, String)> {
     nodes
 }
 
-/// The distinct row pages (kind-1 ordered leaves) of the committed store.
+/// The distinct row pages of the committed store: kind-1 ordered leaves whose
+/// domain is the table row map (`rows`), not the relation catalog
+/// (`relations`), which every publish rewrites (store-format-3 §3).
 fn row_pages(root: &Path) -> BTreeSet<String> {
-    store_nodes(root)
-        .into_iter()
-        .filter(|(kind, _, _)| *kind == 1)
-        .map(|(_, _, oid)| oid)
-        .collect()
+    let mut pages = BTreeSet::new();
+    for line in git(root, &["ls-tree", "-r", "HEAD", ".orna/store"]).lines() {
+        let (entry, path) = line.split_once('\t').expect("an ls-tree entry");
+        if path != ".orna/store/data" && !path.ends_with("/data") {
+            continue;
+        }
+        let oid = entry.split(' ').nth(2).expect("an ls-tree object id");
+        let data = git_bytes(root, &["cat-file", "blob", oid]);
+        if data[2] == 1 && data[..data.len().min(32)].windows(4).any(|w| w == b"rows") {
+            pages.insert(oid.to_owned());
+        }
+    }
+    pages
 }
 
 /// A note body beyond the 8 KiB inline row limit and within the 16 KiB a
@@ -294,38 +304,50 @@ fn a_row_over_8_kib_publishes_through_the_overflow_graph() {
     assert_eq!(changed["changes"][0]["content_changed"], true, "{changed}");
 }
 
-/// store-format-3 §3 and ORNA-ROW-006 (A07-storage-rows-04): an update to a
-/// table of many row pages rewrites only the page that holds the row, and
-/// every other page keeps its object; ORNA-ROW-010: rewriting a row to the
-/// value it already holds publishes no change at all.
-#[test]
-fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
-    let directory = TempDir::new().expect("create the test directory");
-    let (root, relation) = committed_database(&directory, NOTE_SOURCE);
-    let body =
-        |index: usize, label: &str| format!("{label} {index}: {}", "the ridge log ".repeat(12));
+/// A note body of the row's label and index, about 170 bytes.
+fn note_body(index: usize, label: &str) -> String {
+    format!("{label} {index}: {}", "the ridge log ".repeat(12))
+}
+
+/// Seeds `Note` with 600 rows, publishes them, and returns the root, the
+/// relation and the object IDs of the row pages. The table spans several
+/// pages (store-format-3 §3).
+fn seed_six_hundred_notes(directory: &TempDir) -> (PathBuf, String, BTreeSet<String>) {
+    let (root, relation) = committed_database(directory, NOTE_SOURCE);
     let inserts = (0..600)
         .map(|index| {
             format!(
                 r#"main.Note.insert({{ id: "n{index:04}", body: "{}" }})"#,
-                body(index, "first")
+                note_body(index, "first")
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     assert_success(&orna_repl(&root, &inserts), "REPL inserts");
     publish(&root, "Add six hundred notes");
-    let pages_before = row_pages(&root);
+    let pages = row_pages(&root);
     assert!(
-        pages_before.len() >= 4,
+        pages.len() >= 4,
         "the table spans several row pages: {}",
-        pages_before.len()
+        pages.len()
     );
     assert_eq!(table_row_count(&root, &relation), 600);
+    (root, relation, pages)
+}
 
+/// store-format-3 §3 and ORNA-ROW-006 (A07-storage-rows-04): an update to a
+/// table of many row pages rewrites only the page that holds the row, and
+/// every other page keeps its object; ORNA-ROW-010: rewriting a row to the
+/// value it already holds publishes no change at all. The new body has the
+/// byte length of the old one, so the row's encoded size and every page
+/// boundary stay put.
+#[test]
+fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
+    let directory = TempDir::new().expect("create the test directory");
+    let (root, relation, pages_before) = seed_six_hundred_notes(&directory);
     let revise = format!(
         r#"main.Note.update("n0300", {{ body: "{}" }})"#,
-        body(300, "second")
+        note_body(300, "third")
     );
     assert_success(&orna_repl(&root, &revise), "REPL update");
     publish(&root, "Revise one note");
@@ -358,4 +380,30 @@ fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
         transcript(&unchanged)
     );
     assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+}
+
+/// The same update with a body one byte longer. Pages close on their byte
+/// size as well as their entry count (`NODE_DATA_LIMIT`, `closes_before`), so
+/// a grown row can move a page boundary into the next page; the complete
+/// build moves it the same way (native_graph's append-maintenance test pins
+/// that equality). The bound is the page holding the row and at most the
+/// neighbour it pushes.
+#[test]
+fn growing_a_row_rewrites_its_page_and_at_most_the_neighbour_it_shifts() {
+    let directory = TempDir::new().expect("create the test directory");
+    let (root, relation, pages_before) = seed_six_hundred_notes(&directory);
+    let revise = format!(
+        r#"main.Note.update("n0300", {{ body: "{}" }})"#,
+        note_body(300, "second")
+    );
+    assert_success(&orna_repl(&root, &revise), "REPL update");
+    publish(&root, "Grow one note");
+    let pages_after = row_pages(&root);
+    let rewritten = pages_after.difference(&pages_before).count();
+    let removed = pages_before.difference(&pages_after).count();
+    assert!(
+        (1..=2).contains(&rewritten) && removed == rewritten,
+        "a grown row rewrites its page and at most one neighbour: {rewritten} new, {removed} removed"
+    );
+    assert_eq!(table_row_count(&root, &relation), 600);
 }
