@@ -1,0 +1,4 @@
+pub fn prefer(target: sys.TableRef, storage: sys.Storage) =
+    sys.admin.set_storage_preference(target, storage.profile);
+pub fn rewrite(target: sys.TableRef, storage: sys.Storage) =
+    sys.admin.rewrite_storage(target, storage.profile);
