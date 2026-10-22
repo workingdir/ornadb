@@ -1,1 +1,1 @@
-std.collection.drop(rows, 2)
+drop(rows, 2)

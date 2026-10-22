@@ -1178,7 +1178,7 @@ fn history_at_refuses_a_legacy_snapshot_it_cannot_walk() {
     }
     std::fs::create_dir_all(root.join(".orna")).unwrap();
     std::fs::write(root.join("main.orna"), b"module main;\n").unwrap();
-    std::fs::write(root.join(".orna/format.orna"), b"format 1\n").unwrap();
+    std::fs::write(root.join(".orna/format.orna"), b"{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(root, &["add", "--all"]);
     git(root, &["commit", "--quiet", "-m", "legacy format fixture"]);
     let legacy = git_output(root, &["rev-parse", "HEAD"], None);
@@ -1795,7 +1795,7 @@ fn query_at_refuses_a_legacy_snapshot_it_cannot_read() {
     }
     std::fs::create_dir_all(root.join(".orna")).unwrap();
     std::fs::write(root.join("main.orna"), b"module main;\n").unwrap();
-    std::fs::write(root.join(".orna/format.orna"), b"format 1\n").unwrap();
+    std::fs::write(root.join(".orna/format.orna"), b"{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(root, &["add", "--all"]);
     git(root, &["commit", "--quiet", "-m", "legacy format fixture"]);
     let legacy = git_output(root, &["rev-parse", "HEAD"], None);

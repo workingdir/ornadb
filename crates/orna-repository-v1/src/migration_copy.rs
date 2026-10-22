@@ -297,7 +297,7 @@ fn prepare_format3_migration_in(
 ) -> Result<MigratedCopy, RepositoryError> {
     let context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if context.supports_writes() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -380,7 +380,7 @@ fn prepare_format3_migration_in(
             ),
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
-                Some(legacy_format_bytes(source_format)),
+                Some(committed_legacy_format(&context)?),
                 None,
             ),
             PublicationJournalEntry::new(
@@ -417,9 +417,7 @@ fn require_legacy_worktree_metadata_matches(
     let format_path = source.worktree().join(LEGACY_FORMAT_PATH);
     let worktree_format =
         read_regular_metadata_file(&format_path)?.ok_or(RepositoryError::InvalidFormatMigration)?;
-    let committed_format = context
-        .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
-        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+    let committed_format = committed_legacy_format(context)?;
     if worktree_format != committed_format {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -615,7 +613,7 @@ fn recover_prepared_copy(
 ) -> Result<MigratedCopy, RepositoryError> {
     let source_context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if source_context.supports_writes()
         || !matches!(
             source_context.repository_format(),
@@ -686,7 +684,7 @@ fn recover_prepared_copy(
         ),
         PublicationJournalEntry::new(
             crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
-            Some(legacy_format_bytes(source_format)),
+            Some(committed_legacy_format(&source_context)?),
             None,
         ),
         PublicationJournalEntry::new(
@@ -772,9 +770,13 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
     Ok(())
 }
 
-/// The recorded `format.orna` bytes of one legacy source.
-fn legacy_format_bytes(format: RepositoryFormat) -> Vec<u8> {
-    format!("format {}\n", format.number()).into_bytes()
+/// The committed `format.orna` bytes of one legacy source, exactly as its
+/// writer recorded them. The journal names these bytes as the file the
+/// migration removes, so they are never rebuilt from the format number.
+fn committed_legacy_format(context: &RepositoryFormatContext) -> Result<Vec<u8>, RepositoryError> {
+    context
+        .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        .map_err(|_| RepositoryError::InvalidFormatMigration)
 }
 
 /// Names the migration transition in the candidate's own message.
