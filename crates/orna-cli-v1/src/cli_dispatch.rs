@@ -130,8 +130,15 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
         Command::Unmount { ref mountpoint } => cli_mount::run_unmount(&parsed.endpoint, mountpoint),
         Command::Edit { ref path, row } => cli_mount::run_edit(&parsed.endpoint, path, row),
-        Command::Diff(ref arguments) => run_git_diff(arguments),
-        Command::Log(ref arguments) => run_git_log(arguments),
+        Command::Diff(ref arguments) => run_git_passthrough(&parsed.endpoint, "diff", arguments),
+        Command::Log(ref arguments) => run_git_passthrough(&parsed.endpoint, "log", arguments),
+        Command::GitPassthrough {
+            name,
+            ref arguments,
+        } => run_git_passthrough(&parsed.endpoint, name, arguments),
+        Command::RestoreRow { ref table, ref key } => {
+            cli_stage::unstage_row(&parsed.endpoint, table, key)
+        }
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Query(arguments) => cli_query::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
@@ -1164,34 +1171,33 @@ mod short_runtime_summary_tests {
     }
 }
 
-fn run_git_diff(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("diff")
-        .args(arguments)
-        .status()
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2000",
-                "Git diff could not be started",
-                "check that Git is installed and available on PATH",
-                error.to_string(),
-            )
-        })?;
-    if let Some(code) = status.code() {
-        std::process::exit(code);
+/// Run a Git-native command (ORNA-CLI-001). A local `--db PATH` runs as
+/// `git -C PATH NAME ...` so the Git operation targets the database's repository,
+/// not the current directory. Managed-local runs in the current worktree. Socket
+/// and remote endpoints have no local repository to run Git against.
+fn run_git_passthrough(endpoint: &Endpoint, name: &str, arguments: &[String]) -> Result<(), Diagnostic> {
+    let mut command = std::process::Command::new("git");
+    match endpoint {
+        Endpoint::ManagedLocal => {}
+        Endpoint::Path(path) => {
+            command.arg("-C").arg(path);
+        }
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
+            return Err(Diagnostic::target(
+                "E2100",
+                "Git passthrough requires a local repository",
+                "run the command against a local worktree or with `--db PATH`",
+            ));
+        }
     }
-    std::process::exit(128)
-}
-
-fn run_git_log(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("log")
+    let status = command
+        .arg(name)
         .args(arguments)
         .status()
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2000",
-                "Git log could not be started",
+                "Git command could not be started",
                 "check that Git is installed and available on PATH",
                 error.to_string(),
             )
