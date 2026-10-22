@@ -24,7 +24,9 @@ impl Drop for RunningServer {
 
 fn http_get(address: &str, path: &str) -> std::io::Result<(u16, String)> {
     let mut stream = TcpStream::connect(address)?;
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    // Host must name the listener's own authority, port included (RFC 9110);
+    // `orna serve` refuses any other Host.
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     let (headers, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
