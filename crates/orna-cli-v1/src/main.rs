@@ -1962,11 +1962,15 @@ fn run_project_invocation_with_arguments(
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project invocation was rejected",
-            "the project transaction failed atomically; no partial changes were committed",
-        )),
+        StageOutcome::Failed(diagnostic) => {
+            let mut rejection = Diagnostic::target(
+                "E2200",
+                "durable project invocation was rejected",
+                "the project transaction failed atomically; no partial changes were committed",
+            );
+            rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+            Err(rejection)
+        }
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
