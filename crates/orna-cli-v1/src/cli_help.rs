@@ -45,9 +45,6 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  migrate abort DEST",
     "  discards the prepared format-3 copy in DEST after verifying it; the source stays unchanged",
     "  migrate abort exit status: 0 discarded; 1 DEST is not the prepared copy of this source, the source changed since preparation, or the local worktree is unavailable; 2 missing or invalid arguments",
-    "  migrate activate DEST",
-    "  verifies the prepared copy in DEST, then refuses: this build does not perform the protected format transition",
-    "  migrate activate exit status: 1 refused (verification failed or activation unavailable in this build); 2 missing or invalid arguments",
     "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
     "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "  commit -m MESSAGE                           review and publish exactly the staged candidate",
@@ -112,7 +109,6 @@ mod tests {
                 .contains(&"  migrate copy DEST --annotation-defaults N --no-persistent-consumers")
         );
         assert!(HELP_LINES.contains(&"  migrate abort DEST"));
-        assert!(HELP_LINES.contains(&"  migrate activate DEST"));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
     }
 
