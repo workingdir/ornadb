@@ -16,7 +16,8 @@ use num_bigint::{BigInt, Sign};
 use orna_evaluator_v1::{
     ActivationExplainCatalogue, EffectHandler, Environment, EvaluationError, ExplainCatalogue,
     Functions, Limits as EvaluatorLimits, NominalDefinition, NominalDefinitions, NominalField,
-    PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression,
+    PureFunction as RetainedFunction, RelationPage, StepBudget, SysHostAttachment, SysHostContext,
+    evaluate_expression,
     evaluate_expression_with_functions, evaluate_with_functions_and_budget,
     evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
     invoke_named_with_effects_nominals_and_budget, invoke_named_with_nominals,
@@ -194,8 +195,8 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
             | "E5001"
             | "E5002"
             | "E5003"
-            | "E5004"
             | "E5103"
+            | "E5004"
             | "E6001"
             | "E7001"
             | "E7002"
@@ -1798,6 +1799,7 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     explain_catalogue: Option<ActivationExplainCatalogue>,
 }
 
@@ -1810,6 +1812,7 @@ impl TransactionalEvaluator {
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
+            sys_host: None,
             explain_catalogue: None,
         }
     }
@@ -1821,6 +1824,14 @@ impl TransactionalEvaluator {
 
     fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    fn with_sys_host_context(
+        mut self,
+        sys_host: Option<std::sync::Arc<SysHostAttachment>>,
+    ) -> Self {
+        self.sys_host = sys_host;
         self
     }
 
@@ -1988,6 +1999,7 @@ impl TransactionalEvaluator {
                 limits,
                 activation_time: self.activation_time,
                 publication_rows: self.publication_rows.clone(),
+                sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
@@ -2063,6 +2075,7 @@ pub struct RuntimeTarget<'a> {
 pub struct DurableTransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
+    sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     #[cfg(test)]
     activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
@@ -2144,10 +2157,20 @@ impl DurableTransactionalEvaluator {
         Self {
             entry: entry.into(),
             limits,
+            sys_host: None,
             #[cfg(test)]
             activation_time_observer: None,
         }
     }
+
+    /// Attaches the repository and activation facts that `sys.rt.info()` reads
+    /// during every table activation this evaluator runs.
+    #[must_use]
+    pub fn with_sys_host_context(mut self, sys_host: SysHostContext) -> Self {
+        self.sys_host = Some(std::sync::Arc::new(SysHostAttachment::new(sys_host)));
+        self
+    }
+
     /// Reports whether a project root is admitted by the same bounded
     /// finite-list stream seam used by [`Self::execute_project_stream`].
     ///
@@ -2219,6 +2242,7 @@ impl DurableTransactionalEvaluator {
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
@@ -2402,6 +2426,7 @@ impl DurableTransactionalEvaluator {
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
@@ -2570,6 +2595,7 @@ impl DurableTransactionalEvaluator {
             });
         }
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
+            .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(continuation.context().activation_time());
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
@@ -3607,6 +3633,7 @@ impl DurableTransactionalEvaluator {
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
+            .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows);
         for (table, rows) in snapshot.table_rows() {
@@ -3712,6 +3739,7 @@ impl DurableTransactionalEvaluator {
             }
         };
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
+            .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows)
             .with_explain_catalogue(explain_catalogue);
@@ -5612,10 +5640,15 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    sys_host: Option<&'activation SysHostAttachment>,
     explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host
+    }
+
     fn scan_relation_page(
         &mut self,
         source: &str,
@@ -10043,6 +10076,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    sys_host: None,
                     explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
@@ -10392,6 +10426,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    sys_host: None,
                     explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
@@ -10581,6 +10616,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    sys_host: None,
                     explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);

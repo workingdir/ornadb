@@ -30,7 +30,9 @@ const DATABASE_FILE: &str = "database.orna";
 const MAIN_FILE: &str = "main.orna";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const REPOSITORY_FORMAT: i64 = 3;
-const STORAGE_PROFILE: &str = "store-3";
+/// The storage profile of the format-3 writer. `sys.rt.info` reports it as
+/// `storage_manifest_version` of an attached repository.
+pub const STORAGE_PROFILE: &str = "store-3";
 const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 
 /// A stable repository identity, represented by UUIDv4 bytes.

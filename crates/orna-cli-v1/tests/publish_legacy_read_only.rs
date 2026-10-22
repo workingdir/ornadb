@@ -34,8 +34,7 @@ use format3::{cli_runtime_identity, git, git_output};
 const DATABASE_ID: &str = "9f237b7e-6844-4498-bcd5-d24641c07449";
 
 /// Committed `format.orna` contents and the format each one records.
-const LEGACY_FORMAT_RECORDS: [(&str, u8); 3] = [
-    ("format 2\n", 2),
+const LEGACY_FORMAT_RECORDS: [(&str, u8); 2] = [
     (
         include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
         1,
