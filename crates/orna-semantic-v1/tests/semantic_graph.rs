@@ -8,9 +8,10 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 }
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
-    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_TYPE_MISMATCH,
+    Catalogue, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION,
+    DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT,
+    DIAG_LEGACY_RESULT, DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_PRIMARY_KEY_FLOAT,
+    DIAG_RELATION_EQUALITY_AMBIGUOUS, DIAG_RESERVED, DIAG_TYPE, DIAG_TYPE_MISMATCH,
     DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace,
     StandardCatalogueError, StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind,
     Type, analyze, analyze_with_catalogue,
@@ -970,7 +971,7 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
             ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE
+            diagnostic.code() == DIAG_RELATION_EQUALITY_AMBIGUOUS
                 && diagnostic.message() == "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
         }), "{:?}", result.diagnostics);
     }
@@ -1923,13 +1924,13 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
         "key.orna",
         include_str!("fixtures/inline-semantic_graph/4bae95d858a3.orna"),
     )]);
-    assert!(has(&key, DIAG_TYPE));
+    assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
     let temperature = analyze(&[ModuleInput::new(
         "temperature.orna",
         include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
     )]);
-    assert!(has(&temperature, DIAG_TYPE));
+    assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
 
 #[test]
