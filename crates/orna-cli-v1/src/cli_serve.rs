@@ -3490,8 +3490,9 @@ mod tests {
             &["init", "--quiet", "--initial-branch=expiry"],
         );
         // Keepalive pings start only after 15 s and the client waits at most
-        // LIVE_TEST_TIMEOUT for the Close frame, so only the sweep can close
-        // the socket in time. The lease leaves the evaluation four seconds.
+        // LIVE_TEST_TIMEOUT for the Close frame. The reconnection lease starts
+        // when the socket detaches (30-protocol), so the session is ended only
+        // after the client closes; the lease leaves the evaluation four seconds.
         let address = start_live_server(
             directory.path(),
             TEST_IDENTITY,
@@ -3503,8 +3504,22 @@ mod tests {
         let session = create_session(address);
         let mut socket = open_websocket(address, &session);
         assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [71; 16]));
-
-        expect_server_close(&mut socket, CLOSE_RETIRED);
+        // Closing the socket detaches it, starting the reconnection lease.
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let reply = resume_reply(address, &session);
+            if reply.status == 410 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the owner sweep ends the detached session"
+            );
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
         assert_eq!(resume_reply(address, &session).status, 410);
     }
 
