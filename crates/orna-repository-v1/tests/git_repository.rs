@@ -4587,7 +4587,7 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
             PublicationJournalStage::WorktreeReconciled
         );
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
@@ -4978,7 +4978,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
         assert_eq!(repo.head().unwrap(), Some(old_head.clone()));
         assert!(repo.read_publication_journal().unwrap().is_none());
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
@@ -5033,7 +5033,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
             3
         );
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
