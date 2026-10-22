@@ -2596,7 +2596,7 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
         .find(|module| module.namespace.display() == "io_consumer")
         .expect("filesystem consumer module");
     let reads = consumer.symbols.get("reads").expect("filesystem wrapper");
-    assert!(reads.effects.effects.contains("filesystem"));
+    assert!(reads.effects.effects.contains(&orna_semantic_v1::EffectKind::Filesystem));
     assert!(reads.effects.may_fail);
 }
 
