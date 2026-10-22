@@ -1,0 +1,5 @@
+use std.ui.*;
+
+pub fn page() = Page("/contacts", _ => {
+    Table(contacts.Contact | sort_by(contact => contact.name))
+});

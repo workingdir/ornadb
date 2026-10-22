@@ -559,10 +559,17 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let mut application =
-        ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
-            .with_runtime_identity(identity.database_id, identity.repository_id)
-            .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
+    let std_snapshot = project
+        .as_ref()
+        .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
+    let sys_host_context =
+        sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot);
+    let mut application = ApplicationLiveAdapter::new(
+        ApplicationAuthority::new(catalogue, Limits::default())
+            .with_sys_host_context(sys_host_context),
+    )
+    .with_runtime_identity(identity.database_id, identity.repository_id)
+    .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
     if let Some(project) = project {
         application = application.with_loaded_project(project);
     }
@@ -590,19 +597,48 @@ fn new_serve_state(
 fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
     start_session_sweep(state)?;
     for accepted in listener.incoming() {
-        let stream = accepted?;
+        let stream = match accepted {
+            Ok(stream) => stream,
+            // A peer that resets before accept, or a process that briefly runs
+            // out of descriptors, must not end the listener for every client.
+            Err(error) if is_transient_accept_error(&error) => {
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let Some(slot) = ConnectionSlot::claim(state, &stream) else {
             refuse_connection(stream);
             continue;
         };
-        std::thread::Builder::new()
+        // A failed spawn drops the closure, which releases the slot and
+        // shuts the connection; the listener keeps serving other clients.
+        let _ = std::thread::Builder::new()
             .name("orna-serve-connection".into())
             .spawn(move || {
                 let _ = serve_connection(stream, &slot.state);
                 drop(slot);
-            })?;
+            });
     }
     Ok(())
+}
+
+/// How long the accept loop pauses after a transient accept failure before
+/// trying again, so a descriptor shortage does not spin the loop.
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Whether an accept failure only concerns one attempt or a temporary
+/// resource shortage, so the listener should retry rather than stop.
+/// The errno values are Linux's: EMFILE 24, ENFILE 23, ENOMEM 12, ENOBUFS 105.
+fn is_transient_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(12 | 23 | 24 | 105))
 }
 
 /// One accepted connection's claim on [`ServeOptions::max_connections`],
@@ -661,6 +697,16 @@ fn refuse_connection(mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
 }
 
+/// Maps a live WebSocket failure to the RFC 6455 close code the socket is
+/// closed with: 1009 when a message exceeds its size bound, 1002 for any
+/// other protocol violation (30-protocol close codes).
+fn close_code_for_failure(error: orna_live_v1::Error) -> u16 {
+    match error {
+        orna_live_v1::Error::Limit => 1009,
+        _ => 1002,
+    }
+}
+
 /// Starts the owner sweep (30-protocol, Session creation and ownership:
 /// expiry terminates the owner and cancels its children). Every
 /// [`SESSION_SWEEP_INTERVAL`] it ends each session whose lease has elapsed
@@ -695,11 +741,27 @@ fn sweep_sessions(state: &Weak<ServeState>, executor: &tokio::runtime::Runtime) 
 fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
     let transfer = state.options.transfer;
     let mut reader = BufReader::new(stream);
-    let Ok((mut request, body_length)) =
-        read_request_head(&mut reader, Instant::now() + REQUEST_HEAD_TIMEOUT)
-    else {
-        return write_response(reader.get_mut(), bad_request_response(), transfer);
+    let mut orna_route = false;
+    let Ok((mut request, body_length)) = read_request_head(
+        &mut reader,
+        Instant::now() + REQUEST_HEAD_TIMEOUT,
+        &mut orna_route,
+    ) else {
+        let response = if orna_route {
+            live_error_response(400, "wire.invalid_message", "malformed request")
+        } else {
+            bad_request_response()
+        };
+        return write_response(reader.get_mut(), response, transfer);
     };
+    if body_length > request_body_limit(&request.path) {
+        let response = if request.path.starts_with("/orna/") {
+            live_error_response(413, "wire.limit", "request body exceeds its limit")
+        } else {
+            bad_request_response()
+        };
+        return write_response(reader.get_mut(), response, transfer);
+    }
     // Refuse from the head alone, before the body is read or allocated, so a
     // foreign or cross-origin request cannot make this host wait for or
     // buffer up to the route's body limit.
@@ -1021,12 +1083,19 @@ impl WebSocketWorker<'_> {
                     })?;
                     match completed {
                         Ok(output) => Some(output),
-                        Err(_) => return Ok(false),
+                        Err(error) => {
+                            self.close(close_code_for_failure(error));
+                            return Ok(false);
+                        }
                     }
                 }
-                // A framing or attachment failure ends this socket; dropping
-                // the worker closes its attachment.
-                Err(_) => return Ok(false),
+                // A framing or attachment failure closes this socket with the
+                // code the WebSocket protocol assigns to it; dropping the
+                // worker then releases its attachment.
+                Err(error) => {
+                    self.close(close_code_for_failure(error));
+                    return Ok(false);
+                }
             };
             if let Some(output) = output {
                 self.write(&output)?;
@@ -1869,15 +1938,18 @@ fn clone_report(root: &Path, identity: RuntimeIdentity) -> io::Result<Vec<u8>> {
 /// Reads one request line and its headers, which together must arrive
 /// within `deadline` and [`MAX_HEADER_BYTES`]. Every route, including the
 /// WebSocket upgrade, is chosen from this one parse. Returns the request with
-/// an empty body and the declared body length, already checked against the
-/// route's body limit.
+/// an empty body and the declared body length; the caller checks that length
+/// against the route's body limit. `orna_route` is set as soon as the request
+/// line is read, so a malformed head still answers in the live error shape.
 fn read_request_head(
     reader: &mut BufReader<TcpStream>,
     deadline: Instant,
+    orna_route: &mut bool,
 ) -> io::Result<(Request, usize)> {
     let mut budget = MAX_HEADER_BYTES;
     let mut line = Vec::new();
     read_head_line(reader, &mut line, &mut budget, deadline)?;
+    *orna_route = is_orna_request_line(&line);
     let request_line = std::str::from_utf8(&line)
         .map_err(|_| io::Error::other("invalid request line"))?
         .trim_end_matches(['\r', '\n'])
@@ -1953,14 +2025,6 @@ fn read_request_head(
         return Err(io::Error::other("missing Host header"));
     }
     let body_length = content_length.unwrap_or(0);
-    let body_limit = if path.starts_with("/git/") {
-        MAX_GIT_REQUEST_BODY_BYTES
-    } else {
-        MAX_REQUEST_BODY_BYTES
-    };
-    if body_length > body_limit {
-        return Err(io::Error::other("request body limit"));
-    }
     Ok((
         Request {
             method,
@@ -2217,6 +2281,35 @@ fn bad_request_response() -> Response {
     )
 }
 
+/// Whether a request line targets the live `/orna/` surface, so its errors
+/// use the `{ "code", "message" }` shape (30-protocol, Creation/resume errors).
+fn is_orna_request_line(line: &[u8]) -> bool {
+    line.starts_with(b"GET /orna/")
+        || line.starts_with(b"POST /orna/")
+        || line.starts_with(b"DELETE /orna/")
+}
+
+/// The body limit for a route, which the head's declared length must not
+/// exceed before the body is read.
+fn request_body_limit(path: &str) -> usize {
+    if path.starts_with("/git/") {
+        MAX_GIT_REQUEST_BODY_BYTES
+    } else {
+        MAX_REQUEST_BODY_BYTES
+    }
+}
+
+/// A live error in the protocol's `{ "code", "message" }` JSON. The code and
+/// message are fixed constants with no characters needing JSON escapes, and
+/// they carry no credentials or host paths.
+fn live_error_response(status: u16, code: &str, message: &str) -> Response {
+    Response::new(
+        status,
+        "application/json",
+        format!(r#"{{"code":"{code}","message":"{message}"}}"#).into_bytes(),
+    )
+}
+
 fn unavailable_response() -> Response {
     Response::new(
         503,
@@ -2230,6 +2323,87 @@ mod tests {
     use super::*;
     use orna_live_v1::LiveApplication;
     use std::process::Command;
+
+    #[test]
+    fn websocket_failures_close_with_size_or_protocol_code() {
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::Limit),
+            1009,
+            "an oversized message closes with 1009"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidFrame),
+            1002,
+            "a malformed frame closes with 1002"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidMessage),
+            1002,
+            "a malformed message closes with 1002"
+        );
+    }
+
+    #[test]
+    fn accept_retries_transient_failures_and_stops_on_fatal_ones() {
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::Interrupted
+        )));
+        assert!(
+            is_transient_accept_error(&io::Error::from_raw_os_error(24)),
+            "EMFILE retries after descriptors are released"
+        );
+        assert!(is_transient_accept_error(&io::Error::from_raw_os_error(23)));
+        assert!(!is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_transient_accept_error(&io::Error::from_raw_os_error(22)));
+    }
+
+    /// Writes `request` from a client socket and returns the server side of
+    /// the connection, buffered the way `serve_connection` reads it.
+    fn buffered_request(request: &[u8]) -> BufReader<TcpStream> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.write_all(request).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        BufReader::new(server)
+    }
+
+    #[test]
+    fn malformed_orna_head_is_answered_in_the_live_error_shape() {
+        let mut reader = buffered_request(b"GET /orna/session HTTP/1.1\r\nno-colon\r\n\r\n");
+        let mut orna_route = false;
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        assert!(read_request_head(&mut reader, deadline, &mut orna_route).is_err());
+        assert!(orna_route, "the request line already chose the live route");
+        assert_eq!(
+            live_error_response(400, "wire.invalid_message", "malformed request").body,
+            br#"{"code":"wire.invalid_message","message":"malformed request"}"#.to_vec()
+        );
+    }
+
+    #[test]
+    fn oversized_orna_body_is_refused_by_its_declared_length() {
+        let declared = MAX_REQUEST_BODY_BYTES + 1;
+        let head = format!(
+            "POST /orna/session HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n\r\n"
+        );
+        let mut reader = buffered_request(head.as_bytes());
+        let mut orna_route = false;
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        let (request, body_length) = read_request_head(&mut reader, deadline, &mut orna_route)
+            .expect("a well-formed head parses");
+        assert!(orna_route);
+        assert_eq!(body_length, declared);
+        assert!(body_length > request_body_limit(&request.path));
+        assert_eq!(
+            live_error_response(413, "wire.limit", "request body exceeds its limit").status,
+            413
+        );
+    }
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
     const SERVE_ENTRY_FIXTURE: &str = include_str!("../tests/fixtures/serve-entry.orna");
@@ -2651,6 +2825,7 @@ mod tests {
             read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_secs(5),
+                &mut false,
             )
         });
         let mut client = TcpStream::connect(address).expect("loopback connection");
@@ -2683,6 +2858,7 @@ mod tests {
             let result = read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_secs(30),
+                &mut false,
             );
             (result.err(), started.elapsed())
         });
@@ -2711,6 +2887,7 @@ mod tests {
             let result = read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_millis(300),
+                &mut false,
             );
             (result.err(), started.elapsed())
         });
@@ -3320,8 +3497,9 @@ mod tests {
             &["init", "--quiet", "--initial-branch=expiry"],
         );
         // Keepalive pings start only after 15 s and the client waits at most
-        // LIVE_TEST_TIMEOUT for the Close frame, so only the sweep can close
-        // the socket in time. The lease leaves the evaluation four seconds.
+        // LIVE_TEST_TIMEOUT for the Close frame. The reconnection lease starts
+        // when the socket detaches (30-protocol), so the session is ended only
+        // after the client closes; the lease leaves the evaluation four seconds.
         let address = start_live_server(
             directory.path(),
             TEST_IDENTITY,
@@ -3333,8 +3511,22 @@ mod tests {
         let session = create_session(address);
         let mut socket = open_websocket(address, &session);
         assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [71; 16]));
-
-        expect_server_close(&mut socket, CLOSE_RETIRED);
+        // Closing the socket detaches it, starting the reconnection lease.
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let reply = resume_reply(address, &session);
+            if reply.status == 410 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the owner sweep ends the detached session"
+            );
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
         assert_eq!(resume_reply(address, &session).status, 410);
     }
 

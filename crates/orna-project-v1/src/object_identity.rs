@@ -33,37 +33,71 @@ use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 pub const OBJECT_IDENTITY_MANIFEST_PATH: &str =
     orna_repository_v1::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH;
 const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
-const MANIFEST_VERSION: u64 = 1;
+/// Sidecar encoding version. Version 2 stores each kind's `sys.ObjectKind`
+/// ordinal (see [`ObjectKind::spec_ordinal`]); version 1 is the legacy
+/// internal code (see [`ObjectKind::legacy_code`]) and is read only for old commits.
+const MANIFEST_VERSION: u64 = 2;
+const LEGACY_MANIFEST_VERSION: u64 = 1;
+/// `sys.ObjectKind` ordinals (api/sys.json order) shared by several kinds.
+const SPEC_FIELD_ORDINAL: u64 = 9;
+const SPEC_VARIANT_ORDINAL: u64 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-#[repr(u64)]
 pub enum ObjectKind {
-    Table = 1,
+    Table,
     /// A table column, including primary-key columns (`Table.column`).
-    Field = 2,
-    Unit = 3,
+    Field,
+    Unit,
     /// A nominal user type, refined nominal type or enum (`Type`).
-    Type = 4,
+    Type,
     /// One enum variant (`Enum.variant`).
-    Variant = 5,
+    Variant,
     /// One field of a nominal record type (`Type.field`).
-    TypeField = 6,
+    TypeField,
     /// One payload field of an enum variant (`Enum.variant.field`).
-    VariantField = 7,
+    VariantField,
 }
 
 impl ObjectKind {
-    fn from_raw(raw: &Raw) -> Option<Self> {
-        match raw_int(raw)? {
-            1 => Some(Self::Table),
-            2 => Some(Self::Field),
-            3 => Some(Self::Unit),
-            4 => Some(Self::Type),
-            5 => Some(Self::Variant),
-            6 => Some(Self::TypeField),
-            7 => Some(Self::VariantField),
-            _ => None,
+    /// The `sys.ObjectKind` value this kind is stored under. Both nominal
+    /// fields and variant payload fields are `field`; they are told apart by
+    /// their owner when read (see [`records_from_spec_ordinals`]).
+    const fn spec_ordinal(self) -> u64 {
+        match self {
+            Self::Table => 2,
+            Self::Field => 3,
+            Self::Unit => 15,
+            Self::Type => 8,
+            Self::Variant => SPEC_VARIANT_ORDINAL,
+            Self::TypeField | Self::VariantField => SPEC_FIELD_ORDINAL,
         }
+    }
+
+    /// The internal code of sidecar version 1.
+    const fn legacy_code(self) -> u64 {
+        match self {
+            Self::Table => 1,
+            Self::Field => 2,
+            Self::Unit => 3,
+            Self::Type => 4,
+            Self::Variant => 5,
+            Self::TypeField => 6,
+            Self::VariantField => 7,
+        }
+    }
+
+    fn from_legacy_code(code: u64) -> Option<Self> {
+        [
+            Self::Table,
+            Self::Field,
+            Self::Unit,
+            Self::Type,
+            Self::Variant,
+            Self::TypeField,
+            Self::VariantField,
+        ]
+        .into_iter()
+        .find(|kind| kind.legacy_code() == code)
     }
 }
 
@@ -327,15 +361,24 @@ impl ObjectIdentityManifest {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ObjectIdentityError> {
+        self.encode_as(MANIFEST_VERSION, ObjectKind::spec_ordinal)
+    }
+
+    /// Encodes the inventory under `version`, storing each kind as `code` gives it.
+    fn encode_as(
+        &self,
+        version: u64,
+        code: fn(ObjectKind) -> u64,
+    ) -> Result<Vec<u8>, ObjectIdentityError> {
         validate_records(&self.records)?;
         let raw = Raw::Array(vec![
-            Raw::Int(MANIFEST_VERSION.into()),
+            Raw::Int(version.into()),
             Raw::Array(
                 self.records
                     .iter()
                     .map(|record| {
                         Raw::Array(vec![
-                            Raw::Int((record.kind as u64).into()),
+                            Raw::Int(code(record.kind).into()),
                             Raw::Text(record.qualified_name.clone()),
                             Raw::Bytes(record.id.to_vec()),
                             Raw::Bool(record.retired),
@@ -357,13 +400,16 @@ impl ObjectIdentityManifest {
         let Raw::Array(root) = value.raw() else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        if root.len() != 2 || raw_int(&root[0]) != Some(MANIFEST_VERSION) {
-            return Err(ObjectIdentityError::InvalidEncoding);
-        }
+        let version = match root.first().and_then(raw_int) {
+            Some(version @ (LEGACY_MANIFEST_VERSION | MANIFEST_VERSION)) if root.len() == 2 => {
+                version
+            }
+            _ => return Err(ObjectIdentityError::InvalidEncoding),
+        };
         let Raw::Array(entries) = &root[1] else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        let mut records = Vec::with_capacity(entries.len());
+        let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
             let Raw::Array(fields) = entry else {
                 return Err(ObjectIdentityError::InvalidEncoding);
@@ -371,8 +417,7 @@ impl ObjectIdentityManifest {
             if fields.len() != 4 {
                 return Err(ObjectIdentityError::InvalidEncoding);
             }
-            let kind =
-                ObjectKind::from_raw(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
+            let code = raw_int(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
             let Raw::Text(qualified_name) = &fields[1] else {
                 return Err(ObjectIdentityError::InvalidEncoding);
             };
@@ -386,16 +431,31 @@ impl ObjectIdentityManifest {
                 .as_slice()
                 .try_into()
                 .map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-            records.push(ObjectIdentity {
-                kind,
-                qualified_name: qualified_name.clone(),
-                id,
-                retired: *retired,
-            });
+            rows.push((code, qualified_name.clone(), id, *retired));
         }
+        let records = if version == LEGACY_MANIFEST_VERSION {
+            rows.into_iter()
+                .map(|(code, qualified_name, id, retired)| {
+                    Ok(ObjectIdentity {
+                        kind: ObjectKind::from_legacy_code(code)
+                            .ok_or(ObjectIdentityError::InvalidEncoding)?,
+                        qualified_name,
+                        id,
+                        retired,
+                    })
+                })
+                .collect::<Result<Vec<_>, ObjectIdentityError>>()?
+        } else {
+            records_from_spec_ordinals(rows)?
+        };
         let manifest = Self { records };
         validate_records(&manifest.records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-        if manifest.encode()?.as_slice() != bytes {
+        let canonical = if version == LEGACY_MANIFEST_VERSION {
+            manifest.encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)?
+        } else {
+            manifest.encode()?
+        };
+        if canonical.as_slice() != bytes {
             return Err(ObjectIdentityError::InvalidEncoding);
         }
         Ok(manifest)
@@ -517,7 +577,7 @@ impl ObjectIdentityManifest {
             .map(|record| {
                 StoredObjectIdentity::new(
                     record.id,
-                    record.kind as u64,
+                    record.kind.spec_ordinal(),
                     record.qualified_name.clone(),
                     record.retired,
                 )
@@ -528,18 +588,18 @@ impl ObjectIdentityManifest {
     /// Rebuilds the inventory from the store rows of the sealed identity
     /// relation, in the same canonical record order reconciliation uses.
     fn from_stored(stored: &[StoredObjectIdentity]) -> Result<Self, ObjectIdentityError> {
-        let mut records = stored
+        let rows = stored
             .iter()
             .map(|identity| {
-                Ok(ObjectIdentity {
-                    kind: ObjectKind::from_raw(&Raw::Int(identity.kind().into()))
-                        .ok_or(ObjectIdentityError::InvalidEncoding)?,
-                    qualified_name: identity.qualified_name().to_owned(),
-                    id: *identity.id(),
-                    retired: identity.retired(),
-                })
+                (
+                    identity.kind(),
+                    identity.qualified_name().to_owned(),
+                    *identity.id(),
+                    identity.retired(),
+                )
             })
-            .collect::<Result<Vec<_>, ObjectIdentityError>>()?;
+            .collect();
+        let mut records = records_from_spec_ordinals(rows)?;
         records.sort_by(|left, right| {
             (left.kind, left.qualified_name.as_str())
                 .cmp(&(right.kind, right.qualified_name.as_str()))
@@ -2242,6 +2302,50 @@ fn raw_int(raw: &Raw) -> Option<u64> {
     }
 }
 
+/// Rebuilds records from `(sys.ObjectKind ordinal, qualified name, id, retired)`
+/// rows. A `field` row is a variant payload field exactly when its owner (the
+/// name without its last segment) is a variant row; otherwise it is a type field.
+fn records_from_spec_ordinals(
+    rows: Vec<(u64, String, [u8; 16], bool)>,
+) -> Result<Vec<ObjectIdentity>, ObjectIdentityError> {
+    let variants: BTreeSet<&str> = rows
+        .iter()
+        .filter(|(code, ..)| *code == SPEC_VARIANT_ORDINAL)
+        .map(|(_, qualified_name, ..)| qualified_name.as_str())
+        .collect();
+    rows.iter()
+        .map(|(code, qualified_name, id, retired)| {
+            let kind = if *code == SPEC_FIELD_ORDINAL {
+                let (owner, _) = qualified_name
+                    .rsplit_once('.')
+                    .ok_or(ObjectIdentityError::InvalidEncoding)?;
+                if variants.contains(owner) {
+                    ObjectKind::VariantField
+                } else {
+                    ObjectKind::TypeField
+                }
+            } else {
+                [
+                    ObjectKind::Table,
+                    ObjectKind::Field,
+                    ObjectKind::Unit,
+                    ObjectKind::Type,
+                    ObjectKind::Variant,
+                ]
+                .into_iter()
+                .find(|kind| kind.spec_ordinal() == *code)
+                .ok_or(ObjectIdentityError::InvalidEncoding)?
+            };
+            Ok(ObjectIdentity {
+                kind,
+                qualified_name: qualified_name.clone(),
+                id: *id,
+                retired: *retired,
+            })
+        })
+        .collect()
+}
+
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
     let mut active = BTreeSet::new();
     let mut ids = HashSet::new();
@@ -2481,6 +2585,77 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::decode(&removed.encode().unwrap()).unwrap(),
             removed
+        );
+    }
+
+    // Restores the retired-id invariant deleted with orna-semantic-v1 (commit
+    // 0e26aa9a4, PR #9168). Spec: ORNA-OBJECT-005 (retired IDs MUST NOT be
+    // reused for an unrelated definition) and ORNA-AUTOID-002 (allocated IDs
+    // are never reused after deletion).
+    #[test]
+    fn committed_ids_survive_edits_and_retirement_prevents_reuse() {
+        let first_source = "pub table Note(id: Str) { title: Str, }";
+        let first = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            None,
+        )
+        .expect("initial authoring allocates committed identities");
+        let table_id = *first.id(ObjectKind::Table, "Note").unwrap();
+        let title_id = *first.id(ObjectKind::Field, "Note.title").unwrap();
+        let encoded = first.encode().unwrap();
+        assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
+
+        let edited = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new(
+                "main.orna",
+                "pub table Note(id: Str) { title: Str, body: Str, }",
+            )],
+            Some(&first),
+        )
+        .expect("compatible edit retains prior identities");
+        assert_eq!(edited.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert_eq!(edited.id(ObjectKind::Field, "Note.title"), Some(&title_id));
+
+        let removed = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&edited),
+        )
+        .expect("removal retires identities");
+        assert!(removed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.is_retired()
+        }));
+        let restored = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            Some(&removed),
+        )
+        .expect("unassisted recreation receives new identities");
+        assert_ne!(restored.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert!(restored.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.id() == &table_id
+                && record.is_retired()
+        }));
+        let removed_again = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&restored),
+        )
+        .expect("later removal can retire the new identity generation");
+        let retired_table_count = removed_again
+            .records()
+            .iter()
+            .filter(|record| {
+                record.kind() == ObjectKind::Table
+                    && record.qualified_name() == "Note"
+                    && record.is_retired()
+            })
+            .count();
+        assert_eq!(retired_table_count, 2);
+        assert_eq!(
+            ObjectIdentityManifest::decode(&removed_again.encode().unwrap()).unwrap(),
+            removed_again,
         );
     }
     #[test]
@@ -2734,6 +2909,41 @@ mod tests {
         );
         SchemaDescriptor::decode(&schema.descriptor.encode().unwrap()).unwrap();
     }
+
+    #[test]
+    fn legacy_sidecar_codes_decode_to_spec_kinds_and_reencode_as_v2() {
+        let manifest = ObjectIdentityManifest {
+            records: vec![
+                ObjectIdentity {
+                    kind: ObjectKind::Type,
+                    qualified_name: "Shape".into(),
+                    id: [1; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::Variant,
+                    qualified_name: "Shape.circle".into(),
+                    id: [2; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::VariantField,
+                    qualified_name: "Shape.circle.radius".into(),
+                    id: [3; 16],
+                    retired: false,
+                },
+            ],
+        };
+        let legacy = manifest
+            .encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)
+            .unwrap();
+        let decoded = ObjectIdentityManifest::decode(&legacy).unwrap();
+        assert_eq!(decoded, manifest);
+        let current = decoded.encode().unwrap();
+        assert_ne!(current, legacy);
+        assert_eq!(ObjectIdentityManifest::decode(&current).unwrap(), manifest);
+    }
+
     #[test]
     fn oversized_worktree_manifest_is_rejected_before_reading() {
         let directory = tempfile::tempdir().unwrap();
