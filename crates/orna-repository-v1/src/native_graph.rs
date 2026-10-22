@@ -22,10 +22,10 @@ use std::{
 
 use fs2::FileExt;
 use orna_value_v1::{
-    AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
-    Format3Context, Format3Quota, GitHash, MediaAnnotation, MimeRegistry,
-    NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
-    Snapshot as ValueSnapshot,
+    AvailabilityState, Blob, BlobMetadata, BlobResolver, ContentIdentity as ValueContentIdentity,
+    ContentReference, ContextValue, Error as ValueError, Format3Context, Format3Quota, GitHash,
+    MediaAnnotation, MimeRegistry, NativeOid as ValueNativeOid, OwnerLifetime, Raw,
+    SchemaDescriptor, Snapshot as ValueSnapshot, ValueFormat,
 };
 use sha2::{Digest, Sha256};
 
@@ -377,6 +377,9 @@ impl AdmittedRowFields {
 pub struct RepositoryCaptureCapability {
     graph: Arc<NativeGraphContext>,
     scope: RepositoryReadScope,
+    /// The snapshot-pinned value context that captured candidates are bound
+    /// to, present when a format context issued this capability.
+    capture_context: Option<Format3Context>,
 }
 
 impl PartialEq for RepositoryCaptureCapability {
@@ -395,7 +398,18 @@ impl RepositoryCaptureCapability {
         scope: RepositoryReadScope,
     ) -> Result<Self, GraphError> {
         scope.authorize(&graph)?;
-        Ok(Self { graph, scope })
+        Ok(Self {
+            graph,
+            scope,
+            capture_context: None,
+        })
+    }
+
+    /// Binds the values this capability issues for captured candidates to the
+    /// exact snapshot pin of the format context that issued it.
+    pub(crate) fn with_capture_pin(mut self, pin: ValueSnapshot) -> Result<Self, ValueError> {
+        self.capture_context = Some(self.value_context(pin)?);
+        Ok(self)
     }
 
     /// Cumulative media payload bytes this capability has read from the graph.
@@ -427,6 +441,34 @@ impl RepositoryCaptureCapability {
     ) -> Result<CapturedBlobCandidate, GraphError> {
         self.graph
             .capture_blob_candidate(source, max_bytes, &self.scope)
+    }
+
+    /// The lazy Blob value of a captured candidate: its content identity, the
+    /// octet-stream fallback annotation and its descriptor, as a ROV-3 value
+    /// in this capability's snapshot-pinned context. Reading it streams
+    /// verified chunks from the graph on demand; the value never holds the
+    /// payload, whatever its size.
+    pub fn candidate_value(
+        &self,
+        candidate: &CapturedBlobCandidate,
+    ) -> Result<ContextValue, GraphError> {
+        let context = self
+            .capture_context
+            .as_ref()
+            .ok_or(GraphError::ContextMismatch)?;
+        if candidate.context != self.graph.identity || candidate.owner_id != self.graph.owner_id {
+            return Err(GraphError::ContextMismatch);
+        }
+        let identity =
+            ValueContentIdentity::new(candidate.identity.length(), candidate.identity.sha256())
+                .map_err(|_| GraphError::InvalidLength(candidate.identity.length()))?;
+        let descriptor = ValueNativeOid::from_bytes(candidate.descriptor_oid.as_bytes())
+            .map_err(|_| GraphError::MalformedOid)?;
+        let reference = context
+            .reference(identity, descriptor)
+            .map_err(|_| GraphError::MalformedOid)?;
+        let blob = Blob::from_reference(reference).map_err(|_| GraphError::ContextMismatch)?;
+        ContextValue::from_blob(&blob, ValueFormat::Rov3).map_err(|_| GraphError::ContextMismatch)
     }
 
     /// Promotes a captured source into an owner-scoped durable pending pin,
