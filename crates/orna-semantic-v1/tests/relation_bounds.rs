@@ -113,7 +113,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     for name in ["direct_one", "predicate_one"] {
         assert!(matches!(
             &module.symbols[name].ty,
-            Type::Function { result, .. } if result.as_ref() == &Type::Named("Note".into())
+            Type::Function { result, .. } if result.as_ref() == &Type::Named("relation-callback-effects.Note".into())
         ));
     }
 }
