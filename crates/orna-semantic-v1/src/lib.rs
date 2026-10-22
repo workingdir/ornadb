@@ -7386,6 +7386,7 @@ fn infer_local_generic_call(
         .map(|parameter| substitute_generic_type(parameter, &substitutions))
         .collect::<Vec<_>>();
     check_call_arguments(
+        scope,
         &parameters,
         parameter_names.as_deref(),
         default_parameters,
@@ -9070,6 +9071,7 @@ fn infer_node(
                     default_parameters,
                 }) => {
                     check_call_arguments(
+                        scope,
                         &parameters,
                         parameter_names.as_deref(),
                         &default_parameters,
@@ -9172,7 +9174,7 @@ fn infer_node(
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
             Inferred {
-                ty: infer_unary_operator(op, &inferred.ty, diagnostics),
+                ty: infer_unary_operator(scope, op, &inferred.ty, diagnostics),
                 effects: inferred.effects,
             }
         }
@@ -9309,8 +9311,8 @@ fn infer_node(
                 return Inferred { ty, effects };
             }
             if matches!(op.as_str(), "&&" | "||") {
-                require_same(&Type::Bool, &left.ty, diagnostics);
-                require_same(&Type::Bool, &right.ty, diagnostics);
+                require_same(scope, &Type::Bool, &left.ty, diagnostics);
+                require_same(scope, &Type::Bool, &right.ty, diagnostics);
                 return Inferred {
                     ty: if left.ty == Type::Bool && right.ty == Type::Bool {
                         Type::Bool
@@ -9378,7 +9380,7 @@ fn infer_node(
                             );
                             let expected = resolved_type_of(annotation, scope);
                             let x = infer_contextual(value, &expected, scope, &locals, diagnostics);
-                            require_same(&expected, &x.ty, diagnostics);
+                            require_same(scope, &expected, &x.ty, diagnostics);
                             x
                         } else {
                             infer(value, scope, &locals, diagnostics)
@@ -9399,7 +9401,7 @@ fn infer_node(
                     Statement::Assert { value, .. } => {
                         let x = infer(value, scope, &locals, diagnostics);
                         effects.join(&x.effects);
-                        require_same(&Type::Bool, &x.ty, diagnostics);
+                        require_same(scope, &Type::Bool, &x.ty, diagnostics);
                     }
                     Statement::Expression { value, .. } => {
                         let x = infer(value, scope, &locals, diagnostics);
@@ -9558,12 +9560,17 @@ fn infer_node(
 
 /// Types a prefix operator. `!` requires `Bool` because Orna has no implicit
 /// truthiness (ORNA-CFLOW-009); a numeric sign keeps its operand's type.
-fn infer_unary_operator(op: &str, operand: &Type, diagnostics: &mut Vec<Diagnostic>) -> Type {
+fn infer_unary_operator(
+    scope: &Scope,
+    op: &str,
+    operand: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
     if matches!(operand, Type::Error | Type::Bottom) {
         return operand.clone();
     }
     if op == "!" {
-        require_same(&Type::Bool, operand, diagnostics);
+        require_same(scope, &Type::Bool, operand, diagnostics);
         return if *operand == Type::Bool {
             Type::Bool
         } else {
@@ -10497,7 +10504,7 @@ fn infer_while(
         };
     };
     let condition = infer(condition, scope, local, diagnostics);
-    require_same(&Type::Bool, &condition.ty, diagnostics);
+    require_same(scope, &Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "while control requires a body"));
@@ -10585,7 +10592,7 @@ fn infer_assignment(
                             message,
                         ));
                     } else {
-                        require_same(&expected, &value.ty, diagnostics);
+                        require_same(scope, &expected, &value.ty, diagnostics);
                     }
                 }
                 None => diagnostics.push(diag(
@@ -10605,7 +10612,7 @@ fn infer_assignment(
                     AssignmentOperator::Set => unreachable!("`=` has its own assignment arm"),
                 };
                 let result = binary_arithmetic_type(op, &symbol.ty, &value.ty, diagnostics);
-                require_same(&symbol.ty, &result, diagnostics);
+                require_same(scope, &symbol.ty, &result, diagnostics);
             }
             None => diagnostics.push(diag(
                 DIAG_UNRESOLVED,
@@ -10733,7 +10740,7 @@ fn infer_if(
         };
     };
     let condition = infer(condition, scope, local, diagnostics);
-    require_same(&Type::Bool, &condition.ty, diagnostics);
+    require_same(scope, &Type::Bool, &condition.ty, diagnostics);
 
     let Some(body) = body else {
         diagnostics.push(diag(DIAG_UNSUPPORTED, "if expression requires a body"));
@@ -10767,7 +10774,7 @@ fn infer_if(
     let mut effects = condition.effects;
     effects.join(&body.effects);
     effects.join(&alternate.effects);
-    require_same(&body.ty, &alternate.ty, diagnostics);
+    require_same(scope, &body.ty, &alternate.ty, diagnostics);
     Inferred {
         ty: if body.ty == alternate.ty {
             body.ty
@@ -10780,6 +10787,7 @@ fn infer_if(
 
 #[allow(clippy::too_many_arguments)]
 fn check_call_arguments(
+    scope: &Scope,
     parameters: &[Type],
     parameter_names: Option<&[String]>,
     default_parameters: &BTreeSet<usize>,
@@ -10807,7 +10815,7 @@ fn check_call_arguments(
                 ));
             }
             for (expected, actual) in parameters.iter().zip(input.into_iter().chain(values)) {
-                require_same(expected, actual, diagnostics);
+                require_same(scope, expected, actual, diagnostics);
             }
         }
         return;
@@ -10844,7 +10852,7 @@ fn check_call_arguments(
             malformed = true;
             continue;
         }
-        require_same(&parameters[index], actual, diagnostics);
+        require_same(scope, &parameters[index], actual, diagnostics);
     }
     if (0..parameters.len())
         .any(|index| !seen.contains(&index) && !default_parameters.contains(&index))
@@ -11236,12 +11244,12 @@ fn infer_case_arm_body(
     if let Some(guard) = &arm.guard {
         let guard = infer(guard, scope, local, diagnostics);
         effects.join(&guard.effects);
-        require_same(&Type::Bool, &guard.ty, diagnostics);
+        require_same(scope, &Type::Bool, &guard.ty, diagnostics);
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
     if let Some(expected) = result.as_ref() {
-        require_same(expected, &body.ty, diagnostics);
+        require_same(scope, expected, &body.ty, diagnostics);
     } else {
         *result = Some(body.ty);
     }
@@ -11834,7 +11842,7 @@ fn infer_nominal(
     }
     for (name, actual) in supplied {
         if let Some(expected) = expected.get(&name) {
-            require_same(expected, &actual, diagnostics);
+            require_same(scope, expected, &actual, diagnostics);
         }
     }
     Inferred {
@@ -12736,7 +12744,7 @@ fn infer_finite_list_helper_collection(
     let result = match operation {
         "chunk" => {
             let size = values.get(1).and_then(Option::as_ref).unwrap_or(&Type::Error);
-            require_same(&Type::Int, size, diagnostics);
+            require_same(scope, &Type::Int, size, diagnostics);
             if let Some(index) = slots.get(1).and_then(|slot| *slot)
                 && is_non_positive_integer_constant(&arguments[index].value)
             {
@@ -12835,7 +12843,7 @@ fn infer_finite_list_helper_collection(
         "window" => {
             for index in [1, 2] {
                 let size = values.get(index).and_then(Option::as_ref).unwrap_or(&Type::Error);
-                require_same(&Type::Int, size, diagnostics);
+                require_same(scope, &Type::Int, size, diagnostics);
                 if let Some(argument_index) = slots.get(index).and_then(|slot| *slot)
                     && is_non_positive_integer_constant(&arguments[argument_index].value)
                 {
@@ -12846,7 +12854,7 @@ fn infer_finite_list_helper_collection(
         }
         "asof_join" => {
             let right = list_element(1, "right input", diagnostics);
-            require_same(&first, &right, diagnostics);
+            require_same(scope, &first, &right, diagnostics);
             for index in [2, 3] {
                 if let Some(argument_index) = slots.get(index).and_then(|slot| *slot) {
                     let callback = infer_finite_list_callback(
@@ -13170,6 +13178,7 @@ fn infer_finite_list_sort_key(
         && let Some(annotation) = &lambda_parameter.annotation
     {
         require_same(
+            scope,
             &parameter,
             &resolved_type_of(annotation, scope),
             diagnostics,
@@ -13594,6 +13603,7 @@ fn infer_finite_list_predicate(
         };
         if let Some(annotation) = &lambda_parameter.annotation {
             require_same(
+                scope,
                 &parameter,
                 &resolved_type_of(annotation, scope),
                 diagnostics,
@@ -13612,7 +13622,7 @@ fn infer_finite_list_predicate(
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
         let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
-        require_same(&Type::Bool, &inferred.ty, diagnostics);
+        require_same(scope, &Type::Bool, &inferred.ty, diagnostics);
         return Inferred {
             ty: inferred.ty,
             effects: inferred.effects,
@@ -13639,9 +13649,9 @@ fn infer_finite_list_predicate(
             format!("finite-list {operation} predicate must take one parameter"),
         ));
     } else {
-        require_same(&parameter, &parameters[0], diagnostics);
+        require_same(scope, &parameter, &parameters[0], diagnostics);
     }
-    require_same(&Type::Bool, &result, diagnostics);
+    require_same(scope, &Type::Bool, &result, diagnostics);
     Inferred {
         ty: *result,
         effects: callback.effects,
@@ -15613,7 +15623,7 @@ fn infer_success_pipeline(
                 || shared_contact_selector
                     && table_row_types_match(&parameters[0], &element, scope))
             {
-                require_same(&parameters[0], &element, diagnostics);
+                require_same(scope, &parameters[0], &element, diagnostics);
             }
             let mut effects = input.effects;
             effects.join(&projection.effects);
@@ -15948,7 +15958,7 @@ fn infer_recovery_pipeline(
     } else if input.ty == Type::Bottom || types_match(&input.ty, &recovered.ty) {
         recovered.ty
     } else {
-        require_same(&input.ty, &recovered.ty, diagnostics);
+        require_same(scope, &input.ty, &recovered.ty, diagnostics);
         Type::Error
     };
     Inferred { ty, effects }
@@ -16025,6 +16035,7 @@ fn infer_error_call(
 
     let before = diagnostics.len();
     check_call_arguments(
+        scope,
         &[Type::Text, Type::Text, error_value_type()],
         Some(&["code".into(), "message".into(), "cause".into()]),
         &BTreeSet::from([2]),
@@ -16108,7 +16119,7 @@ fn infer_lambda_pipeline_stage(
         .as_ref()
         .map(type_of)
         .unwrap_or_else(|| input.ty.clone());
-    require_same(&parameter_type, &input.ty, diagnostics);
+    require_same(scope, &parameter_type, &input.ty, diagnostics);
     let mut lambda_locals = local.clone();
     insert_local_binding(name, parameter_type, &mut lambda_locals, diagnostics);
     let body = infer_function_body(body, None, scope, &lambda_locals, diagnostics);
@@ -16201,6 +16212,7 @@ fn infer_named_pipeline_stage(
         values.push(value.ty);
     }
     check_call_arguments(
+        scope,
         &parameters,
         parameter_names.as_deref(),
         &default_parameters,
@@ -16450,7 +16462,7 @@ fn infer_callback(
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
     let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
-    require_same(&result, &inferred.ty, diagnostics);
+    require_same(scope, &result, &inferred.ty, diagnostics);
     inferred
 }
 
@@ -16503,10 +16515,10 @@ fn infer_relation_callback(
     if parameters.len() != 1 {
         diagnostics.push(diag(DIAG_TYPE, "relation callback must take one parameter"));
     } else {
-        require_same(&parameter, &parameters[0], diagnostics);
+        require_same(scope, &parameter, &parameters[0], diagnostics);
     }
     if result != Type::Error {
-        require_same(&result, &callback_result, diagnostics);
+        require_same(scope, &result, &callback_result, diagnostics);
     }
     Inferred {
         ty: *callback_result,
@@ -16547,9 +16559,9 @@ fn infer_finite_list_callback(
             "finite-list collection callback must take one parameter",
         ));
     } else {
-        require_same(&parameter, &parameters[0], diagnostics);
+        require_same(scope, &parameter, &parameters[0], diagnostics);
     }
-    require_same(&result, &callback_result, diagnostics);
+    require_same(scope, &result, &callback_result, diagnostics);
     Inferred {
         ty: *callback_result,
         effects: callback.effects,
@@ -16587,6 +16599,7 @@ fn infer_relation_member_call(
         .map(|argument| infer(&argument.value, scope, local, diagnostics).ty)
         .collect::<Vec<_>>();
     check_call_arguments(
+        scope,
         &[],
         Some(&[]),
         &BTreeSet::new(),
@@ -16705,6 +16718,7 @@ fn infer_table_operation(
                 diagnostics,
             );
             require_same(
+                scope,
                 &Type::Named("sys.SnapshotRef".into()),
                 &inferred.ty,
                 diagnostics,
@@ -16811,7 +16825,7 @@ fn infer_table_operation(
                 keys => Type::Tuple(keys.iter().map(|(_, ty)| ty.clone()).collect()),
             };
             let inferred = infer_contextual(&argument.value, &expected, scope, local, diagnostics);
-            require_same(&expected, &inferred.ty, diagnostics);
+            require_same(scope, &expected, &inferred.ty, diagnostics);
             inferred
         } else {
             infer(&argument.value, scope, local, diagnostics)
@@ -18477,6 +18491,7 @@ fn infer_unsupported_generic_system_call(
                     .filter_map(|(index, parameter)| parameter.has_default.then_some(index))
                     .collect();
                 check_call_arguments(
+                    scope,
                     &parameters,
                     Some(&names),
                     &defaults,
@@ -24743,7 +24758,7 @@ fn infer_refined_assertion(
     let effects = inferred.effects;
     if op == "in" {
         match inferred.ty {
-            Type::Range(element) => require_same(base, &element, diagnostics),
+            Type::Range(element) => require_same(scope, base, &element, diagnostics),
             Type::Error => {}
             _ => diagnostics.push(diag(
                 DIAG_TYPE,
@@ -24751,7 +24766,7 @@ fn infer_refined_assertion(
             )),
         }
     } else {
-        require_same(base, &inferred.ty, diagnostics);
+        require_same(scope, base, &inferred.ty, diagnostics);
     }
     Inferred {
         ty: Type::Bool,
@@ -25033,7 +25048,7 @@ fn infer_module_relation(
                             infer_module_relation(value, table_rows, scope, &locals, diagnostics)
                         };
                         if let Some(expected) = &expected {
-                            require_same(expected, &inferred.ty, diagnostics);
+                            require_same(scope, expected, &inferred.ty, diagnostics);
                         }
                         // A lambda's body effects are latent until the bound
                         // continuation is invoked; its value is pure to bind.
@@ -25056,7 +25071,7 @@ fn infer_module_relation(
                             &locals,
                             diagnostics,
                         );
-                        require_same(&Type::Bool, &inferred.ty, diagnostics);
+                        require_same(scope, &Type::Bool, &inferred.ty, diagnostics);
                         effects.join(&inferred.effects);
                     }
                     Statement::Expression { value, .. } | Statement::Control { value, .. } => {
@@ -25218,9 +25233,9 @@ fn infer_module_relation(
                     "module relation continuation must take exactly one row",
                 ));
             } else {
-                require_same(row, &parameters[0], diagnostics);
+                require_same(scope, row, &parameters[0], diagnostics);
             }
-            require_same(&Type::Bool, result, diagnostics);
+            require_same(scope, &Type::Bool, result, diagnostics);
             Inferred {
                 ty: result.as_ref().clone(),
                 effects: symbol.effects.clone(),
@@ -25281,7 +25296,7 @@ fn infer_module_lambda(
             .as_ref()
             .map(type_of)
             .unwrap_or_else(|| expected_parameter.clone());
-        require_same(expected_parameter, &parameter_type, diagnostics);
+        require_same(scope, expected_parameter, &parameter_type, diagnostics);
         bind_pattern(
             &parameter.pattern,
             parameter_type,
@@ -25291,7 +25306,7 @@ fn infer_module_lambda(
         );
     }
     let inferred = infer_module_relation(body, table_rows, scope, &locals, diagnostics);
-    require_same(expected_result, &inferred.ty, diagnostics);
+    require_same(scope, expected_result, &inferred.ty, diagnostics);
     Some(Inferred {
         ty: Type::Function {
             parameters: expected_parameters.clone(),
