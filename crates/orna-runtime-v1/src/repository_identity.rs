@@ -8,9 +8,17 @@ use crate::{RuntimeError, RuntimeIdentity};
 
 /// Derives the runtime identity and initial digest from the repository's
 /// stored database identity. Fails closed when the metadata is unavailable.
+///
+/// Durable writes follow the format recorded at `HEAD`, not worktree
+/// metadata (ORNA-UPGRADE-001). A format-1/2 `HEAD` has no row writer
+/// (ORNA-UPGRADE-003), so it is refused with
+/// [`RuntimeError::LegacyHeadReadOnly`] before any runtime state is opened.
 pub fn repository_runtime_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
+    repository
+        .require_writable_head_format()
+        .map_err(RuntimeError::LegacyHeadReadOnly)?;
     let metadata = inspect_metadata_for_runtime(repository)
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(metadata) = metadata else {
