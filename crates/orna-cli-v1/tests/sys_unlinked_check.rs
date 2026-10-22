@@ -66,6 +66,9 @@ fn check_admits_the_linked_blob_annotation() {
     );
 }
 
+/// `sys.rt.info()` has a linked production provider, so the project checks clean:
+/// ORNA-SYS-006 requires the runtime to expose the RuntimeInfo coordinates
+/// (source/15-system.md:46).
 #[test]
 fn check_admits_the_linked_runtime_info() {
     let project = project("pub fn info() = sys.rt.info();\n");

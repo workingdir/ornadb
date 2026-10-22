@@ -27025,6 +27025,8 @@ mod tests {
         }
     }
 
+    /// Portable `sys` members without a linked production provider are rejected with
+    /// `sys.version.incompatible` before evaluation can perform writes (ORNA-SYS-008).
     #[test]
     fn unlinked_sys_members_are_rejected_with_version_incompatible() {
         for (source, member) in [
@@ -27067,6 +27069,9 @@ mod tests {
         }
     }
 
+    /// Linked `sys` members are admitted. `sys.rt.info()` is one of them: ORNA-SYS-006
+    /// requires the runtime to expose the RuntimeInfo coordinates, which the production
+    /// host links (source/15-system.md:46).
     #[test]
     fn linked_sys_members_are_admitted() {
         let analysis = admitted(&[ModuleInput::new(
