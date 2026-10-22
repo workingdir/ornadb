@@ -22,6 +22,7 @@ mod cli_status;
 mod cli_serve;
 mod media_range;
 mod repl;
+mod sys_host;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -55,7 +56,9 @@ use orna_runtime_v1::{
     QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
     RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
 };
-use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use orna_sys_v1::{
+    EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
+};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1088,7 +1091,8 @@ fn unpublished_mutation_count(
 
 fn runtime_publication_metadata_rows(
     endpoint: &Endpoint,
-) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    std_snapshot: StdSnapshotPin,
+) -> Result<(RuntimePublicationMetadataRows, SysHostContext), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1098,6 +1102,12 @@ fn runtime_publication_metadata_rows(
         )
     })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let sys_host_context = sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Embedded,
+        std_snapshot,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1117,7 +1127,7 @@ fn runtime_publication_metadata_rows(
                 "retry the invocation after checking local runtime state",
             )
         })?;
-    runtime
+    let rows = runtime
         .block_on(state.publication_metadata_rows())
         .map_err(|_| {
             Diagnostic::target(
@@ -1125,7 +1135,8 @@ fn runtime_publication_metadata_rows(
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
-        })
+        })?;
+    Ok((rows, sys_host_context))
 }
 
 fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
@@ -1840,6 +1851,7 @@ fn run_project_function(
             endpoint,
             target,
             &execution,
+            sys_host::std_snapshot_pin(&project),
             color_enabled,
         );
     }
@@ -1861,7 +1873,13 @@ fn run_project_stream_invocation(
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
+    run_project_stream_invocation_with_project(
+        endpoint,
+        root_entry,
+        &execution,
+        sys_host::std_snapshot_pin(&project),
+        color_enabled,
+    )
 }
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
@@ -1902,6 +1920,7 @@ fn run_project_invocation_with_arguments(
             "retry the durable project invocation",
         )
     })?;
+    let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
     let owner_id = invocation_owner_id(identity);
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -1915,19 +1934,26 @@ fn run_project_invocation_with_arguments(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_request_with_arguments(
-                orna_conformance_v1::RuntimeTarget {
-                    repository: &repository,
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
                     identity,
-                    owner_id,
-                    initial_digest,
-                },
-                request,
-                fingerprint,
-                &project,
-                root_entry,
-                arguments,
-            ),
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_request_with_arguments(
+                    orna_conformance_v1::RuntimeTarget {
+                        repository: &repository,
+                        identity,
+                        owner_id,
+                        initial_digest,
+                    },
+                    request,
+                    fingerprint,
+                    &project,
+                    root_entry,
+                    arguments,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -1961,6 +1987,7 @@ fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    std_snapshot: StdSnapshotPin,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -1984,14 +2011,21 @@ fn run_project_stream_invocation_with_project(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_stream(
-                &repository,
-                identity,
-                owner_id,
-                initial_digest,
-                project,
-                root_entry,
-            ),
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
+                    identity,
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_stream(
+                    &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                    project,
+                    root_entry,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -2043,7 +2077,11 @@ fn run_pure_invocation(
                     )
                 })?;
             if admitted.requires_publication_metadata() {
-                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                    endpoint,
+                    sys_host::std_snapshot_pin(&project),
+                )?;
+                let authority = authority.with_sys_host_context(sys_host_context);
                 let activation = authority
                     .evaluate_staged_with_publication_rows(
                         &admitted,
@@ -2218,7 +2256,14 @@ fn repl_transactions(
         project,
         commit,
         format_context,
-        authority: ApplicationAuthority::new(catalogue, Limits::default()),
+        authority: ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
+            sys_host::sys_host_context(
+                repository.worktree(),
+                identity,
+                RuntimeMode::Repl,
+                sys_host::std_snapshot_pin(workspace_project),
+            ),
+        ),
         runtime,
         identity,
         initial_digest,
