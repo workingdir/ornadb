@@ -2248,15 +2248,21 @@ impl SysStreamProjection {
         observation: &StreamObservation,
         run: &RunObservation,
     ) -> Result<Self, RuntimeError> {
-        let stream_is_terminal = matches!(
+        // A closed stream has no further delivery, retry, skip or replay
+        // transition. A failed delivery is not closed: it stays open for an
+        // authorised retry, skip or replay, so it is live until acknowledged.
+        let stream_is_closed = matches!(
             observation.status,
             StreamObservationStatus::Completed
-                | StreamObservationStatus::Failed
                 | StreamObservationStatus::Cancelled
                 | StreamObservationStatus::Orphaned
         );
-        if (run.status.is_terminal() && !stream_is_terminal)
-            || (observation.live && (!run.live || stream_is_terminal))
+        // Run end orphans in-flight streams but leaves a failed delivery
+        // open, so a terminal run may still retain a failed stream.
+        let stream_is_settled_by_run_end =
+            stream_is_closed || observation.status == StreamObservationStatus::Failed;
+        if (run.status.is_terminal() && !stream_is_settled_by_run_end)
+            || (observation.live && (!run.live || stream_is_closed))
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
@@ -2468,6 +2474,10 @@ pub enum RuntimeError {
     FaultInjected(FaultPoint),
     SystemProviderAbiInvalid,
     StorageUnavailable,
+    /// The format recorded at `HEAD` is 1 or 2, so durable writes are refused
+    /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
+    /// format and remedy.
+    LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
 }
 impl RuntimeError {
     /// Returns the stable public system code when this runtime error has one.
@@ -2548,6 +2558,7 @@ impl fmt::Display for RuntimeError {
             Self::FaultInjected(_) => "runtime fault injected",
             Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
+            Self::LegacyHeadReadOnly(refusal) => refusal.title(),
         })
     }
 }
@@ -2603,6 +2614,10 @@ pub struct RuntimeActivationContext {
     capture: CwdCapture,
     activation_time: SystemTime,
     table_object_ids: BTreeMap<String, TableObjectId>,
+    /// Committed `HEAD` rows bound to the published pin they were read at.
+    /// `None` binds no committed base: the live `table_row` state is the whole
+    /// relation. The unpublished tail overrides the base key by key.
+    committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
 /// Reusable source-derived work for one captured table activation.
@@ -2675,6 +2690,56 @@ pub struct RunningTableRequestContinuation {
 /// transaction, so evaluation cannot combine a generation from one durable
 /// state with rows from another.
 pub type RuntimeTableRows = BTreeMap<String, Vec<(Vec<u8>, Vec<u8>)>>;
+
+/// The published pin a committed base was read at: the mutation sequence of
+/// the newest published checkpoint, zero before any publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublishedPin {
+    mutation_sequence: i64,
+}
+
+impl PublishedPin {
+    /// Mutation sequence of the pinned checkpoint.
+    #[must_use]
+    pub fn mutation_sequence(&self) -> i64 {
+        self.mutation_sequence
+    }
+}
+
+/// Committed `HEAD` rows of declared relations, bound to the published pin they
+/// were read at. Every transaction that reads through the base verifies the pin
+/// still matches the published checkpoint and fails closed with
+/// [`RuntimeError::StaleCapture`] otherwise. Rows are keyed for direct lookup and
+/// shared by `Arc`, so a commit or validator never copies the relation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedCommittedRows {
+    pin: PublishedPin,
+    tables: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+}
+
+impl PinnedCommittedRows {
+    /// Binds `rows` to `pin`. A relation with a duplicate committed key is a
+    /// corrupt base and fails closed.
+    pub fn new(pin: PublishedPin, rows: RuntimeTableRows) -> Result<Self, RuntimeError> {
+        let mut tables = BTreeMap::new();
+        for (table, table_rows) in rows {
+            let mut keyed = BTreeMap::new();
+            for (key, value) in table_rows {
+                if keyed.insert(key, value).is_some() {
+                    return Err(RuntimeError::RecoveryInvalid);
+                }
+            }
+            tables.insert(table, keyed);
+        }
+        Ok(Self { pin, tables })
+    }
+
+    /// The published pin these rows were read at.
+    #[must_use]
+    pub fn pin(&self) -> PublishedPin {
+        self.pin
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeTableActivationSnapshot {
@@ -3151,6 +3216,13 @@ pub trait StreamTableCandidateValidator {
         BTreeMap::new()
     }
 
+    /// Committed `HEAD` rows, pinned to the published checkpoint, that the
+    /// candidate relations are read beneath. Name-only validators read no
+    /// committed base.
+    fn committed_rows(&self) -> Option<&PinnedCommittedRows> {
+        None
+    }
+
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
 }
@@ -3167,6 +3239,13 @@ pub trait TableActivationCandidateValidator {
     /// Name-only validators keep the default empty map.
     fn table_object_ids(&self) -> BTreeMap<String, TableObjectId> {
         BTreeMap::new()
+    }
+
+    /// Committed `HEAD` rows, pinned to the published checkpoint, that the
+    /// candidate relations are read beneath. Name-only validators read no
+    /// committed base.
+    fn committed_rows(&self) -> Option<&PinnedCommittedRows> {
+        None
     }
 
     /// Exact repository-issued CWD and schema generation used to decode and
@@ -6203,6 +6282,7 @@ impl RuntimeState {
             capture: self.capture().await?,
             activation_time: SystemTime::now(),
             table_object_ids: BTreeMap::new(),
+            committed_rows: None,
         })
     }
 
@@ -6340,6 +6420,7 @@ impl RuntimeState {
             capture: run.snapshot,
             activation_time: observation_instant(run.started_ms)?,
             table_object_ids,
+            committed_rows: None,
         };
         transaction
             .commit()
@@ -6354,8 +6435,17 @@ impl RuntimeState {
         })
     }
 
-    /// Captures one activation context and its declared committed relations
-    /// from the same durable read transaction.
+    /// Reads the published pin a committed base must be bound to. Read the pin
+    /// before the committed rows: a publication between the two reads fails the
+    /// activation closed with [`RuntimeError::StaleCapture`].
+    pub async fn published_pin(&self) -> Result<PublishedPin, RuntimeError> {
+        let mutation_sequence = published_mutation_sequence_tx(&self.connection).await?;
+        Ok(PublishedPin { mutation_sequence })
+    }
+
+    /// Captures one activation context and its table rows from the same durable
+    /// read transaction. No committed base is bound: the live `table_row` state
+    /// is the whole relation.
     pub async fn begin_table_activation(
         &self,
         tables: &[&str],
@@ -6364,7 +6454,7 @@ impl RuntimeState {
             .iter()
             .map(|table| validate_table_name(table).map(|()| (*table).to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
-        self.begin_table_activation_inner(&names, BTreeMap::new(), None)
+        self.begin_table_activation_inner(&names, BTreeMap::new(), None, None)
             .await
     }
 
@@ -6378,6 +6468,27 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// Captures an admitted activation whose declared relations are read over
+    /// `committed`: the published `HEAD` rows, bound to the pin they were read at.
+    /// The pin is read before the rows, so a publication between the two reads
+    /// fails closed with `StaleCapture`. The unpublished tail overlays those rows,
+    /// so a key the tail deleted or rewrote is never returned from the committed
+    /// base.
+    pub async fn begin_admitted_table_activation_over_committed(
+        &self,
+        tables: &[RuntimeTableIdentity],
+        committed: PinnedCommittedRows,
+    ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
+        self.begin_table_activation_inner(
+            &admitted_table_names(tables)?,
+            admitted_table_object_ids(tables)?,
+            None,
+            Some(Arc::new(committed)),
         )
         .await
     }
@@ -6400,6 +6511,7 @@ impl RuntimeState {
             &admitted_table_names(tables)?,
             admitted_table_object_ids(tables)?,
             Some(continuation.context().capture()),
+            continuation.context().committed_rows.clone(),
         )
         .await
     }
@@ -6409,6 +6521,7 @@ impl RuntimeState {
         tables: &[String],
         table_object_ids: BTreeMap<String, TableObjectId>,
         expected_capture: Option<&CwdCapture>,
+        committed: Option<Arc<PinnedCommittedRows>>,
     ) -> Result<RuntimeTableActivationSnapshot, RuntimeError> {
         let transaction = self
             .connection
@@ -6421,7 +6534,15 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
-        let table_rows = table_rows_tx(&transaction, tables, &table_object_ids).await?;
+        let base = CommittedTableBase::load_tx(
+            &transaction,
+            committed.as_deref(),
+            tables
+                .iter()
+                .map(|table| (table.as_str(), table_object_ids.get(table).copied())),
+        )
+        .await?;
+        let table_rows = table_rows_tx(&transaction, tables, &table_object_ids, &base).await?;
         transaction
             .commit()
             .await
@@ -6431,6 +6552,7 @@ impl RuntimeState {
                 capture,
                 activation_time: SystemTime::now(),
                 table_object_ids: table_object_ids.clone(),
+                committed_rows: committed.clone(),
             },
             table_rows,
             table_object_ids,
@@ -6494,8 +6616,10 @@ impl RuntimeState {
             });
         }
         self.require_owner(&tx, lease).await?;
+        let mut base =
+            load_candidate_base_tx(&tx, context.committed_rows.as_deref(), mutations, None).await?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next =
             append_mutations_tx(&tx, context.capture(), &encoded, next_digest, faults).await?;
@@ -6588,6 +6712,14 @@ impl RuntimeState {
         self.require_owner(&transaction, writer)
             .await
             .map_err(TableActivationError::Runtime)?;
+        if table_mutations_already_durable_tx(&transaction, &encoded)
+            .await
+            .map_err(TableActivationError::Runtime)?
+        {
+            // An exact replay of a save the relation already holds publishes
+            // nothing new: no row effect, mutation record or checkpoint.
+            return Ok(current);
+        }
         if !transfers.is_empty() {
             let Some(expected_graph_repository_id) = self.graph_repository_id.as_ref() else {
                 return Err(TableActivationError::Runtime(
@@ -6620,8 +6752,16 @@ impl RuntimeState {
                 ));
             }
         }
+        let mut base = load_candidate_base_tx(
+            &transaction,
+            context.committed_rows.as_deref(),
+            mutations,
+            Some(&*validator),
+        )
+        .await
+        .map_err(TableActivationError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&transaction, mutation)
+            apply_table_mutation_tx(&transaction, mutation, &mut base)
                 .await
                 .map_err(TableActivationError::Runtime)?;
         }
@@ -6629,6 +6769,7 @@ impl RuntimeState {
             &transaction,
             validator.tables(),
             &validator.table_object_ids(),
+            &base,
         )
         .await
         .map_err(TableActivationError::Runtime)?;
@@ -7039,8 +7180,19 @@ impl RuntimeState {
                 Err(error) => return Err(request_activation_rollback(transaction, error).await?),
             }
         }
+        let mut base = match load_candidate_base_tx(
+            &transaction,
+            context.committed_rows.as_deref(),
+            mutations,
+            validator.as_deref(),
+        )
+        .await
+        {
+            Ok(base) => base,
+            Err(error) => return Err(request_activation_rollback(transaction, error).await?),
+        };
         for mutation in mutations {
-            if let Err(error) = apply_table_mutation_tx(&transaction, mutation).await {
+            if let Err(error) = apply_table_mutation_tx(&transaction, mutation, &mut base).await {
                 return Err(request_activation_rollback(transaction, error).await?);
             }
         }
@@ -7052,6 +7204,7 @@ impl RuntimeState {
                 &transaction,
                 validator.tables(),
                 &validator.table_object_ids(),
+                &base,
             )
             .await
             {
@@ -10362,17 +10515,33 @@ impl RuntimeState {
                 .map_err(StreamTableDeliveryError::Runtime)?;
             return Ok((current, result));
         }
+        let validator_object_ids = validator.table_object_ids();
+        let mut base = CommittedTableBase::load_tx(
+            &tx,
+            validator.committed_rows(),
+            validator
+                .tables()
+                .iter()
+                .map(|table| (table.as_str(), validator_object_ids.get(table).copied())),
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation)
+            apply_table_mutation_tx(&tx, mutation, &mut base)
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
-            .await
-            .map_err(StreamTableDeliveryError::Runtime)?;
+        let rows = table_rows_tx(
+            &tx,
+            validator.tables(),
+            &validator_object_ids,
+            &base,
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         validator
             .validate(&rows)
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
@@ -10437,8 +10606,9 @@ impl RuntimeState {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
         }
+        let mut base = CommittedTableBase::default();
         for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -10518,8 +10688,9 @@ impl RuntimeState {
             let current = capture_tx(&tx).await?;
             return Ok((current, result));
         }
+        let mut base = CommittedTableBase::default();
         for mutation in table_mutations {
-            apply_table_mutation_tx(&tx, mutation).await?;
+            apply_table_mutation_tx(&tx, mutation, &mut base).await?;
         }
         let next = if mutations.is_empty() {
             capture_tx(&tx).await?
@@ -10608,15 +10779,26 @@ impl RuntimeState {
                 .map_err(StreamTableDeliveryError::Runtime)?;
             return Ok((current, result));
         }
+        let validator_object_ids = validator.table_object_ids();
+        let mut base = CommittedTableBase::load_tx(
+            &tx,
+            validator.committed_rows(),
+            validator
+                .tables()
+                .iter()
+                .map(|table| (table.as_str(), validator_object_ids.get(table).copied())),
+        )
+        .await
+        .map_err(StreamTableDeliveryError::Runtime)?;
         for mutation in mutations {
-            apply_table_mutation_tx(&tx, mutation)
+            apply_table_mutation_tx(&tx, mutation, &mut base)
                 .await
                 .map_err(StreamTableDeliveryError::Runtime)?;
         }
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(&tx, validator.tables(), &validator.table_object_ids())
+        let rows = table_rows_tx(&tx, validator.tables(), &validator_object_ids, &base)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
@@ -17212,6 +17394,13 @@ async fn apply_stream_intent(
     ) {
         return Err(RuntimeError::RecoveryInvalid);
     }
+    // A reset must commit with its audit row (old/new position and reason) in
+    // the same transaction. Only the administrative reset supplies that reason,
+    // and reopen rejects reset-only checkpoints without an audit row, so the
+    // stream-intent reset is refused here before it can persist.
+    if matches!(intent, CommitIntent::Reset { .. }) {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
     let transition = match &intent {
         CommitIntent::Complete { .. } => Some(StreamCheckpointTransition::Complete),
         CommitIntent::Skip { .. } => Some(StreamCheckpointTransition::Skip),
@@ -18930,40 +19119,182 @@ fn read_length_prefixed<'a>(
     Ok(bytes)
 }
 
+/// Committed `HEAD` rows of one storage table, borrowed from the pinned base,
+/// and the keys whose live `table_row` state now governs.
+struct CommittedTable<'a> {
+    /// Committed value of each key at the published pin.
+    rows: &'a BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Keys mutated after the pin, by the unpublished tail or by the batch in
+    /// progress. The committed value of such a key no longer applies.
+    overridden: BTreeSet<Vec<u8>>,
+}
+
+/// Committed `HEAD` rows an activation or commit reads beneath the live
+/// `table_row` state, keyed by storage table. `None` binds no committed base:
+/// the live `table_row` state is the whole relation.
+#[derive(Default)]
+struct CommittedTableBase<'a> {
+    tables: Option<BTreeMap<String, CommittedTable<'a>>>,
+}
+
+/// The committed rows of a relation that has none at the pin.
+static NO_COMMITTED_ROWS: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+
+impl<'a> CommittedTableBase<'a> {
+    /// Binds the pinned committed rows of each target and overrides every key
+    /// mutated after the published pin. Fails closed with `StaleCapture` when the
+    /// pin no longer matches the published checkpoint.
+    async fn load_tx<'t>(
+        connection: &Connection,
+        committed: Option<&'a PinnedCommittedRows>,
+        targets: impl IntoIterator<Item = (&'t str, Option<TableObjectId>)>,
+    ) -> Result<Self, RuntimeError> {
+        let Some(committed) = committed else {
+            return Ok(Self::default());
+        };
+        let sequence = published_mutation_sequence_tx(connection).await?;
+        if sequence != committed.pin.mutation_sequence {
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture_tx(connection).await?),
+            });
+        }
+        let mut tables: BTreeMap<String, CommittedTable<'a>> = BTreeMap::new();
+        for (table, object_id) in targets {
+            let storage = table_storage_key(table, object_id);
+            if tables.contains_key(&storage) {
+                continue;
+            }
+            let mut overridden = BTreeSet::new();
+            let mut tail = connection
+                .query(
+                    "SELECT DISTINCT row_key FROM runtime_table_history
+                     WHERE table_id = ?1 AND mutation_sequence > ?2",
+                    params![storage.clone(), sequence],
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+            while let Some(row) = tail
+                .next()
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?
+            {
+                let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                overridden.insert(key);
+            }
+            let rows = committed.tables.get(table).unwrap_or(&NO_COMMITTED_ROWS);
+            tables.insert(storage, CommittedTable { rows, overridden });
+        }
+        Ok(Self {
+            tables: Some(tables),
+        })
+    }
+
+    /// Marks `key` of `storage` as governed by `table_row` from now on.
+    fn override_key(&mut self, storage: &str, key: &[u8]) {
+        if let Some(table) = self
+            .tables
+            .as_mut()
+            .and_then(|tables| tables.get_mut(storage))
+        {
+            table.overridden.insert(key.to_vec());
+        }
+    }
+
+    /// Whether a live `table_row` key of `storage` belongs to the relation. With
+    /// no base bound every live row does. Beneath a base only keys the tail
+    /// overrode do, so a live row never shadows an untouched committed key.
+    fn includes_live_row(&self, storage: &str, key: &[u8]) -> bool {
+        match &self.tables {
+            None => true,
+            Some(tables) => tables
+                .get(storage)
+                .is_some_and(|table| table.overridden.contains(key)),
+        }
+    }
+
+    /// Whether a committed row `key` of `storage` is untouched since the pin.
+    fn committed_visible(&self, storage: &str, key: &[u8]) -> bool {
+        self.tables
+            .as_ref()
+            .and_then(|tables| tables.get(storage))
+            .is_some_and(|table| table.rows.contains_key(key) && !table.overridden.contains(key))
+    }
+}
+
+/// Mutation sequence of the newest published checkpoint; zero before any
+/// publication has committed.
+async fn published_mutation_sequence_tx(connection: &Connection) -> Result<i64, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT COALESCE(MAX(publication_freeze.checkpoint_mutation_sequence), 0)
+             FROM publication_freeze
+             JOIN publication_commit
+               ON publication_commit.intent_id = publication_freeze.intent_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .ok_or(RuntimeError::RecoveryInvalid)?;
+    row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+/// Whether `key` is live in `storage`: present in `table_row`, or a committed
+/// base row that no mutation has touched since the pin.
+async fn row_present_tx(
+    connection: &Connection,
+    storage: &str,
+    key: &[u8],
+    base: &CommittedTableBase<'_>,
+) -> Result<bool, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
+            params![storage.to_owned(), key.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(base.committed_visible(storage, key))
+}
+
+/// Applies one table mutation to the live rows and records the keys it
+/// overrides beneath the committed base.
 async fn apply_table_mutation_tx(
     connection: &Connection,
     mutation: &TableMutation,
+    base: &mut CommittedTableBase<'_>,
+) -> Result<(), RuntimeError> {
+    apply_table_row_tx(connection, mutation, base).await?;
+    let storage_table = mutation.storage_table();
+    base.override_key(&storage_table, mutation.key());
+    if let Some(new_key) = mutation.rekey_to() {
+        base.override_key(&storage_table, new_key);
+    }
+    Ok(())
+}
+
+async fn apply_table_row_tx(
+    connection: &Connection,
+    mutation: &TableMutation,
+    base: &CommittedTableBase<'_>,
 ) -> Result<(), RuntimeError> {
     let storage_table = mutation.storage_table();
     if let Some(new_key) = mutation.rekey_to() {
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), mutation.key().to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_none()
-        {
+        if !row_present_tx(connection, &storage_table, mutation.key(), base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), new_key.to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        if row_present_tx(connection, &storage_table, new_key, base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
         let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
@@ -18992,19 +19323,7 @@ async fn apply_table_mutation_tx(
     }
     if mutation.is_insert() {
         let value = mutation.value().ok_or(RuntimeError::InvalidTableMutation)?;
-        let mut rows = connection
-            .query(
-                "SELECT 1 FROM table_row WHERE table_id = ?1 AND row_key = ?2 LIMIT 1",
-                params![storage_table.clone(), mutation.key().to_vec()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
+        if row_present_tx(connection, &storage_table, mutation.key(), base).await? {
             return Err(RuntimeError::InvalidTableMutation);
         }
         let digest: [u8; 32] = Sha256::digest(value).into();
@@ -19065,10 +19384,41 @@ async fn apply_table_mutation_tx(
     Ok(())
 }
 
+/// Loads the committed base beneath one candidate: the relations its mutations
+/// address and the relations its validator reads.
+async fn load_candidate_base_tx<'a>(
+    connection: &Connection,
+    committed: Option<&'a PinnedCommittedRows>,
+    mutations: &[TableMutation],
+    validator: Option<&dyn TableActivationCandidateValidator>,
+) -> Result<CommittedTableBase<'a>, RuntimeError> {
+    let validator_ids = validator
+        .map(|validator| validator.table_object_ids())
+        .unwrap_or_default();
+    let validator_tables: &[String] = match validator {
+        Some(validator) => validator.tables(),
+        None => &[],
+    };
+    CommittedTableBase::load_tx(
+        connection,
+        committed,
+        mutations
+            .iter()
+            .map(|mutation| (mutation.table(), mutation.table_object_id()))
+            .chain(
+                validator_tables
+                    .iter()
+                    .map(|table| (table.as_str(), validator_ids.get(table).copied())),
+            ),
+    )
+    .await
+}
+
 async fn table_rows_tx(
     connection: &Connection,
     tables: &[String],
     table_object_ids: &BTreeMap<String, TableObjectId>,
+    base: &CommittedTableBase<'_>,
 ) -> Result<RuntimeTableRows, RuntimeError> {
     let mut result = BTreeMap::new();
     for table in tables {
@@ -19077,26 +19427,37 @@ async fn table_rows_tx(
             continue;
         }
         let storage = table_storage_key(table, table_object_ids.get(table).copied());
+        // Beneath a committed base the relation is the committed `HEAD` rows no
+        // mutation touched plus the live rows the tail overrode. With no base the
+        // live `table_row` state is the whole relation.
+        let mut rows_by_key: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+        if let Some(committed) = base.tables.as_ref().and_then(|tables| tables.get(&storage)) {
+            for (key, value) in committed.rows {
+                if !committed.overridden.contains(key) {
+                    rows_by_key.insert(key.clone(), value.clone());
+                }
+            }
+        }
         let mut query = connection
             .query(
                 "SELECT row_key, row_value FROM table_row
                  WHERE table_id = ?1 ORDER BY row_key",
-                params![storage],
+                params![storage.clone()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = Vec::new();
         while let Some(row) = query
             .next()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            rows.push((
-                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            ));
+            let key: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let value: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if base.includes_live_row(&storage, &key) {
+                rows_by_key.insert(key, value);
+            }
         }
-        result.insert(table.clone(), rows);
+        result.insert(table.clone(), rows_by_key.into_iter().collect());
     }
     Ok(result)
 }
@@ -19166,6 +19527,45 @@ fn validate_admitted_table_identities(
         }
     }
     Ok(())
+}
+
+/// Reports whether `mutations` are an exact replay of records the relation
+/// already holds. A mutation's record is written in the same transaction that
+/// applies its row effect, so an identical retained record proves that effect
+/// is present. A batch that is only partly retained, or retained with different
+/// bytes, reuses a mutation identity and is invalid.
+async fn table_mutations_already_durable_tx(
+    connection: &Connection,
+    mutations: &[Mutation],
+) -> Result<bool, RuntimeError> {
+    let mut retained = 0_usize;
+    for mutation in mutations {
+        let mut rows = connection
+            .query(
+                "SELECT payload, digest FROM pending_mutation WHERE mutation_id = ?1",
+                params![mutation.id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        else {
+            continue;
+        };
+        let payload: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if payload != mutation.payload || digest != mutation.digest {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        retained += 1;
+    }
+    match retained {
+        0 => Ok(false),
+        count if count == mutations.len() => Ok(true),
+        _ => Err(RuntimeError::InvalidTableMutation),
+    }
 }
 
 async fn append_mutations_tx(
@@ -20947,7 +21347,19 @@ mod tests {
         let database_uuid = "00000000-0000-4000-8000-000000000001";
         let database =
             format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-        let schema_source = b"capture transaction test schema";
+        let schema_descriptor = orna_foundation_v1::SchemaDescriptor::new(OvbRaw::Map(vec![
+            (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+            (
+                OvbRaw::Int(1.into()),
+                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(relation_id.to_vec()))),
+            ),
+            (OvbRaw::Int(2.into()), OvbRaw::Array(Vec::new())),
+            (OvbRaw::Int(3.into()), OvbRaw::Array(Vec::new())),
+            (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+        ]))
+        .unwrap();
+        let schema_source = schema_descriptor.encode().unwrap();
+        let schema_source = schema_source.as_slice();
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
         std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
@@ -22308,6 +22720,7 @@ mod tests {
             capture: CwdCapture::new(context.capture().snapshot().clone(), digest(200)).unwrap(),
             activation_time: context.activation_time(),
             table_object_ids: BTreeMap::new(),
+            committed_rows: None,
         };
         let result = state
             .commit_validated_catalogue_table_request_activation(
@@ -22564,32 +22977,111 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_table_activation_rejects_a_missing_delete_without_advancing_state() {
+    async fn typed_table_activation_records_a_missing_delete_as_an_advancing_no_op() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let lease = state.acquire_lease(id(4)).await.unwrap();
         let context = state.begin_activation().await.unwrap();
-        let before = context.capture().clone();
-
-        assert_eq!(
-            state
-                .commit_table_activation(
-                    lease,
-                    &context,
-                    &[table_mutation(9, 1, None)],
-                    digest(10),
-                    &NoFault,
-                )
-                .await,
-            Err(RuntimeError::InvalidTableMutation)
-        );
-        assert_eq!(state.capture().await.unwrap(), before);
-        assert_eq!(state.latest_checkpoint().await.unwrap(), None);
-        assert!(state.pending().await.unwrap().is_empty());
+        state
+            .commit_table_activation(
+                lease,
+                &context,
+                &[table_mutation(9, 1, None)],
+                digest(10),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(state.latest_checkpoint().await.unwrap().is_some());
+        assert_eq!(state.pending().await.unwrap().len(), 1);
         assert_eq!(
             state.committed_table_row("books", &[1]).await.unwrap(),
             None
         );
+        // The no-op delete still advances history as a deleted row with no
+        // value, so `as_of` reads see the same absence as the live relation.
+        let mut history = state
+            .connection
+            .query(
+                "SELECT row_value IS NULL, deleted FROM runtime_table_history
+                 WHERE table_id = 'books' AND row_key = ?1",
+                params![vec![1_u8]],
+            )
+            .await
+            .unwrap();
+        let row = history.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 1);
+        assert_eq!(row.get::<i64>(1).unwrap(), 1);
+        assert!(history.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn partially_retained_table_batch_is_rejected_without_publishing() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let cwd_generation = activation_test_cwd_generation(0);
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: &cwd_generation,
+                mutations: &[table_mutation(20, 1, Some(9))],
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        let capture_before = state.capture().await.unwrap();
+        let checkpoint_before = state.latest_checkpoint().await.unwrap();
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+
+        // Mutation 20 is already retained, so replaying it beside new mutation
+        // 21 reuses an identity for only part of the batch: that is invalid.
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = ObservingTableActivationValidator {
+            tables: vec!["books".into()],
+            calls: 0,
+            seen: None,
+        };
+        let partial = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: &cwd_generation,
+                mutations: &[
+                    table_mutation(20, 1, Some(9)),
+                    table_mutation(21, 2, Some(8)),
+                ],
+                content_pins: &mut [],
+                next_digest: digest(7),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+        assert!(matches!(
+            partial,
+            Err(TableActivationError::Runtime(
+                RuntimeError::InvalidTableMutation
+            ))
+        ));
+        assert_eq!(validator.calls, 0);
+        assert_eq!(state.capture().await.unwrap(), capture_before);
+        assert_eq!(state.latest_checkpoint().await.unwrap(), checkpoint_before);
+        assert_eq!(state.pending().await.unwrap().len(), 1);
+        assert_eq!(
+            state.committed_table_row("books", &[1]).await.unwrap(),
+            Some(vec![9])
+        );
+        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -22921,7 +23413,8 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .unwrap();
-        apply_table_mutation_tx(&transaction, &interrupted_mutation)
+        let mut base = CommittedTableBase::default();
+        apply_table_mutation_tx(&transaction, &interrupted_mutation, &mut base)
             .await
             .unwrap();
         let interrupted_capture = append_mutations_tx(
@@ -23201,6 +23694,187 @@ mod tests {
         );
         assert_eq!(snapshot.table_rows().get("unused"), Some(&Vec::new()));
         assert_eq!(snapshot.table_rows().len(), 2);
+    }
+
+    /// A committed `HEAD` row the unpublished tail deleted is hidden from a
+    /// later activation, while a committed row the tail left untouched stays
+    /// visible. The base is what the activation reads; the live `table_row`
+    /// state only overlays it.
+    #[tokio::test]
+    async fn table_activation_over_committed_head_hides_tail_deleted_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed = committed_books(&state, vec![(vec![1], vec![9]), (vec![2], vec![8])]).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+
+        let snapshot = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![8])])
+        );
+
+        let delete = TableMutation::new(id(5), "books", vec![1], None)
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[delete], digest(6), &NoFault)
+            .await
+            .unwrap();
+
+        let after = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            after.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![8])])
+        );
+        assert_eq!(after.query_exact("books", &[1]).unwrap(), None);
+        assert_eq!(after.query_exact("books", &[2]).unwrap(), Some(&[8][..]));
+    }
+
+    async fn committed_books(
+        state: &RuntimeState,
+        rows: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> PinnedCommittedRows {
+        let pin = state.published_pin().await.unwrap();
+        PinnedCommittedRows::new(pin, BTreeMap::from([("books".to_owned(), rows)])).unwrap()
+    }
+
+    async fn books_snapshot_over(
+        state: &RuntimeState,
+        identity: &RuntimeTableIdentity,
+        committed: &PinnedCommittedRows,
+    ) -> RuntimeTableActivationSnapshot {
+        state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(identity),
+                committed.clone(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Mutations are checked against the committed base: inserting a committed
+    /// key again is a duplicate, a committed row the tail updates reads back
+    /// with the new value, a rekey moves a committed key, and a key the tail
+    /// deleted may be inserted again.
+    #[tokio::test]
+    async fn committed_base_enforces_key_identity_across_commits() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed = committed_books(&state, vec![(vec![1], vec![9]), (vec![2], vec![8])]).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        let duplicate = TableMutation::insert(id(5), "books", vec![1], vec![7])
+            .unwrap()
+            .with_table_object_id(object_id);
+        assert!(matches!(
+            state
+                .commit_table_activation(lease, snapshot.context(), &[duplicate], digest(6), &NoFault)
+                .await,
+            Err(RuntimeError::InvalidTableMutation)
+        ));
+
+        let update = TableMutation::new(id(11), "books", vec![2], Some(vec![7]))
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[update], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![1], vec![9]), (vec![2], vec![7])])
+        );
+
+        let rekey = TableMutation::rekey(id(12), "books", vec![1], vec![3], vec![5])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[rekey], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![7]), (vec![3], vec![5])])
+        );
+
+        let delete = TableMutation::new(id(13), "books", vec![2], None)
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[delete], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![3], vec![5])])
+        );
+
+        let reinsert = TableMutation::insert(id(14), "books", vec![2], vec![6])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[reinsert], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        assert_eq!(
+            snapshot.table_rows().get("books"),
+            Some(&vec![(vec![2], vec![6]), (vec![3], vec![5])])
+        );
+    }
+
+    /// A committed base read before a publication is stale once the publication
+    /// commits, so the activation fails closed instead of mixing pins.
+    #[tokio::test]
+    async fn committed_base_read_before_publication_fails_closed() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(9));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let committed = committed_books(&state, vec![(vec![1], vec![9])]).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let snapshot = books_snapshot_over(&state, &identity, &committed).await;
+        let insert = TableMutation::insert(id(5), "books", vec![2], vec![8])
+            .unwrap()
+            .with_table_object_id(object_id);
+        state
+            .commit_table_activation(lease, snapshot.context(), &[insert], digest(6), &NoFault)
+            .await
+            .unwrap();
+        let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
+        let freeze = state.freeze(id(7), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+
+        let stale = state
+            .begin_admitted_table_activation_over_committed(
+                std::slice::from_ref(&identity),
+                committed,
+            )
+            .await;
+        assert!(matches!(stale, Err(RuntimeError::StaleCapture { .. })));
     }
 
     struct QuerySessionEffects<'session, 'snapshot> {
@@ -39592,33 +40266,46 @@ mod tests {
                     .unwrap(),
                 CommitResult::Rejected(RejectReason::StreamPaused)
             );
-            let reset = match stream
-                .apply_async(CommitIntent::Reset {
-                    key: key.clone(),
-                    expected: CheckpointPrecondition::from(&before),
-                    to: reset_position.clone(),
-                })
-                .await
-                .unwrap()
-            {
-                CommitResult::CheckpointReset { checkpoint } => checkpoint,
-                other => panic!("unexpected checkpoint reset result: {other:?}"),
-            };
-            assert_eq!(reset.committed, Some(reset_position.clone()));
-            assert_eq!(reset.version, 1);
-            assert_eq!(
+            assert!(matches!(
                 stream
                     .apply_async(CommitIntent::Reset {
                         key: key.clone(),
                         expected: CheckpointPrecondition::from(&before),
-                        to: Position {
-                            token: Component::new("stale").unwrap(),
-                        },
+                        to: reset_position.clone(),
                     })
-                    .await
-                    .unwrap(),
-                CommitResult::Rejected(RejectReason::StaleCheckpoint)
-            );
+                    .await,
+                Err(RuntimeError::RecoveryInvalid)
+            ));
+            let reset = reopened
+                .reset_checkpoint(
+                    writer,
+                    CheckpointResetRequest {
+                        key: key.clone(),
+                        expected: CheckpointPrecondition::from(&before),
+                        to: reset_position.clone(),
+                        reason: "operator rewind".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reset.committed, Some(reset_position.clone()));
+            assert_eq!(reset.version, 1);
+            assert!(matches!(
+                reopened
+                    .reset_checkpoint(
+                        writer,
+                        CheckpointResetRequest {
+                            key: key.clone(),
+                            expected: CheckpointPrecondition::from(&before),
+                            to: Position {
+                                token: Component::new("stale").unwrap(),
+                            },
+                            reason: "stale rewind".into(),
+                        },
+                    )
+                    .await,
+                Err(RuntimeError::StreamCheckpointStale)
+            ));
             assert!(matches!(
                 stream
                     .apply_async(CommitIntent::Resume { key: key.clone() })
@@ -42373,18 +43060,18 @@ mod tests {
                     .unwrap(),
                 CommitResult::StreamStatusChanged { .. }
             ));
-            let reset = match stream
-                .apply_async(CommitIntent::Reset {
-                    key: delivery.checkpoint_key(),
-                    expected: (&terminal_checkpoint).into(),
-                    to: delivery.position.clone(),
-                })
+            let reset = reopened
+                .reset_checkpoint(
+                    writer,
+                    CheckpointResetRequest {
+                        key: delivery.checkpoint_key(),
+                        expected: (&terminal_checkpoint).into(),
+                        to: delivery.position.clone(),
+                        reason: "operator rewind".into(),
+                    },
+                )
                 .await
-                .unwrap()
-            {
-                CommitResult::CheckpointReset { checkpoint } => checkpoint,
-                other => panic!("unexpected reset result: {other:?}"),
-            };
+                .unwrap();
             assert!(matches!(
                 stream
                     .apply_async(CommitIntent::Resume {
@@ -42541,18 +43228,18 @@ mod tests {
                 .unwrap(),
             CommitResult::StreamStatusChanged { .. }
         ));
-        let reset = match stream
-            .apply_async(CommitIntent::Reset {
-                key: delivery.checkpoint_key(),
-                expected: (&terminal_checkpoint).into(),
-                to: delivery.position.clone(),
-            })
+        let reset = reopened
+            .reset_checkpoint(
+                writer,
+                CheckpointResetRequest {
+                    key: delivery.checkpoint_key(),
+                    expected: (&terminal_checkpoint).into(),
+                    to: delivery.position.clone(),
+                    reason: "operator rewind".into(),
+                },
+            )
             .await
-            .unwrap()
-        {
-            CommitResult::CheckpointReset { checkpoint } => checkpoint,
-            other => panic!("unexpected reset result: {other:?}"),
-        };
+            .unwrap();
         assert!(matches!(
             stream
                 .apply_async(CommitIntent::Resume {
@@ -42987,19 +43674,18 @@ mod tests {
         let reset_position = Position {
             token: Component::new("replay-reset").unwrap(),
         };
-        let reset = match state
-            .stream_backend(writer)
-            .apply_async(CommitIntent::Reset {
-                key: key.clone(),
-                expected: (&checkpoint).into(),
-                to: reset_position.clone(),
-            })
+        let reset = state
+            .reset_checkpoint(
+                writer,
+                CheckpointResetRequest {
+                    key: key.clone(),
+                    expected: (&checkpoint).into(),
+                    to: reset_position.clone(),
+                    reason: "replay rewind".into(),
+                },
+            )
             .await
-            .unwrap()
-        {
-            CommitResult::CheckpointReset { checkpoint } => checkpoint,
-            other => panic!("unexpected replay reset result: {other:?}"),
-        };
+            .unwrap();
         assert_eq!(reset.committed, Some(reset_position));
         assert_eq!(reset.version, checkpoint.version + 1);
         assert_eq!(
