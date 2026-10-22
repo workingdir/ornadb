@@ -2425,28 +2425,42 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
 #[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
-    let result = analyze_corpus(&[ModuleInput::new(
+    // ORNA-UNIT-001: unit spellings do not resolve by name alone. Without a
+    // supplied environment the postfix units are unresolved and the literals
+    // are rejected.
+    let unsupplied = analyze(&[ModuleInput::new(
+        "literals.orna",
+        include_str!("fixtures/inline-semantic_graph/7f039374396b.orna"),
+    )]);
+    assert!(!unsupplied.is_ok(), "{:?}", unsupplied.diagnostics);
+    assert!(
+        has(&unsupplied, DIAG_UNRESOLVED),
+        "{:?}",
+        unsupplied.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
+
+    let rates = analyze(&[ModuleInput::new(
+        "rates.orna",
+        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
+    )]);
+    assert!(
+        has(&rates, DIAG_UNRESOLVED),
+        "{:?}",
+        rates.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
+
+    // With the corpus environment supplied, the same postfix literals succeed.
+    let supplied = analyze_corpus(&[ModuleInput::new(
         "literals.orna",
         with_fixture_units(include_str!("fixtures/inline-semantic_graph/7f039374396b.orna")),
     )]);
-
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    assert!(supplied.is_ok(), "{:?}", supplied.diagnostics);
 
     let non_currency = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/4f50dc5cff02.orna"),
     )]);
     assert!(has(&non_currency, DIAG_TYPE));
-
-    let unsupported = analyze(&[ModuleInput::new(
-        "rates.orna",
-        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
-    )]);
-    assert!(
-        has(&unsupported, DIAG_UNSUPPORTED),
-        "{:?}",
-        unsupported.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
-    );
 }
 
 #[test]
