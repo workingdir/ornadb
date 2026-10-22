@@ -511,6 +511,30 @@ impl NominalDefinition {
 /// Trusted evaluator definitions keyed by admitted source spellings.
 pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
 
+/// A closed `sys.<Enum>.<variant>` constant, unless a local binding shadows
+/// the `sys` root. Enum constants are pure values, so no host is consulted.
+fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, String)> {
+    let mut root = expression;
+    while let Expr::Field { base, .. } = root {
+        root = base;
+    }
+    let Expr::Name { text, .. } = root else {
+        return None;
+    };
+    if text != "sys" || scope.0.contains_key("sys") {
+        return None;
+    }
+    let mut segments = Vec::new();
+    let mut current = expression;
+    while let Expr::Field { base, name, .. } = current {
+        segments.push(name.as_str());
+        current = base;
+    }
+    segments.push("sys");
+    segments.reverse();
+    orna_semantic_v1::system_enum_constant(&segments)
+}
+
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -1654,7 +1678,9 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
     if context.transfer.is_some() {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     }
-    ContextValue::new(ValueFormat::Ovb2, value.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+    // A Blob that an effect returned in its format-3 context (a lazy capture)
+    // keeps that context; every other result is OVB-2.
+    Context::contextual_value(value, ValueFormat::Ovb2, None)
 }
 
 /// Evaluate source against explicit values and pure functions, checking source
@@ -4650,6 +4676,13 @@ impl Context<'_, '_> {
                 self.index(base, index)
             }
             Expr::Field { base, name, .. } => {
+                if let Some((enum_name, variant)) = system_enum_constant(expression, scope) {
+                    return Ok(Value::Enum {
+                        type_id: Raw::Text(enum_name),
+                        variant_id: Raw::Text(variant),
+                        payload: None,
+                    });
+                }
                 match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
                     Some(variant) => variant,
                     None => {
