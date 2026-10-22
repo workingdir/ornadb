@@ -24,6 +24,7 @@ pub struct MountedProcess {
     mountpoint: PathBuf,
     stderr: Arc<Mutex<String>>,
     stderr_reader: Option<JoinHandle<()>>,
+    unmount_on_drop: bool,
 }
 
 impl MountedProcess {
@@ -39,6 +40,54 @@ impl MountedProcess {
             .clone()
     }
 
+    /// The mount process id, so signal tests can stop it.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Waits up to `timeout` for the mount process to exit. Returns its status,
+    /// or `None` while it is still running. Once it has exited, its complete
+    /// stderr is available from `stderr_text`.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                if let Some(reader) = self.stderr_reader.take() {
+                    let _ = reader.join();
+                }
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Waits until `path` exists inside the mount, failing if the mount process
+    /// exits first.
+    pub fn await_path(&mut self, path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                self.exited(status);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "mount did not expose {}",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Hands the mountpoint to the next command: this guard no longer unmounts
+    /// it when dropped. Signal tests use this after the process died so a
+    /// recovering `orna mount` or `orna unmount` sees the dead FUSE mount.
+    pub fn release_mountpoint(&mut self) {
+        self.unmount_on_drop = false;
+    }
+
     fn exited(&mut self, status: std::process::ExitStatus) -> ! {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
@@ -49,7 +98,7 @@ impl MountedProcess {
 
 impl Drop for MountedProcess {
     fn drop(&mut self) {
-        if mountinfo_contains(&self.mountpoint) {
+        if self.unmount_on_drop && mountinfo_contains(&self.mountpoint) {
             if let Some(program) = std::env::var_os("FUSERMOUNT_PATH") {
                 let _ = Command::new(program)
                     .args(["-u", "--"])
@@ -132,6 +181,12 @@ pub struct EditorMount {
 /// Starts `mount --cwd` and waits until the Linux mount table lists `mountpoint`.
 pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
     std::fs::create_dir(mountpoint).unwrap();
+    wait_for_mount(start_mount_process(repository_path, mountpoint))
+}
+
+/// Starts `mount --cwd` on an existing mountpoint directory without waiting for
+/// the FUSE mount to appear.
+pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
         .args([
             "--db",
@@ -160,14 +215,19 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
             }
         })
     });
-    let mut mounted = MountedProcess {
+    MountedProcess {
         child,
         mountpoint: mountpoint.to_path_buf(),
         stderr,
         stderr_reader,
-    };
+        unmount_on_drop: true,
+    }
+}
+
+/// Waits until the Linux mount table lists the process's mountpoint.
+pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(mountpoint) {
+    while !mountinfo_contains(&mounted.mountpoint) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             mounted.exited(status);
         }
@@ -268,6 +328,76 @@ pub async fn repository_with_source_row(
     .await;
     drop(state);
     (repository_directory, repository, relation_id)
+}
+
+/// Creates a repository whose `Music` table has one committed row for each
+/// `(key, document)` pair.
+pub async fn repository_with_music_rows(
+    rows: &[(&str, &str)],
+) -> (TempDir, Repository, [u8; 16]) {
+    let paths = rows
+        .iter()
+        .map(|(key, document)| (format!("Music/{key}.orna"), *document))
+        .collect::<Vec<_>>();
+    let sources = paths
+        .iter()
+        .map(|(path, document)| (path.as_str(), *document))
+        .collect::<Vec<_>>();
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_rows(MUSIC_SOURCE, "Music", &sources);
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    let captures = rows
+        .iter()
+        .zip(0x90_u8..)
+        .map(|(&(key, document), ordinal)| SourceCaptureRow {
+            key,
+            blob_fields: &[],
+            source_row: Some(document),
+            ordinal,
+            insert_only: true,
+        })
+        .collect::<Vec<_>>();
+    commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &captures,
+    )
+    .await;
+    drop(state);
+    (repository_directory, repository, relation_id)
+}
+
+/// The contents of every record in the repository's VFS recovery storage,
+/// where the mount retains candidates it did not accept.
+pub fn retained_drafts(repository: &Repository) -> Vec<String> {
+    let directory = repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1");
+    match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| {
+                let path = entry.expect("list retained drafts").path();
+                String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
+                    .into_owned()
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list retained drafts in {}: {error}", directory.display()),
+    }
 }
 
 pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
