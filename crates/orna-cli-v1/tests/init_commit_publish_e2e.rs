@@ -11,6 +11,7 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use orna_foundation_v1::{OvbRaw, Value};
 use tempfile::TempDir;
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
@@ -391,6 +392,48 @@ fn a_failed_first_commit_leaves_its_tables_free_to_change() {
     assert_eq!(
         query_rows(&root, &["query", relation, "--format", "json"]),
         0
+    );
+}
+
+/// A repository that still tracks the pre-store identity sidecar (version 1,
+/// kinds under their old internal codes) keeps the table identity it recorded:
+/// the first commit reads code 1 as a table and admits it under the recorded UUID.
+#[test]
+fn a_legacy_identity_sidecar_keeps_its_table_id_through_the_first_commit() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    let sidecar = Value::new(OvbRaw::Array(vec![
+        OvbRaw::Int(1u64.into()),
+        OvbRaw::Array(vec![OvbRaw::Array(vec![
+            OvbRaw::Int(1u64.into()),
+            OvbRaw::Text("Music".into()),
+            OvbRaw::Bytes(vec![7; 16]),
+            OvbRaw::Bool(false),
+        ])]),
+    ]))
+    .and_then(|value| value.encode())
+    .expect("encode the legacy sidecar");
+    fs::write(root.join(".orna/object-identities.cbor"), sidecar)
+        .expect("write the legacy sidecar");
+    git(
+        &root,
+        &[
+            "add",
+            "main.orna",
+            ".orna/database.orna",
+            ".orna/object-identities.cbor",
+        ],
+    );
+    let committed = orna(&root, &["commit", "-m", "first commit"]);
+    assert_success(&committed, "orna commit");
+    let admitted: Vec<_> = String::from_utf8_lossy(&committed.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("admitted table "))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        admitted,
+        vec![format!("Music as relation {}", "07".repeat(16))]
     );
 }
 
