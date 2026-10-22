@@ -5,6 +5,86 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
+- `std.io.fs` operations resolve every path from the root directory handle held
+  since the host allowed it, one component at a time without following
+  symbolic links, and act on the final entry through its open parent directory.
+  Parent traversal, absolute paths, symbolic links and `.git` metadata are
+  refused as `sys.host.filesystem.denied`, while a missing target reports
+  `sys.host.filesystem.not_found`; only `symlink_metadata` still describes a
+  final link, without following it. Writes without overwrite create
+  exclusively, moves without overwrite never replace a destination, and
+  listings omit `.git`. Platforms other than Linux refuse these operations as
+  unavailable.
+- `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
+  it to its activation snapshot: the admitted project tables, plus
+  `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
+  (`orna run` and `orna serve`; the REPL serves neither yet). A query returns its
+  structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
+  row's own message as the summary (the explicit marker only when the row is
+  redacted), its causes, its help as suggestions and the objects it names.
+  `sys.explain(FunctionRef)` is dispatched, but no catalogue records function
+  object identities yet, so every function reference reports
+  `sys.object.not_found`.
+- Changed failure codes, all now taken from the portable failure table:
+  - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
+    `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
+    source or function, `sys.version.incompatible` for a stage or source the
+    planner cannot represent, and `sys.object.wrong_kind` for a reference to
+    another relation. `ORNA-EVAL-TYPE` no longer rejects function and
+    diagnostic arguments.
+  - `sys.blob.capture_file`: `ORNA-INGEST-001`, `-002` and `-003` become
+    `sys.blob.source_denied`; `ORNA-INGEST-004` becomes `sys.blob.limit`; and
+    `ORNA-INGEST-005` becomes `sys.blob.source_changed`. A negative or
+    unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
+    quota is `sys.blob.limit`. A host without a filesystem provider reports
+    `sys.blob.source_denied`, and one without a repository Blob writer reports
+    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The native
+    host operation declares `sys.blob.source_denied`, `sys.blob.bounds`,
+    `sys.blob.limit` and `sys.blob.source_changed` instead of
+    `sys.blob.capture.*`; the binding raises only these declared codes and the
+    global `sys.version.incompatible`, and the portable operation declares the
+    same set plus that global code, which every callable operation carries.
+    `orna annotate` source errors cite the portable code.
+  - `sys.blob.annotate`: an OVB-1 value is
+    `sys.codec.unsupported_value_profile`; arguments that are not annotated
+    Blobs are `ORNA-EVAL-TYPE`; a host without the generated provider is
+    `sys.version.incompatible`. No `sys.abi.*` code reaches programs.
+  - `orna serve` stream administration: `sys.admin.unavailable` becomes
+    `sys.admin.missing_object`, `sys.admin.busy`, the specific checkpoint or
+    snapshot code, or `sys.storage.unavailable`. A dispatcher without resume
+    reports `sys.admin.read_only`, unavailable publication metadata reports
+    `sys.storage.unavailable` instead of `sys.storage.metadata_unavailable`, and
+    `sys.admin.result` is gone.
+- Every portable `sys` operation now declares its failure codes explicitly
+  through `#[ornasys(failures = ...)]`, replacing the namespace-prefix guess.
+  The build checks that every published code is declared by an operation, is
+  global, or belongs to a non-callable surface (the `sys.repl` singleton or the
+  VFS).
+- Removed the unreachable duplicate explain implementations:
+  `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
+  `orna_sys_v1::explain_diagnostic` with `Explanation` and
+  `DiagnosticExplanationError`, and the `orna_foundation_v1` explanation
+  envelope (`SystemDiagnosticExplanationInput`,
+  `SystemDiagnosticExplanationOutput`, `system_diagnostic_explanation_input`
+  and `SystemDiagnosticAdapterError`). Also removed
+  `SysHostBindingRegistry::with_explain_catalogue` and
+  `CaptureFileError::code`.
+- Opening a repository format context reads only the root tree, the `.orna`
+  tree and its metadata blobs, through one long-lived `git cat-file
+  --batch-command` reader per repository handle. It no longer lists the whole
+  commit, `.orna/store` included, with a Git process per entry, so point reads
+  no longer slow down as the store grows, and a snapshot with more than 65,536
+  tree entries opens.
+- The project loader's 4,096-entry limit is now `ProjectLimits::max_source_modules`
+  (formerly `max_repository_entries`) and counts source modules only. The
+  loader never walks `.orna/store`, in the worktree or in a committed snapshot,
+  so `orna check`, `orna run` and `orna repl` load databases with large stores.
 - The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
   active calls: function, closure and callback bodies. Expression nesting inside
   one body no longer consumes it, so recursion depth no longer shrinks as bodies
@@ -61,9 +141,28 @@ been published.
   time adds the Time exponent and returns a length quantity. Dimension expressions
   parse qualified names without consuming multiplication or division operators.
 
+- `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
+  any freeze, with `E2300`; it writes nothing and the pending range stays. The
+  help says this build has no writer or in-place upgrade for format-1/2
+  snapshots and names the upgrade work item, ornadb-5il1.184. Inside a prepared
+  migration copy it says the format-3 candidate is prepared but not activated,
+  and that activation is tracked as ornadb-5il1.192. The loose and compact
+  (Parquet) row writers, their recovery paths and the CLI compact-journal
+  recovery are retired. Format-1/2 commits keep their library readers, but no
+  CLI verb reads them yet (ORNA-UPGRADE-003, ORNA-ROW-013).
+
+- The `format.orna` records that the legacy writers produced are now read as
+  read-only format-1/2 inputs: OrnaDB 1.0's `{repository_format: 1,
+  storage_profile: "compact-storage-v1"}` and the previous draft's closed
+  format-2 record. They were rejected as malformed, so `orna migrate copy`
+  failed on every real legacy repository. Runtime writes now follow the format
+  recorded at `HEAD`. A format-1/2 `HEAD` refuses them with
+  `ORNA-REPO-CONTEXT-015` even when the worktree holds format-3 metadata, and
+  `orna run` and the other write verbs exit with `E2200`. The one exception is
+  a prepared migration copy (ORNA-UPGRADE-001).
+
 - Format-3 store-only publication validates canonical row keys without legacy
-  loose-row path resolution, including no-op preparation. Legacy formats retain
-  their existing loose-path resolution.
+  loose-row path resolution, including no-op preparation.
 
 - Explicit format-3 row rekeys retain their relation identity and canonical old/new
   addresses in the publication journal so replay and recovery do not infer a move
@@ -125,6 +224,15 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- `Money<C>` requires a currency type: a nominal type that implements the core
+  `Currency` protocol, or a generic parameter bounded by it. A declared or
+  imported `Currency` counts only when its surface is exactly the core one.
+  `Money<Int>`, table rows, types without `Currency` and undeclared names are
+  rejected, and three-letter names are no longer assumed to be currencies.
+  Imported currencies now construct Money from `12.34.GBP`. A Float currency
+  literal such as `12.34f.GBP` is rejected with E5004.
+
+
 - Format-3 table schemas encode defaulted fields and keys as stored or key
   fields, computed fields as non-stored role-2 selectors with an expression
   digest, table-typed fields as stored references, and enum, nominal record,
@@ -167,6 +275,34 @@ been published.
   the ref names them, and the ref is flushed before the runtime tail is
   consumed.
 
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
+
+- `orna serve` ends live sessions in order. `DELETE /orna/session/<id>` cancels
+  and joins the session's application work and closes its socket before it
+  answers 204, including while the socket is attached; it used to answer 503
+  then, and 400 once the session had evaluated anything. A sweep ends sessions
+  whose lease has elapsed in the same way.
+
+- `orna serve` serves at most 64 connections at once. The accept loop answers
+  any further connection with 503 straight away, without reading its request.
+
+- `orna serve` bounds each HTTP request body and each response with one
+  deadline for the whole transfer, 15 s plus the time it takes at 64 KiB/s,
+  instead of bounding each blocked read or write. A peer that sends or reads a
+  few bytes at a time can no longer keep a connection busy.
+
+- Live session HTTP errors use the statuses `30-protocol.md` assigns: a
+  WebSocket upgrade from another origin gets 403 instead of 410, and a DELETE
+  carrying a token other than the live session's current one gets 401 instead
+  of 410. A child-free DELETE that would first have to drain application work
+  gets 503 instead of 400. `Content-Type: application/json; charset=utf-8` is
+  accepted.
 - Semantic checking types `+ - * / % ^`, unary signs and compound
   assignment through one operator table: Int, Decimal and Float never mix,
   Money scales only by exact numbers in one currency, declared-unit
