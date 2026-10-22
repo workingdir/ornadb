@@ -42,6 +42,7 @@ mod list;
 mod regex_lite;
 mod relation;
 mod repl;
+mod source_enums;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
 #[cfg(feature = "system-host-bindings")]
@@ -64,10 +65,11 @@ use relation::{
 };
 pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
+pub use source_enums::source_enum_definitions;
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
 #[cfg(feature = "system-host-bindings")]
-pub use explain_bindings::ExplainCatalogue;
+pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
     ZonedLocalDateTime, resolve_time_zone,
@@ -873,8 +875,9 @@ pub trait EffectHandler {
         self.handle_registered_with_budget(operation, callee, arguments, budget)
     }
 
-    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
-    /// without one report `sys.abi.unavailable` for explain calls.
+    /// The host catalogue that pins `sys.explain` inputs to the activation's
+    /// snapshot. Without one, query and function explains report
+    /// `sys.version.incompatible`.
     #[cfg(feature = "system-host-bindings")]
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         None
@@ -1099,8 +1102,9 @@ pub trait Ovb2EffectHandler {
         Ok(None)
     }
 
-    /// The host catalogue that resolves `sys.explain(Query)` sources. Handlers
-    /// without one report `sys.abi.unavailable` for explain calls.
+    /// The host catalogue that pins `sys.explain` inputs to the activation's
+    /// snapshot. Without one, query and function explains report
+    /// `sys.version.incompatible`.
     #[cfg(feature = "system-host-bindings")]
     fn explain_catalogue(&self) -> Option<&dyn explain_bindings::ExplainCatalogue> {
         None
@@ -2039,8 +2043,40 @@ pub fn invoke_named_with_effects_and_budget(
     effects: &mut dyn EffectHandler,
     budget: &mut StepBudget,
 ) -> Result<CanonicalValue, EvaluationError> {
-    invoke_named_with_effects_and_reuse(name, functions, arguments, limits, effects, budget)
-        .map(|(value, _)| value)
+    invoke_named_with_effects_nominals_and_budget(
+        name,
+        functions,
+        arguments,
+        &NominalDefinitions::new(),
+        limits,
+        effects,
+        budget,
+    )
+}
+
+/// Invokes an admitted function with declaration-owned nominal construction
+/// plans while consuming a caller-owned activation budget. The plans are
+/// retained by the initial lexical scope and reach nested named calls and
+/// closures, as for [`invoke_named_with_nominals`].
+pub fn invoke_named_with_effects_nominals_and_budget(
+    name: &str,
+    functions: &Functions,
+    arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
+    limits: Limits,
+    effects: &mut dyn EffectHandler,
+    budget: &mut StepBudget,
+) -> Result<CanonicalValue, EvaluationError> {
+    invoke_named_with_effects_and_reuse(
+        name,
+        functions,
+        arguments,
+        nominal_definitions,
+        limits,
+        effects,
+        budget,
+    )
+    .map(|(value, _)| value)
 }
 
 /// Invokes an admitted function with a fresh budget and reports the
@@ -2054,13 +2090,22 @@ pub fn invoke_named_with_effects_and_reuse_report(
     effects: &mut dyn EffectHandler,
 ) -> Result<(CanonicalValue, CallReuseStats), EvaluationError> {
     let mut budget = StepBudget::new(limits.max_steps);
-    invoke_named_with_effects_and_reuse(name, functions, arguments, limits, effects, &mut budget)
+    invoke_named_with_effects_and_reuse(
+        name,
+        functions,
+        arguments,
+        &NominalDefinitions::new(),
+        limits,
+        effects,
+        &mut budget,
+    )
 }
 
 fn invoke_named_with_effects_and_reuse(
     name: &str,
     functions: &Functions,
     arguments: &Environment,
+    nominal_definitions: &NominalDefinitions,
     limits: Limits,
     effects: &mut dyn EffectHandler,
     budget: &mut StepBudget,
@@ -2085,8 +2130,12 @@ fn invoke_named_with_effects_and_reuse(
     let result = (|| {
         context.items(functions.len())?;
         let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
-        let supplied = supplied_arguments(arguments, &NominalDefinitions::new(), &mut context)?;
-        let captured = Scope::from_environment(&function.environment, &mut context)?;
+        let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
+        let captured = Scope::from_environment_with_nominals(
+            &function.environment,
+            nominal_definitions,
+            &mut context,
+        )?;
         invoke_pure(
             &mut context,
             &function.parameters,
@@ -4632,8 +4681,13 @@ impl Context<'_, '_> {
                         payload: None,
                     });
                 }
-                let base = self.evaluate(base, scope, depth + 1)?;
-                self.field_value(base, name, scope)
+                match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
+                    Some(variant) => variant,
+                    None => {
+                        let base = self.evaluate(base, scope, depth + 1)?;
+                        self.field_value(base, name, scope)
+                    }
+                }
             }
             Expr::Control {
                 kind: ControlKind::If,
@@ -4912,7 +4966,7 @@ impl Context<'_, '_> {
             .collect::<Vec<_>>()
             .join(".");
         let Some((type_id, declaration)) =
-            enum_variant_identity(scope, &owner, &variant.text)
+            enum_variant_identity(scope, self.namespace.as_deref(), &owner, &variant.text)
         else {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         };
@@ -7394,9 +7448,9 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        // Mirrors semantic admission: piped input is the query and takes no
-        // argument; otherwise exactly one query argument is required.
-        let query = match input {
+        // Mirrors semantic admission: piped input is the explained value and
+        // takes no argument; otherwise exactly one argument is required.
+        let explained = match input {
             Some(input) => {
                 if !arguments.is_empty() {
                     return Err(error("ORNA-EVAL-ARGUMENT"));
@@ -7410,14 +7464,22 @@ impl Context<'_, '_> {
                 self.evaluate(&arguments[0].value, scope, depth + 1)?
             }
         };
-        let Value::Relation(plan) = query else {
-            return Err(error("ORNA-EVAL-TYPE"));
-        };
         let catalogue = self
             .effects
             .as_deref()
             .and_then(|handler| handler.explain_catalogue());
-        explain_bindings::explain(&plan, catalogue)
+        // Semantic admission selects the overload by static argument type
+        // (source/34-system-reference.md `sys.explain`): a query is a relation,
+        // a `sys.FunctionRef` is a row reference and a `sys.Diagnostic` is its
+        // row record.
+        match explained {
+            Value::Relation(plan) => explain_bindings::explain_query_plan(&plan, catalogue),
+            Value::Reference(function) => {
+                explain_bindings::explain_function_plan(&function, catalogue)
+            }
+            Value::Record(diagnostic) => explain_bindings::explain_diagnostic(diagnostic),
+            _ => Err(error("ORNA-EVAL-TYPE")),
+        }
     }
 
     /// Dispatches one portable annotated-Blob call declared by the generated
@@ -7769,8 +7831,9 @@ impl Context<'_, '_> {
             root_collection_name(callee).filter(|name| !scope.0.contains_key(*name));
         let resolved_function = self.resolve_function_name(callee, scope);
         let source_function_name = function_name(callee);
-        // `sys.explain(Query)` is lowered by the host catalogue, never by a
-        // provider invoke. An unshadowed call therefore stays on this path.
+        // Every `sys.explain` overload is evaluated natively against the host
+        // catalogue, never by a provider invoke. An unshadowed call therefore
+        // stays on this path.
         #[cfg(feature = "system-host-bindings")]
         if source_function_name.as_deref() == Some("sys.explain")
             && !scope.0.contains_key("sys")
@@ -13369,12 +13432,43 @@ fn bind(
         } => bind_constructor(path, arguments, fields, value, scope, context, depth),
     }
 }
+/// ORNA-ENUM-002: `Enum.variant` (or `module.Enum.variant`) evaluates to a
+/// payload-free variant of an admitted enum. A local binding shadows the
+/// enum name, and a payload variant has no bare value form (ORNA-ENUM-003).
+fn payload_free_enum_variant(
+    base: &Expr,
+    variant: &str,
+    scope: &Scope,
+    namespace: Option<&str>,
+) -> Option<Result<Value, EvaluationError>> {
+    if scope.3.is_empty() || scope.0.contains_key(function_root_name(base)?) {
+        return None;
+    }
+    let owner = function_name(base)?;
+    let (type_id, declaration) = enum_variant_identity(scope, namespace, &owner, variant)?;
+    Some(if declaration.payload_fields.is_empty() {
+        Ok(Value::Enum {
+            type_id: type_id.clone(),
+            variant_id: declaration.variant_id.clone(),
+            payload: None,
+        })
+    } else {
+        Err(error("ORNA-EVAL-ARGUMENT"))
+    })
+}
+
+/// Resolves `owner.variant` against the admitted enums. A declaration of the
+/// evaluating module shadows a same-named enum reached by its short name.
 fn enum_variant_identity<'scope>(
     scope: &'scope Scope,
+    namespace: Option<&str>,
     owner: &str,
     variant: &str,
 ) -> Option<(&'scope Raw, &'scope NominalVariant)> {
-    if let Some(definition) = scope.3.get(owner) {
+    if let Some(definition) = namespace
+        .and_then(|namespace| scope.3.get(&format!("{namespace}.{owner}")))
+        .or_else(|| scope.3.get(owner))
+    {
         return definition
             .variants
             .iter()
@@ -13440,18 +13534,19 @@ fn bind_constructor(
     let owner = context.string(owner)?;
     let variant = context.string(path.last().expect("path length checked").text.clone())?;
     let qualified_name = context.string(format!("{owner}.{variant}"))?;
-    let Some((expected_type, expected_variant)) = enum_variant_identity(scope, &owner, &variant)
-        .map(|(type_id, candidate)| (type_id, &candidate.variant_id))
-        .or_else(|| {
-            scope.0.get(&qualified_name).and_then(|value| match value {
-                Value::Enum {
-                    type_id,
-                    variant_id,
-                    ..
-                } => Some((type_id, variant_id)),
-                _ => None,
+    let Some((expected_type, expected_variant)) =
+        enum_variant_identity(scope, context.namespace.as_deref(), &owner, &variant)
+            .map(|(type_id, candidate)| (type_id, &candidate.variant_id))
+            .or_else(|| {
+                scope.0.get(&qualified_name).and_then(|value| match value {
+                    Value::Enum {
+                        type_id,
+                        variant_id,
+                        ..
+                    } => Some((type_id, variant_id)),
+                    _ => None,
+                })
             })
-        })
     else {
         return Err(error("ORNA-EVAL-UNSUPPORTED"));
     };
