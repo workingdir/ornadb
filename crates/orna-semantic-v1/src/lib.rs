@@ -4714,21 +4714,27 @@ fn check_item(
                         "primary-key fields must have simple names",
                     )),
                 }
-                if let Some(annotation) = &key.annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                } else {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "primary-key fields must declare a type",
-                    ));
-                }
+                let annotation_resolved = match &key.annotation {
+                    Some(annotation) => {
+                        let before = diagnostics.len();
+                        validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
+                        diagnostics.len() == before
+                    }
+                    None => {
+                        diagnostics.push(diag(DIAG_TYPE, "primary-key fields must declare a type"));
+                        false
+                    }
+                };
                 let ty = key
                     .annotation
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                if let Some((code, message)) =
-                    primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+                // A key type that failed annotation validation already carries
+                // its diagnostic; it has no encoding left to judge.
+                if annotation_resolved
+                    && let Some((code, message)) =
+                        primary_key_type_error(&ty, scope, &mut BTreeSet::new())
                 {
                     diagnostics.push(diag(code, message));
                 }
@@ -12681,15 +12687,47 @@ fn is_portable_statistics_operation(operation: &str) -> bool {
     )
 }
 
-// The pinned collection source declares one generic finite-list signature.
-// Nonempty calls get their element type from the rows; empty aggregates use
-// the caller's context where available and otherwise keep the Int zero rule.
-fn finite_list_aggregate_element(
-    _callee: &Expr,
-    _operation: &str,
-    _scope: &Scope,
-) -> Option<Type> {
-    None
+// The pinned collection source declares each aggregate. A generic export such
+// as `sum<T>(rows: [T]): T` takes its element type from the rows; a
+// monomorphic export such as `sum(rows: [Decimal]): Decimal` pins the element
+// type every call must supply and, with it, the declared result.
+fn finite_list_aggregate_element(callee: &Expr, operation: &str, scope: &Scope) -> Option<Type> {
+    if !matches!(operation, "sum" | "min" | "max") {
+        return None;
+    }
+    let namespace = match qualified_path(callee)?.as_slice() {
+        ["std", module @ ("collection" | "query"), _] => {
+            Namespace(vec!["std".into(), (*module).into()])
+        }
+        [alias, _] => scope.modules.get(*alias)?.clone(),
+        _ => return None,
+    };
+    if !(namespace.0.len() == 2
+        && namespace.0[0] == "std"
+        && matches!(namespace.0[1].as_str(), "collection" | "query"))
+    {
+        return None;
+    }
+    let symbol = scope
+        .available_modules
+        .get(&namespace)?
+        .exports
+        .get(operation)?;
+    let Type::Function {
+        parameters, result, ..
+    } = &symbol.ty
+    else {
+        return None;
+    };
+    let [Type::List(element)] = parameters.as_slice() else {
+        return None;
+    };
+    let pinned_result = if operation == "sum" {
+        result.as_ref() == element.as_ref()
+    } else {
+        matches!(result.as_ref(), Type::Optional(inner) if inner == element)
+    };
+    (symbol.generic_parameters.is_empty() && pinned_result).then(|| element.as_ref().clone())
 }
 
 /// Root collection names are ordinary, shadowable bindings in 1.0.0. Keep
@@ -24590,74 +24628,52 @@ fn descriptor_member_type(
     substitutions: &BTreeMap<String, Type>,
 ) -> Option<Type> {
     let field = system_api::embedded_system_api().field(system_type, member)?;
-    descriptor_type_with_records(field, substitutions, &mut BTreeSet::new())
+    descriptor_type_with_substitutions(field, substitutions)
 }
 
-fn descriptor_type_with_records(
+/// A described member keeps the nominal identity of its descriptor type, so a
+/// read such as `checkpoint.position` agrees with a `sys.CheckpointPosition`
+/// annotation or signature parameter (ORNA-NOMINAL-002), and an opaque
+/// `sys.Value` is never unboxed into a structural record. Chained reads resolve
+/// each step through `infer_system_member`; only type parameters substitute.
+fn descriptor_type_with_substitutions(
     ty: &system_api::SystemType,
     substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
 ) -> Option<Type> {
     match ty {
-        system_api::SystemType::Named(name) => {
-            if let Some(ty) = substitutions.get(name) {
-                return Some(ty.clone());
-            }
-            descriptor_relation_record_type(name, substitutions, expanding)
-                .or_else(|| Some(descriptor_type(ty)))
-        }
+        system_api::SystemType::Named(name) => Some(
+            substitutions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| descriptor_type(ty)),
+        ),
         system_api::SystemType::Applied { base, arguments }
             if matches!(base.as_str(), "Relation" | "Query") =>
         {
-            Some(Type::Relation(Box::new(descriptor_type_with_records(
-                arguments.first()?,
-                substitutions,
-                expanding,
-            )?)))
+            Some(Type::Relation(Box::new(
+                descriptor_type_with_substitutions(arguments.first()?, substitutions)?,
+            )))
         }
         system_api::SystemType::Applied { base, arguments } if base == "Stream" => {
-            Some(Type::Stream(Box::new(descriptor_type_with_records(
+            Some(Type::Stream(Box::new(descriptor_type_with_substitutions(
                 arguments.first()?,
                 substitutions,
-                expanding,
             )?)))
         }
         system_api::SystemType::Applied { base, arguments } => Some(Type::Applied {
             base: base.clone(),
             arguments: arguments
                 .iter()
-                .map(|argument| descriptor_type_with_records(argument, substitutions, expanding))
+                .map(|argument| descriptor_type_with_substitutions(argument, substitutions))
                 .collect::<Option<Vec<_>>>()?,
         }),
         system_api::SystemType::List(element) => Some(Type::List(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
         system_api::SystemType::Optional(element) => Some(Type::Optional(Box::new(
-            descriptor_type_with_records(element, substitutions, expanding)?,
+            descriptor_type_with_substitutions(element, substitutions)?,
         ))),
     }
-}
-
-fn descriptor_relation_record_type(
-    system_type: &str,
-    substitutions: &BTreeMap<String, Type>,
-    expanding: &mut BTreeSet<String>,
-) -> Option<Type> {
-    let fields = system_api::embedded_system_api().record_fields(system_type)?;
-    if fields.is_empty() || !expanding.insert(system_type.to_owned()) {
-        return None;
-    }
-    let fields = fields
-        .iter()
-        .map(|(name, ty)| {
-            Some((
-                name.clone(),
-                descriptor_type_with_records(ty, substitutions, expanding)?,
-            ))
-        })
-        .collect::<Option<BTreeMap<_, _>>>();
-    expanding.remove(system_type);
-    fields.map(Type::Record)
 }
 
 fn infer_text_member(base: &Type, name: &str) -> Option<Type> {
