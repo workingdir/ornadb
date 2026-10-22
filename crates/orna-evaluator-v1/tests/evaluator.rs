@@ -4342,7 +4342,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
 }
 
 #[test]
-fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
+fn std_collection_float_aggregates_fail_on_bad_inputs_and_yield_ieee_infinity() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
@@ -4374,12 +4374,8 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            include_str!("fixtures/evaluator_source_4513747d05260e45.orna"),
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-DIVIDE-BY-ZERO"
+        evaluate(include_str!("fixtures/evaluator_source_4513747d05260e45.orna")),
+        Value::new(Raw::Float(f64::INFINITY.to_bits())).unwrap()
     );
 
     for (expression, limits) in [
