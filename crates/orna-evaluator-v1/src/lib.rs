@@ -512,21 +512,23 @@ pub type NominalDefinitions = BTreeMap<String, NominalDefinition>;
 /// A closed `sys.<Enum>.<variant>` constant, unless a local binding shadows
 /// the `sys` root. Enum constants are pure values, so no host is consulted.
 fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, String)> {
+    let mut root = expression;
+    while let Expr::Field { base, .. } = root {
+        root = base;
+    }
+    let Expr::Name { text, .. } = root else {
+        return None;
+    };
+    if text != "sys" || scope.0.contains_key("sys") {
+        return None;
+    }
     let mut segments = Vec::new();
     let mut current = expression;
-    loop {
-        match current {
-            Expr::Field { base, name, .. } => {
-                segments.push(name.as_str());
-                current = base;
-            }
-            Expr::Name { text, .. } if text == "sys" && !scope.0.contains_key("sys") => {
-                segments.push("sys");
-                break;
-            }
-            _ => return None,
-        }
+    while let Expr::Field { base, name, .. } = current {
+        segments.push(name.as_str());
+        current = base;
     }
+    segments.push("sys");
     segments.reverse();
     orna_semantic_v1::system_enum_constant(&segments)
 }
