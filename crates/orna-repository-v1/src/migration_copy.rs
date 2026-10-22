@@ -297,7 +297,7 @@ fn prepare_format3_migration_in(
 ) -> Result<MigratedCopy, RepositoryError> {
     let context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if context.supports_writes() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -613,7 +613,7 @@ fn recover_prepared_copy(
 ) -> Result<MigratedCopy, RepositoryError> {
     let source_context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if source_context.supports_writes()
         || !matches!(
             source_context.repository_format(),

@@ -223,7 +223,7 @@ fn linked_explain_query_is_dispatched_natively_through_the_host_catalogue() {
     let mut uncatalogued = RecordingHost::default();
     let error = evaluate("sys.Storage | sys.explain()", &mut uncatalogued)
         .expect_err("a host without a catalogue cannot pin the query source");
-    assert_eq!(error.code(), "sys.abi.unavailable");
+    assert_eq!(error.code(), "sys.version.incompatible");
     assert!(uncatalogued.forwarded.is_empty(), "explain is native dispatch");
 }
 

@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
+- A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
+- `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
+- Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
+- A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
+- A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
 - Enum values can be written in source: `Level.low` references a payload-free
   variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
   through named imports and module bindings. `orna check` reports an unknown
@@ -161,6 +167,8 @@ been published.
   `orna run` and the other write verbs exit with `E2200`. The one exception is
   a prepared migration copy (ORNA-UPGRADE-001).
 
+- `orna migrate copy` reports a source whose format context cannot be admitted as `E2100` titled `migration source could not be admitted: <cause>`, with the cause's `ORNA-REPO-CONTEXT-*` code, and creates no destination.
+
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
 
@@ -311,6 +319,10 @@ been published.
   `return`, including inside anonymous functions, is checked against the
   declared result or joined into the inferred one. Blocks without a final
   expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+- `sys.rt.info()` is linked into the production sys provider, so it evaluates
+  to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
+  of an unlinked callable. Admission no longer reports a version diagnostic for
+  it (ORNA-SYS-006).
 
 ## 1.0.0 — release inventory (publication pending)
 
