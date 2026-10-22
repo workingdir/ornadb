@@ -8846,7 +8846,8 @@ fn detached_attachment_past_its_lease_rejects_a_binary_request_before_admission(
     // An attached session is governed by its reconnection lease, which starts
     // at WebSocket loss (30-protocol); detaching at 2 starts that lease.
     block_on(host.close_attachment([85; 16], 2)).unwrap();
-    let lease_end = 2 + Limits::default().lease_ms;
+    // The reconnect lease `durable_host_with_owner` configures (10 ms).
+    let lease_end = 2 + 10;
 
     let request = [84; 16];
     let mut application = UnitApplication::default();
