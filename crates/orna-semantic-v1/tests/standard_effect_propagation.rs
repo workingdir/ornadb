@@ -14,6 +14,14 @@ fn catalogue_with_wrappers() -> Catalogue {
             "std/wrap_dice.orna".to_owned(),
             "pub fn coin(): Int = sys.random.bit();\n".to_owned(),
         ),
+        (
+            "std/net/pure.orna".to_owned(),
+            "pub fn identity(url: Str): Str = url;\n".to_owned(),
+        ),
+        (
+            "std/io/fs/pure.orna".to_owned(),
+            "pub fn passthrough(path: Str): Str = path;\n".to_owned(),
+        ),
     ];
     let profile = StandardDependencyProfile::from_sources("orna.std/v1-wrappers", sources.clone())
         .expect("wrapper dependency profile");
@@ -74,4 +82,30 @@ fn std_wrapper_calling_sys_random_propagates_randomness() {
         "effects: {effects:?}; diagnostics: {diagnostics:?}"
     );
     assert_eq!(effects, vec!["randomness".to_owned()]);
+}
+
+#[test]
+fn pure_parameter_reference_in_std_net_module_has_no_effects() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.net.pure as p;\npub fn outer(u: Str): Str = p.identity(u);\n",
+        "outer",
+    );
+
+    assert!(
+        !may_fail && effects.is_empty(),
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn pure_parameter_reference_in_std_io_fs_module_has_no_effects() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.io.fs.pure as p;\npub fn outer(u: Str): Str = p.passthrough(u);\n",
+        "outer",
+    );
+
+    assert!(
+        !may_fail && effects.is_empty(),
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
 }
