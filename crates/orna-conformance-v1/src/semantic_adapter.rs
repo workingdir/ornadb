@@ -768,7 +768,10 @@ impl BoundedEvaluator {
                 parse_as: "module_unit".into(),
                 source,
             };
-            match staged.evaluate_module(&unit) {
+            // Standard functions keep their module identity (`std.<module>.<name>`)
+            // so their bodies resolve sibling helpers and never shadow user names.
+            let namespace = module_namespace(&unit);
+            match staged.evaluate_module_with_namespace(&unit, namespace.as_deref()) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
