@@ -8,12 +8,15 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 }
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
-    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_TYPE_MISMATCH,
-    DIAG_UNRESOLVED, DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace,
-    StandardCatalogueError, StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind,
-    Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_ABSOLUTE_QUANTITY_SUM, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_AMBIGUOUS,
+    DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
+    DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_LEGACY_RESULT,
+    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_MONEY_BINARY_FLOAT, DIAG_PRIMARY_KEY_FLOAT,
+    DIAG_RELATION_EQUALITY_AMBIGUOUS, DIAG_RESERVED, DIAG_RESERVED_SYS, DIAG_TABLE_FIELD_TYPE,
+    DIAG_TABLE_UNKNOWN_FIELD, DIAG_TYPE, DIAG_TYPE_MISMATCH, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
+    StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind, Type, analyze,
+    analyze_with_catalogue,
 };
 
 fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
@@ -425,19 +428,27 @@ fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
         assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
     }
-    for source in [
-        include_str!("fixtures/attached-table-reject-customer-payment.orna"),
-        include_str!("fixtures/attached-table-reject-struct-payment.orna"),
-        include_str!("fixtures/attached-table-reject-contact-order.orna"),
-        include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+    for (source, code) in [
+        (
+            include_str!("fixtures/attached-table-reject-customer-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-struct-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-contact-order.orna"),
+            DIAG_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+            DIAG_TYPE,
+        ),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
-        assert!(
-            has(&result, DIAG_TYPE),
-            "{source}: {:?}",
-            result.diagnostics
-        );
+        assert!(has(&result, code), "{source}: {:?}", result.diagnostics);
     }
 }
 
@@ -451,11 +462,11 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
         ),
         (
             include_str!("fixtures/stored-email-provider-wrong-type.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_FIELD_TYPE),
         ),
         (
             include_str!("fixtures/stored-email-provider-unknown-field.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_UNKNOWN_FIELD),
         ),
         (
             include_str!("fixtures/stored-email-provider-connector-message.orna"),
@@ -840,10 +851,19 @@ fn table_insert_and_upsert_validate_provided_fields() {
             }
         }
     }
-    for value in [
-        include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
-        include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
-        include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+    for (value, code) in [
+        (
+            include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
+            DIAG_TABLE_UNKNOWN_FIELD,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
@@ -852,7 +872,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
                 &[("value", &value)],
             ),
         )]);
-        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+        assert!(has(&result, code), "{:?}", result.diagnostics);
     }
 }
 
@@ -977,7 +997,7 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
             ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE
+            diagnostic.code() == DIAG_RELATION_EQUALITY_AMBIGUOUS
                 && diagnostic.message() == "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
         }), "{:?}", result.diagnostics);
     }
@@ -1930,13 +1950,13 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
         "key.orna",
         include_str!("fixtures/inline-semantic_graph/4bae95d858a3.orna"),
     )]);
-    assert!(has(&key, DIAG_TYPE));
+    assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
     let temperature = analyze(&[ModuleInput::new(
         "temperature.orna",
         include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
     )]);
-    assert!(has(&temperature, DIAG_TYPE));
+    assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
 
 #[test]
@@ -2144,7 +2164,7 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
         "{:?}",
         analysis.diagnostics
     );
-    assert!(has(&analysis, DIAG_TYPE), "{:?}", analysis.diagnostics);
+    assert!(has(&analysis, DIAG_MONEY_BINARY_FLOAT), "{:?}", analysis.diagnostics);
 
     let unknown = analyze_corpus(&[ModuleInput::new(
         "unknown.orna",
@@ -14999,7 +15019,7 @@ fn qualified_kwh_units_share_the_closed_cross_database_identity() {
         "units.orna",
         include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
     )]);
-    assert!(has(&incompatible, DIAG_TYPE));
+    assert!(has(&incompatible, DIAG_INCOMPATIBLE_DIMENSIONS));
 }
 
 #[test]
@@ -15463,7 +15483,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     )]);
     assert!(
         reserved_table.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }),
         "{:#?}",
         reserved_table.diagnostics
@@ -17898,7 +17918,7 @@ fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
         "sum.orna",
         include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
     )]);
-    assert!(has(&invalid, DIAG_TYPE));
+    assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
 }
 
