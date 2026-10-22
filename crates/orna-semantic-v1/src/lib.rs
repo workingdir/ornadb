@@ -2124,6 +2124,9 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Payload rows of every admitted module's source enums, keyed by module,
+    /// so a REPL session admits the same enum spellings as the project.
+    pub(crate) source_enums: BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     /// Whether `sys` members were admitted against production providers.
     production_sys_providers: bool,
 }
@@ -2637,6 +2640,7 @@ fn analyze_retaining_context_with_providers(
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
     }
+    result.source_enums = source_enums;
     if let Some(record) = &unlinked_system_members {
         report_unlinked_system_members(record, &mut result.diagnostics);
     }
