@@ -109,6 +109,29 @@ fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() 
 }
 
 #[test]
+fn native_sys_blob_from_bytes_builds_an_ovb2_blob_from_integer_bytes() {
+    let built = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-from-bytes.orna").trim(),
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch native Blob constructor");
+    assert_eq!(built.format(), ValueFormat::Ovb2);
+    let blob = built.blob().expect("constructed OVB-2 Blob");
+    assert_eq!(blob.media_type(), "application/octet-stream");
+    assert_eq!(blob.suffix(), None);
+    assert_eq!(blob.read_to_end().unwrap(), [0u8, 255, 7]);
+
+    let error = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-from-bytes-out-of-range.orna").trim(),
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect_err("an integer outside 0..=255 is not a byte");
+    assert_eq!(error.code(), "sys.blob.bounds");
+}
+
+#[test]
 fn native_sys_blob_annotate_reports_mime_policy_failures() {
     let blob_value = annotated_blob_value(b"payload");
     let environment = BTreeMap::from([("asset".to_owned(), blob_value)]);

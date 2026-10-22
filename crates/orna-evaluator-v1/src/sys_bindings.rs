@@ -1075,7 +1075,9 @@ pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
 
 /// True when `operation` is dispatched through the native Blob call path.
 pub(crate) fn is_blob_call_operation(operation: &str) -> bool {
-    is_blob_annotation_operation(operation) || is_blob_read_operation(operation)
+    is_blob_annotation_operation(operation)
+        || is_blob_read_operation(operation)
+        || is_blob_from_bytes_operation(operation)
 }
 
 /// Rewraps a registry-admitted failure code as an evaluator error.
@@ -1305,6 +1307,29 @@ const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
 /// True when `operation` is one of the portable read-side Blob operations.
 pub(crate) fn is_blob_read_operation(operation: &str) -> bool {
     BLOB_READ_OPERATIONS.contains(&operation)
+}
+
+/// True when `operation` is the portable Blob constructor from integer bytes.
+pub(crate) fn is_blob_from_bytes_operation(operation: &str) -> bool {
+    operation == "sys.blob.from_bytes"
+}
+
+/// Builds the Blob of `sys.blob.from_bytes` from integers in `0..=255`. The
+/// integer list is checked against the 8 MiB call limit before any byte is
+/// copied, and a value outside the byte range is `sys.blob.bounds`.
+pub(crate) fn dispatch_blob_from_bytes(values: &[BigInt]) -> Result<ContextValue, EvaluationError> {
+    if values.len() as u64 > MAX_BLOB_CALL_BYTES {
+        return Err(redacted_error("sys.blob.limit"));
+    }
+    let bytes = values
+        .iter()
+        .map(|value| {
+            value
+                .to_u8()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))
+        })
+        .collect::<Result<Vec<u8>, _>>()?;
+    ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2).map_err(blob_read_failure)
 }
 
 /// Typed result of one read-side Blob call, before evaluator value conversion.
@@ -1824,6 +1849,57 @@ mod tests {
                 "sys.blob.read",
                 &source,
                 &bounds(&[0, 8 * 1024 * 1024 + 1])
+            )),
+            "sys.blob.limit"
+        );
+    }
+
+    #[test]
+    fn blob_from_bytes_builds_an_ovb2_blob_within_the_byte_range() {
+        let values = bounds(&[0, 1, 255]);
+        let value = dispatch_blob_from_bytes(&values).expect("bytes in 0..=255 build a Blob");
+        assert_eq!(value.format(), ValueFormat::Ovb2);
+        assert_eq!(
+            value.blob().expect("Blob").read_to_end().unwrap(),
+            [0u8, 1, 255]
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[256]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[-1]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        let too_many = vec![BigInt::from(0); MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            dispatch_blob_from_bytes(&too_many)
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn blob_to_bytes_materialises_at_most_the_call_limit() {
+        let at_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize];
+        let Ok(BlobReadValue::Bytes(bytes)) =
+            dispatch_blob_read("sys.blob.to_bytes", &blob_source(&at_limit), &[])
+        else {
+            panic!("to_bytes at the 8 MiB limit must succeed");
+        };
+        assert_eq!(bytes.len(), at_limit.len());
+
+        let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.to_bytes",
+                &blob_source(&over_limit),
+                &[]
             )),
             "sys.blob.limit"
         );
