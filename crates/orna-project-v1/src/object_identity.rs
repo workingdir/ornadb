@@ -2587,6 +2587,77 @@ mod tests {
             removed
         );
     }
+
+    // Restores the retired-id invariant deleted with orna-semantic-v1 (commit
+    // 0e26aa9a4, PR #9168). Spec: ORNA-OBJECT-005 (retired IDs MUST NOT be
+    // reused for an unrelated definition) and ORNA-AUTOID-002 (allocated IDs
+    // are never reused after deletion).
+    #[test]
+    fn committed_ids_survive_edits_and_retirement_prevents_reuse() {
+        let first_source = "pub table Note(id: Str) { title: Str, }";
+        let first = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            None,
+        )
+        .expect("initial authoring allocates committed identities");
+        let table_id = *first.id(ObjectKind::Table, "Note").unwrap();
+        let title_id = *first.id(ObjectKind::Field, "Note.title").unwrap();
+        let encoded = first.encode().unwrap();
+        assert_eq!(ObjectIdentityManifest::decode(&encoded).unwrap(), first);
+
+        let edited = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new(
+                "main.orna",
+                "pub table Note(id: Str) { title: Str, body: Str, }",
+            )],
+            Some(&first),
+        )
+        .expect("compatible edit retains prior identities");
+        assert_eq!(edited.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert_eq!(edited.id(ObjectKind::Field, "Note.title"), Some(&title_id));
+
+        let removed = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&edited),
+        )
+        .expect("removal retires identities");
+        assert!(removed.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.is_retired()
+        }));
+        let restored = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", first_source)],
+            Some(&removed),
+        )
+        .expect("unassisted recreation receives new identities");
+        assert_ne!(restored.id(ObjectKind::Table, "Note"), Some(&table_id));
+        assert!(restored.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && record.qualified_name() == "Note"
+                && record.id() == &table_id
+                && record.is_retired()
+        }));
+        let removed_again = ObjectIdentityManifest::reconcile(
+            &[ModuleInput::new("main.orna", "")],
+            Some(&restored),
+        )
+        .expect("later removal can retire the new identity generation");
+        let retired_table_count = removed_again
+            .records()
+            .iter()
+            .filter(|record| {
+                record.kind() == ObjectKind::Table
+                    && record.qualified_name() == "Note"
+                    && record.is_retired()
+            })
+            .count();
+        assert_eq!(retired_table_count, 2);
+        assert_eq!(
+            ObjectIdentityManifest::decode(&removed_again.encode().unwrap()).unwrap(),
+            removed_again,
+        );
+    }
     #[test]
     fn table_rename_cascades_child_field_identities() {
         let original = ModuleInput::new(

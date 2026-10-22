@@ -58,7 +58,7 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 6] = [
+const DECLARED_LINKS: [SystemProviderLink; 7] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
@@ -68,11 +68,18 @@ const DECLARED_LINKS: [SystemProviderLink; 6] = [
     // `explain_bindings`; the plan pins its source through the catalogue the
     // host installs. No production host installs an `ExplainCatalogue` yet
     // (A10-sys-inventory-03, bead ornadb-5il1.124), so `orna run`, `orna serve`
-    // and REPL calls fail with `sys.abi.unavailable` until one does. The
+    // and REPL calls fail with `sys.version.incompatible` until one does. The
     // `FunctionRef` and `Diagnostic` overloads stay unlinked: the evaluator
     // rejects them.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.explain(Query)"),
+        host: SystemProviderHost::Evaluator,
+    },
+    // `orna-evaluator-v1`: `Evaluator::call` answers `sys.rt.info()` natively
+    // from the `SysHostContext` the host attaches to the activation. A host
+    // that attaches none reports `sys.version.incompatible` (SYS-022..030).
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.rt.info"),
         host: SystemProviderHost::Evaluator,
     },
     // `orna-application-v1`: `AsyncSourceMutationEffectHandler` forwards both
@@ -237,7 +244,6 @@ mod tests {
     fn members_without_a_production_provider_are_not_linked() {
         let linkage = system_provider_linkage();
         for member in [
-            SystemSurfaceMember::Callable("sys.rt.info"),
             SystemSurfaceMember::Callable("sys.snapshot(Str)"),
             SystemSurfaceMember::Callable("sys.explain(FunctionRef)"),
             SystemSurfaceMember::Relation("sys.Plan"),
@@ -255,6 +261,7 @@ mod tests {
         for member in [
             SystemSurfaceMember::Callable("sys.blob.annotate"),
             SystemSurfaceMember::Callable("sys.explain(Query)"),
+            SystemSurfaceMember::Callable("sys.rt.info"),
             SystemSurfaceMember::Callable("sys.blob.capture_file"),
             SystemSurfaceMember::Relation("sys.Storage"),
         ] {
