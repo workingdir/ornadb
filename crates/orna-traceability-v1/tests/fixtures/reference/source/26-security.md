@@ -32,3 +32,6 @@ Normal row deletion is versioned deletion, not erasure from Git history, remotes
 
 Multi-user authentication and authorisation are outside this profile. Trusted deployments do not require a separate multi-user authorisation service.
 
+## Repository and binary access
+
+Raw clone/fetch credentials imply trust with repository content; sparse checkout and partial clone are not row-level isolation. Content hashes and paths are identifiers, not grants. Blob import, decoding and serving follow the explicit root, quota, cancellation and historical rules in [ingestion](#ingestion). A decoder or UI cannot turn its inspection authority into arbitrary host execution. No new multi-user grant model is introduced in 1.1.

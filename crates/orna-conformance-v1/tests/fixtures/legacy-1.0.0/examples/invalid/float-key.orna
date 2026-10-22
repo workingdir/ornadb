@@ -1,0 +1,1 @@
+pub table Bad(value: Float) { text: Str, }
