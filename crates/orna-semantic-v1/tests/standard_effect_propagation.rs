@@ -109,3 +109,61 @@ fn pure_parameter_reference_in_std_io_fs_module_has_no_effects() {
         "effects: {effects:?}; diagnostics: {diagnostics:?}"
     );
 }
+
+/// A method call on a user impl whose body performs network must not be
+/// accepted silently: method dispatch is not typecheckable, so the call is
+/// rejected instead of joining an unknown method's effects as pure.
+#[test]
+fn method_call_on_user_impl_with_host_body_is_rejected() {
+    let (_, _, diagnostics) = consumer_effects(
+        "pub protocol Fetch { fn fetch(self): Str; }\n\
+         pub type Remote {\n    url: Str,\n    impl Fetch { fn fetch(self): Str = std.wrap_net.fetch(self.url); }\n}\n\
+         pub fn outer(r: Remote): Str = r.fetch();\n",
+        "outer",
+    );
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+/// Protocol-bound dispatch through a generic parameter is rejected for the same
+/// reason: the method's host effects cannot be joined at the call site.
+#[test]
+fn generic_protocol_method_dispatch_is_rejected() {
+    let (_, _, diagnostics) = consumer_effects(
+        "pub protocol Fetch { fn fetch(self): Str; }\n\
+         pub fn generic_fetch<T impl Fetch>(x: T): Str = x.fetch();\n\
+         pub fn outer(): Str = \"u\";\n",
+        "outer",
+    );
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+/// Module-level `let` is not admitted by the frozen parser for a module, so it
+/// cannot carry an unsummarised initialiser past the effect checks.
+#[test]
+fn module_level_let_is_not_admitted() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std.wrap_net as net;\npub let greeting = net.fetch(\"u\");\n",
+        )],
+        &catalogue_with_wrappers(),
+    );
+    let diagnostics: Vec<String> = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code().to_string())
+        .collect();
+
+    assert!(
+        diagnostics.iter().any(|code| code == "ORNA-S000-PARSE"),
+        "diagnostics: {diagnostics:?}"
+    );
+}
