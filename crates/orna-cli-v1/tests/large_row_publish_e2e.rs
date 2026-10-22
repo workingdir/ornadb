@@ -152,6 +152,32 @@ fn query_rows(root: &Path, arguments: &[&str]) -> u64 {
     report["rows"].as_u64().expect("the report counts rows")
 }
 
+/// Every row of the table, counted in key ranges that each fit one query
+/// page (`orna query --limit` is at most 256, and rows are keyed `n0000`
+/// through `n0599`; a range is lower-inclusive and upper-exclusive).
+fn table_row_count(root: &Path, relation: &str) -> u64 {
+    [("n0000", "n0200"), ("n0200", "n0400"), ("n0400", "n0600")]
+        .into_iter()
+        .map(|(from, until)| {
+            query_rows(
+                root,
+                &[
+                    "query",
+                    relation,
+                    "--from",
+                    &format!("text:{from}"),
+                    "--until",
+                    &format!("text:{until}"),
+                    "--limit",
+                    "256",
+                    "--format",
+                    "json",
+                ],
+            )
+        })
+        .sum()
+}
+
 /// The kind, encoded length and object ID of every format-3 node `data`
 /// blob reachable from the committed `.orna/store` (store-format-3 §1: every
 /// node data is `[1, kind, ...]`).
@@ -295,10 +321,7 @@ fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
         "the table spans several row pages: {}",
         pages_before.len()
     );
-    assert_eq!(
-        query_rows(&root, &["query", &relation, "--format", "json"]),
-        600
-    );
+    assert_eq!(table_row_count(&root, &relation), 600);
 
     let revise = format!(
         r#"main.Note.update("n0300", {{ body: "{}" }})"#,
@@ -323,10 +346,7 @@ fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
         "orna history --diff",
     );
     assert_eq!(changed["changed"], 1, "{changed}");
-    assert_eq!(
-        query_rows(&root, &["query", &relation, "--format", "json"]),
-        600
-    );
+    assert_eq!(table_row_count(&root, &relation), 600);
 
     let head = git(&root, &["rev-parse", "HEAD"]);
     assert_success(&orna_repl(&root, &revise), "REPL update to the same body");
