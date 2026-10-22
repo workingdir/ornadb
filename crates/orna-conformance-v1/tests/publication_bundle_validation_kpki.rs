@@ -1,6 +1,7 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
@@ -18,6 +19,7 @@ fn read_json(relative: &str) -> Value {
         .unwrap_or_else(|error| panic!("parse reference {relative}: {error}"))
 }
 
+/// Exact values of every `id="..."` attribute, in document order.
 fn html_ids(html: &str) -> Vec<String> {
     let mut ids = Vec::new();
     let mut remaining = html;
@@ -31,9 +33,25 @@ fn html_ids(html: &str) -> Vec<String> {
     ids
 }
 
+/// Exact `ORNA-PUB-NNN` tokens: the prefix must be followed by exactly three
+/// digits and no further digit, so no substring of a longer identifier counts.
+fn html_publication_tokens(html: &str) -> Vec<String> {
+    const PREFIX: &str = "ORNA-PUB-";
+    let mut tokens = Vec::new();
+    let mut remaining = html;
+    while let Some(position) = remaining.find(PREFIX) {
+        let after = &remaining[position + PREFIX.len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if digits.len() == 3 && !after[3..].starts_with(|c: char| c.is_ascii_digit()) {
+            tokens.push(format!("{PREFIX}{digits}"));
+        }
+        remaining = &after[digits.len()..];
+    }
+    tokens
+}
+
 fn source_chapters() -> Vec<String> {
-    let manifest = read_json("source/manifest.json");
-    manifest
+    read_json("source/manifest.json")
         .as_array()
         .expect("source manifest array")
         .iter()
@@ -41,35 +59,43 @@ fn source_chapters() -> Vec<String> {
         .collect()
 }
 
-fn expected_api_names(api: &Value) -> HashSet<String> {
-    let mut names = HashSet::new();
-    let mut add = |name: &str| {
-        names.insert(name.to_owned());
-    };
-    for value in api["singletons"].as_array().expect("singletons array") {
-        add(value["name"].as_str().expect("singleton name"));
+/// Anchor slug used by `tools/generate_api_reference.py`.
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
     }
+    out.trim_matches('-').to_owned()
+}
+
+/// The exact `api-*` anchors the generator emits for `api/sys.json`.
+fn expected_api_anchors(api: &Value) -> HashSet<String> {
+    let mut anchors = HashSet::new();
     for value in api["opaque_identifiers"].as_array().expect("opaque identifiers array") {
-        add(value.as_str().expect("opaque identifier name"));
-    }
-    for value in api["reference_aliases"].as_array().expect("reference aliases array") {
-        add(value["name"].as_str().expect("reference alias name"));
-    }
-    for value in api["value_types"].as_array().expect("value types array") {
-        let name = value["name"].as_str().expect("value type name");
-        add(name.split(['<', '(']).next().expect("value type base name"));
+        let name = value
+            .as_str()
+            .or_else(|| value["name"].as_str())
+            .expect("opaque identifier name");
+        anchors.insert(format!("api-type-{}", slug(name)));
     }
     for name in api["enums"].as_object().expect("enum object").keys() {
-        add(name);
+        anchors.insert(format!("api-type-{}", slug(name)));
     }
-    for value in api["relations"].as_array().expect("relations array") {
-        add(value["name"].as_str().expect("relation name"));
+    for group in ["value_types", "relations"] {
+        for value in api[group].as_array().expect("api group array") {
+            let name = value["name"].as_str().expect("api type name");
+            anchors.insert(format!("api-type-{}", slug(name)));
+        }
     }
     for value in api["functions"].as_array().expect("functions array") {
         let name = value["name"].as_str().expect("function name");
-        add(name.split(['<', '(']).next().expect("function base name"));
+        anchors.insert(format!("api-call-{}", slug(name)));
     }
-    names
+    anchors
 }
 
 #[test]
@@ -79,7 +105,10 @@ fn explicit_source_anchors_are_unique_across_the_book() {
         for line in read_text(&source).lines() {
             if let Some((_, rest)) = line.split_once("{#") {
                 let anchor = rest.split('}').next().expect("anchor closing brace").trim();
-                assert!(seen.insert(anchor.to_owned()), "duplicate explicit anchor {anchor} in {source}");
+                assert!(
+                    seen.insert(anchor.to_owned()),
+                    "duplicate explicit anchor {anchor} in {source}"
+                );
             }
         }
     }
@@ -87,45 +116,67 @@ fn explicit_source_anchors_are_unique_across_the_book() {
 }
 
 #[test]
-fn every_sys_api_name_is_documented_in_the_system_reference() {
+fn published_api_anchors_equal_the_sys_api_surface() {
     let api = read_json("api/sys.json");
-    let reference = read_text("source/34-system-reference.md");
-    for name in expected_api_names(&api) {
-        assert!(reference.contains(&name), "system reference does not document {name}");
-    }
+    let html = read_text("index.html");
+    let published: HashSet<String> = html_ids(&html)
+        .into_iter()
+        .filter(|id| id.starts_with("api-"))
+        .collect();
+    let expected = expected_api_anchors(&api);
+    assert!(!expected.is_empty(), "api/sys.json declares API surface");
+    let missing: Vec<_> = expected.difference(&published).collect();
+    let extra: Vec<_> = published.difference(&expected).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "rendered api anchors differ from api/sys.json: missing {missing:?}, extra {extra:?}"
+    );
 }
 
 #[test]
-fn published_index_contains_every_publication_requirement() {
-    let source = read_text("source/22-publication.md");
-    let expected: HashSet<_> = source
-        .split("**")
-        .filter_map(|part| part.strip_prefix("ORNA-PUB-"))
-        .filter_map(|part| part.split("**").next())
-        .map(|suffix| format!("ORNA-PUB-{suffix}"))
+fn published_index_publication_ids_equal_the_publication_manifest() {
+    let expected: HashSet<String> = read_json("tests/requirements.json")
+        .as_array()
+        .expect("requirements manifest array")
+        .iter()
+        .filter(|requirement| requirement["chapter"] == "publication")
+        .filter_map(|requirement| requirement["id"].as_str())
+        .filter(|id| id.starts_with("ORNA-PUB-"))
+        .map(str::to_owned)
         .collect();
-    assert_eq!(expected.len(), 21, "the 1.1.0 publication chapter's normative PUB inventory");
-    let html = read_text("index.html");
-    for requirement in expected {
-        assert!(html.contains(&requirement), "published book is missing {requirement}");
-    }
+    assert!(!expected.is_empty(), "publication manifest declares ORNA-PUB requirements");
+
+    let tokens = html_publication_tokens(&read_text("index.html"));
+    let published: HashSet<String> = tokens.iter().cloned().collect();
+    assert_eq!(
+        published.len(),
+        tokens.len(),
+        "each ORNA-PUB requirement appears exactly once in the rendered book"
+    );
+    assert_eq!(
+        published, expected,
+        "rendered ORNA-PUB requirements equal the publication manifest"
+    );
 }
 
 #[test]
 fn published_index_ids_are_unique() {
-    let html = read_text("index.html");
-    let ids = html_ids(&html);
+    let ids = html_ids(&read_text("index.html"));
     let unique: HashSet<_> = ids.iter().cloned().collect();
     assert_eq!(unique.len(), ids.len(), "duplicate id in index.html");
 }
 
 #[test]
-fn published_sha256sums_cover_the_book_artifacts() {
-    let sums = read_text("SHA256SUMS");
-    for artifact in ["Orna-1.1.0.md", "index.html"] {
-        assert!(
-            sums.lines().any(|line| line.ends_with(artifact)),
-            "SHA256SUMS does not list {artifact}"
-        );
-    }
+fn canonical_markdown_matches_its_sha256sums_entry() {
+    let root = reference_root();
+    let bytes = fs::read(root.join("Orna-1.1.0.md")).expect("read canonical markdown");
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let published = read_text("SHA256SUMS")
+        .lines()
+        .find_map(|line| {
+            let (digest, name) = line.split_once("  ")?;
+            (name == "Orna-1.1.0.md").then(|| digest.to_owned())
+        })
+        .expect("SHA256SUMS lists Orna-1.1.0.md");
+    assert_eq!(digest, published, "Orna-1.1.0.md matches its SHA256SUMS entry");
 }
