@@ -4,8 +4,8 @@ use orna_repository_v1::Repository;
 use tempfile::TempDir;
 
 const LEGACY_FORMATS: [(&str, u8); 2] = [
-    (include_str!("fixtures/format-context/format-1.orna"), 1),
-    (include_str!("fixtures/format-context/format-2.orna"), 2),
+    (include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"), 1),
+    (include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"), 2),
 ];
 const FORMAT_THREE_DATABASE: &str =
     include_str!("fixtures/format-context/database-final.orna");
