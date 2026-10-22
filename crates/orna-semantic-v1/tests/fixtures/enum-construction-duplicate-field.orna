@@ -1,0 +1,1 @@
+pub fn bad(): SyncResult = SyncResult.ok { count: 1, count: 2 };

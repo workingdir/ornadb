@@ -1,9 +1,10 @@
-//! A bounded Orna 1.0 storage/publication slice.
+//! Orna storage: format-3 publication through the runtime publication
+//! coordinator, plus the retained readers for legacy compact segments.
 //!
-//! This crate models the deterministic portion of loose-row materialisation
-//! and PUB-1.  It deliberately performs neither provider nor Git I/O: an
-//! adapter must supply observations and enact returned plans.  Unknown or
-//! changed external state is a typed conflict, never permission to overwrite.
+//! Publication writes only the format-3 native row store. Format-1/2 commits
+//! keep their versioned readers, but their loose and compact row writers are
+//! retired (ORNA-UPGRADE-003, ORNA-ROW-013): publishing onto such a snapshot
+//! fails with [`Error::LegacyReadOnly`] until the repository is migrated.
 
 mod compact;
 mod compact_parquet;
@@ -715,56 +716,23 @@ pub use publication_policy::{
     MIN_COMPRESSED_TARGET_BYTES,
 };
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt,
-};
+use std::{collections::BTreeMap, fmt};
 
-use orna_foundation_v1::{
-    CwdCapture, OvbRaw, RepositoryGenerationAdapter, RepositoryIdentity, SchemaDescriptor,
-};
+use orna_foundation_v1::{OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CompactManifest, CompactPublicationPlan, CompactPublicationRecovery, GitCommitRef,
-    IndexGeneration, ManagedFileChange, ManagedPath, NativeGraphContext, NativeOid, PrivateCommit,
-    PublicationJournal, PublicationJournalEntry, PublicationLogicalRowRekey, Repository,
-    RepositoryError, RepositoryFormat, RowIndexMutation, TypedKey, Uuid,
+    GitCommitRef, HistoricalFormatContext, IndexGeneration, ManagedPath, NativeGraphContext,
+    NativeOid, PrivateCommit, PublicationJournal, PublicationJournalEntry,
+    PublicationLogicalRowRekey, Repository, RepositoryError, RepositoryFormat, RowIndexMutation,
+    TypedKey,
 };
-use orna_runtime_v1::{
-    PublicationCommitId, PublicationFreeze, PublicationTableIdentity, RuntimeError, RuntimeState,
-    TableMutation,
-};
+use orna_runtime_v1::{PublicationCommitId, PublicationFreeze, RuntimeState, TableMutation};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, ValueFormat, path_decode_key_components,
     path_encode_key_components, path_validate_relative_components,
 };
-use sha2::{Digest, Sha256};
 
-/// An opaque, deterministic mutation identity supplied by the runtime.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct MutationId(String);
-
-impl MutationId {
-    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
-        let value = value.into();
-        if value.is_empty() || value.len() > 128 || !value.is_ascii() {
-            return Err(Error::InvalidMutationId);
-        }
-        Ok(Self(value))
-    }
-}
-
-/// A content digest; this is used only for equality/revalidation, not as a
-/// substitute for an adapter's durable Git object validation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RowHash([u8; 32]);
-
-impl RowHash {
-    pub fn of(bytes: &[u8]) -> Self {
-        Self(Sha256::digest(bytes).into())
-    }
-}
-
-/// A validated ordinary loose-row path derived with the v1 path codec.
+/// A validated legacy loose-row path derived with the v1 path codec.
+/// Format-1/2 snapshots address rows by this path; format-3 rows have none.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct LoosePath(ManagedPath);
 
@@ -814,351 +782,6 @@ impl PartialOrd for LoosePath {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LooseRow {
-    bytes: Vec<u8>,
-    hash: RowHash,
-}
-impl LooseRow {
-    pub fn new(bytes: Vec<u8>) -> Result<Self, Error> {
-        if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
-            return Err(Error::InvalidRow);
-        }
-        let hash = RowHash::of(&bytes);
-        Ok(Self { bytes, hash })
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-    pub const fn hash(&self) -> RowHash {
-        self.hash
-    }
-}
-
-/// One final, already-folded runtime mutation.  `expected` is the captured
-/// loose projection state and prevents an editor's later change being replaced.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LooseMutation {
-    pub id: MutationId,
-    pub path: LoosePath,
-    pub expected: Option<RowHash>,
-    pub next: Option<LooseRow>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FrozenBatch {
-    pub id: MutationId,
-    pub mutations: Vec<LooseMutation>,
-    pub watermark: u64,
-    // The loose candidate stores opaque row bytes; retain protected transfer
-    // evidence beside them until runtime completion consumes the frozen prefix.
-    protected_source_mutations: Vec<TableMutation>,
-}
-
-impl FrozenBatch {
-    /// Enforces the complete staging gate before any materialisation can begin.
-    ///
-    /// It stays private so public publication can only start from a
-    /// runtime-issued freeze lowered by `prepare`.
-    fn new(
-        id: MutationId,
-        mutations: Vec<LooseMutation>,
-        watermark: u64,
-    ) -> Result<Self, Error> {
-        if mutations.is_empty() || watermark == 0 {
-            return Err(Error::IncompleteStaging);
-        }
-        let mut paths = BTreeSet::new();
-        let mut ids = BTreeSet::new();
-        for mutation in &mutations {
-            if mutation.id == id
-                || !paths.insert(mutation.path.clone())
-                || !ids.insert(mutation.id.clone())
-            {
-                return Err(Error::IncompleteStaging);
-            }
-            if mutation.next.is_none() && mutation.expected.is_none() {
-                return Err(Error::IncompleteStaging);
-            }
-        }
-        Ok(Self {
-            id,
-            mutations,
-            watermark,
-            protected_source_mutations: Vec::new(),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct LooseProjection {
-    rows: BTreeMap<LoosePath, LooseRow>,
-    tombstones: BTreeSet<LoosePath>,
-    applied: BTreeMap<MutationId, LooseMutation>,
-}
-
-impl LooseProjection {
-    pub fn row(&self, path: &LoosePath) -> Option<&LooseRow> {
-        self.rows.get(path)
-    }
-
-    /// Returns the editable rows in deterministic path order.
-    pub fn entries(&self) -> impl Iterator<Item = (&LoosePath, &LooseRow)> {
-        self.rows.iter()
-    }
-
-    /// Returns deleted editable paths retained as logical tombstones.
-    ///
-    /// A tombstone is part of the pending CWD projection even when no loose
-    /// row file remains. Readers use it to suppress the corresponding compact
-    /// base row until the deletion is durably published.
-    pub fn tombstones(&self) -> impl Iterator<Item = &LoosePath> {
-        self.tombstones.iter()
-    }
-
-    pub fn contains_applied(&self, id: &MutationId) -> bool {
-        self.applied.contains_key(id)
-    }
-
-    /// Applies all of the frozen batch or none of it. A repeated, identical
-    /// application is a no-op; a reused id with differing intent fails closed.
-    pub fn project(&mut self, batch: &FrozenBatch) -> Result<(), Error> {
-        let mut candidate = self.clone();
-        for mutation in &batch.mutations {
-            candidate.apply(mutation)?;
-        }
-        validate_portable_paths(candidate.rows.keys())?;
-        *self = candidate;
-        Ok(())
-    }
-
-    fn apply(&mut self, mutation: &LooseMutation) -> Result<(), Error> {
-        if let Some(previous) = self.applied.get(&mutation.id) {
-            return if previous == mutation {
-                Ok(())
-            } else {
-                Err(Error::MutationReplayConflict {
-                    id: mutation.id.clone(),
-                })
-            };
-        }
-        let actual = self.rows.get(&mutation.path).map(LooseRow::hash);
-        if actual != mutation.expected {
-            return Err(Error::ExternalConflict {
-                path: mutation.path.clone(),
-                expected: mutation.expected,
-                actual,
-            });
-        }
-        match &mutation.next {
-            Some(row) => {
-                self.tombstones.remove(&mutation.path);
-                self.rows.insert(mutation.path.clone(), row.clone());
-            }
-            None => {
-                self.rows.remove(&mutation.path);
-                self.tombstones.insert(mutation.path.clone());
-            }
-        }
-        self.applied.insert(mutation.id.clone(), mutation.clone());
-        Ok(())
-    }
-}
-
-/// One row in the logical hybrid read view.
-///
-/// One row in a validated hybrid read view. A loose row and compact row with
-/// the same key are never silently combined; callers that need a temporary
-/// publication shadow must prove its row hash and generation barrier before
-/// reaching this logical projection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HybridLogicalRow<'a> {
-    Compact {
-        key: CompactKeyIdentity,
-        row: &'a CompactBaseRow,
-    },
-    Loose {
-        key: CompactKeyIdentity,
-        path: &'a LoosePath,
-        row: &'a LooseRow,
-    },
-}
-
-impl<'a> HybridLogicalRow<'a> {
-    pub fn key(&self) -> &CompactKeyIdentity {
-        match self {
-            Self::Compact { key, .. } | Self::Loose { key, .. } => key,
-        }
-    }
-}
-
-/// Merges one verified compact base with its pending editable projection.
-///
-/// The resolver is schema-owned because a path stores canonical text
-/// components while compact identity is typed OVB. Disjoint loose rows are
-/// appended to compact rows. Any editable row or tombstone resolving to a
-/// compact key is a conflict because this boundary has no publication-shadow
-/// proof or compact mutation intent.
-pub fn merge_compact_loose<'a, F>(
-    profile: &CompactOvbProfile,
-    base: &'a CompactBaseState,
-    loose: &'a LooseProjection,
-    resolve: F,
-) -> Result<Vec<HybridLogicalRow<'a>>, Error>
-where
-    F: Fn(&LoosePath) -> Result<CompactKeyIdentity, Error>,
-{
-    if base.table_id() != profile.table_id()
-        || base.schema_fingerprint() != profile.schema_fingerprint()
-    {
-        return Err(Error::HybridBaseMismatch);
-    }
-    let mut merged: BTreeMap<CompactKeyIdentity, HybridLogicalRow<'a>> = BTreeMap::new();
-    for row in base.rows() {
-        let encoded = row
-            .key()
-            .encode()
-            .map_err(|_| Error::HybridBaseMismatch)?;
-        let key = profile
-            .decode_key(&encoded)
-            .map_err(|_| Error::HybridBaseMismatch)?;
-        if merged
-            .insert(key.clone(), HybridLogicalRow::Compact { key: key.clone(), row })
-            .is_some()
-        {
-            return Err(Error::HybridDuplicateKey { key });
-        }
-    }
-
-    let mut resolved_loose = BTreeSet::new();
-    for (path, row) in loose.entries() {
-        let key = resolve(path)?;
-        profile
-            .decode_key(key.encoded())
-            .map_err(|_| Error::InvalidKey)?;
-        if !resolved_loose.insert(key.clone()) {
-            return Err(Error::HybridDuplicateKey { key });
-        }
-        if merged.contains_key(&key) {
-            return Err(Error::HybridDuplicateKey { key });
-        }
-        merged.insert(key.clone(), HybridLogicalRow::Loose { key, path, row });
-    }
-    for path in loose.tombstones() {
-        let key = resolve(path)?;
-        profile
-            .decode_key(key.encoded())
-            .map_err(|_| Error::InvalidKey)?;
-        if !resolved_loose.insert(key.clone()) {
-            return Err(Error::HybridDuplicateKey { key });
-        }
-        if merged.contains_key(&key) {
-            return Err(Error::HybridDuplicateKey { key });
-        }
-    }
-
-    let mut result = Vec::with_capacity(merged.len());
-    for (key, row) in merged {
-        match row {
-            HybridLogicalRow::Loose { .. } => result.push(row),
-            HybridLogicalRow::Compact { row, .. } if row.value().is_some() => {
-                result.push(HybridLogicalRow::Compact { key, row });
-            }
-            HybridLogicalRow::Compact { .. } => {}
-        }
-    }
-    Ok(result)
-}
-
-/// The result of materialising one loose row. This operation intentionally
-/// stops at the worktree projection boundary; it does not stage an index,
-/// advance a ref, or claim PUB-1 completion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Materialization {
-    Applied,
-    AlreadyApplied,
-}
-
-/// Materialises one validated loose mutation through the repository boundary.
-///
-/// A matching next value is idempotent. Any other unexpected current bytes are
-/// reported as an external conflict and are never overwritten.
-pub fn materialize_loose_mutation(
-    repository: &Repository,
-    mutation: &LooseMutation,
-) -> Result<Materialization, Error> {
-    let current = repository
-        .managed_file_bytes(mutation.path.as_managed_path())
-        .map_err(|_| Error::RepositoryUnavailable)?;
-    let actual = current.as_deref().map(RowHash::of);
-    let desired = mutation.next.as_ref().map(LooseRow::hash);
-    if actual == desired {
-        return Ok(Materialization::AlreadyApplied);
-    }
-    if actual != mutation.expected {
-        return Err(Error::ExternalConflict {
-            path: mutation.path.clone(),
-            expected: mutation.expected,
-            actual,
-        });
-    }
-    match repository.materialize_managed_file(
-        mutation.path.as_managed_path(),
-        current.as_deref(),
-        mutation.next.as_ref().map(LooseRow::bytes),
-    ) {
-        Ok(()) => Ok(Materialization::Applied),
-        Err(RepositoryError::ManagedContentConflict) => {
-            let actual = repository
-                .managed_file_bytes(mutation.path.as_managed_path())
-                .map_err(|_| Error::RepositoryUnavailable)?
-                .as_deref()
-                .map(RowHash::of);
-            Err(Error::ExternalConflict {
-                path: mutation.path.clone(),
-                expected: mutation.expected,
-                actual,
-            })
-        }
-        Err(_) => Err(Error::RepositoryUnavailable),
-    }
-}
-
-/// Builds the real Git candidate for a frozen batch without advancing a ref.
-/// The runtime batch remains authoritative until the caller journals, performs
-/// index/worktree reconciliation, and completes the publication boundary.
-pub fn build_private_publication_candidate(
-    repository: &Repository,
-    expected_head: &GitCommitRef,
-    batch: &FrozenBatch,
-    message: &str,
-) -> Result<PrivateCommit, Error> {
-    let changes = private_publication_file_changes(batch)?;
-    repository
-        .build_private_commit(expected_head, &changes, message)
-        .map_err(|_| Error::RepositoryUnavailable)
-}
-fn private_publication_file_changes(
-    batch: &FrozenBatch,
-) -> Result<Vec<ManagedFileChange>, Error> {
-    validate_portable_paths(
-        batch
-            .mutations
-            .iter()
-            .filter_map(|mutation| mutation.next.as_ref().map(|_| &mutation.path)),
-    )?;
-    Ok(batch
-        .mutations
-        .iter()
-        .map(|mutation| {
-            ManagedFileChange::new(
-                mutation.path.as_managed_path().clone(),
-                mutation.next.as_ref().map(|row| row.bytes().to_vec()),
-            )
-        })
-        .collect())
 }
 
 fn build_private_publication_candidate_with_store_root(
@@ -1496,94 +1119,6 @@ fn build_frozen_publication_store_root(
     Ok((graph, store_root, logical_rekeys))
 }
 
-/// Converts the runtime's validated typed table prefix into the loose-row
-/// representation without decoding or narrowing row values. Key decoding
-/// remains schema-owned: this function refuses to invent paths for opaque keys.
-pub fn lower_runtime_table_mutations(
-    freeze: &PublicationFreeze,
-    mutations: &[TableMutation],
-    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
-    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
-) -> Result<FrozenBatch, Error> {
-    lower_runtime_table_mutations_allow_empty(freeze, mutations, path_for, expected_bytes_for)?
-        .ok_or(Error::IncompleteStaging)
-}
-
-/// Converts the runtime's validated typed table prefix into the loose-row
-/// representation, reporting a prefix with no visible change as `None`.
-///
-/// Row values remain opaque and byte-exact. Graph-issued pin owners carried by
-/// the frozen prefix stay attached through publication completion.
-///
-/// Lowering still refuses an empty prefix, because an empty freeze is not a
-/// publication. A prefix whose every row folds to the bytes already committed
-/// is a different case: there is nothing to stage, so a caller completes the
-/// frozen intent without building an empty commit instead of failing the save
-/// that produced no change.
-pub fn lower_runtime_table_mutations_allow_empty(
-    freeze: &PublicationFreeze,
-    mutations: &[TableMutation],
-    path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
-    expected_bytes_for: impl Fn(&LoosePath) -> Result<Option<Vec<u8>>, Error>,
-) -> Result<Option<FrozenBatch>, Error> {
-    if mutations.is_empty() {
-        return Err(Error::IncompleteStaging);
-    }
-    let batch_id = MutationId::new(hex_id(freeze.intent_id))?;
-    let mut lowered: BTreeMap<LoosePath, LooseMutation> = BTreeMap::new();
-    let mut identities = BTreeMap::new();
-    for mutation in mutations {
-        let path = path_for(mutation)?;
-        let identity = (mutation.table().to_owned(), mutation.key().to_vec());
-        if let Some(previous) = identities.insert(path.clone(), identity.clone())
-            && previous != identity
-        {
-            return Err(Error::PathCollision);
-        }
-        let next = mutation
-            .value()
-            .map(|bytes| LooseRow::new(bytes.to_vec()))
-            .transpose()?;
-        let id = MutationId::new(hex_id(mutation.id()))?;
-        if let Some(previous) = lowered.get_mut(&path) {
-            let expected = previous.expected;
-            *previous = LooseMutation {
-                id,
-                path,
-                expected,
-                next,
-            };
-        } else {
-            let expected = expected_bytes_for(&path)?.as_deref().map(RowHash::of);
-            lowered.insert(
-                path.clone(),
-                LooseMutation {
-                    id,
-                    path,
-                    expected,
-                    next,
-                },
-            );
-        }
-    }
-    let visible = lowered
-        .into_values()
-        .filter(|mutation| mutation.next.as_ref().map(LooseRow::hash) != mutation.expected)
-        .collect::<Vec<_>>();
-    if visible.is_empty() {
-        // Every row in the prefix already matches its committed bytes, so the
-        // frozen intent has no visible change to publish.
-        return Ok(None);
-    }
-    let mut batch = FrozenBatch::new(batch_id, visible, freeze.checkpoint.mutation_sequence)?;
-    batch.protected_source_mutations = mutations
-        .iter()
-        .filter(|mutation| !mutation.protected_content_transfers().is_empty())
-        .cloned()
-        .collect();
-    Ok(Some(batch))
-}
-
 /// A prepared, runtime-bound publication. Preparation creates only private
 /// Git objects and a durable journal; `publish` and `complete` are separate so
 /// a crash can be recovered at each PUB-1 boundary.
@@ -1596,245 +1131,12 @@ pub struct RuntimePublicationCoordinator {
     // and journal completion have succeeded.
     protected_source_mutations: Vec<TableMutation>,
 }
-/// The committed snapshot and pending-mutation window a logical compact reader
-/// must use for one observation.  The two choices deliberately make the
-/// publication boundary explicit: the frozen prefix is read either from the
-/// old snapshot's pending tail or from the compact candidate, never both.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompactReaderVisibility {
-    snapshot: GitCommitRef,
-    tail: CompactTailWindow,
-}
-
-impl CompactReaderVisibility {
-    pub fn snapshot(&self) -> &GitCommitRef {
-        &self.snapshot
-    }
-
-    pub const fn tail(&self) -> CompactTailWindow {
-        self.tail
-    }
-}
-
-/// The portion of the pending ledger which remains visible beside a compact
-/// snapshot.  `AfterWatermark` is also suitable for a reader holding a cached
-/// ledger view that predates the runtime cleanup transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompactTailWindow {
-    AllPending,
-    AfterWatermark(u64),
-}
 
 impl RuntimePublicationCoordinator {
-    /// Selects the one valid compact reader view across PUB-1's ref and
-    /// runtime-cleanup boundaries.  A reader observes the old snapshot plus
-    /// the full pending tail until the runtime has durably consumed the frozen
-    /// range.  Once that receipt is durable, it observes the candidate and
-    /// masks the frozen range even if repository journal cleanup is still
-    /// pending after a crash.
-    pub async fn compact_reader_visibility(
-        repository: &Repository,
-        runtime: &RuntimeState,
-    ) -> Result<CompactReaderVisibility, Error> {
-        let Some(journal) = repository
-            .read_publication_journal()
-            .map_err(map_publication_repository_error)?
-        else {
-            return repository
-                .head()
-                .map_err(map_publication_repository_error)?
-                .map(|snapshot| CompactReaderVisibility {
-                    snapshot,
-                    tail: CompactTailWindow::AllPending,
-                })
-                .ok_or(Error::InvalidTransition);
-        };
-        if journal.compact_manifest().is_none() {
-            return Err(Error::InvalidTransition);
-        }
-        // A compact candidate must be a distinct committed snapshot.  If a
-        // malformed journal aliases it to the old snapshot, the candidate
-        // branch below would mask the frozen tail without any snapshot owning
-        // those rows.
-        if journal.old_head() == journal.new_head() {
-            return Err(Error::InvalidTransition);
-        }
-        let intent_id = journal
-            .runtime_intent_id()
-            .ok_or(Error::InvalidTransition)?;
-        let freeze = runtime
-            .publication_freeze(intent_id)
-            .await
-            .map_err(map_compact_runtime_error)?;
-        // The journal's compact witness and the runtime freeze name the same
-        // frozen prefix.  An intent match alone is insufficient: a malformed
-        // journal could pair that intent with another watermark, causing this
-        // reader to choose a snapshot/tail boundary which no durable receipt
-        // can prove.  Refuse the observation before exposing either side.
-        if journal
-            .compact_manifest()
-            .ok_or(Error::InvalidTransition)?
-            .cleanup_watermark()
-            != freeze.checkpoint.digest
-        {
-            return Err(Error::InvalidTransition);
-        }
-        let frozen_prefix = runtime
-            .pending_through(&freeze)
-            .await
-            .map_err(map_compact_runtime_error)?;
-        // The only reader-admissible post-receipt state is the durable
-        // runtime cleanup with the repository journal still at its pending
-        // boundary. `RuntimeCompleted` and `Complete` are repository
-        // finalization markers, not independent evidence that this runtime
-        // consumed this journal's prefix. A crash (or malformed journal) at
-        // either marker must recover through the receipt fence rather than
-        // letting a reader mask a still-pending prefix.
-        let candidate_visible = journal.stage()
-            == orna_repository_v1::PublicationJournalStage::WorktreeReconciled
-            && frozen_prefix.is_empty();
-        if matches!(
-            journal.stage(),
-            orna_repository_v1::PublicationJournalStage::RuntimeCompleted
-                | orna_repository_v1::PublicationJournalStage::Complete
-        ) {
-            return Err(Error::InvalidTransition);
-        }
-        // An empty frozen range is evidence that the runtime has consumed the
-        // prefix, but that evidence is only reader-safe after the candidate
-        // has completed its repository reconciliation.  Returning the old
-        // snapshot with an empty tail at an earlier journal stage would omit
-        // the frozen logical rows.
-        if frozen_prefix.is_empty() && !candidate_visible {
-            return Err(Error::InvalidTransition);
-        }
-        if candidate_visible {
-            // A durable runtime receipt has removed the frozen prefix from
-            // the ledger, so exposing the old snapshot here would lose rows.
-            // Do not assume the journal candidate is still the selected Git
-            // snapshot: a native writer may have advanced HEAD between the
-            // receipt and journal finalization.
-            if repository
-                .head()
-                .map_err(map_publication_repository_error)?
-                .as_ref()
-                != Some(journal.new_head())
-            {
-                return Err(Error::RefConflict);
-            }
-            runtime
-                .validate_recovery()
-                .await
-                .map_err(map_compact_runtime_error)?;
-            return Ok(CompactReaderVisibility {
-                snapshot: journal.new_head().clone(),
-                tail: CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence),
-            });
-        }
-        Ok(CompactReaderVisibility {
-            snapshot: journal.old_head().clone(),
-            tail: CompactTailWindow::AllPending,
-        })
-    }
-
-    /// Completes a candidate only after its verified committed logical rows
-    /// match the final fold of the durable frozen mutations.
-    async fn publish_compact_candidate_and_complete(
-        repository: &Repository,
-        runtime: &RuntimeState,
-        profile: &CompactOvbProfile,
-        freeze: &PublicationFreeze,
-        plan: CompactPublicationPlan,
-        expected: &CompactBaseState,
-        candidate_generation: u64,
-    ) -> Result<IndexGeneration, Error> {
-        // Logical equivalence is part of candidate admission: prove the
-        // unreferenced commit against the frozen prefix before its ref can be
-        // made visible. The Git objects and manifest are immutable after this
-        // check; the repository publication boundary still fences HEAD/index
-        // and verifies the journal binding before advancing the ref.
-        verify_compact_candidate_rows_at_commit(
-            repository,
-            profile,
-            plan.candidate_commit(),
-            expected,
-            candidate_generation,
-        )?;
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .map_err(map_publication_repository_error)?;
-        verify_compact_candidate_rows(
-            repository,
-            profile,
-            freeze,
-            &pending,
-            expected,
-            candidate_generation,
-        )?;
-        runtime
-            .bind_compact_publication(&pending, freeze)
-            .await
-            .map_err(map_compact_runtime_error)?;
-        let receipt = runtime
-            .complete_compact_publication(&pending, freeze)
-            .await
-            .map_err(map_compact_runtime_error)?;
-        repository
-            .finish_compact_with_receipt(&receipt)
-            .map_err(map_publication_repository_error)
-    }
-
-    /// Validates and consumes the schema-bound committed base and generated
-    /// writer input before repository publication consumes the sealed prefix.
-    pub async fn publish_compact_and_complete_validated(
-        repository: &Repository,
-        runtime: &RuntimeState,
-        profile: &CompactOvbProfile,
-        freeze: &PublicationFreeze,
-        plan: CompactPublicationPlan,
-    ) -> Result<IndexGeneration, Error> {
-        if !plan.matches_runtime_freeze(freeze.intent_id, freeze.checkpoint.digest) {
-            return Err(Error::InvalidTransition);
-        }
-        let table = Uuid::from_bytes(profile.table_id());
-        if plan.manifest().table() != table
-            || plan.manifest().schema() != profile.schema_fingerprint()
-        {
-            return Err(Error::InvalidTransition);
-        }
-        let expected_head = repository
-            .head()
-            .map_err(map_publication_repository_error)?
-            .ok_or(Error::InvalidTransition)?;
-        let base = load_compact_base_at(repository, &expected_head, profile)?;
-        let writer_input = lower_compact_freeze(profile, freeze)?;
-        let folded_input = base
-            .fold_writer_input(&writer_input)
-            .map_err(|_| Error::InvalidTransition)?;
-        base.consume_writer_input(&folded_input)
-            .map_err(|_| Error::InvalidTransition)?;
-        validate_manifest_generation_binding(plan.manifest(), &folded_input)?;
-        let writer_batch = base
-            .prepare_writer_batch(profile, &writer_input)
-            .map_err(|_| Error::InvalidTransition)?;
-        let expected = base
-            .apply_writer_batch(&writer_batch)
-            .map_err(|_| Error::InvalidTransition)?;
-        Self::publish_compact_candidate_and_complete(
-            repository,
-            runtime,
-            profile,
-            freeze,
-            plan,
-            &expected,
-            writer_input.candidate_generation,
-        )
-        .await
-    }
-
-    /// Prepares the exact prefix issued by `runtime` as a canonical loose-row
-    /// candidate. Protected source mutations are retained from that prefix
-    /// before any repository candidate is written.
+    /// Prepares the exact prefix issued by `runtime` as a format-3 candidate
+    /// and fails when that prefix has no visible change. Protected source
+    /// mutations are retained from that prefix before any repository
+    /// candidate is written.
     pub async fn prepare(
         repository: &Repository,
         runtime: &RuntimeState,
@@ -1860,177 +1162,70 @@ impl RuntimePublicationCoordinator {
     /// Reads the exact typed prefix named by `freeze` and reports the result as
     /// `None` when the frozen prefix is a no-op.
     ///
-    /// A legacy prefix whose rows, or a format-3 prefix whose native store root,
-    /// are unchanged from the committed snapshot has no visible change. The caller
-    /// completes the frozen intent without a commit instead of preparing an empty
-    /// publication.
+    /// Only a format-3 snapshot has a row writer. A format-1/2 `expected_head`
+    /// keeps its versioned readers but fails with [`Error::LegacyReadOnly`]
+    /// before the runtime prefix is read or any Git object is written
+    /// (ORNA-UPGRADE-003, ORNA-ROW-013). A prefix whose native store root is
+    /// unchanged from the committed snapshot has no visible change: the caller
+    /// completes the frozen intent without a commit instead of preparing an
+    /// empty publication.
+    ///
+    /// `_path_for` is unused because format-3 rows have no loose path; it
+    /// remains only while existing callers still supply one.
     pub async fn prepare_allow_noop(
         repository: &Repository,
         runtime: &RuntimeState,
         expected_head: &GitCommitRef,
         expected_index: IndexGeneration,
         freeze: &PublicationFreeze,
-        path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
+        _path_for: impl Fn(&TableMutation) -> Result<LoosePath, Error>,
         message: &str,
     ) -> Result<Option<Self>, Error> {
+        let format = writable_snapshot_context(repository, expected_head)?;
         let mutations = runtime
             .pending_table_mutations_through(freeze)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
-        let format = repository
-            .open_format_context_at_selector(expected_head.as_str())
-            .map_err(|_| Error::RepositoryUnavailable)?;
-        if format.repository_format() == RepositoryFormat::Format3 {
-            if mutations.is_empty() || freeze.checkpoint.mutation_sequence == 0 {
-                return Err(Error::IncompleteStaging);
-            }
-            let current_store_root = format
-                .load_row_map(
-                    mutations[0]
-                        .table_object_id()
-                        .ok_or(Error::IncompleteStaging)?
-                        .bytes(),
-                )
-                .map_err(|_| Error::RepositoryUnavailable)?
-                .version()
-                .store_root()
-                .clone();
-            let (graph, store_root, logical_rekeys) =
-                build_frozen_publication_store_root(repository, expected_head, &mutations)?;
-            if store_root == current_store_root && logical_rekeys.is_empty() {
-                return Ok(None);
-            }
-            let candidate = build_private_publication_candidate_with_store_root(
-                repository,
-                expected_head,
-                &graph,
-                &store_root,
-                message,
-            )?;
-            // Store-only candidates still need a durable journal anchor. Keep
-            // the format metadata file unchanged rather than projecting row
-            // keys into legacy loose paths.
-            let marker = ManagedPath::new(".orna/database.orna")
-                .map_err(|_| Error::RepositoryUnavailable)?;
-            let paths = [marker.clone()];
-            let captured = repository
-                .capture_managed_publication_state(expected_head, &expected_index, &paths)
-                .map_err(map_publication_repository_error)?;
-            let expected = captured
-                .into_iter()
-                .next()
-                .ok_or(Error::RepositoryUnavailable)?;
-            let entry = PublicationJournalEntry::new(marker, expected.clone(), expected);
-            let base_index_tree = expected_index
-                .tree()
-                .cloned()
-                .ok_or(Error::IncompleteStaging)?;
-            let journal = PublicationJournal::new_with_runtime_intent(
-                expected_head.clone(),
-                candidate.commit().clone(),
-                base_index_tree,
-                freeze.intent_id,
-                vec![entry],
-            )
-            .and_then(|journal| journal.with_store_root(&store_root))
-            .and_then(|journal| journal.with_logical_rekeys(logical_rekeys))
-            .map_err(|_| Error::RepositoryUnavailable)?;
-            let protected_source_mutations = mutations
-                .iter()
-                .filter(|mutation| !mutation.protected_content_transfers().is_empty())
-                .cloned()
-                .collect();
-            return Ok(Some(Self {
-                expected_index,
-                candidate,
-                journal,
-                protected_source_mutations,
-            }));
+        if mutations.is_empty() || freeze.checkpoint.mutation_sequence == 0 {
+            return Err(Error::IncompleteStaging);
         }
-        let Some(batch) =
-            lower_runtime_table_mutations_allow_empty(freeze, &mutations, path_for, |path| {
-                repository
-                    .managed_file_bytes(path.as_managed_path())
-                    .map_err(|_| Error::RepositoryUnavailable)
-            })?
-        else {
+        let current_store_root = format
+            .load_row_map(
+                mutations[0]
+                    .table_object_id()
+                    .ok_or(Error::IncompleteStaging)?
+                    .bytes(),
+            )
+            .map_err(|_| Error::RepositoryUnavailable)?
+            .version()
+            .store_root()
+            .clone();
+        let (graph, store_root, logical_rekeys) =
+            build_frozen_publication_store_root(repository, expected_head, &mutations)?;
+        if store_root == current_store_root && logical_rekeys.is_empty() {
             return Ok(None);
-        };
-        Self::prepare_lowered(
+        }
+        let candidate = build_private_publication_candidate_with_store_root(
             repository,
             expected_head,
-            expected_index,
-            freeze,
-            &mutations,
-            batch,
+            &graph,
+            &store_root,
             message,
-        )
-        .map(Some)
-    }
-
-    /// Builds the repository candidate from mutations lowered from the exact
-    /// runtime prefix. This stays private so no caller can omit its protected
-    /// source mutation evidence.
-    fn prepare_lowered(
-        repository: &Repository,
-        expected_head: &GitCommitRef,
-        expected_index: IndexGeneration,
-        freeze: &PublicationFreeze,
-        runtime_mutations: &[TableMutation],
-        batch: FrozenBatch,
-        message: &str,
-    ) -> Result<Self, Error> {
-        let mut retained_protected = batch.protected_source_mutations.iter();
-        for mutation in runtime_mutations
-            .iter()
-            .filter(|mutation| !mutation.protected_content_transfers().is_empty())
-        {
-            if retained_protected.next() != Some(mutation) {
-                return Err(Error::IncompleteStaging);
-            }
-        }
-        if retained_protected.next().is_some() {
-            return Err(Error::IncompleteStaging);
-        }
-        if batch.watermark != freeze.checkpoint.mutation_sequence
-            || batch.id != MutationId::new(hex_id(freeze.intent_id))?
-        {
-            // The frozen prefix is the only runtime range completion may
-            // consume.  Requiring the lowering batch identity to equal the
-            // durable freeze intent prevents a caller from publishing bytes
-            // under one journal intent and then deleting another prefix.
-            return Err(Error::IncompleteStaging);
-        }
-        let paths = batch
-            .mutations
-            .iter()
-            .map(|mutation| mutation.path.as_managed_path().clone())
-            .collect::<Vec<_>>();
+        )?;
+        // Store-only candidates still need a durable journal anchor. Keep the
+        // format metadata file unchanged rather than projecting row keys into
+        // legacy loose paths.
+        let marker =
+            ManagedPath::new(".orna/database.orna").map_err(|_| Error::RepositoryUnavailable)?;
+        let paths = [marker.clone()];
         let captured = repository
             .capture_managed_publication_state(expected_head, &expected_index, &paths)
             .map_err(map_publication_repository_error)?;
-        let candidate =
-            build_private_publication_candidate(repository, expected_head, &batch, message)?;
-        let entries = batch
-            .mutations
-            .iter()
-            .zip(captured)
-            .map(|(mutation, expected)| {
-                let actual = expected.as_deref().map(RowHash::of);
-                if actual != mutation.expected {
-                    return Err(Error::ExternalConflict {
-                        path: mutation.path.clone(),
-                        expected: mutation.expected,
-                        actual,
-                    });
-                }
-                Ok(PublicationJournalEntry::new(
-                    mutation.path.as_managed_path().clone(),
-                    expected,
-                    mutation.next.as_ref().map(|row| row.bytes().to_vec()),
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let expected = captured
+            .into_iter()
+            .next()
+            .ok_or(Error::RepositoryUnavailable)?;
+        let entry = PublicationJournalEntry::new(marker, expected.clone(), expected);
         let base_index_tree = expected_index
             .tree()
             .cloned()
@@ -2040,15 +1235,22 @@ impl RuntimePublicationCoordinator {
             candidate.commit().clone(),
             base_index_tree,
             freeze.intent_id,
-            entries,
+            vec![entry],
         )
+        .and_then(|journal| journal.with_store_root(&store_root))
+        .and_then(|journal| journal.with_logical_rekeys(logical_rekeys))
         .map_err(|_| Error::RepositoryUnavailable)?;
-        Ok(Self {
+        let protected_source_mutations = mutations
+            .iter()
+            .filter(|mutation| !mutation.protected_content_transfers().is_empty())
+            .cloned()
+            .collect();
+        Ok(Some(Self {
             expected_index,
             candidate,
             journal,
-            protected_source_mutations: batch.protected_source_mutations,
-        })
+            protected_source_mutations,
+        }))
     }
 
     pub fn candidate(&self) -> &PrivateCommit {
@@ -2100,9 +1302,6 @@ impl RuntimePublicationCoordinator {
         }
         let commit = PublicationCommitId::new(self.candidate.commit().as_str().as_bytes().to_vec())
             .map_err(|_| Error::InvalidObjectId)?;
-        if self.journal.compact_manifest().is_some() {
-            return Err(Error::InvalidTransition);
-        }
         if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled {
             return Err(Error::PublicationPending);
         }
@@ -2128,137 +1327,39 @@ impl RuntimePublicationCoordinator {
     /// Recovers a persisted runtime publication after a process interruption.
     /// Repository reconciliation is completed before the runtime prefix is
     /// consumed; every mismatch leaves the journal and pending tail intact.
+    ///
+    /// A journal left by a retired loose or compact writer fails with
+    /// [`Error::LegacyReadOnly`] before any ref, index, worktree or runtime
+    /// change: this build cannot finish a legacy publication.
     pub async fn recover(
         repository: &Repository,
         runtime: &RuntimeState,
-    ) -> Result<Option<IndexGeneration>, Error> {
-        Self::recover_inner(repository, runtime, None).await
-    }
-
-    /// Recovers a compact publication with schema-admitted table identity.
-    /// A consumed prefix is finalized only through the runtime's validated
-    /// persisted receipt; an unconsumed prefix is rebuilt from that identity.
-    pub async fn recover_compact_validated(
-        repository: &Repository,
-        runtime: &RuntimeState,
-        profile: &CompactOvbProfile,
-        table_identity: &PublicationTableIdentity,
-    ) -> Result<Option<IndexGeneration>, Error> {
-        Self::recover_inner(repository, runtime, Some((profile, table_identity))).await
-    }
-
-    async fn recover_inner(
-        repository: &Repository,
-        runtime: &RuntimeState,
-        compact_profile: Option<(&CompactOvbProfile, &PublicationTableIdentity)>,
     ) -> Result<Option<IndexGeneration>, Error> {
         let Some(journal) = repository
             .read_publication_journal()
             .map_err(map_publication_repository_error)?
         else {
-            return Ok(None);
-        };
-        if journal.compact_manifest().is_some() {
-            let recovery = repository
-                .recover_compact_publication_boundary()
-                .map_err(map_publication_repository_error)?;
-            let (pending, descendant) = match recovery {
-                None => {
-                    return repository
-                        .index_generation()
-                        .map(Some)
-                        .map_err(map_publication_repository_error);
-                }
-                Some(CompactPublicationRecovery::PendingRuntimeReceipt(pending)) => {
-                    (pending, false)
-                }
-                Some(CompactPublicationRecovery::ReconciliationRequired(reconciliation)) => {
-                    let pending = repository
-                        .compact_descendant_receipt_request(&reconciliation)
-                        .map_err(map_publication_repository_error)?
-                        .ok_or(Error::RefConflict)?;
-                    (pending, true)
-                }
-            };
-            // A validated receipt is enough to finalize; schema identity is needed only
-            // to rebuild an unconsumed prefix.
-            if let Some(receipt) = runtime
-                .persisted_compact_publication_receipt(&pending)
-                .await
-                .map_err(map_compact_runtime_error)?
-            {
-                return repository
-                    .finish_compact_with_receipt(&receipt)
-                    .map(Some)
-                    .map_err(map_publication_repository_error);
-            }
-            if descendant {
-                // A descendant already includes the candidate. Without its
-                // original durable receipt, rebuilding or re-consuming the
-                // frozen prefix could publish a duplicate generation.
-                return Err(Error::RefConflict);
-            }
-            let (profile, table_identity) = compact_profile.ok_or(Error::InvalidTransition)?;
-            let trusted_schema = trusted_compact_schema_descriptor(
-                repository,
-                journal.old_head(),
-                Uuid::from_bytes(profile.table_id()),
-                profile.schema_fingerprint(),
-                &journal,
-                pending.commit(),
-            )?;
-            let witness = journal
-                .compact_manifest()
-                .ok_or(Error::InvalidTransition)?;
-            if CompactOvbProfile::new(trusted_schema)
-                .map_err(|_| Error::InvalidTransition)?
-                != *profile
-                || table_identity.table_id != profile.table_id()
-                || table_identity.schema_fingerprint != profile.schema_fingerprint()
-                || table_identity.candidate_generation != witness.generation()
-            {
-                return Err(Error::InvalidTransition);
-            }
-            let freeze = runtime
-                .publication_freeze_compact(
-                    pending.runtime_intent_id(),
-                    std::slice::from_ref(table_identity),
-                )
-                .await
-                .map_err(map_compact_runtime_error)?;
-            if freeze.intent_id != pending.runtime_intent_id()
-                || freeze.checkpoint.digest != pending.cleanup_watermark()
-            {
-                return Err(Error::InvalidTransition);
-            }
-            let base = load_compact_base_from_commit(repository, journal.old_head(), profile)?;
-            let writer_input = lower_compact_freeze(profile, &freeze)?;
-            let writer_input = base
-                .fold_writer_input(&writer_input)
-                .map_err(|_| Error::InvalidTransition)?;
-            let expected = base
-                .apply_writer_input(&writer_input)
-                .map_err(|_| Error::InvalidTransition)?;
-            verify_compact_candidate_rows(
-                repository,
-                profile,
-                &freeze,
-                &pending,
-                &expected,
-                writer_input.candidate_generation,
-            )?;
-            runtime
-                .bind_compact_publication(&pending, &freeze)
-                .await
-                .map_err(map_compact_runtime_error)?;
-            let receipt = runtime
-                .complete_compact_publication(&pending, &freeze)
-                .await
-                .map_err(map_compact_runtime_error)?;
+            // Without a journal, an Orna-marked lock may still have been left
+            // before Prepared; the repository reclaims it before reporting none.
             return repository
-                .finish_compact_with_receipt(&receipt)
-                .map(Some)
+                .recover_publication()
                 .map_err(map_publication_repository_error);
+        };
+        refuse_retired_writer_journal(repository, &journal)?;
+        if repository
+            .publication_journal_is_reviewed(&journal)
+            .map_err(map_publication_repository_error)?
+        {
+            // A reviewed commit is completed by `commit_reviewed_candidate`,
+            // which records its runtime intent with `mark_runtime_complete`.
+            // It never had a runtime freeze, so none is requested here.
+            return match repository.recover_publication() {
+                Ok(index) => Ok(index),
+                Err(RepositoryError::PublicationPending | RepositoryError::RuntimeCompletionRequired) => {
+                    Err(Error::PublicationPending)
+                }
+                Err(error) => Err(map_publication_repository_error(error)),
+            };
         }
         let intent_id = journal
             .runtime_intent_id()
@@ -2324,87 +1425,6 @@ impl RuntimePublicationCoordinator {
     }
 }
 
-/// Loads a schema descriptor only from a validated committed compact segment.
-/// The journal must bind the supplied source and candidate commits, and its
-/// compact witness must bind the requested table and schema fingerprint.
-///
-/// Schema and table identities are never inferred from decoded row contents
-/// or source syntax; every returned descriptor came through the repository's
-/// committed-object and Parquet validation boundary.
-pub fn trusted_compact_schema_descriptor(
-    repository: &Repository,
-    source: &GitCommitRef,
-    table: Uuid,
-    schema: [u8; 32],
-    journal: &PublicationJournal,
-    candidate: &GitCommitRef,
-) -> Result<SchemaDescriptor, Error> {
-    let witness = journal
-        .compact_manifest()
-        .ok_or(Error::InvalidTransition)?;
-    if journal.old_head() != source
-        || journal.new_head() != candidate
-        || witness.table() != table
-        || repository
-            .head()
-            .map_err(map_publication_repository_error)?
-            .as_ref()
-            != Some(candidate)
-    {
-        return Err(Error::InvalidTransition);
-    }
-    let manifest = repository
-        .read_compact_manifest(candidate, table)
-        .map_err(map_publication_repository_error)?
-        .ok_or(Error::InvalidTransition)?;
-    if manifest.schema() != schema {
-        return Err(Error::InvalidTransition);
-    }
-    let projections = repository
-        .read_compact_committed_base_from_commit(
-            candidate,
-            table,
-            schema,
-            COMPACT_STORAGE_PROFILE,
-            |_entry, projection| Ok(projection.source_schema().clone()),
-        )
-        .map_err(map_publication_repository_error)?;
-    let mut descriptors = projections.into_iter();
-    let descriptor = descriptors.next().ok_or(Error::InvalidTransition)?;
-    if descriptors.any(|other| other != descriptor) {
-        return Err(Error::InvalidTransition);
-    }
-    Ok(descriptor)
-}
-
-/// Publishes and completes a compact publication through the runtime
-/// coordinator. The plan's candidate is not exposed as a standalone
-/// publication operation; this production boundary owns both the repository
-/// publication and the fenced runtime cleanup.
-///
-/// The freeze checkpoint digest is the cleanup watermark: it binds the runtime
-/// range to this compact journal rather than merely to a plausible commit. The
-/// runtime transaction preserves mutations appended after the frozen prefix.
-/// The repository coordination lock stays held from witness proof through the
-/// runtime transaction, so concurrent Orna publishers cannot change the
-/// publication boundary during cleanup. Native Git writers remain outside that
-/// lock; completion rechecks HEAD and retains the journal if one wins that
-/// external race after runtime commit.
-///
-pub async fn complete_verified_compact_runtime_prefix(
-    repository: &Repository,
-    runtime: &RuntimeState,
-    profile: &CompactOvbProfile,
-    freeze: &PublicationFreeze,
-    plan: CompactPublicationPlan,
-) -> Result<(), Error> {
-    RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-        repository, runtime, profile, freeze, plan,
-    )
-    .await
-    .map(|_| ())
-}
-
 fn map_publication_repository_error(error: RepositoryError) -> Error {
     match error {
         RepositoryError::InvalidPublicationJournal | RepositoryError::InvalidCompactManifest => {
@@ -2419,472 +1439,59 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
     }
 }
 
-fn validate_manifest_generation_binding(
-    manifest: &CompactManifest,
-    writer_input: &CompactWriterInput,
-) -> Result<(), Error> {
-    if writer_input.candidate_generation.checked_add(1) != Some(manifest.next_generation()) {
-        return Err(Error::InvalidTransition);
-    }
-    Ok(())
-}
-
-fn load_compact_base_at(
+/// Opens the committed format context at `snapshot` only when that snapshot
+/// has a row writer. Format-1/2 commits keep their versioned readers, but the
+/// loose and compact row writers are retired (ORNA-UPGRADE-003, ORNA-ROW-013).
+/// They fail with [`Error::LegacyReadOnly`], so publication onto them writes
+/// nothing until the repository is migrated to format 3.
+pub fn writable_snapshot_context(
     repository: &Repository,
-    head: &GitCommitRef,
-    profile: &CompactOvbProfile,
-) -> Result<CompactBaseState, Error> {
-    let table = Uuid::from_bytes(profile.table_id());
-    let manifest = repository
-        .read_compact_manifest(head, table)
-        .map_err(map_publication_repository_error)?;
-    let Some(manifest) = manifest else {
-        return fold_compact_committed_base(profile, std::iter::empty(), 1)
-            .map_err(|_| Error::InvalidTransition);
-    };
-    if manifest.schema() != profile.schema_fingerprint() {
-        return Err(Error::InvalidTransition);
+    snapshot: &GitCommitRef,
+) -> Result<HistoricalFormatContext, Error> {
+    let context = repository
+        .open_format_context_at_selector(snapshot.as_str())
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    match context.repository_format() {
+        RepositoryFormat::Format3 => Ok(context),
+        legacy => Err(Error::LegacyReadOnly {
+            format: legacy.number(),
+        }),
     }
-    let projections = repository
-        .read_compact_committed_base(
-            head,
-            table,
-            profile.schema_fingerprint(),
-            COMPACT_STORAGE_PROFILE,
-            |_entry, projection| Ok(projection.clone()),
-        )
-        .map_err(map_publication_repository_error)?;
-    fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
-        .map_err(|_| Error::InvalidTransition)
 }
 
-fn load_compact_base_from_commit(
+/// Refuses a publication journal written by a retired legacy writer. Only the
+/// compact writer recorded a compact witness, and a non-migration journal over
+/// a format-1/2 snapshot came from the loose writer. This build can finish
+/// neither, so the journal, ref, index, worktree and runtime tail stay as
+/// they are. A migration journal is the format-3 transition itself.
+fn refuse_retired_writer_journal(
     repository: &Repository,
-    commit: &GitCommitRef,
-    profile: &CompactOvbProfile,
-) -> Result<CompactBaseState, Error> {
-    let table = Uuid::from_bytes(profile.table_id());
-    let manifest = repository
-        .read_compact_manifest(commit, table)
-        .map_err(map_publication_repository_error)?;
-    let Some(manifest) = manifest else {
-        return fold_compact_committed_base(profile, std::iter::empty(), 1)
-            .map_err(|_| Error::InvalidTransition);
-    };
-    if manifest.schema() != profile.schema_fingerprint() {
-        return Err(Error::InvalidTransition);
-    }
-    let projections = repository
-        .read_compact_committed_base_from_commit(
-            commit,
-            table,
-            profile.schema_fingerprint(),
-            COMPACT_STORAGE_PROFILE,
-            |_entry, projection| Ok(projection.clone()),
-        )
-        .map_err(map_publication_repository_error)?;
-    fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
-        .map_err(|_| Error::InvalidTransition)
-}
-
-fn verify_compact_candidate_rows(
-    repository: &Repository,
-    profile: &CompactOvbProfile,
-    freeze: &PublicationFreeze,
-    pending: &orna_repository_v1::CompactPublicationPending,
-    expected: &CompactBaseState,
-    candidate_generation: u64,
+    journal: &PublicationJournal,
 ) -> Result<(), Error> {
-    if pending.runtime_intent_id() != freeze.intent_id
-        || pending.cleanup_watermark() != freeze.checkpoint.digest
-    {
-        return Err(Error::InvalidTransition);
+    let compact = journal.compact_manifest().is_some();
+    if !compact && journal.migration_continuity().is_some() {
+        return Ok(());
     }
-    verify_compact_candidate_rows_at_commit(
-        repository,
-        profile,
-        pending.commit(),
-        expected,
-        candidate_generation,
-    )
-}
-
-fn verify_compact_candidate_rows_at_commit(
-    repository: &Repository,
-    profile: &CompactOvbProfile,
-    commit: &GitCommitRef,
-    expected: &CompactBaseState,
-    candidate_generation: u64,
-) -> Result<(), Error> {
-    let table = Uuid::from_bytes(profile.table_id());
-    let manifest = repository
-        .read_compact_manifest(commit, table)
-        .map_err(map_publication_repository_error)?
-        .ok_or(Error::InvalidTransition)?;
-    if manifest.schema() != profile.schema_fingerprint()
-        || candidate_generation.checked_add(1) != Some(manifest.next_generation())
-    {
-        return Err(Error::InvalidTransition);
+    match writable_snapshot_context(repository, journal.old_head()) {
+        Err(error @ Error::LegacyReadOnly { .. }) => Err(error),
+        // A compact witness over anything but a legacy base is malformed.
+        _ if compact => Err(Error::InvalidPublicationJournal),
+        _ => Ok(()),
     }
-    let projections = repository
-        .read_compact_committed_base_from_commit(
-            commit,
-            table,
-            profile.schema_fingerprint(),
-            COMPACT_STORAGE_PROFILE,
-            |_entry, projection| Ok(projection.clone()),
-        )
-        .map_err(map_publication_repository_error)?;
-    let actual = fold_compact_committed_base(profile, projections.iter(), manifest.next_generation())
-        .map_err(|_| Error::InvalidTransition)?;
-    if !expected.has_same_logical_rows(&actual) {
-        return Err(Error::InvalidTransition);
-    }
-    Ok(())
-}
-
-/// Translates only the runtime outcomes reachable from the compact receipt
-/// boundary. Invariant and receipt-binding failures are a caller-visible
-/// storage transition failure; only durable runtime availability is reported
-/// as unavailable.
-fn map_compact_runtime_error(error: RuntimeError) -> Error {
-    match error {
-        RuntimeError::StorageUnavailable => Error::RuntimeUnavailable,
-        RuntimeError::InvalidIdentity
-        | RuntimeError::SystemProviderAbiInvalid
-        | RuntimeError::InvalidDigest
-        | RuntimeError::InvalidObservationReference
-        | RuntimeError::ObservationCoordinateMismatch
-        | RuntimeError::ProcedureMaterializationConflict
-        | RuntimeError::InvocationObservationConflict | RuntimeError::QueryObservationConflict
-        | RuntimeError::InvocationStateConflict | RuntimeError::QueryStateConflict
-        | RuntimeError::InvocationChildrenActive
-        | RuntimeError::InvocationOwnerInvalid
-        | RuntimeError::InvocationTailInvalid
-        | RuntimeError::InvocationTailLimit
-        | RuntimeError::AdminInvocationConflict
-        | RuntimeError::ConflictingPublicationIntent
-        | RuntimeError::ConflictingPublicationCommit
-        | RuntimeError::InvalidPublicationCommit
-        | RuntimeError::InvalidPublicationPolicy
-        | RuntimeError::CompactPublicationRequired
-        | RuntimeError::CompactReceiptKeyMismatch
-        | RuntimeError::InvalidCompactReceipt
-        | RuntimeError::RecoveryInvalid
-        | RuntimeError::CheckpointNotReplayable
-        | RuntimeError::StreamSourceNotReplayable
-        | RuntimeError::SnapshotNotFound
-        | RuntimeError::SnapshotIncomplete
-        | RuntimeError::SnapshotContextMismatch => Error::InvalidTransition,
-        RuntimeError::RecoveryPending | RuntimeError::AdminBusy => Error::RuntimeUnavailable,
-        RuntimeError::StreamIdentityMismatch
-        | RuntimeError::StreamCheckpointStale
-        | RuntimeError::LeaseHeld
-        | RuntimeError::OwnerLost
-        | RuntimeError::StaleCapture { .. }
-        | RuntimeError::InvalidCapture
-        | RuntimeError::EmptyMutationBatch
-        | RuntimeError::InvalidTableMutation
-        | RuntimeError::RequestUnknown
-        | RuntimeError::RequestFingerprintMismatch
-        | RuntimeError::RequestOwnerConflict
-        | RuntimeError::RequestStateConflict
-        | RuntimeError::SessionClosed
-        | RuntimeError::SessionWorkActive
-        | RuntimeError::TerminalOutcomeTooLarge
-        | RuntimeError::FaultInjected(_) => Error::RuntimeUnavailable,
-    }
-}
-
-fn hex_id(id: [u8; 16]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(32);
-    for byte in id {
-        text.push(HEX[(byte >> 4) as usize] as char);
-        text.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    text
-}
-
-fn validate_portable_paths<'a>(
-    paths: impl IntoIterator<Item = &'a LoosePath>,
-) -> Result<(), Error> {
-    let mut siblings = BTreeMap::new();
-    for path in paths {
-        let mut prefix = Vec::new();
-        for (index, component) in path.0.as_path().iter().enumerate() {
-            let component = component.to_str().ok_or(Error::UnsafePath)?;
-            // Table roots are supplied by the schema adapter; collisions here
-            // concern encoded key siblings within the same table.
-            prefix.push(if index == 0 {
-                component.to_owned()
-            } else {
-                // Nested composite-key directories need the same portable
-                // sibling check as first-level keys after path escaping.
-                component.to_ascii_lowercase()
-            });
-            if let Some(previous) = siblings.insert(prefix.clone(), component)
-                && previous != component
-            {
-                return Err(Error::PathCollision);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefName(String);
-impl RefName {
-    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
-        let value = value.into();
-        if value.is_empty() || !value.starts_with("refs/") {
-            Err(Error::InvalidRef)
-        } else {
-            Ok(Self(value))
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GitObjectId(String);
-impl GitObjectId {
-    pub fn new(value: impl Into<String>) -> Result<Self, Error> {
-        let value = value.into();
-        if value.len() < 4 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            Err(Error::InvalidObjectId)
-        } else {
-            Ok(Self(value))
-        }
-    }
-}
-
-/// A byte-exact, simplified ordinary index image. Its map representation makes
-/// the carry-forward rule observable without claiming to implement Git's file format.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct IndexImage(BTreeMap<LoosePath, Option<LooseRow>>);
-impl IndexImage {
-    pub fn entry(&self, path: LoosePath, row: Option<LooseRow>) -> Self {
-        let mut next = self.clone();
-        next.0.insert(path, row);
-        next
-    }
-    pub fn get(&self, path: &LoosePath) -> Option<&Option<LooseRow>> {
-        self.0.get(path)
-    }
-}
-
-/// Carry the staged difference from H to the private candidate N. Any staged
-/// managed-path difference is an overlap and must have been rejected at capture.
-pub fn reconcile_index(
-    base: &IndexImage,
-    ordinary: &IndexImage,
-    publication: &FrozenBatch,
-) -> Result<IndexImage, Error> {
-    let mut result = ordinary.clone();
-    for mutation in &publication.mutations {
-        if ordinary.get(&mutation.path) != base.get(&mutation.path) {
-            return Err(Error::IndexConflict {
-                path: mutation.path.clone(),
-            });
-        }
-        result
-            .0
-            .insert(mutation.path.clone(), mutation.next.clone());
-    }
-    validate_portable_paths(
-        result
-            .0
-            .iter()
-            .filter_map(|(path, row)| row.as_ref().map(|_| path)),
-    )?;
-    Ok(result)
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PubJournal {
-    pub batch: FrozenBatch,
-    pub target: RefName,
-    pub old: GitObjectId,
-    pub new: GitObjectId,
-    pub base_index: IndexImage,
-    pub reconciled_index: IndexImage,
-    pub stage: JournalStage,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JournalStage {
-    Journaled,
-    RefAdvanced,
-    IndexReconciled,
-    Cleaned,
-    Complete,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Publication {
-    journal: PubJournal,
-}
-impl Publication {
-    pub fn prepare(
-        batch: FrozenBatch,
-        target: RefName,
-        old: GitObjectId,
-        new: GitObjectId,
-        base: IndexImage,
-        ordinary: IndexImage,
-    ) -> Result<Self, Error> {
-        let reconciled_index = reconcile_index(&base, &ordinary, &batch)?;
-        Ok(Self {
-            journal: PubJournal {
-                batch,
-                target,
-                old,
-                new,
-                base_index: ordinary,
-                reconciled_index,
-                stage: JournalStage::Journaled,
-            },
-        })
-    }
-    pub fn journal(&self) -> &PubJournal {
-        &self.journal
-    }
-    pub fn advance_ref(&mut self, observed: &GitObjectId) -> Result<(), Error> {
-        if observed != &self.journal.old {
-            return Err(Error::RefConflict);
-        }
-        self.journal.stage = JournalStage::RefAdvanced;
-        Ok(())
-    }
-    pub fn install_index(&mut self, observed: &IndexImage) -> Result<(), Error> {
-        if self.journal.stage != JournalStage::RefAdvanced {
-            return Err(Error::InvalidTransition);
-        }
-        if observed != &self.journal.base_index {
-            return Err(Error::RecoveryIndexConflict);
-        }
-        self.journal.stage = JournalStage::IndexReconciled;
-        Ok(())
-    }
-    pub fn cleanup(&mut self) -> Result<(), Error> {
-        if self.journal.stage != JournalStage::IndexReconciled {
-            return Err(Error::InvalidTransition);
-        }
-        self.journal.stage = JournalStage::Cleaned;
-        Ok(())
-    }
-    pub fn complete(&mut self) -> Result<(), Error> {
-        if self.journal.stage != JournalStage::Cleaned {
-            return Err(Error::InvalidTransition);
-        }
-        self.journal.stage = JournalStage::Complete;
-        Ok(())
-    }
-
-    /// Computes the only safe recovery action; Git/filesystem effects remain
-    /// unsupported adapter responsibilities.
-    pub fn recover(
-        &mut self,
-        observed_ref: &GitObjectId,
-        observed_index: &IndexImage,
-    ) -> Result<Recovery, Error> {
-        if observed_ref == &self.journal.old {
-            if observed_index != &self.journal.base_index {
-                return Err(Error::RecoveryIndexConflict);
-            }
-            self.journal.stage = JournalStage::Journaled;
-            return Ok(Recovery::KeepPending);
-        }
-        if observed_ref != &self.journal.new {
-            return Err(Error::RefConflict);
-        }
-        if observed_index == &self.journal.base_index {
-            // The durable journal can prove that reconciliation is still
-            // required, but it cannot claim the index was installed before
-            // the adapter performs that action.
-            self.journal.stage = JournalStage::RefAdvanced;
-            return Ok(Recovery::InstallIndex(
-                self.journal.reconciled_index.clone(),
-            ));
-        }
-        if observed_index == &self.journal.reconciled_index {
-            self.journal.stage = JournalStage::Cleaned;
-            return Ok(Recovery::FinishCleanup);
-        }
-        Err(Error::RecoveryIndexConflict)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Recovery {
-    KeepPending,
-    InstallIndex(IndexImage),
-    FinishCleanup,
-}
-
-/// Explicitly unsupported I/O boundary. Consumers may provide an adapter only
-/// after separately meeting PUB-1's locking, flushing and Git CAS obligations.
-pub trait PublicationProvider {
-    type Error: std::error::Error + Send + Sync + 'static;
-    fn unsupported_git_io(&self) -> Result<(), Self::Error>;
-}
-
-/// A compile-time bridge to the existing v1 repository/runtime direction-only
-/// contract, without assuming a provider can perform publication I/O.
-pub fn capture_runtime<A: RepositoryGenerationAdapter>(
-    adapter: &A,
-) -> Result<(RepositoryIdentity, CwdCapture), Error> {
-    let identity = adapter
-        .require_cwd()
-        .map_err(|_| Error::RuntimeUnavailable)?;
-    let capture = adapter
-        .capture_cwd(identity)
-        .map_err(|_| Error::RuntimeUnavailable)?;
-    Ok((identity, capture))
-}
-
-/// Binds a journal entry to the existing runtime's durable freeze identity.
-/// The caller retains responsibility for reading and consuming the frozen range.
-pub const fn runtime_freeze_id(freeze: &orna_runtime_v1::PublicationFreeze) -> [u8; 16] {
-    freeze.intent_id
-}
-
-/// Lowers a runtime compact freeze through the schema-bound storage
-/// consumer. Callers must supply the authoritative schema profile; the
-/// lowerer rejects mismatched identity, ordering, witness, and generation
-/// state before any repository publication step.
-pub fn lower_compact_freeze(
-    profile: &CompactOvbProfile,
-    freeze: &PublicationFreeze,
-) -> Result<CompactWriterInput, Error> {
-    lower_publication_freeze(profile, freeze).map_err(|_| Error::InvalidTransition)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Error {
-    InvalidMutationId,
     InvalidTableRoot,
     InvalidKey,
-    HybridBaseMismatch,
-    HybridDuplicateKey {
-        key: CompactKeyIdentity,
-    },
     UnsafePath,
-    InvalidRow,
-    PathCollision,
     IncompleteStaging,
-    InvalidRef,
     InvalidObjectId,
-    MutationReplayConflict {
-        id: MutationId,
-    },
-    ExternalConflict {
-        path: LoosePath,
-        expected: Option<RowHash>,
-        actual: Option<RowHash>,
-    },
-    IndexConflict {
-        path: LoosePath,
+    /// The publication target is a format-1/2 compatibility snapshot. It
+    /// remains readable, but it has no row writer until it is migrated to
+    /// format 3.
+    LegacyReadOnly {
+        format: u8,
     },
     RecoveryIndexConflict,
     RefConflict,
@@ -2898,20 +1505,17 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidMutationId => "invalid mutation id",
             Self::InvalidTableRoot => "invalid table root",
             Self::InvalidKey => "invalid loose row key",
-            Self::HybridBaseMismatch => "hybrid compact base does not match the schema profile",
-            Self::HybridDuplicateKey { .. } => "hybrid logical key conflict",
             Self::UnsafePath => "unsafe loose row path",
-            Self::InvalidRow => "invalid loose row",
-            Self::PathCollision => "portable loose-row path collision",
             Self::IncompleteStaging => "incomplete publication staging",
-            Self::InvalidRef => "invalid ref",
             Self::InvalidObjectId => "invalid object id",
-            Self::MutationReplayConflict { .. } => "mutation replay conflicts",
-            Self::ExternalConflict { .. } => "external loose-row conflict",
-            Self::IndexConflict { .. } => "managed path conflicts with ordinary index",
+            Self::LegacyReadOnly { format } => {
+                return write!(
+                    f,
+                    "repository format {format} is a read-only legacy snapshot; migrate it to format 3 before publishing"
+                );
+            }
             Self::RecoveryIndexConflict => "recovery index conflict",
             Self::RefConflict => "publication ref conflict",
             Self::ManagedWorktreeConflict => "managed worktree content conflict",
@@ -2931,7 +1535,10 @@ mod tests {
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     use bytes::Bytes;
     use orna_foundation_v1::{CanonicalValue, OvbRaw};
-    use orna_repository_v1::{CompactManifest, CompactSegment, CompactSegmentRole, Uuid};
+    use orna_repository_v1::{
+        CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole,
+        ManagedFileChange, Uuid,
+    };
     use parquet::file::{
         metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
         reader::{FileReader, SerializedFileReader},
@@ -2939,46 +1546,6 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{fs, path::Path, process::Command};
     use tempfile::TempDir;
-
-    #[test]
-    fn recovery_pending_maps_to_temporary_storage_unavailability() {
-        assert_eq!(
-            map_compact_runtime_error(RuntimeError::RecoveryPending),
-            Error::RuntimeUnavailable
-        );
-    }
-
-    #[test]
-    fn admin_busy_maps_to_temporary_storage_unavailability() {
-        assert_eq!(
-            map_compact_runtime_error(RuntimeError::AdminBusy),
-            Error::RuntimeUnavailable
-        );
-    }
-
-    #[test]
-    fn admin_invocation_identity_conflict_maps_to_invalid_transition() {
-        assert_eq!(
-            map_compact_runtime_error(RuntimeError::AdminInvocationConflict),
-            Error::InvalidTransition
-        );
-    }
-
-    #[test]
-    fn checkpoint_not_replayable_maps_to_invalid_transition() {
-        assert_eq!(
-            map_compact_runtime_error(RuntimeError::CheckpointNotReplayable),
-            Error::InvalidTransition
-        );
-    }
-
-    #[test]
-    fn stream_source_not_replayable_maps_to_invalid_transition() {
-        assert_eq!(
-            map_compact_runtime_error(RuntimeError::StreamSourceNotReplayable),
-            Error::InvalidTransition
-        );
-    }
 
     fn git(directory: &Path, arguments: &[&str]) {
         assert!(
@@ -3114,15 +1681,6 @@ mod tests {
         digest.finalize().into()
     }
 
-    fn compact_publication_identity(profile: &CompactOvbProfile) -> PublicationTableIdentity {
-        PublicationTableIdentity {
-            table: "Contact".to_owned(),
-            table_id: profile.table_id(),
-            schema_fingerprint: profile.schema_fingerprint(),
-            candidate_generation: 1,
-        }
-    }
-
     fn compact_schema_hex(schema: [u8; 32]) -> String {
         schema
             .into_iter()
@@ -3176,29 +1734,16 @@ mod tests {
         (bytes, fingerprint)
     }
 
-    fn compact_runtime_plan(
+    /// Builds a compact candidate and its journal with the test-only legacy
+    /// fixture writer, exactly as the retired compact writer left them before
+    /// its ref advanced.
+    fn legacy_compact_plan(
         repository: &Repository,
         freeze: &PublicationFreeze,
-    ) -> CompactPublicationPlan {
-        compact_runtime_plan_with_base(
-            repository,
-            freeze,
-            CompactManifest::empty(
-                Uuid::from_u128(1),
-                compact_schema_fingerprint(&compact_schema()),
-            ),
-            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001),
-        )
-    }
-
-    fn compact_runtime_plan_with_base(
-        repository: &Repository,
-        freeze: &PublicationFreeze,
-        base: CompactManifest,
-        segment_id: Uuid,
     ) -> CompactPublicationPlan {
         let (parquet, schema) = compact_runtime_parquet();
         let table = Uuid::from_u128(1);
+        let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
         let segment_path = ManagedPath::new(format!(
             ".orna/storage/{table}/data/{}/{segment_id}.parquet",
             &segment_id.to_string()[..2]
@@ -3224,7 +1769,7 @@ mod tests {
             .prepare_compact_publication(
                 &head,
                 repository.index_generation().unwrap(),
-                base,
+                CompactManifest::empty(table, schema),
                 freeze.intent_id,
                 freeze.checkpoint.digest,
                 &[segment],
@@ -3233,1214 +1778,103 @@ mod tests {
             .unwrap()
     }
 
-    async fn compact_runtime_unpublished_fixture() -> (
-        TempDir,
-        Repository,
-        RuntimeState,
-        PublicationFreeze,
-        CompactPublicationPlan,
-    ) {
-        let (temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [71; 16],
-                repository_id: [72; 16],
-            },
-            [73; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([74; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [75; 16],
-                    "Contact",
-                    b"compact row".to_vec(),
-                    Some(b"compact row".to_vec()),
-                )
-                .unwrap()],
-                [76; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [77; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [76; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let tail_context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &tail_context,
-                &[TableMutation::new(
-                    [78; 16],
-                    "Contact",
-                    b"Bob".to_vec(),
-                    Some(b"tail row".to_vec()),
-                )
-                .unwrap()],
-                [79; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let plan = compact_runtime_plan(&repository, &freeze);
-        (temp, repository, runtime, freeze, plan)
-    }
-
-    #[tokio::test]
-    async fn compact_production_entrypoint_rejects_freeze_without_compact_identity() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-
-        assert_eq!(
-            complete_verified_compact_runtime_prefix(
-                &repository,
-                &runtime,
-                &profile,
-                &freeze,
-                plan,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-
-        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn candidate_manifest_next_generation_follows_the_published_generation() {
-        let (_temp, repository, _runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        assert!(plan.matches_runtime_freeze(freeze.intent_id, freeze.checkpoint.digest));
-        let writer_input = CompactWriterInput {
-            table_id: profile.table_id(),
-            schema_fingerprint: profile.schema_fingerprint(),
-            candidate_generation: 1,
-            row_encoding_identity: orna_runtime_v1::PublicationRowEncoding::CompactOvb1,
-            value_encoding_identity: orna_runtime_v1::PublicationValueEncoding::Ovb1,
-            mutations: Vec::new(),
-            candidate_digest: [0; 32],
-        };
-        assert_eq!(
-            validate_manifest_generation_binding(plan.manifest(), &writer_input),
-            Ok(())
-        );
-
-        let mut stale_input = writer_input;
-        stale_input.candidate_generation = 2;
-        assert_eq!(
-            validate_manifest_generation_binding(plan.manifest(), &stale_input),
-            Err(Error::InvalidTransition)
-        );
-        assert!(repository.read_publication_journal().unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn compact_candidate_row_mismatch_is_rejected_before_ref_advancement() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        let old_head = repository.head().unwrap().unwrap();
-        let empty_base = load_compact_base_at(&repository, &old_head, &profile).unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_candidate_and_complete(
-                &repository,
-                &runtime,
-                &profile,
-                &freeze,
-                plan,
-                &empty_base,
-                1,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-        assert_eq!(repository.head().unwrap(), Some(old_head));
-        assert!(repository.read_publication_journal().unwrap().is_none());
-        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn compact_coordinator_rejects_legacy_freeze_without_compact_identity() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        assert_eq!(RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-            &repository,
-            &runtime,
-            &profile,
-            &freeze,
-            plan,
-        )
-        .await, Err(Error::InvalidTransition));
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn compact_reader_visibility_switches_at_the_durable_runtime_watermark() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let old_head = repository.head().unwrap().unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
-                .await
-                .unwrap(),
-            CompactReaderVisibility {
-                snapshot: old_head.clone(),
-                tail: CompactTailWindow::AllPending,
-            }
-        );
-
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
-                .await
-                .unwrap(),
-            CompactReaderVisibility {
-                snapshot: old_head,
-                tail: CompactTailWindow::AllPending,
-            }
-        );
-
-        runtime
-            .bind_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-        runtime
-            .complete_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime)
-                .await
-                .unwrap(),
-            CompactReaderVisibility {
-                snapshot: pending.commit().clone(),
-                tail: CompactTailWindow::AfterWatermark(freeze.checkpoint.mutation_sequence),
-            }
-        );
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert!(repository.read_publication_journal().unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn compact_reader_visibility_rejects_an_aliased_candidate_snapshot() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-        runtime
-            .bind_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-        runtime
-            .complete_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-
-        let journal = repository.read_publication_journal().unwrap().unwrap();
-        let mut forged = PublicationJournal::new_with_runtime_intent(
-            journal.old_head().clone(),
-            journal.old_head().clone(),
-            journal.base_index_tree().unwrap().clone(),
-            journal.runtime_intent_id().unwrap(),
-            journal.entries().to_vec(),
-        )
-        .unwrap()
-        .with_compact_manifest(journal.compact_manifest().unwrap().clone())
-        .unwrap();
-        for stage in [
-            orna_repository_v1::PublicationJournalStage::RefAdvanced,
-            orna_repository_v1::PublicationJournalStage::IndexReconciled,
-            orna_repository_v1::PublicationJournalStage::WorktreeReconciled,
-            orna_repository_v1::PublicationJournalStage::RuntimeCompleted,
-        ] {
-            forged.advance(stage).unwrap();
-        }
-        repository.write_publication_journal(&forged).unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::InvalidTransition)
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_reader_visibility_does_not_trust_a_finalization_marker_without_cleanup() {
-        let (_temp, repository, runtime, _freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-
-        let mut journal = repository.read_publication_journal().unwrap().unwrap();
-        journal
-            .advance(orna_repository_v1::PublicationJournalStage::RuntimeCompleted)
-            .unwrap();
-        repository.write_publication_journal(&journal).unwrap();
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::InvalidTransition)
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_reader_visibility_rejects_a_journal_with_a_mismatched_runtime_watermark() {
-        let (_temp, repository, runtime, freeze, _plan) =
-            compact_runtime_unpublished_fixture().await;
-        let mismatched_freeze = PublicationFreeze {
-            intent_id: freeze.intent_id,
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: freeze.checkpoint.generation,
-                digest: [98; 32],
-                mutation_sequence: freeze.checkpoint.mutation_sequence,
-            },
-            candidate_digest: freeze.candidate_digest,
-            mutations: freeze.mutations.clone(),
-        };
-        let plan = compact_runtime_plan(&repository, &mismatched_freeze);
-        repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::InvalidTransition)
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_reader_visibility_rejects_cleanup_before_candidate_reconciliation() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-        runtime
-            .bind_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-        runtime
-            .complete_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-
-        let journal = repository.read_publication_journal().unwrap().unwrap();
-        let mut forged = PublicationJournal::new_with_runtime_intent(
-            journal.old_head().clone(),
-            journal.new_head().clone(),
-            journal.base_index_tree().unwrap().clone(),
-            journal.runtime_intent_id().unwrap(),
-            journal.entries().to_vec(),
-        )
-        .unwrap()
-        .with_compact_manifest(journal.compact_manifest().unwrap().clone())
-        .unwrap();
-        forged
-            .advance(orna_repository_v1::PublicationJournalStage::RefAdvanced)
-            .unwrap();
-        repository.write_publication_journal(&forged).unwrap();
-
-        assert_eq!(runtime.pending_through(&freeze).await.unwrap(), Vec::new());
-        assert_eq!(
-            RuntimePublicationCoordinator::compact_reader_visibility(&repository, &runtime).await,
-            Err(Error::InvalidTransition)
-        );
-    }
-
-    #[tokio::test]
-    async fn compact_restart_completion_reuses_the_witness_fence() {
-        let (_temp, repository, runtime, _freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        let identity = compact_publication_identity(&profile);
-        assert_eq!(
-            RuntimePublicationCoordinator::recover_compact_validated(
-                &repository,
-                &runtime,
-                &profile,
-                &identity,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert!(repository.read_publication_journal().unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn compact_witness_mismatch_preserves_journal_and_runtime_tail() {
-        let (_temp, repository, runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let mismatched = PublicationFreeze {
-            intent_id: freeze.intent_id,
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: freeze.checkpoint.generation,
-                digest: [99; 32],
-                mutation_sequence: freeze.checkpoint.mutation_sequence,
-            },
-            candidate_digest: freeze.candidate_digest,
-            mutations: freeze.mutations.clone(),
-        };
-
-        assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-                &repository,
-                &runtime,
-                &CompactOvbProfile::new(compact_schema()).unwrap(),
-                &mismatched,
-                plan,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn compact_plan_with_wrong_runtime_intent_is_rejected_before_publication() {
-        let (_temp, repository, runtime, freeze, _plan) =
-            compact_runtime_unpublished_fixture().await;
-        let wrong_plan_freeze = PublicationFreeze {
-            intent_id: [80; 16],
-            checkpoint: freeze.checkpoint.clone(),
-            candidate_digest: freeze.candidate_digest,
-            mutations: freeze.mutations.clone(),
-        };
-        let plan = compact_runtime_plan(&repository, &wrong_plan_freeze);
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-                &repository,
-                &runtime,
-                &CompactOvbProfile::new(compact_schema()).unwrap(),
-                &freeze,
-                plan,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-
-        assert_eq!(repository.head().unwrap(), Some(head));
-        assert_eq!(repository.index_generation().unwrap(), index);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn compact_plan_with_wrong_cleanup_watermark_is_rejected_before_publication() {
-        let (_temp, repository, runtime, freeze, _plan) =
-            compact_runtime_unpublished_fixture().await;
-        let wrong_plan_freeze = PublicationFreeze {
-            intent_id: freeze.intent_id,
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: freeze.checkpoint.generation,
-                digest: [81; 32],
-                mutation_sequence: freeze.checkpoint.mutation_sequence,
-            },
-            candidate_digest: freeze.candidate_digest,
-            mutations: freeze.mutations.clone(),
-        };
-        let plan = compact_runtime_plan(&repository, &wrong_plan_freeze);
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-
-        assert_eq!(
-            RuntimePublicationCoordinator::publish_compact_and_complete_validated(
-                &repository,
-                &runtime,
-                &CompactOvbProfile::new(compact_schema()).unwrap(),
-                &freeze,
-                plan,
-            )
-            .await,
-            Err(Error::InvalidTransition)
-        );
-
-        assert_eq!(repository.head().unwrap(), Some(head));
-        assert_eq!(repository.index_generation().unwrap(), index);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn compact_ref_drift_after_runtime_commit_preserves_journal_and_tail() {
-        let (temp, repository, runtime, freeze, plan) = compact_runtime_unpublished_fixture().await;
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-        runtime
-            .bind_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-        runtime
-            .complete_compact_publication(&pending, &freeze)
-            .await
-            .unwrap();
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        let result = RuntimePublicationCoordinator::recover_compact_validated(
-            &repository,
-            &runtime,
-            &profile,
-            &compact_publication_identity(&profile),
-        )
-        .await;
-        assert_eq!(result, Err(Error::RefConflict));
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert!(repository.read_publication_journal().unwrap().is_some());
-    }
-
-    fn path() -> LoosePath {
-        LoosePath::for_key("tables", &["sensor".into(), "one".into()]).unwrap()
-    }
-    fn row(text: &str) -> LooseRow {
-        LooseRow::new(text.as_bytes().to_vec()).unwrap()
-    }
-
-    fn prepared_publication_plan(repository: &Repository) -> RuntimePublicationCoordinator {
-        let freeze = PublicationFreeze {
-            intent_id: [41; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [42; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [42; 32],
-            mutations: Vec::new(),
-        };
-        let mutation = LooseMutation {
-            id: MutationId::new("publication-conflict").unwrap(),
-            path: LoosePath::for_key("Contact", &["Alice".into()]).unwrap(),
-            expected: None,
-            next: Some(row("published")),
-        };
-        let batch = FrozenBatch::new(
-            MutationId::new(hex_id(freeze.intent_id)).unwrap(),
-            vec![mutation],
-            freeze.checkpoint.mutation_sequence,
-        )
-        .unwrap();
-
-        RuntimePublicationCoordinator::prepare_lowered(
-            repository,
-            &repository.head().unwrap().unwrap(),
-            repository.index_generation().unwrap(),
-            &freeze,
-            &[],
-            batch,
-            "orna: publish runtime data",
-        )
-        .unwrap()
-    }
-    #[test]
-    fn prepare_rejects_batch_not_bound_to_freeze_intent() {
-        let (_temp, repository) = repository();
-        let freeze = PublicationFreeze {
-            intent_id: [43; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [44; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [44; 32],
-            mutations: Vec::new(),
-        };
-        let batch = FrozenBatch::new(
-            MutationId::new("unrelated-batch").unwrap(),
-            vec![LooseMutation {
-                id: MutationId::new("mutation").unwrap(),
-                path: path(),
-                expected: None,
-                next: Some(row("published")),
-            }],
-            freeze.checkpoint.mutation_sequence,
-        )
-        .unwrap();
-        assert_eq!(
-            RuntimePublicationCoordinator::prepare_lowered(
-                &repository,
-                &repository.head().unwrap().unwrap(),
-                repository.index_generation().unwrap(),
-                &freeze,
-                &[],
-                batch,
-                "orna: reject unrelated batch",
-            ),
-            Err(Error::IncompleteStaging)
-        );
-    }
-
-    #[test]
-    fn runtime_table_prefix_lowers_into_a_bound_publication() {
-        let (root, repository) = repository();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let freeze = PublicationFreeze {
-            intent_id: [7; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [8; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [8; 32],
-            mutations: Vec::new(),
-        };
-        let full_row = b"full typed row tuple\0primary field\0Blob field";
-        let candidate_path = LoosePath::for_key("Contact", &["Alice".into()])
-            .unwrap()
-            .as_managed_path()
-            .as_path()
-            .to_string_lossy()
-            .into_owned();
-        let mutation = TableMutation::new(
-            [9; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(full_row.to_vec()),
-        )
-        .unwrap();
-        let batch = lower_runtime_table_mutations(
-            &freeze,
-            std::slice::from_ref(&mutation),
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            |_path| Ok(None),
-        )
-        .unwrap();
-        assert!(batch.protected_source_mutations.is_empty());
-        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), full_row);
-        let plan = RuntimePublicationCoordinator::prepare_lowered(
-            &repository,
-            &head,
-            index,
-            &freeze,
-            std::slice::from_ref(&mutation),
-            batch,
-            "orna: publish runtime data",
-        )
-        .unwrap();
-        assert!(plan.protected_source_mutations.is_empty());
-        assert_ne!(plan.candidate().commit(), &head);
-        assert_eq!(plan.journal().runtime_intent_id(), Some([7; 16]));
-        assert_eq!(plan.journal().entries().len(), 1);
-        assert_eq!(
-            git_output(
-                root.path(),
-                &[
-                    "show",
-                    &format!("{}:{candidate_path}", plan.candidate().commit()),
-                ],
-            )
-            .as_bytes(),
-            full_row
-        );
-    }
-
-    #[test]
-    fn runtime_table_prefix_folds_repeated_key_to_final_row() {
-        let (_temp, repository) = repository();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let freeze = PublicationFreeze {
-            intent_id: [17; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [18; 32],
-                mutation_sequence: 2,
-            },
-            candidate_digest: [18; 32],
-            mutations: Vec::new(),
-        };
-        let first = TableMutation::new(
-            [19; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(b"first".to_vec()),
-        )
-        .unwrap();
-        let final_mutation = TableMutation::new(
-            [20; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(b"final".to_vec()),
-        )
-        .unwrap();
-        let source_mutations = [first, final_mutation];
-        let batch = lower_runtime_table_mutations(
-            &freeze,
-            &source_mutations,
-            |mutation| {
-                LoosePath::for_key(
-                    mutation.table(),
-                    &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-                )
-            },
-            |_path| Ok(None),
-        )
-        .unwrap();
-
-        assert_eq!(batch.mutations.len(), 1);
-        assert_eq!(batch.mutations[0].next.as_ref().unwrap().bytes(), b"final");
-        assert_eq!(batch.mutations[0].expected, None);
-        let plan = RuntimePublicationCoordinator::prepare_lowered(
-            &repository,
-            &head,
-            index,
-            &freeze,
-            &source_mutations,
-            batch,
-            "orna: publish folded runtime data",
-        )
-        .unwrap();
-        assert_eq!(plan.journal().entries().len(), 1);
-    }
-
-    #[test]
-    fn runtime_table_prefix_discards_a_net_noop_update() {
-        let freeze = PublicationFreeze {
-            intent_id: [25; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [26; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [26; 32],
-            mutations: Vec::new(),
-        };
-        let mutation = TableMutation::new(
-            [27; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(b"unchanged".to_vec()),
-        )
-        .unwrap();
-        assert_eq!(
-            lower_runtime_table_mutations(
-                &freeze,
-                std::slice::from_ref(&mutation),
-                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
-                |_path| Ok(Some(b"unchanged".to_vec())),
-            ),
-            Err(Error::IncompleteStaging)
-        );
-    }
-
-    #[test]
-    fn runtime_table_prefix_reports_a_net_noop_update_as_no_visible_change() {
-        let freeze = PublicationFreeze {
-            intent_id: [28; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [29; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [29; 32],
-            mutations: Vec::new(),
-        };
-        let mutation = TableMutation::new(
-            [30; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(b"unchanged".to_vec()),
-        )
-        .unwrap();
-        // A prefix that folds to the committed bytes has no publication to
-        // stage, so the no-op-aware lowering reports it instead of failing the
-        // save that produced it.
-        assert_eq!(
-            lower_runtime_table_mutations_allow_empty(
-                &freeze,
-                std::slice::from_ref(&mutation),
-                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
-                |_path| Ok(Some(b"unchanged".to_vec())),
-            ),
-            Ok(None)
-        );
-        // The strict entry point still refuses, so an empty publication can
-        // never be built silently.
-        assert_eq!(
-            lower_runtime_table_mutations(
-                &freeze,
-                std::slice::from_ref(&mutation),
-                |_mutation| LoosePath::for_key("Contact", &["Alice".into()]),
-                |_path| Ok(Some(b"unchanged".to_vec())),
-            ),
-            Err(Error::IncompleteStaging)
-        );
-    }
-
-    #[test]
-    fn runtime_table_prefix_rejects_distinct_row_identities_at_one_loose_path() {
-        let freeze = PublicationFreeze {
-            intent_id: [21; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [22; 32],
-                mutation_sequence: 2,
-            },
-            candidate_digest: [22; 32],
-            mutations: Vec::new(),
-        };
-        let first = TableMutation::new(
-            [23; 16],
-            "Contact",
-            b"Alice".to_vec(),
-            Some(b"first".to_vec()),
-        )
-        .unwrap();
-        let second = TableMutation::new(
-            [24; 16],
-            "Contact",
-            b"Bob".to_vec(),
-            Some(b"second".to_vec()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            lower_runtime_table_mutations(
-                &freeze,
-                &[first, second],
-                |_mutation| LoosePath::for_key("Contact", &["same".into()]),
-                |_path| Ok(None),
-            ),
-            Err(Error::PathCollision)
-        );
-    }
-
-    #[test]
-    fn coordinator_rejects_preexisting_managed_edits_at_capture() {
-        let (temp, repository) = repository();
-        let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
-        let target = temp.path().join(path.as_managed_path().as_path());
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, b"committed\n").unwrap();
-        git(temp.path(), &["add", "Contact/Alice.orna"]);
-        git(temp.path(), &["commit", "-m", "add managed row"]);
-
-        let head = repository.head().unwrap().unwrap();
-        fs::write(&target, b"staged\n").unwrap();
-        git(temp.path(), &["add", "Contact/Alice.orna"]);
-        let staged_index = repository.index_generation().unwrap();
-        fs::write(&target, b"unstaged\n").unwrap();
-
-        let staged_batch = FrozenBatch::new(
-            MutationId::new(hex_id([81; 16])).unwrap(),
-            vec![LooseMutation {
-                id: id("staged-mutation"),
-                path: path.clone(),
-                expected: Some(RowHash::of(b"unstaged\n")),
-                next: Some(row("runtime")),
-            }],
-            1,
-        )
-        .unwrap();
-        let freeze = PublicationFreeze {
-            intent_id: [81; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [82; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [82; 32],
-            mutations: Vec::new(),
-        };
-        assert_eq!(
-            RuntimePublicationCoordinator::prepare_lowered(
-                &repository,
-                &head,
-                staged_index,
-                &freeze,
-                &[],
-                staged_batch,
-                "orna: reject managed edit",
-            ),
-            Err(Error::ManagedWorktreeConflict)
-        );
-        assert_eq!(fs::read(&target).unwrap(), b"unstaged\n");
-        assert!(
-            git_output(
-                temp.path(),
-                &[
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    "--",
-                    "Contact/Alice.orna",
-                ],
-            )
-            .contains("Contact/Alice.orna")
-        );
-
-        git(
-            temp.path(),
-            &["restore", "--staged", "--", "Contact/Alice.orna"],
-        );
-        let unstaged_index = repository.index_generation().unwrap();
-        let unstaged_batch = FrozenBatch::new(
-            MutationId::new(hex_id([83; 16])).unwrap(),
-            vec![LooseMutation {
-                id: id("unstaged-mutation"),
-                path: path.clone(),
-                expected: Some(RowHash::of(b"unstaged\n")),
-                next: Some(row("runtime")),
-            }],
-            1,
-        )
-        .unwrap();
-        let freeze = PublicationFreeze {
-            intent_id: [83; 16],
-            checkpoint: orna_runtime_v1::Checkpoint {
-                generation: 1,
-                digest: [84; 32],
-                mutation_sequence: 1,
-            },
-            candidate_digest: [84; 32],
-            mutations: Vec::new(),
-        };
-        assert_eq!(
-            RuntimePublicationCoordinator::prepare_lowered(
-                &repository,
-                &head,
-                unstaged_index,
-                &freeze,
-                &[],
-                unstaged_batch,
-                "orna: reject managed edit",
-            ),
-            Err(Error::ManagedWorktreeConflict)
-        );
-        assert_eq!(fs::read(&target).unwrap(), b"unstaged\n");
-        assert!(
-            git_output(
-                temp.path(),
-                &[
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    "--",
-                    "Contact/Alice.orna",
-                ],
-            )
-            .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn coordinator_publishes_and_completes_a_real_runtime_prefix() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [1; 16],
-                repository_id: [2; 16],
-            },
-            [3; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([4; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        let mutation =
-            TableMutation::new([5; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
-                .unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[mutation],
-                [6; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [7; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [6; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let tail_context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &tail_context,
-                &[TableMutation::new(
-                    [8; 16],
-                    "Contact",
-                    b"Bob".to_vec(),
-                    Some(b"later row".to_vec()),
-                )
-                .unwrap()],
-                [9; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        plan.publish(&repository).unwrap();
-        plan.complete(&repository, &runtime, &freeze).await.unwrap();
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-        let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
-        assert_eq!(
-            repository
-                .managed_file_bytes(managed.as_managed_path())
-                .unwrap(),
-            Some(b"row".to_vec())
-        );
-    }
-
-    #[tokio::test]
-    async fn coordinator_rejects_runtime_cleanup_before_reconciliation() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [31; 16],
-                repository_id: [32; 16],
-            },
-            [33; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [35; 16],
-                    "Contact",
-                    b"Alice".to_vec(),
-                    Some(b"row".to_vec()),
-                )
-                .unwrap()],
-                [36; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [37; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [36; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-
-        assert!(matches!(
-            plan.complete(&repository, &runtime, &freeze).await,
-            Err(Error::PublicationPending)
-        ));
-        assert_eq!(
-            plan.journal().stage(),
-            orna_repository_v1::PublicationJournalStage::Prepared
-        );
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(repository.head().unwrap(), Some(head));
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn coordinator_rejects_runtime_cleanup_after_native_head_drift() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [31; 16],
-                repository_id: [32; 16],
-            },
-            [33; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [35; 16],
-                    "Contact",
-                    b"Alice".to_vec(),
-                    Some(b"row".to_vec()),
-                )
-                .unwrap()],
-                [36; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [37; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [36; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        plan.publish(&repository).unwrap();
-        let persisted_journal = repository.read_publication_journal().unwrap().unwrap();
-
-        let candidate = plan.candidate().commit().clone();
-        let pending_before = runtime.pending().await.unwrap();
+    /// A committed format-1/2 snapshot: the legacy `format.orna` coordinate
+    /// beside the legacy `database.orna` sidecar.
+    fn legacy_repository(format: u8) -> (TempDir, Repository) {
+        let (temp, _) = repository();
+        fs::create_dir_all(temp.path().join(".orna")).unwrap();
         fs::write(
-            repository.worktree().join("ordinary.txt"),
-            "native writer\n",
+            temp.path().join(".orna/format.orna"),
+            format!("format {format}\n"),
         )
         .unwrap();
-        git(repository.worktree(), &["add", "ordinary.txt"]);
-        git(repository.worktree(), &["commit", "-m", "native writer"]);
-        let newer_head = repository.head().unwrap().unwrap();
-        assert_ne!(newer_head, candidate);
+        fs::write(
+            temp.path().join(".orna/database.orna"),
+            "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
+        )
+        .unwrap();
+        git(temp.path(), &["add", ".orna"]);
+        git(temp.path(), &["commit", "-m", "legacy format metadata"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
 
-        assert_eq!(
-            plan.complete(&repository, &runtime, &freeze).await,
-            Err(Error::RefConflict)
-        );
-        assert_eq!(runtime.pending().await.unwrap(), pending_before);
-        assert_eq!(
-            plan.journal().stage(),
-            orna_repository_v1::PublicationJournalStage::WorktreeReconciled
-        );
-        assert_eq!(
+    /// A committed format-3 snapshot: the canonical `database.orna` record.
+    fn format3_repository() -> (TempDir, Repository) {
+        let (temp, _) = repository();
+        fs::create_dir_all(temp.path().join(".orna")).unwrap();
+        fs::write(
+            temp.path().join(".orna/database.orna"),
+            "{\n    repository_format: 3,\n    database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\",\n}\n",
+        )
+        .unwrap();
+        git(temp.path(), &["add", ".orna"]);
+        git(temp.path(), &["commit", "-m", "format-3 metadata"]);
+        let repository = Repository::discover(temp.path()).unwrap();
+        (temp, repository)
+    }
+
+    /// Opens a runtime holding one committed row and freezes it, so a
+    /// publication has a real prefix to refuse.
+    async fn frozen_runtime(repository: &Repository) -> (RuntimeState, PublicationFreeze) {
+        let runtime = RuntimeState::open(
+            repository,
+            orna_runtime_v1::RuntimeIdentity {
+                database_id: [91; 16],
+                repository_id: [92; 16],
+            },
+            [93; 32],
+        )
+        .await
+        .unwrap();
+        let lease = runtime.acquire_lease([94; 16]).await.unwrap();
+        let context = runtime.begin_activation().await.unwrap();
+        runtime
+            .commit_table_activation(
+                lease,
+                &context,
+                &[
+                    TableMutation::new([95; 16], "Contact", b"Alice".to_vec(), Some(b"row".to_vec()))
+                        .unwrap(),
+                ],
+                [96; 32],
+                &orna_runtime_v1::NoFault,
+            )
+            .await
+            .unwrap();
+        let freeze = runtime
+            .freeze(
+                [97; 16],
+                &orna_runtime_v1::Checkpoint {
+                    generation: 1,
+                    digest: [96; 32],
+                    mutation_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        (runtime, freeze)
+    }
+
+    /// Everything a refused publication must leave untouched: the ref, the
+    /// index, the worktree, the object store and the publication journal.
+    fn publication_state(
+        root: &Path,
+        repository: &Repository,
+    ) -> (
+        Option<GitCommitRef>,
+        IndexGeneration,
+        String,
+        String,
+        Option<PublicationJournal>,
+    ) {
+        (
+            repository.head().unwrap(),
+            repository.index_generation().unwrap(),
+            git_output(root, &["status", "--porcelain", "--untracked-files=all"]),
+            git_output(root, &["count-objects", "-v"]),
             repository.read_publication_journal().unwrap(),
-            Some(persisted_journal)
-        );
-        assert_eq!(repository.head().unwrap(), Some(newer_head));
-    }
-
-    #[test]
-    fn coordinator_preserves_changed_index_conflict() {
-        let (temp, repository) = repository();
-        let mut plan = prepared_publication_plan(&repository);
-        fs::write(temp.path().join("ordinary.txt"), "changed\n").unwrap();
-        git(temp.path(), &["add", "ordinary.txt"]);
-
-        assert!(matches!(
-            plan.publish(&repository),
-            Err(Error::RecoveryIndexConflict)
-        ));
-    }
-
-    #[test]
-    fn coordinator_preserves_changed_managed_worktree_conflict() {
-        let (temp, repository) = repository();
-        let mut plan = prepared_publication_plan(&repository);
-        let managed = temp.path().join("Contact").join("Alice.orna");
-        fs::create_dir_all(managed.parent().unwrap()).unwrap();
-        fs::write(managed, "edited\n").unwrap();
-
-        assert!(matches!(
-            plan.publish(&repository),
-            Err(Error::ManagedWorktreeConflict)
-        ));
+        )
     }
 
     #[test]
@@ -4449,174 +1883,6 @@ mod tests {
             map_publication_repository_error(RepositoryError::StaleHead),
             Error::RefConflict
         ));
-    }
-
-    #[tokio::test]
-    async fn coordinator_recovery_discards_a_pre_ref_journal_and_keeps_the_batch_pending() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [31; 16],
-                repository_id: [32; 16],
-            },
-            [33; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [35; 16],
-                    "Contact",
-                    b"Carol".to_vec(),
-                    Some(b"row".to_vec()),
-                )
-                .unwrap()],
-                [36; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [37; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [36; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index.clone(),
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        repository
-            .write_publication_journal(plan.journal())
-            .unwrap();
-        let pending = runtime.pending().await.unwrap();
-
-        // Recovery row "Ref still at H": the journal names nothing that was
-        // published, so recovery discards it and leaves the frozen batch
-        // pending instead of fencing the next publication (ORNA-PUB-006).
-        assert_eq!(
-            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
-            Ok(Some(index.clone()))
-        );
-        assert_eq!(repository.head().unwrap(), Some(head));
-        assert_eq!(repository.index_generation().unwrap(), index);
-        assert_eq!(runtime.pending().await.unwrap(), pending);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn coordinator_recovery_preserves_a_candidate_byte_binding_failure() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [51; 16],
-                repository_id: [52; 16],
-            },
-            [53; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([54; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [55; 16],
-                    "Contact",
-                    b"Alice".to_vec(),
-                    Some(b"candidate row".to_vec()),
-                )
-                .unwrap()],
-                [56; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [57; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [56; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index.clone(),
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
-        let journal = PublicationJournal::new_with_runtime_intent(
-            head.clone(),
-            plan.candidate().commit().clone(),
-            index.tree().unwrap().clone(),
-            freeze.intent_id,
-            vec![PublicationJournalEntry::new(
-                path.as_managed_path().clone(),
-                None,
-                Some(b"journal row".to_vec()),
-            )],
-        )
-        .unwrap();
-        repository.write_publication_journal(&journal).unwrap();
-        repository
-            .advance_current_ref(&head, plan.candidate())
-            .unwrap();
-
-        assert!(matches!(
-            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
-            Err(Error::InvalidPublicationJournal)
-        ));
-        assert_eq!(
-            repository.head().unwrap(),
-            Some(plan.candidate().commit().clone())
-        );
-        assert_eq!(repository.index_generation().unwrap().tree(), index.tree());
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(
-            repository.read_publication_journal().unwrap(),
-            Some(journal)
-        );
     }
 
     #[tokio::test]
@@ -4656,257 +1922,6 @@ mod tests {
             .unwrap(),
             b"truncated journal"
         );
-    }
-
-    #[tokio::test]
-    async fn coordinator_recovery_consumes_only_the_frozen_prefix() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [11; 16],
-                repository_id: [12; 16],
-            },
-            [13; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([14; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [15; 16],
-                    "Contact",
-                    b"Alice".to_vec(),
-                    Some(b"row".to_vec()),
-                )
-                .unwrap()],
-                [16; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [17; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [16; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        let tail_context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &tail_context,
-                &[TableMutation::new(
-                    [18; 16],
-                    "Contact",
-                    b"Bob".to_vec(),
-                    Some(b"later row".to_vec()),
-                )
-                .unwrap()],
-                [19; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        plan.publish(&repository).unwrap();
-        drop(plan);
-
-        assert_eq!(runtime.pending().await.unwrap().len(), 2);
-        assert!(
-            RuntimePublicationCoordinator::recover(&repository, &runtime)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(runtime.pending().await.unwrap().len(), 1);
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
-        let managed = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
-        assert_eq!(
-            repository
-                .managed_file_bytes(managed.as_managed_path())
-                .unwrap(),
-            Some(b"row".to_vec())
-        );
-    }
-
-    #[tokio::test]
-    async fn coordinator_recovery_rejects_native_head_drift_before_runtime_cleanup() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [31; 16],
-                repository_id: [32; 16],
-            },
-            [33; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([34; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[TableMutation::new(
-                    [35; 16],
-                    "Contact",
-                    b"Carol".to_vec(),
-                    Some(b"row".to_vec()),
-                )
-                .unwrap()],
-                [36; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [37; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [36; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        plan.publish(&repository).unwrap();
-
-        let candidate = plan.candidate().commit().clone();
-        let pending_before = runtime.pending().await.unwrap();
-        fs::write(
-            repository.worktree().join("ordinary.txt"),
-            "native writer\n",
-        )
-        .unwrap();
-        git(repository.worktree(), &["add", "ordinary.txt"]);
-        git(repository.worktree(), &["commit", "-m", "native writer"]);
-        let newer_head = repository.head().unwrap().unwrap();
-        assert_ne!(newer_head, candidate);
-        drop(plan);
-
-        assert_eq!(
-            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
-            Err(Error::RefConflict)
-        );
-        assert_eq!(runtime.pending().await.unwrap(), pending_before);
-        assert!(repository.read_publication_journal().unwrap().is_some());
-        assert_eq!(repository.head().unwrap(), Some(newer_head));
-    }
-
-    #[tokio::test]
-    async fn coordinator_recovery_is_idempotent_after_runtime_completion() {
-        let (_temp, repository) = repository();
-        let runtime = RuntimeState::open(
-            &repository,
-            orna_runtime_v1::RuntimeIdentity {
-                database_id: [21; 16],
-                repository_id: [22; 16],
-            },
-            [23; 32],
-        )
-        .await
-        .unwrap();
-        let lease = runtime.acquire_lease([24; 16]).await.unwrap();
-        let context = runtime.begin_activation().await.unwrap();
-        runtime
-            .commit_table_activation(
-                lease,
-                &context,
-                &[
-                    TableMutation::new([25; 16], "Contact", b"Bob".to_vec(), Some(b"row".to_vec()))
-                        .unwrap(),
-                ],
-                [26; 32],
-                &orna_runtime_v1::NoFault,
-            )
-            .await
-            .unwrap();
-        let freeze = runtime
-            .freeze(
-                [27; 16],
-                &orna_runtime_v1::Checkpoint {
-                    generation: 1,
-                    digest: [26; 32],
-                    mutation_sequence: 1,
-                },
-            )
-            .await
-            .unwrap();
-        let head = repository.head().unwrap().unwrap();
-        let index = repository.index_generation().unwrap();
-        let mut plan = RuntimePublicationCoordinator::prepare(&repository,
-        &runtime,
-        &head,
-        index,
-        &freeze,
-        |mutation| {
-            LoosePath::for_key(
-                mutation.table(),
-                &[String::from_utf8(mutation.key().to_vec()).unwrap()],
-            )
-        },
-        "orna: publish runtime data",)
-        .await
-        .unwrap();
-        plan.publish(&repository).unwrap();
-        let commit =
-            PublicationCommitId::new(plan.candidate().commit().as_str().as_bytes().to_vec())
-                .unwrap();
-        runtime
-            .complete_publication(&freeze, &commit)
-            .await
-            .unwrap();
-        drop(plan);
-
-        RuntimePublicationCoordinator::recover(&repository, &runtime)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(runtime.pending().await.unwrap().is_empty());
-        assert_eq!(repository.read_publication_journal().unwrap(), None);
     }
 
     #[test]
@@ -4977,741 +1992,149 @@ mod tests {
         }
         assert!(LoosePath::from_encoded_key("../Contact", &["alice.orna".into()]).is_err());
     }
-    #[test]
-    fn portable_sibling_collisions_reject_the_entire_candidate() {
-        let mut independent = LooseProjection::default();
-        for (name, table, keys) in [
-            ("one", "Contact", vec!["Alice", "one"]),
-            ("two", "Contact", vec!["Alice", "two"]),
-            ("other-table", "Other", vec!["alice", "one"]),
-        ] {
-            let mutation = LooseMutation {
-                id: id(name),
-                path: LoosePath::for_key(
-                    table,
-                    &keys.into_iter().map(String::from).collect::<Vec<_>>(),
-                )
-                .unwrap(),
-                expected: None,
-                next: Some(row("body")),
-            };
-            independent
-                .project(&FrozenBatch::new(id("independent"), vec![mutation], 1).unwrap())
-                .unwrap();
-        }
-        assert_eq!(independent.rows.len(), 3);
-        for (first, second) in [
-            (vec!["Alice"], vec!["alice"]),
-            (vec!["Alice", "one"], vec!["alice", "two"]),
-        ] {
-            let key = |parts: Vec<&str>| {
-                LoosePath::for_key(
-                    "Contact",
-                    &parts.into_iter().map(String::from).collect::<Vec<_>>(),
-                )
-                .unwrap()
-            };
-            let first = key(first);
-            let second = key(second);
-            let insert = |name, path| LooseMutation {
-                id: id(name),
-                path,
-                expected: None,
-                next: Some(row("body")),
-            };
-            let a = insert("first", first.clone());
-            let b = insert("second", second.clone());
-            for mutations in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
-                let mut projection = LooseProjection::default();
-                let batch = FrozenBatch::new(id("both"), mutations, 1).unwrap();
-                assert_eq!(projection.project(&batch), Err(Error::PathCollision));
-                assert_eq!(projection, LooseProjection::default());
-            }
-            let mut projection = LooseProjection::default();
-            projection
-                .project(&FrozenBatch::new(id("initial"), vec![a], 1).unwrap())
-                .unwrap();
-            let before = projection.clone();
+
+    #[tokio::test]
+    async fn legacy_head_is_refused_before_any_publication_write() {
+        for format in [1, 2] {
+            let (temp, repository) = legacy_repository(format);
+            let (runtime, freeze) = frozen_runtime(&repository).await;
+            let head = repository.head().unwrap().unwrap();
+            let before = publication_state(temp.path(), &repository);
+            let pending = runtime.pending().await.unwrap();
+            let path_for =
+                |mutation: &TableMutation| LoosePath::for_key(mutation.table(), &["Alice".into()]);
+
             assert_eq!(
-                projection.project(&FrozenBatch::new(id("conflict"), vec![b.clone()], 2).unwrap()),
-                Err(Error::PathCollision)
+                RuntimePublicationCoordinator::prepare_allow_noop(
+                    &repository,
+                    &runtime,
+                    &head,
+                    repository.index_generation().unwrap(),
+                    &freeze,
+                    path_for,
+                    "orna: publish runtime data",
+                )
+                .await,
+                Err(Error::LegacyReadOnly { format })
             );
-            assert_eq!(projection, before);
-            let delete = LooseMutation {
-                id: id("delete"),
-                path: first,
-                expected: Some(row("body").hash()),
-                next: None,
-            };
-            for mutations in [vec![b.clone(), delete.clone()], vec![delete, b]] {
-                let mut replaced = before.clone();
-                replaced
-                    .project(&FrozenBatch::new(id("replace"), mutations, 3).unwrap())
-                    .unwrap();
-                assert!(replaced.row(&second).is_some());
-                assert_eq!(replaced.rows.len(), 1);
-            }
-        }
-    }
-    fn id(text: &str) -> MutationId {
-        MutationId::new(text).unwrap()
-    }
-    fn batch(expected: Option<RowHash>, next: Option<LooseRow>) -> FrozenBatch {
-        FrozenBatch::new(
-            id("batch"),
-            vec![LooseMutation {
-                id: id("mutation"),
-                path: path(),
-                expected,
-                next,
-            }],
-            1,
-        )
-        .unwrap()
-    }
-    fn objects() -> (GitObjectId, GitObjectId) {
-        (
-            GitObjectId::new("aaaa").unwrap(),
-            GitObjectId::new("bbbb").unwrap(),
-        )
-    }
-    fn publication(base: IndexImage, ordinary: IndexImage) -> Publication {
-        let (old, new) = objects();
-        Publication::prepare(
-            batch(None, Some(row("published"))),
-            RefName::new("refs/heads/main").unwrap(),
-            old,
-            new,
-            base,
-            ordinary,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn publication_validates_portable_paths_in_its_final_candidate() {
-        let path = |key: Vec<&str>| {
-            LoosePath::for_key(
-                "Contact",
-                &key.into_iter().map(String::from).collect::<Vec<_>>(),
-            )
-            .unwrap()
-        };
-        let mutation = |name, path, expected, next| LooseMutation {
-            id: id(name),
-            path,
-            expected,
-            next,
-        };
-        let prepare = |batch, base, ordinary| {
-            let (old, new) = objects();
-            Publication::prepare(
-                batch,
-                RefName::new("refs/heads/main").unwrap(),
-                old,
-                new,
-                base,
-                ordinary,
-            )
-        };
-
-        let upper = path(vec!["Alice"]);
-        let lower = path(vec!["alice"]);
-        let same_batch = FrozenBatch::new(
-            id("same-batch"),
-            vec![
-                mutation("same-upper", upper.clone(), None, Some(row("upper"))),
-                mutation("same-lower", lower.clone(), None, Some(row("lower"))),
-            ],
-            1,
-        )
-        .unwrap();
-        assert!(matches!(
-            prepare(same_batch, IndexImage::default(), IndexImage::default()),
-            Err(Error::PathCollision)
-        ));
-
-        let base = IndexImage::default().entry(upper.clone(), Some(row("old")));
-        let ordinary = base.clone();
-        let pre_existing = FrozenBatch::new(
-            id("pre-existing"),
-            vec![mutation(
-                "pre-existing-lower",
-                lower.clone(),
-                None,
-                Some(row("new")),
-            )],
-            2,
-        )
-        .unwrap();
-        assert!(matches!(
-            prepare(pre_existing, base.clone(), ordinary.clone()),
-            Err(Error::PathCollision)
-        ));
-        assert_eq!(base.get(&upper).unwrap().as_ref().unwrap().bytes(), b"old");
-        assert_eq!(ordinary, base);
-
-        let nested_upper = path(vec!["Alice", "one"]);
-        let nested_lower = path(vec!["alice", "two"]);
-        let base = IndexImage::default().entry(nested_upper, Some(row("old")));
-        let composite_collision = FrozenBatch::new(
-            id("composite"),
-            vec![mutation(
-                "composite-lower",
-                nested_lower,
-                None,
-                Some(row("new")),
-            )],
-            3,
-        )
-        .unwrap();
-        assert!(matches!(
-            prepare(composite_collision, base.clone(), base),
-            Err(Error::PathCollision)
-        ));
-
-        let delete = mutation(
-            "rename-delete",
-            upper.clone(),
-            Some(row("old").hash()),
-            None,
-        );
-        let insert = mutation("rename-insert", lower.clone(), None, Some(row("new")));
-        for mutations in [
-            vec![delete.clone(), insert.clone()],
-            vec![insert.clone(), delete.clone()],
-        ] {
-            let renamed = prepare(
-                FrozenBatch::new(id("case-rename"), mutations, 4).unwrap(),
-                IndexImage::default().entry(upper.clone(), Some(row("old"))),
-                IndexImage::default().entry(upper.clone(), Some(row("old"))),
-            )
-            .unwrap();
-            assert_eq!(renamed.journal().reconciled_index.get(&upper), Some(&None));
             assert_eq!(
-                renamed
-                    .journal()
-                    .reconciled_index
-                    .get(&lower)
+                RuntimePublicationCoordinator::prepare(
+                    &repository,
+                    &runtime,
+                    &head,
+                    repository.index_generation().unwrap(),
+                    &freeze,
+                    path_for,
+                    "orna: publish runtime data",
+                )
+                .await,
+                Err(Error::LegacyReadOnly { format })
+            );
+
+            // No candidate object, ref, index, worktree row or journal was
+            // written, and the frozen prefix is still pending.
+            assert_eq!(publication_state(temp.path(), &repository), before);
+            assert!(!temp.path().join("Contact").exists());
+            assert_eq!(runtime.pending().await.unwrap(), pending);
+            assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
+            // The legacy commit stays readable through its versioned reader.
+            assert_eq!(
+                repository
+                    .open_format_context_at_selector(head.as_str())
                     .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .bytes(),
-                b"new"
+                    .repository_format_number(),
+                format
             );
         }
-    }
-
-    #[test]
-    fn publication_collision_preserves_unrelated_ordinary_staging() {
-        let upper = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
-        let lower = LoosePath::for_key("Contact", &["alice".into()]).unwrap();
-        let unrelated = LoosePath::for_key("Contact", &["unrelated".into()]).unwrap();
-        let base = IndexImage::default().entry(upper.clone(), Some(row("head")));
-        let ordinary = base
-            .clone()
-            .entry(unrelated.clone(), Some(row("staged-only")));
-        let before = ordinary.clone();
-        let batch = FrozenBatch::new(
-            id("collision"),
-            vec![LooseMutation {
-                id: id("collision-lower"),
-                path: lower,
-                expected: None,
-                next: Some(row("published")),
-            }],
-            1,
-        )
-        .unwrap();
-        let (old, new) = objects();
-
-        assert!(matches!(
-            Publication::prepare(
-                batch,
-                RefName::new("refs/heads/main").unwrap(),
-                old,
-                new,
-                base,
-                ordinary.clone(),
-            ),
-            Err(Error::PathCollision)
-        ));
-        assert_eq!(ordinary, before);
         assert_eq!(
-            ordinary.get(&unrelated).unwrap().as_ref().unwrap().bytes(),
-            b"staged-only"
-        );
-        assert!(ordinary.get(&upper).unwrap().is_some());
-    }
-
-    #[test]
-    fn projection_is_idempotent_under_fault_retry() {
-        let mut projection = LooseProjection::default();
-        let frozen = batch(None, Some(row("one")));
-        projection.project(&frozen).unwrap();
-        projection.project(&frozen).unwrap();
-        assert_eq!(projection.row(&path()).unwrap().bytes(), b"one");
-    }
-    #[test]
-    fn external_edit_is_a_typed_conflict() {
-        let mut projection = LooseProjection::default();
-        projection
-            .project(&batch(None, Some(row("editor"))))
-            .unwrap();
-        let later = FrozenBatch::new(
-            id("batch-two"),
-            vec![LooseMutation {
-                id: id("mutation-two"),
-                path: path(),
-                expected: None,
-                next: Some(row("runtime")),
-            }],
-            2,
-        )
-        .unwrap();
-        let error = projection.project(&later).unwrap_err();
-        assert!(matches!(error, Error::ExternalConflict { .. }));
-    }
-    #[test]
-    fn complete_staging_gate_rejects_ambiguous_delete() {
-        assert!(matches!(
-            FrozenBatch::new(
-                id("batch"),
-                vec![LooseMutation {
-                    id: id("mutation"),
-                    path: path(),
-                    expected: None,
-                    next: None
-                }],
-                1
-            ),
-            Err(Error::IncompleteStaging)
-        ));
-    }
-    #[test]
-    fn recovery_before_ref_advance_keeps_pending() {
-        let base = IndexImage::default();
-        let mut publication = publication(base.clone(), base.clone());
-        let (old, _) = objects();
-        assert_eq!(
-            publication.recover(&old, &base).unwrap(),
-            Recovery::KeepPending
-        );
-        assert_eq!(publication.journal().stage, JournalStage::Journaled);
-    }
-    #[test]
-    fn recovery_after_ref_advance_reinstalls_reconciled_index() {
-        let base = IndexImage::default();
-        let mut publication = publication(base.clone(), base.clone());
-        let (_, new) = objects();
-        let Recovery::InstallIndex(index) = publication.recover(&new, &base).unwrap() else {
-            panic!("expected index recovery")
-        };
-        assert_eq!(publication.journal().stage, JournalStage::RefAdvanced);
-        assert!(matches!(
-            publication.cleanup(),
-            Err(Error::InvalidTransition)
-        ));
-        assert_eq!(
-            index.get(&path()).unwrap().as_ref().unwrap().bytes(),
-            b"published"
-        );
-        publication.install_index(&base).unwrap();
-        assert_eq!(publication.journal().stage, JournalStage::IndexReconciled);
-    }
-    #[test]
-    fn index_reconciliation_cannot_precede_ref_advance() {
-        let base = IndexImage::default();
-        let mut publication = publication(base.clone(), base.clone());
-        assert!(matches!(
-            publication.install_index(&base),
-            Err(Error::InvalidTransition)
-        ));
-        assert_eq!(publication.journal().stage, JournalStage::Journaled);
-    }
-    #[test]
-    fn reconciliation_preserves_unrelated_partially_staged_entry() {
-        let managed = path();
-        let other = LoosePath::for_key("tables", &["other".into()]).unwrap();
-        let base = IndexImage::default()
-            .entry(managed.clone(), None)
-            .entry(other.clone(), Some(row("head")));
-        let ordinary = base.clone().entry(other.clone(), Some(row("staged-only")));
-        let result =
-            reconcile_index(&base, &ordinary, &batch(None, Some(row("published")))).unwrap();
-        assert_eq!(
-            result.get(&other).unwrap().as_ref().unwrap().bytes(),
-            b"staged-only"
-        );
-        assert_eq!(
-            result.get(&managed).unwrap().as_ref().unwrap().bytes(),
-            b"published"
+            Error::LegacyReadOnly { format: 2 }.to_string(),
+            "repository format 2 is a read-only legacy snapshot; migrate it to format 3 before publishing"
         );
     }
 
-    #[test]
-    fn frozen_batch_builds_a_real_private_candidate_without_advancing_head() {
-        let (root, repository) = repository();
+    #[tokio::test]
+    async fn recovery_refuses_a_retired_loose_journal_without_touching_it() {
+        let (temp, repository) = legacy_repository(2);
+        let (runtime, freeze) = frozen_runtime(&repository).await;
         let head = repository.head().unwrap().unwrap();
-        fs::write(root.path().join("ordinary.txt"), "staged user content\n").unwrap();
-        git(root.path(), &["add", "ordinary.txt"]);
-        let expected_index = repository.index_generation().unwrap();
-        let unstaged = b"unstaged user content\n";
-        fs::write(root.path().join("ordinary.txt"), unstaged).unwrap();
-        let candidate = build_private_publication_candidate(
-            &repository,
-            &head,
-            &batch(None, Some(row("published"))),
-            "orna: publish runtime data",
-        )
-        .unwrap();
-
-        assert_ne!(candidate.commit(), &head);
-        assert_eq!(repository.head().unwrap().unwrap(), head);
-        assert_eq!(repository.index_generation().unwrap(), expected_index);
-        assert_eq!(
-            fs::read(root.path().join("ordinary.txt")).unwrap(),
-            unstaged
-        );
-        assert_eq!(
-            git_output(root.path(), &["show", ":ordinary.txt"]),
-            "staged user content"
-        );
-        assert_eq!(
-            git_output(
-                root.path(),
-                &["show", &format!("{}:ordinary.txt", candidate.commit())]
-            ),
-            "base"
-        );
-        assert_eq!(
-            git_output(
-                root.path(),
-                &[
-                    "show",
-                    &format!("{}:tables/sensor/one.orna", candidate.commit())
-                ]
-            ),
-            "published"
-        );
-    }
-
-    #[test]
-    fn loose_materialization_is_idempotent_and_does_not_publish_git_state() {
-        let (root, repository) = repository();
-        let path = path();
-        let before_index = repository.index_generation().unwrap();
-        let before_head = repository.head().unwrap();
-        let first = LooseRow::new(b"first".to_vec()).unwrap();
-        let mutation = LooseMutation {
-            id: id("materialize-one"),
-            path: path.clone(),
-            expected: None,
-            next: Some(first.clone()),
-        };
-
-        assert_eq!(
-            materialize_loose_mutation(&repository, &mutation).unwrap(),
-            Materialization::Applied
-        );
-        assert_eq!(
-            materialize_loose_mutation(&repository, &mutation).unwrap(),
-            Materialization::AlreadyApplied
-        );
-        assert_eq!(
-            fs::read(root.path().join(path.as_managed_path().as_path())).unwrap(),
-            b"first"
-        );
-        assert_eq!(repository.index_generation().unwrap(), before_index);
-        assert_eq!(repository.head().unwrap(), before_head);
-    }
-
-    #[test]
-    fn loose_materialization_preserves_external_edits_and_supports_idempotent_delete() {
-        let (root, repository) = repository();
-        let path = path();
-        let first = LooseRow::new(b"first".to_vec()).unwrap();
-        let first_mutation = LooseMutation {
-            id: id("materialize-two"),
-            path: path.clone(),
-            expected: None,
-            next: Some(first.clone()),
-        };
-        materialize_loose_mutation(&repository, &first_mutation).unwrap();
-
-        fs::write(
-            root.path().join(path.as_managed_path().as_path()),
-            b"editor",
-        )
-        .unwrap();
-        let replacement = LooseRow::new(b"runtime".to_vec()).unwrap();
-        let conflict = LooseMutation {
-            id: id("materialize-three"),
-            path: path.clone(),
-            expected: Some(first.hash()),
-            next: Some(replacement),
-        };
-        assert!(matches!(
-            materialize_loose_mutation(&repository, &conflict),
-            Err(Error::ExternalConflict { .. })
-        ));
-        assert_eq!(
-            fs::read(root.path().join(path.as_managed_path().as_path())).unwrap(),
-            b"editor"
-        );
-
-        fs::write(
-            root.path().join(path.as_managed_path().as_path()),
-            first.bytes(),
-        )
-        .unwrap();
-        let deletion = LooseMutation {
-            id: id("materialize-four"),
-            path: path.clone(),
-            expected: Some(first.hash()),
-            next: None,
-        };
-        assert_eq!(
-            materialize_loose_mutation(&repository, &deletion).unwrap(),
-            Materialization::Applied
-        );
-        assert_eq!(
-            materialize_loose_mutation(&repository, &deletion).unwrap(),
-            Materialization::AlreadyApplied
-        );
-        assert!(!root.path().join(path.as_managed_path().as_path()).exists());
-    }
-    async fn hybrid_base() -> (CompactOvbProfile, CompactBaseState) {
-        let (_temp, repository, _runtime, freeze, plan) =
-            compact_runtime_unpublished_fixture().await;
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
-        let profile = CompactOvbProfile::new(compact_schema()).unwrap();
-        let projections = repository
-            .read_compact_committed_base(
-                pending.commit(),
-                Uuid::from_u128(1),
-                profile.schema_fingerprint(),
-                COMPACT_STORAGE_PROFILE,
-                |_entry, projection| Ok(projection.clone()),
+        let index = repository.index_generation().unwrap();
+        let path = LoosePath::for_key("Contact", &["Alice".into()]).unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(
+                    path.as_managed_path().clone(),
+                    Some(b"row".to_vec()),
+                )],
+                "orna: publish runtime data",
             )
             .unwrap();
-        let manifest = repository
-            .read_compact_manifest(pending.commit(), Uuid::from_u128(1))
-            .unwrap()
-            .unwrap_or_else(|| {
-                CompactManifest::empty(
-                    Uuid::from_u128(1),
-                    profile.schema_fingerprint(),
-                )
-            });
-        let base =
-            fold_compact_committed_base(&profile, projections.iter(), manifest.next_generation())
-                .unwrap();
-        assert_eq!(freeze.checkpoint.mutation_sequence, 1);
-        (profile, base)
-    }
-
-    fn hybrid_key(profile: &CompactOvbProfile, value: i64) -> CompactKeyIdentity {
-        profile
-            .decode_key(&CanonicalValue::int(value.into()).encode().unwrap())
-            .unwrap()
-    }
-
-    fn project_loose(
-        projection: &mut LooseProjection,
-        batch_name: &str,
-        mutation_name: &str,
-        path: LoosePath,
-        expected: Option<RowHash>,
-        next: Option<LooseRow>,
-        watermark: u64,
-    ) {
-        projection
-            .project(
-                &FrozenBatch::new(
-                    id(batch_name),
-                    vec![LooseMutation {
-                        id: id(mutation_name),
-                        path,
-                        expected,
-                        next,
-                    }],
-                    watermark,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn hybrid_merge_exposes_compact_only_rows() {
-        let (profile, base) = hybrid_base().await;
-        let empty_projection = LooseProjection::default();
-        let rows = merge_compact_loose(&profile, &base, &empty_projection, |_| {
-            unreachable!("no loose paths")
-        })
+        let journal = PublicationJournal::new_with_runtime_intent(
+            head.clone(),
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            freeze.intent_id,
+            vec![PublicationJournalEntry::new(
+                path.as_managed_path().clone(),
+                None,
+                Some(b"row".to_vec()),
+            )],
+        )
         .unwrap();
-        assert!(matches!(
-            rows.as_slice(),
-            [HybridLogicalRow::Compact { key, .. }]
-                if key == &hybrid_key(&profile, 1)
-        ));
-    }
+        repository.write_publication_journal(&journal).unwrap();
+        // The retired loose writer was interrupted after advancing its ref.
+        repository.advance_current_ref(&head, &candidate).unwrap();
+        let before = publication_state(temp.path(), &repository);
+        let pending = runtime.pending().await.unwrap();
 
-    #[tokio::test]
-    async fn hybrid_merge_appends_disjoint_loose_rows() {
-        let (profile, base) = hybrid_base().await;
-        let loose_path = LoosePath::for_key("Contact", &["two".into()]).unwrap();
-        let loose_key = hybrid_key(&profile, 2);
-        let mut projection = LooseProjection::default();
-        project_loose(
-            &mut projection,
-            "hybrid-loose-batch",
-            "hybrid-loose-mutation",
-            loose_path.clone(),
-            None,
-            Some(row("loose")),
-            1,
-        );
-        let rows = merge_compact_loose(&profile, &base, &projection, |path| {
-            if path == &loose_path {
-                Ok(loose_key.clone())
-            } else {
-                Err(Error::InvalidKey)
-            }
-        })
-        .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|entry| matches!(
-            entry,
-            HybridLogicalRow::Loose { key, path, row }
-                if key == &loose_key && **path == loose_path && row.bytes() == b"loose"
-        )));
-    }
-
-    #[tokio::test]
-    async fn hybrid_merge_rejects_loose_row_for_existing_compact_key() {
-        let (profile, base) = hybrid_base().await;
-        let loose_path = LoosePath::for_key("Contact", &["one".into()]).unwrap();
-        let compact_key = hybrid_key(&profile, 1);
-        let mut projection = LooseProjection::default();
-        project_loose(
-            &mut projection,
-            "hybrid-override-batch",
-            "hybrid-override-mutation",
-            loose_path.clone(),
-            None,
-            Some(row("override")),
-            1,
-        );
         assert_eq!(
-            merge_compact_loose(&profile, &base, &projection, |path| {
-                if path == &loose_path {
-                    Ok(compact_key.clone())
-                } else {
-                    Err(Error::InvalidKey)
-                }
-            }),
-            Err(Error::HybridDuplicateKey { key: compact_key })
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::LegacyReadOnly { format: 2 })
         );
+        assert_eq!(publication_state(temp.path(), &repository), before);
+        assert_eq!(repository.read_publication_journal().unwrap(), Some(journal));
+        assert!(!temp.path().join(path.as_managed_path().as_path()).exists());
+        assert_eq!(runtime.pending().await.unwrap(), pending);
     }
 
     #[tokio::test]
-    async fn hybrid_merge_rejects_tombstone_for_compact_key() {
-        let (profile, base) = hybrid_base().await;
-        let loose_path = LoosePath::for_key("Contact", &["one".into()]).unwrap();
-        let compact_key = hybrid_key(&profile, 1);
-        let old = row("old");
-        let mut projection = LooseProjection::default();
-        project_loose(
-            &mut projection,
-            "hybrid-tombstone-insert",
-            "hybrid-tombstone-seed",
-            loose_path.clone(),
-            None,
-            Some(old.clone()),
-            1,
-        );
-        project_loose(
-            &mut projection,
-            "hybrid-tombstone-delete",
-            "hybrid-tombstone-mutation",
-            loose_path.clone(),
-            Some(old.hash()),
-            None,
-            2,
-        );
-        assert!(projection.tombstones().any(|path| path == &loose_path));
+    async fn recovery_refuses_a_retired_compact_journal_without_touching_it() {
+        let (temp, repository) = legacy_repository(2);
+        let (runtime, freeze) = frozen_runtime(&repository).await;
+        let plan = legacy_compact_plan(&repository, &freeze);
+        repository.write_publication_journal(plan.journal()).unwrap();
+        let before = publication_state(temp.path(), &repository);
+        let pending = runtime.pending().await.unwrap();
+
         assert_eq!(
-            merge_compact_loose(&profile, &base, &projection, |path| {
-                if path == &loose_path {
-                    Ok(compact_key.clone())
-                } else {
-                    Err(Error::InvalidKey)
-                }
-            }),
-            Err(Error::HybridDuplicateKey {
-                key: compact_key.clone()
-            })
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::LegacyReadOnly { format: 2 })
         );
-        project_loose(
-            &mut projection,
-            "hybrid-tombstone-reinsert",
-            "hybrid-tombstone-reinsert-mutation",
-            loose_path.clone(),
-            None,
-            Some(row("reinserted")),
-            3,
-        );
-        assert!(!projection.tombstones().any(|path| path == &loose_path));
+        assert_eq!(publication_state(temp.path(), &repository), before);
         assert_eq!(
-            merge_compact_loose(&profile, &base, &projection, |path| {
-                if path == &loose_path {
-                    Ok(compact_key.clone())
-                } else {
-                    Err(Error::InvalidKey)
-                }
-            }),
-            Err(Error::HybridDuplicateKey { key: compact_key })
+            repository.read_publication_journal().unwrap().as_ref(),
+            Some(plan.journal())
         );
+        assert_eq!(runtime.pending().await.unwrap(), pending);
     }
 
+    /// Only the retired compact writer recorded a compact witness, and it
+    /// wrote only onto format-1/2 snapshots. Over a readable format-3 base the
+    /// witness is malformed evidence, so recovery refuses the journal.
     #[tokio::test]
-    async fn hybrid_merge_rejects_duplicate_resolved_loose_keys() {
-        let (profile, base) = hybrid_base().await;
-        let first = LoosePath::for_key("Contact", &["first".into()]).unwrap();
-        let second = LoosePath::for_key("Contact", &["second".into()]).unwrap();
-        let duplicate_key = hybrid_key(&profile, 2);
-        let mut projection = LooseProjection::default();
-        project_loose(
-            &mut projection,
-            "hybrid-duplicate-first",
-            "hybrid-duplicate-mutation-first",
-            first.clone(),
-            None,
-            Some(row("first")),
-            1,
+    async fn recovery_refuses_a_compact_journal_without_a_legacy_base() {
+        let (temp, repository) = format3_repository();
+        let (runtime, freeze) = frozen_runtime(&repository).await;
+        let plan = legacy_compact_plan(&repository, &freeze);
+        assert!(writable_snapshot_context(&repository, plan.journal().old_head()).is_ok());
+        repository.write_publication_journal(plan.journal()).unwrap();
+        let before = publication_state(temp.path(), &repository);
+
+        assert_eq!(
+            RuntimePublicationCoordinator::recover(&repository, &runtime).await,
+            Err(Error::InvalidPublicationJournal)
         );
-        project_loose(
-            &mut projection,
-            "hybrid-duplicate-second",
-            "hybrid-duplicate-mutation-second",
-            second.clone(),
-            None,
-            Some(row("second")),
-            2,
-        );
-        assert!(matches!(
-            merge_compact_loose(&profile, &base, &projection, |path| {
-                if path == &first || path == &second {
-                    Ok(duplicate_key.clone())
-                } else {
-                    Err(Error::InvalidKey)
-                }
-            }),
-            Err(Error::HybridDuplicateKey { .. })
-        ));
+        assert_eq!(publication_state(temp.path(), &repository), before);
+        assert_eq!(runtime.pending_through(&freeze).await.unwrap().len(), 1);
     }
 }
