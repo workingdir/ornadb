@@ -2338,6 +2338,22 @@ fn same_repl_project_inputs(
         && workspace.standard_modules() == committed.standard_modules()
 }
 
+/// The activation facts a project REPL session reports through
+/// `sys.rt.info()`. `None` leaves the session unattached, so the evaluator
+/// reports `sys.version.incompatible` rather than inventing host facts.
+fn repl_sys_host_context(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Option<SysHostContext> {
+    let (identity, _) = runtime_identity(repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Repl,
+        sys_host::std_snapshot_pin(project),
+    ))
+}
+
 fn repl_runtime(
     repository: Option<orna_repository_v1::Repository>,
 ) -> Result<ReplRuntime, Diagnostic> {
@@ -2351,6 +2367,10 @@ fn repl_runtime(
             Limits::default(),
         )
             .map_err(|error| repl_session_error(&error))?;
+        let session = match repl_sys_host_context(repository, &project) {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        };
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
     } else {
@@ -2425,15 +2445,22 @@ impl ReplSnapshotSessionLoader<'_> {
         self.repository.ok_or(())
     }
 
-    fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
+    fn admit(&self, project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
         // Admit the project's own pinned standard sources; uncaptured imports
         // remain inadmissible because the project has no standard profile.
-        AdmittedReplSession::from_loaded_project(
+        let session = AdmittedReplSession::from_loaded_project(
             project,
             project.standard_sources().iter().cloned(),
             Limits::default(),
         )
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+        let context = self
+            .repository
+            .and_then(|repository| repl_sys_host_context(repository, project));
+        Ok(match context {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        })
     }
 }
 
@@ -2449,7 +2476,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load(self.repository()?)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
@@ -2457,7 +2484,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Ref(reference) => {
                 let repository = self.repository()?;
@@ -2465,7 +2492,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
         };
         self.host_bindings.borrow_mut().take();
