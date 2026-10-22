@@ -18,6 +18,12 @@ use std::{
 
 const VERSION: &str = "1.1.0";
 const NORMATIVE_PAYLOAD_COUNT: usize = 58;
+/// The only named algorithm results the 1.1.0 model register records twice; each
+/// pair is byte-identical in the vendored `evidence/model-results.json`.
+const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] = [
+    "golden MIME audio/mpeg",
+    "golden MIME application/gzip",
+];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -114,7 +120,13 @@ pub enum Status {
 #[derive(Deserialize)]
 struct Release {
     version: String,
+    counts: ReleaseCounts,
     normative_payload_sha256: BTreeMap<String, String>,
+}
+#[derive(Deserialize)]
+struct ReleaseCounts {
+    requirements: usize,
+    scenario_oracles: usize,
 }
 #[derive(Deserialize)]
 struct Requirement {
@@ -213,7 +225,10 @@ struct Scenarios {
 struct Scenario {
     id: String,
     requirements: Vec<String>,
-    /// Absent on 1.1.0 gate-matrix oracles, which carry only `implementation_status`.
+    /// Present on every 1.1.0 scenario oracle.
+    implementation_status: Option<String>,
+    /// Present on the 149 scenarios that declare an evidence level; absent on the
+    /// 130 gate-matrix oracles, which are scoped by `implementation_status` alone.
     #[serde(default)]
     evidence_level: Option<String>,
 }
@@ -314,6 +329,16 @@ fn generate_inner(
         &scenarios,
         &models,
     )?;
+    if release.counts.requirements == 0
+        || release.counts.scenario_oracles == 0
+        || release.counts.requirements != requirements.len()
+        || release.counts.scenario_oracles != scenarios.scenarios.len()
+        || manifest.counts.valid == 0
+        || manifest.counts.invalid == 0
+        || manifest.counts.project == 0
+    {
+        return Err(err("release counts disagree with the reference artefacts"));
+    }
     let evidence_by_id = evidence
         .requirements
         .iter()
@@ -373,20 +398,15 @@ fn generate_inner(
                 {
                     Status::JustifiedGap
                 } else {
-                    // 1.1.0 gate-matrix oracles carry no evidence_level; the bundle
-                    // scopes them as implementation_status "not-executed", a justified gap.
-                    scenario
-                        .evidence_level
-                        .as_deref()
-                        .map_or(Status::JustifiedGap, status_from_level)
+                    scenario_status(scenario)?
                 };
-                ScenarioTrace {
+                Ok(ScenarioTrace {
                     scenario_id: scenario.id.clone(),
                     requirements: scenario.requirements.clone(),
                     status,
-                }
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         bounded_production_evidence: Vec::new(),
     };
     if let Some(witnesses) = engine_witnesses {
@@ -951,26 +971,49 @@ fn validate(
     for scenario in &scenarios.scenarios {
         if scenario.requirements.is_empty()
             || scenario
-                .evidence_level
+                .implementation_status
                 .as_deref()
-                .is_some_and(str::is_empty)
+                .is_none_or(str::is_empty)
+            || scenario.evidence_level.as_deref().is_some_and(str::is_empty)
         {
             return Err(err(
-                "scenario has an empty requirement link or evidence field",
+                "scenario lacks requirement links, implementation_status, or a non-empty evidence level",
             ));
         }
     }
-    let mut outcomes = BTreeMap::new();
-    let consistent = models.results.iter().all(|model| {
-        !model.name.is_empty()
-            && outcomes
-                .insert(model.name.as_str(), model.passed)
-                .is_none_or(|prior| prior == model.passed)
-    });
-    if models.results.is_empty() || !consistent {
+    let mut result_counts = BTreeMap::new();
+    for model in &models.results {
+        if model.name.is_empty() || !model.passed {
+            return Err(err("named algorithm result is empty or not passing"));
+        }
+        *result_counts.entry(model.name.as_str()).or_insert(0usize) += 1;
+    }
+    if models.results.is_empty()
+        || result_counts.iter().any(|(name, count)| {
+            *count > 1 && (!EXACT_DUPLICATE_MODEL_RESULTS.contains(name) || *count != 2)
+        })
+    {
         return Err(err("named algorithm inventory is invalid"));
     }
     Ok(())
+}
+
+/// Scenario status for implementation-scenario oracles. A scenario with an
+/// evidence level is classified by it; a scenario without one must be
+/// `not-executed` and is a justified gap. Anything else is rejected.
+fn scenario_status(scenario: &Scenario) -> Result<Status> {
+    let implementation_status = scenario
+        .implementation_status
+        .as_deref()
+        .ok_or_else(|| err(format!("scenario lacks implementation_status: {}", scenario.id)))?;
+    match scenario.evidence_level.as_deref() {
+        Some(level) => Ok(status_from_level(level)),
+        None if implementation_status == "not-executed" => Ok(Status::JustifiedGap),
+        None => Err(err(format!(
+            "scenario has no evidence_level and is not not-executed: {}",
+            scenario.id
+        ))),
+    }
 }
 fn normative_payloads(
     digests: &BTreeMap<String, String>,
