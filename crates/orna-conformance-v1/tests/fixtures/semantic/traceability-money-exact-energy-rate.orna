@@ -10,4 +10,7 @@ pub type GBP {
     }
 }
 
+pub dim Energy;
+pub unit kWh : Energy base;
+
 pub fn cost(energy: Decimal<kWh>, rate: Money<GBP> / kWh): Money<GBP> = energy * rate;
