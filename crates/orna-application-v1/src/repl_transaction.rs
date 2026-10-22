@@ -26,6 +26,15 @@ impl ApplicationAuthority {
         bindings: &mut SysHostBindingRegistry,
     ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ApplicationError> {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
+        // The REPL host serves no publication relation, so its explain
+        // catalogue pins the activation's project tables only.
+        let explain_catalogue = orna_evaluator_v1::ActivationExplainCatalogue::new(
+            scope.runtime_context.capture().snapshot(),
+            tables.keys().map(String::as_str),
+        )
+        .map_err(|_| {
+            ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
+        })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
@@ -41,6 +50,7 @@ impl ApplicationAuthority {
             mutations,
             scope,
             next_row_ordinal: 0,
+            explain_catalogue,
         };
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
@@ -259,7 +269,7 @@ fn admitted_project_tables(
     Functions,
 ), ApplicationError> {
     let project = scope.project;
-    let analysis = analyze_with_catalogue(project.modules(), &authority.catalogue);
+    let analysis = analyze_with_providers(project.modules(), &authority.catalogue, SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(ApplicationError::Semantic(
             analysis
@@ -320,6 +330,7 @@ struct ReplTransactionEffectHandler<'a, 'scope> {
     mutations: SourceMutationEffectHandler,
     scope: &'a ReplTransactionScope<'scope>,
     next_row_ordinal: u64,
+    explain_catalogue: orna_evaluator_v1::ActivationExplainCatalogue,
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {
@@ -600,6 +611,10 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
     fn ovb2_binding(&mut self) -> Option<&mut dyn Ovb2EffectHandler> {
         Some(self)
     }
+
+    fn explain_catalogue(&self) -> Option<&dyn orna_evaluator_v1::ExplainCatalogue> {
+        Some(&self.explain_catalogue)
+    }
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {
@@ -671,11 +686,18 @@ impl ReplTransactionEffectHandler<'_, '_> {
             let Some(Some(blob)) = blob_value(ty, original) else {
                 continue;
             };
-            if !matches!(blob, OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _)) {
+            if !matches!(
+                blob,
+                OvbRaw::Tag(
+                    orna_value_v1::OVB2_BLOB_TAG
+                        | orna_value_v1::ROV3_BLOB_TAG
+                        | orna_value_v1::SOV3_BLOB_TAG,
+                    _
+                )
+            ) {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
             }
-            let value = ContextValue::new(ValueFormat::Ovb2, blob.clone())
-                .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
+            let value = in_profile_of(input_row, blob.clone())?;
             let binding = self.bindings.accept_captured_blob_for_row(&value)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
             blob_bindings.insert(field.clone(), binding);
@@ -701,9 +723,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
             return Ok(None);
         };
         let raw = restore_contextual_blob_values(&schema, result.raw(), input_row.raw())?;
-        ContextValue::new(ValueFormat::Ovb2, raw)
-            .map(Some)
-            .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
+        in_profile_of(input_row, raw).map(Some)
     }
 
     fn handle_contextual_effect(
@@ -841,11 +861,30 @@ impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         )
     }
 
+    /// A lazily captured Blob arrives as a ROV-3 value in its capture context.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+}
+
+/// Rebuilds `raw` in the format and context of `profile`, so a lazily captured
+/// Blob keeps the context that can resolve it.
+fn in_profile_of(profile: &ContextValue, raw: OvbRaw) -> Result<ContextValue, EvaluationError> {
+    match profile.context() {
+        Some(context) => ContextValue::new_in_context(context, profile.format(), raw),
+        None => ContextValue::new(profile.format(), raw),
+    }
+    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))
 }
 
 fn contains_contextual_blob_value(value: &OvbRaw) -> bool {
     match value {
-        OvbRaw::Tag(orna_value_v1::OVB2_BLOB_TAG, _) => true,
+        OvbRaw::Tag(
+            orna_value_v1::OVB2_BLOB_TAG
+            | orna_value_v1::ROV3_BLOB_TAG
+            | orna_value_v1::SOV3_BLOB_TAG,
+            _,
+        ) => true,
         OvbRaw::Tag(_, inner) => contains_contextual_blob_value(inner),
         OvbRaw::Array(values) => values.iter().any(contains_contextual_blob_value),
         OvbRaw::Map(values) => values.iter().any(|(key, value)| {
