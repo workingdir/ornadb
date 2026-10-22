@@ -119,55 +119,99 @@ fn context_backed_resolver_rejects_foreign_store_root_bindings() {
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 1);
 }
 
+/// The vendored Orna 1.1.0 `tests/final-vectors.json`. The `mime1` tests pin
+/// this same copy to its release `SHA256SUMS` value.
+fn final_vectors() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/reference/tests/final-vectors.json"))
+        .expect("the vendored final vectors are JSON")
+}
+
+/// Bytes of a `{"bytes_hex": ...}` field in a final-vector typed value.
+fn vector_bytes(field: &serde_json::Value) -> Vec<u8> {
+    hex_bytes(field["bytes_hex"].as_str().expect("a typed byte string"))
+}
+
+fn vector_identity(length: &serde_json::Value, sha256: &serde_json::Value) -> ContentIdentity {
+    let sha256 = vector_bytes(sha256)
+        .try_into()
+        .expect("a 32-byte content digest");
+    ContentIdentity::new(length.as_u64().expect("a content length"), sha256)
+        .expect("a valid content identity")
+}
+
+/// Orna 1.1.0 `tests/final-vectors.json` `values`: each published Blob value
+/// encodes to its exact canonical bytes under its explicit profile (OVB-2 tag
+/// 60110, SOV-3 tag 60112, ROV-3 tag 60111 with the published descriptor OID),
+/// and those bytes decode back to the same value without reading content.
 #[test]
 fn published_blob_vectors_use_explicit_profiles() {
-    let ovb2 = Blob::from_bytes_with_annotation(b"abc".to_vec(), "text/plain;charset=utf-8", None)
-        .unwrap();
+    let vectors = final_vectors();
+    let values = vectors["values"].as_array().expect("value vectors");
     assert_eq!(
-        encode_ovb2(&ovb2).unwrap(),
-        hex_bytes("d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6")
+        values
+            .iter()
+            .map(|case| case["id"].as_str().expect("a vector id"))
+            .collect::<Vec<_>>(),
+        ["ovb2-empty", "ovb2-text", "sov3-text", "rov3-text", "ovb2-js-module"]
     );
-
-    let identity = ContentIdentity::from_bytes(b"abc");
-    let context = test_context(counting_resolver(b"abc"));
-    let reference = context
-        .reference(identity, NativeOid::from_bytes(&[0x7f; 20]).unwrap())
-        .unwrap();
-    let rov3 =
-        Blob::from_reference_with_annotation(reference, "text/plain;charset=utf-8", None).unwrap();
-    assert!(!rov3.is_hydrated());
-    assert_eq!(
-        encode_rov3(&rov3).unwrap(),
-        hex_bytes(
-            "d9eacf85035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6547f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f"
-        )
-    );
-    let decoded_rov3 = decode_rov3_in_context(&encode_rov3(&rov3).unwrap(), &context).unwrap();
-    assert_eq!(decoded_rov3.content_identity(), rov3.content_identity());
-    assert_eq!(decoded_rov3.media_type(), rov3.media_type());
-    assert_eq!(decoded_rov3.descriptor_oid(), rov3.descriptor_oid());
-
-    let sov3 = Blob::from_semantic_commitment_in_context(
-        identity,
-        &context,
-        "text/plain;charset=utf-8",
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        encode_sov3(&sov3).unwrap(),
-        hex_bytes(
-            "d9ead084035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6"
-        )
-    );
-    let decoded_sov3 = decode_sov3_in_context(&encode_sov3(&sov3).unwrap(), &context).unwrap();
-    assert_eq!(decoded_sov3.content_identity(), sov3.content_identity());
-    assert_eq!(decoded_sov3.media_type(), sov3.media_type());
-    assert_eq!(
-        decoded_sov3.same_content(&sov3),
-        Err(Error::ContentUnavailable)
-    );
-    assert_eq!(decode_ovb2(&encode_ovb2(&ovb2).unwrap()).unwrap(), ovb2);
+    let resolver = counting_resolver(&[]);
+    let context = test_context(resolver.clone());
+    for case in values {
+        let id = case["id"].as_str().expect("a vector id");
+        let canonical = hex_bytes(case["canonical_hex"].as_str().expect("canonical bytes"));
+        let fields = case["value"]["value"].as_array().expect("tagged fields");
+        match case["value"]["tag"].as_u64().expect("a value tag") {
+            60110 => {
+                let media_type = fields[1].as_str().expect("a media type");
+                let ovb2 =
+                    Blob::from_bytes_with_annotation(vector_bytes(&fields[0]), media_type, fields[2].as_str())
+                        .unwrap();
+                assert_eq!(encode_ovb2(&ovb2).unwrap(), canonical, "{id}");
+                assert_eq!(decode_ovb2(&canonical).unwrap(), ovb2, "{id}");
+            }
+            60112 => {
+                let identity = vector_identity(&fields[0], &fields[1]);
+                let media_type = fields[2].as_str().expect("a media type");
+                let sov3 = Blob::from_semantic_commitment_in_context(
+                    identity,
+                    &context,
+                    media_type,
+                    fields[3].as_str(),
+                )
+                .unwrap();
+                assert_eq!(encode_sov3(&sov3).unwrap(), canonical, "{id}");
+                let decoded = decode_sov3_in_context(&canonical, &context).unwrap();
+                assert_eq!(decoded.content_identity(), identity, "{id}");
+                assert_eq!(decoded.media_type(), media_type, "{id}");
+                assert_eq!(decoded.suffix(), fields[3].as_str(), "{id}");
+                assert_eq!(
+                    decoded.same_content(&sov3),
+                    Err(Error::ContentUnavailable),
+                    "{id}"
+                );
+                assert_eq!(encode_sov3(&decoded).unwrap(), canonical, "{id}");
+            }
+            60111 => {
+                let identity = vector_identity(&fields[0], &fields[1]);
+                let media_type = fields[2].as_str().expect("a media type");
+                let descriptor_oid = NativeOid::from_bytes(&vector_bytes(&fields[4])).unwrap();
+                let reference = context.reference(identity, descriptor_oid.clone()).unwrap();
+                let rov3 =
+                    Blob::from_reference_with_annotation(reference, media_type, fields[3].as_str())
+                        .unwrap();
+                assert!(!rov3.is_hydrated(), "{id}");
+                assert_eq!(encode_rov3(&rov3).unwrap(), canonical, "{id}");
+                let decoded = decode_rov3_in_context(&canonical, &context).unwrap();
+                assert_eq!(decoded.content_identity(), identity, "{id}");
+                assert_eq!(decoded.media_type(), media_type, "{id}");
+                assert_eq!(decoded.suffix(), fields[3].as_str(), "{id}");
+                assert_eq!(decoded.descriptor_oid(), Some(&descriptor_oid), "{id}");
+                assert_eq!(encode_rov3(&decoded).unwrap(), canonical, "{id}");
+            }
+            tag => panic!("{id}: unexpected value tag {tag}"),
+        }
+    }
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
