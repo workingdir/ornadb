@@ -1,0 +1,6 @@
+pub enum SyncResult {
+    ok { count: Int },
+    failed { reason: Str, retryable: Bool },
+}
+
+pub fn bad(): SyncResult = SyncResult.ok { count: "three" };
