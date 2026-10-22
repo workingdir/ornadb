@@ -23,7 +23,7 @@ use orna_semantic_v1::{
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_row_unit_with_owner_fields,
 };
-use orna_syntax_v1::{Declaration, Expr, parse_module, parse_row};
+use orna_syntax_v1::{Declaration, Expr, parse_module, parse_module_with_file, parse_row};
 use orna_value_v1::{
     ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
 };
@@ -47,13 +47,22 @@ pub use attachments::{
 
 
 /// Bounded resource limits applied before source contents are read.
+///
+/// These are implementation resource limits: a loader may configure them, and
+/// each one is reported by its own error when exceeded (ORNA-CLOSURE-004).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProjectLimits {
+    /// Maximum reachable modules loaded and parsed.
     pub max_modules: usize,
     pub max_source_bytes: usize,
-    /// Maximum non-administrative directory entries inspected while enforcing
-    /// portable repository ownership rules.
-    pub max_repository_entries: usize,
+    /// Maximum source module files whose paths are checked for namespace
+    /// ownership (ORNA-NS-004, ORNA-NS-005, ORNA-NS-008) before any source is
+    /// read. Unreachable modules are checked without being admitted
+    /// (ORNA-REPO-002, ORNA-REPO-003), so they count too. Nothing else does:
+    /// other files are not modules, and the format-3 store at `.orna/store` is
+    /// database content that the loader never walks (19-repository: a "native
+    /// Git tree, normally sparsely excluded").
+    pub max_source_modules: usize,
 }
 
 impl Default for ProjectLimits {
@@ -61,7 +70,7 @@ impl Default for ProjectLimits {
         Self {
             max_modules: 256,
             max_source_bytes: 4 * 1024 * 1024,
-            max_repository_entries: 4_096,
+            max_source_modules: 4_096,
         }
     }
 }
@@ -165,39 +174,6 @@ impl ResolvedTableSchema {
 
     pub fn binding(&self) -> &CommittedTableBinding {
         &self.binding
-    }
-}
-
-/// Source-owned path for one key under a committed table binding.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CommittedLooseRowProjection {
-    schema: ResolvedTableSchema,
-    table_path: String,
-    logical_path: String,
-    key_path_components: Vec<String>,
-}
-
-impl CommittedLooseRowProjection {
-    pub fn schema(&self) -> &ResolvedTableSchema {
-        &self.schema
-    }
-
-    /// Single-component storage root; module namespaces stay in `table_path`.
-    pub fn table_root(&self) -> &str {
-        self.schema.declaration_name()
-    }
-
-    pub fn table_path(&self) -> &str {
-        &self.table_path
-    }
-
-    pub fn logical_path(&self) -> &str {
-        &self.logical_path
-    }
-
-    /// Encoded components exclude the table root and include `.orna` last.
-    pub fn key_path_components(&self) -> &[String] {
-        &self.key_path_components
     }
 }
 
@@ -377,10 +353,34 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
-    /// Builds a source-only schema from this project's committed identity manifest.
+    /// Builds a source-only schema from this project's committed identity
+    /// manifest. A table that stores a table reference records its database,
+    /// so it fails here; use [`Self::source_table_schema_in_database`].
     pub fn source_table_schema(
         &self,
         manifest: &ObjectIdentityManifest,
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
+        self.build_source_table_schema(manifest, None, module_name, declaration_name)
+    }
+
+    /// Builds a source-only schema whose stored table references bind
+    /// `database_id`, the database that owns this project's tables.
+    pub fn source_table_schema_in_database(
+        &self,
+        manifest: &ObjectIdentityManifest,
+        database_id: [u8; 16],
+        module_name: &str,
+        declaration_name: &str,
+    ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
+        self.build_source_table_schema(manifest, Some(database_id), module_name, declaration_name)
+    }
+
+    fn build_source_table_schema(
+        &self,
+        manifest: &ObjectIdentityManifest,
+        database_id: Option<[u8; 16]>,
         module_name: &str,
         declaration_name: &str,
     ) -> Result<SourceTableSchemaArtifact, ProjectLoadError> {
@@ -398,7 +398,14 @@ impl LoadedProject {
             None => analyze(&self.modules),
         };
         manifest
-            .source_table_schema(&analysis, module_name, source_path, declaration_name)
+            .source_table_schema(
+                &self.modules,
+                &analysis,
+                database_id,
+                module_name,
+                source_path,
+                declaration_name,
+            )
             .map_err(|_| ProjectLoadError::InvalidTableSchema)
     }
 
@@ -882,7 +889,8 @@ fn source_schema_fields(
         }
         let blob_optional = source_schema_blob_optional(ty);
         let role = role.to_string().parse::<u64>().map_err(|_| ProjectLoadError::InvalidSourceRow)?;
-        if role > 1 { return Err(ProjectLoadError::InvalidSourceRow); }
+        // Role 2 is a computed selector: never a stored column (ORNA-FIELD-006).
+        if role > 2 { return Err(ProjectLoadError::InvalidSourceRow); }
         fields.push(SourceSchemaField {
             id,
             name: name.clone(),
@@ -1086,39 +1094,6 @@ impl ProjectLoader {
             &project,
             table_object_id,
         )
-    }
-
-    /// Resolves the frozen mutation's committed table identity and projects its
-    /// key to the exact source row path from that same committed snapshot.
-    pub fn resolve_committed_loose_row_projection(
-        &self,
-        repository: &Repository,
-        commit: &GitCommitRef,
-        mutation: &TableMutation,
-    ) -> Result<CommittedLooseRowProjection, ProjectLoadError> {
-        let table_object_id = mutation
-            .table_object_id()
-            .ok_or(ProjectLoadError::InvalidSourceRow)?;
-        let project = self.load_committed_snapshot(repository, commit)?;
-        let schema = resolve_committed_source_table_schema_for_project(
-            repository,
-            commit,
-            &project,
-            table_object_id,
-        )?;
-        if mutation.table() != schema.declaration_name()
-            || mutation.table_object_id() != Some(schema.table_object_id())
-        {
-            return Err(ProjectLoadError::InvalidSourceRow);
-        }
-        let (table_path, logical_path, key_path_components) =
-            committed_source_row_path(&project, &schema, mutation.key())?;
-        Ok(CommittedLooseRowProjection {
-            schema,
-            table_path,
-            logical_path,
-            key_path_components,
-        })
     }
 
     /// Loads the root module and reachable imports from the immutable tree of
@@ -1362,10 +1337,6 @@ fn resolve_committed_source_table_schema_for_project(
     let snapshot_id = project
         .source_snapshot_id()
         .ok_or(ProjectLoadError::InvalidTableSchema)?;
-    let table = project.source_table_schema(&manifest, module_name, declaration_name)?;
-    if *table.table_object_id() != table_object_id.bytes() {
-        return Err(ProjectLoadError::InvalidTableSchema);
-    }
     let context = repository
         .open_pinned_format_context(commit.as_str())
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
@@ -1375,6 +1346,15 @@ fn resolve_committed_source_table_schema_for_project(
     let expected_database_id = context
         .require_database_id()
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    let table = project.source_table_schema_in_database(
+        &manifest,
+        *expected_database_id.as_bytes(),
+        module_name,
+        declaration_name,
+    )?;
+    if *table.table_object_id() != table_object_id.bytes() {
+        return Err(ProjectLoadError::InvalidTableSchema);
+    }
     let binding = context
         .bind_committed_table(
             table.module_name(),
@@ -1403,132 +1383,6 @@ fn resolve_committed_source_table_schema_for_project(
         table,
         binding,
     })
-}
-
-fn committed_source_row_path(
-    project: &LoadedProject,
-    schema: &ResolvedTableSchema,
-    canonical_key: &[u8],
-) -> Result<(String, String, Vec<String>), ProjectLoadError> {
-    if project.source_commit() != Some(schema.source_commit())
-        || project.source_snapshot_id() != Some(*schema.snapshot_id())
-    {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let catalogue = project
-        .standard_catalogue(project.standard_sources().iter().cloned())
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
-    let analysis = match catalogue.as_ref() {
-        Some(catalogue) => analyze_with_catalogue(project.modules(), catalogue),
-        None => analyze(project.modules()),
-    };
-    if !analysis.is_ok() {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let module_name = source_table_module_name(project, &analysis, schema.declaration_name())?;
-    if module_name != schema.table.module_name()
-        || schema.binding.module_name() != Some(schema.table.module_name())
-        || schema.binding.source_path() != Some(schema.table.source_path())
-    {
-        return Err(ProjectLoadError::InvalidSourceRow);
-    }
-    let table_path = if module_name.is_empty() {
-        schema.declaration_name().to_owned()
-    } else {
-        format!(
-            "{}/{}",
-            module_name.replace('.', "/"),
-            schema.declaration_name()
-        )
-    };
-    let source_schema = schema.descriptor();
-    let key_ids = match raw_map_value(source_schema.raw(), "2") {
-        Some(Raw::Array(ids)) => ids
-            .iter()
-            .map(|id| committed_uuid(id).ok_or(ProjectLoadError::InvalidSourceRow))
-            .collect::<Result<BTreeSet<_>, _>>()?,
-        _ => return Err(ProjectLoadError::InvalidSourceRow),
-    };
-    let (_, fields) = source_schema_fields(source_schema)?;
-    let owner_fields =
-        |candidate: &LooseRowCandidate| absent_source_owner_fields(candidate, &fields, &key_ids);
-    find_committed_source_row_path(project, &analysis, &table_path, canonical_key, owner_fields)
-}
-
-fn absent_source_owner_fields(
-    candidate: &LooseRowCandidate,
-    fields: &[SourceSchemaField],
-    key_ids: &BTreeSet<[u8; 16]>,
-) -> Result<Option<Vec<String>>, ProjectLoadError> {
-    let parsed = parse_row(candidate.source());
-    if !parsed.diagnostics.is_empty() {
-        return Ok(None);
-    }
-    let Expr::Record {
-        fields: row_fields, ..
-    } = parsed.value
-    else {
-        return Ok(None);
-    };
-    let present = row_fields
-        .iter()
-        .map(|field| field.name.as_str())
-        .collect::<BTreeSet<_>>();
-    Ok(Some(
-        fields
-            .iter()
-            .filter(|field| {
-                field.role == 1
-                    && !key_ids.contains(&field.id)
-                    && !present.contains(field.name.as_str())
-            })
-            .map(|field| field.name.clone())
-            .collect(),
-    ))
-}
-
-fn find_committed_source_row_path(
-    project: &LoadedProject,
-    analysis: &Analysis,
-    table_path: &str,
-    canonical_key: &[u8],
-    mut owner_fields_for: impl FnMut(
-        &LooseRowCandidate,
-    ) -> Result<Option<Vec<String>>, ProjectLoadError>,
-) -> Result<(String, String, Vec<String>), ProjectLoadError> {
-    let mut matched = None;
-    for candidate in project
-        .loose_rows()
-        .iter()
-        .filter(|candidate| candidate.table_path() == table_path)
-    {
-        let Some(owner_fields) = owner_fields_for(candidate)? else {
-            continue;
-        };
-        let input = RowUnitInput {
-            logical_path: candidate.logical_path(),
-            table_path: candidate.table_path(),
-            key_path: candidate.key_path(),
-            source: candidate.source(),
-            source_bytes: candidate.source_bytes(),
-            parse_as: candidate.parse_as(),
-        };
-        let Ok(lowered) = lower_row_unit_with_owner_fields(analysis, &input, &owner_fields) else {
-            continue;
-        };
-        if lowered.owner != table_path || lowered.canonical_key != canonical_key {
-            continue;
-        }
-        if matched.is_some() {
-            return Err(ProjectLoadError::InvalidSourceRow);
-        }
-        matched = Some((
-            candidate.table_path().to_owned(),
-            candidate.logical_path().to_owned(),
-            candidate.key_path().to_vec(),
-        ));
-    }
-    matched.ok_or(ProjectLoadError::InvalidSourceRow)
 }
 
 fn source_table_module_name(
@@ -1608,7 +1462,14 @@ fn load_reachable_project(
         let source = read_module(&logical_path, &mut total_bytes)?;
         let parsed = parse_module(&source);
         if !parsed.is_ok() {
-            return Err(ProjectLoadError::InvalidModule);
+            // Re-parse with the logical path so the reported spans carry the
+            // file and 1-based line/column coordinates. Accepted modules keep
+            // the unannotated tree, so the happy path is unchanged.
+            let located = parse_module_with_file(&source, logical_path.as_str());
+            return Err(ProjectLoadError::InvalidModule {
+                logical_path,
+                diagnostics: located.diagnostics,
+            });
         }
         let namespace = namespace_for_path(&logical_path)?;
         if let Some(previous) = namespaces.insert(namespace.clone(), logical_path.clone())
@@ -1768,7 +1629,10 @@ pub enum ProjectLoadError {
     SourceTooLarge,
     RepositoryLimit,
     ModuleLimit,
-    InvalidModule,
+    InvalidModule {
+        logical_path: String,
+        diagnostics: Vec<orna_syntax_v1::SyntaxDiagnostic>,
+    },
     UnsupportedImport,
     ImportUnavailable,
     AmbiguousImport,
@@ -1792,9 +1656,9 @@ impl fmt::Display for ProjectLoadError {
             Self::Symlink => "project module path contains a symbolic link",
             Self::SourceUnavailable => "reachable source module is unavailable",
             Self::SourceTooLarge => "project source exceeds the configured limit",
-            Self::RepositoryLimit => "project exceeds the configured repository-entry limit",
+            Self::RepositoryLimit => "project exceeds the configured source-module limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
-            Self::InvalidModule => "reachable source module is not a valid module unit",
+            Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
             Self::UnsupportedImport => "source import cannot be resolved by this loader",
             Self::ImportUnavailable => "imported source module is unavailable",
             Self::AmbiguousImport => "imported source module has ambiguous ownership",
@@ -1835,12 +1699,17 @@ fn canonical_worktree(repository: &Repository) -> Result<PathBuf, ProjectLoadErr
     fs::canonicalize(repository.worktree()).map_err(|_| ProjectLoadError::RootUnavailable)
 }
 
+/// The materialised format-3 store. It is database content, not source.
+const NATIVE_STORE_PATH: &str = ".orna/store";
+
 /// Validates path portability without reading or parsing repository file bodies.
-/// Git administrative directories are outside repository content and are skipped.
+/// Git administrative directories are outside repository content and are skipped,
+/// and so is the materialised store at `.orna/store`. Only module sources count
+/// against [`ProjectLimits::max_source_modules`].
 fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), ProjectLoadError> {
     let mut pending = VecDeque::from([root.to_path_buf()]);
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
-    let mut entries_seen = 0usize;
+    let store = root.join(NATIVE_STORE_PATH);
     while let Some(directory) = pending.pop_front() {
         let mut entries = fs::read_dir(&directory)
             .map_err(|_| ProjectLoadError::SourceUnavailable)?
@@ -1857,10 +1726,6 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
             if name == ".git" {
                 continue;
             }
-            if entries_seen == limits.max_repository_entries {
-                return Err(ProjectLoadError::RepositoryLimit);
-            }
-            entries_seen += 1;
             if !portable_component(&name) {
                 return Err(ProjectLoadError::NonPortablePath);
             }
@@ -1877,7 +1742,10 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
                 return Err(ProjectLoadError::Symlink);
             }
             if metadata.is_dir() {
-                pending.push_back(entry.path());
+                let subdirectory = entry.path();
+                if subdirectory != store {
+                    pending.push_back(subdirectory);
+                }
             } else if !metadata.is_file() {
                 return Err(ProjectLoadError::UnsafePath);
             } else if name.ends_with(".orna")
@@ -1897,15 +1765,19 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
                 {
                     return Err(ProjectLoadError::DuplicateModuleNamespace);
                 }
+                if module_owners.len() > limits.max_source_modules {
+                    return Err(ProjectLoadError::RepositoryLimit);
+                }
             }
         }
     }
     Ok(())
 }
 
-/// Validates the complete immutable tree before any reachable source body is
-/// read. Git emits only leaf entries, so sibling ownership is reconstructed
-/// from every component rather than inferred from the mutable worktree.
+/// Validates the immutable source tree before any reachable source body is
+/// read. The listing excludes only the native store at `.orna/store`. Git emits
+/// only leaf entries, so sibling ownership is reconstructed from every
+/// component rather than inferred from the mutable worktree.
 struct ValidatedSnapshotTree {
     source_paths: BTreeSet<String>,
     row_paths: BTreeSet<String>,
@@ -1919,7 +1791,7 @@ fn validate_committed_tree(
     limits: ProjectLimits,
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
-        .list_committed_tree(commit, limits.max_repository_entries.saturating_add(1))
+        .list_committed_source_tree(commit)
         .map_err(ProjectLoadError::Repository)?;
     validate_snapshot_tree(entries, limits)
 }
@@ -1930,7 +1802,7 @@ fn validate_private_candidate_tree(
     limits: ProjectLimits,
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
-        .list_private_candidate_tree(candidate, limits.max_repository_entries.saturating_add(1))
+        .list_private_candidate_source_tree(candidate)
         .map_err(ProjectLoadError::Repository)?;
     validate_snapshot_tree(entries, limits)
 }
@@ -1939,10 +1811,6 @@ fn validate_snapshot_tree(
     entries: Vec<CommittedTreeEntry>,
     limits: ProjectLimits,
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
-    if entries.len() > limits.max_repository_entries {
-        return Err(ProjectLoadError::RepositoryLimit);
-    }
-
     let has_standard_gitlink = entries.iter().any(|entry| {
         entry.path().as_path() == Path::new("stdlib/std")
             && entry.kind() == CommittedTreeEntryKind::Submodule
@@ -1963,6 +1831,9 @@ fn validate_snapshot_tree(
             &mut source_paths,
             &mut row_paths,
         )?;
+        if module_owners.len() > limits.max_source_modules {
+            return Err(ProjectLoadError::RepositoryLimit);
+        }
     }
     Ok(ValidatedSnapshotTree {
         source_paths,
@@ -2165,7 +2036,12 @@ fn discover_worktree_rows(
             let metadata =
                 fs::symlink_metadata(&path).map_err(|_| ProjectLoadError::SourceUnavailable)?;
             if metadata.is_dir() {
-                pending.push_back(path);
+                // Nothing below a `.orna` directory is a row source (see
+                // `is_committed_metadata_path`), and the format-3 store there
+                // grows with every row it holds.
+                if entry.file_name() != ".orna" {
+                    pending.push_back(path);
+                }
                 continue;
             }
             if !metadata.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("orna")
@@ -2531,97 +2407,5 @@ mod source_row_admission_tests {
             &expected_database_id,
             COMMIT,
         ));
-    }
-}
-
-#[cfg(test)]
-mod committed_loose_row_projection_tests {
-    use super::*;
-    use orna_value_v1::Value;
-    use std::{path::Path, process::Command};
-
-    fn git(root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git executable is available");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn committed_row_key_projects_to_its_unique_source_path() {
-        let root = tempfile::tempdir().unwrap();
-        let fixtures = [
-            (
-                "main.orna",
-                include_str!("../tests/fixtures/main_contacts.orna"),
-            ),
-            (
-                "contacts.orna",
-                include_str!("../tests/fixtures/contacts_table.orna"),
-            ),
-            (
-                "contacts/Contact/42.orna",
-                include_str!("../tests/fixtures/contact_42.orna"),
-            ),
-        ];
-        for (path, source) in fixtures {
-            let path = root.path().join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, source).unwrap();
-        }
-        git(root.path(), &["init", "--quiet"]);
-        git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
-        git(root.path(), &["config", "user.name", "kierandrewett"]);
-        git(root.path(), &["config", "commit.gpgsign", "false"]);
-        git(root.path(), &["add", "."]);
-        git(root.path(), &["commit", "--quiet", "-m", "fixture"]);
-
-        let repository = Repository::discover(root.path()).unwrap();
-        let commit = repository.head().unwrap().unwrap();
-        let project = ProjectLoader::default()
-            .load_committed_snapshot(&repository, &commit)
-            .unwrap();
-        let analysis = analyze(project.modules());
-        let key = Value::new(Raw::Int(42.into())).unwrap().encode().unwrap();
-
-        let (table_path, logical_path, key_path) =
-            find_committed_source_row_path(&project, &analysis, "contacts/Contact", &key, |_| {
-                Ok(Some(Vec::new()))
-            })
-            .unwrap();
-        assert_eq!(table_path, "contacts/Contact");
-        assert_eq!(logical_path, "contacts/Contact/42.orna");
-        assert_eq!(key_path, ["42.orna"]);
-
-        let other_key = Value::new(Raw::Int(43.into())).unwrap().encode().unwrap();
-        assert!(
-            find_committed_source_row_path(
-                &project,
-                &analysis,
-                "contacts/Contact",
-                &other_key,
-                |_| Ok(Some(Vec::new())),
-            )
-            .is_err()
-        );
-
-        let mut ambiguous = project.clone();
-        ambiguous.loose_rows.push(ambiguous.loose_rows[0].clone());
-        assert!(
-            find_committed_source_row_path(
-                &ambiguous,
-                &analysis,
-                "contacts/Contact",
-                &key,
-                |_| Ok(Some(Vec::new())),
-            )
-            .is_err()
-        );
     }
 }
