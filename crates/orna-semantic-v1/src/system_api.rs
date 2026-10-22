@@ -281,40 +281,21 @@ impl SystemApi {
                 .iter()
                 .map(|precondition| precondition.declaration.as_str())
                 .collect::<Vec<_>>();
-            let namespace = descriptor
-                .label
-                .find(['(', '<'])
-                .map_or(descriptor.label.as_str(), |end| &descriptor.label[..end]);
-            let expected_failures = self
-                .failure_codes
-                .iter()
-                .filter(|code| {
-                    (descriptor.contract.as_deref() == Some("annotated-blob-format-3")
-                        && namespace == "sys.blob.annotate"
-                        && matches!(
-                            code.as_str(),
-                            "sys.blob.incompatible_suffix"
-                                | "sys.blob.invalid_media_type"
-                                | "sys.blob.invalid_suffix"
-                        ))
-                        || code.as_str() == namespace
-                        || code
-                            .strip_prefix(namespace)
-                            .is_some_and(|tail| tail.starts_with('.'))
-                })
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
-            let registered_failures = contract
+            // Each operation declares its portable failures explicitly; the
+            // published API lists no per-operation set, so every declared
+            // portable code must be a published failure code. The shared
+            // `sys.abi.*` provider-boundary codes never reach programs.
+            let failures_published = contract
                 .failures
                 .iter()
                 .map(orna_sys_v1::FailureCode::as_str)
                 .filter(|code| !code.starts_with("sys.abi."))
-                .collect::<BTreeSet<_>>();
+                .all(|code| self.failure_codes.contains(code));
             if contract.signature.source != descriptor.signature
                 || contract.effects.iter().count() != 1
                 || expected_effect != descriptor.effect
                 || registered_preconditions != expected_preconditions
-                || registered_failures != expected_failures
+                || !failures_published
             {
                 return Err(SystemApiError::ProviderAbiMismatch);
             }
@@ -736,6 +717,16 @@ impl SystemApi {
             .map(|_| enum_name.to_owned())
     }
 
+    /// Splits a closed `sys.<Enum>.<variant>` path into its enum and variant.
+    pub(crate) fn enum_constant(&self, path: &[&str]) -> Option<(String, String)> {
+        let (variant, enum_path) = path.split_last()?;
+        let enum_name = enum_path.join(".");
+        self.enums
+            .get(&enum_name)
+            .filter(|variants| variants.contains(*variant))
+            .map(|_| (enum_name, (*variant).to_owned()))
+    }
+
     pub(crate) fn describes_type(&self, name: &str) -> bool {
         self.types.contains_key(name)
             || self.relations.contains_key(name)
@@ -825,6 +816,11 @@ impl SystemApi {
     pub(crate) fn provider_linked(&self, _member: SystemMember<'_>) -> bool {
         false
     }
+}
+
+/// The enum and variant named by a closed `sys.<Enum>.<variant>` path.
+pub fn system_enum_constant(path: &[&str]) -> Option<(String, String)> {
+    embedded_system_api().enum_constant(path)
 }
 
 pub(crate) fn embedded_system_api() -> &'static SystemApi {

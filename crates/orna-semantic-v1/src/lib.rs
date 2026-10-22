@@ -27,6 +27,7 @@ use unicode_normalization::{UnicodeNormalization, is_nfc};
 mod repl;
 mod semantic_payload;
 mod system_api;
+pub use system_api::system_enum_constant;
 mod source_row;
 
 pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
@@ -38,7 +39,7 @@ pub use semantic_payload::{
     analyze_semantic_payloads,
 };
 
-pub use repl::{ReplAdmission, ReplCommitError, ReplContext};
+pub use repl::{NameHints, ReplAdmission, ReplCommitError, ReplContext};
 
 pub const DIAG_BAD_PATH: &str = "ORNA-S001-PATH";
 pub const DIAG_NAMESPACE: &str = "ORNA-S002-NAMESPACE";
@@ -46,6 +47,29 @@ pub const DIAG_RESERVED: &str = "ORNA-S003-RESERVED";
 pub const DIAG_IMPORT: &str = "ORNA-S010-IMPORT";
 pub const DIAG_AMBIGUOUS: &str = "ORNA-S011-AMBIGUOUS";
 pub const DIAG_UNRESOLVED: &str = "ORNA-S012-UNRESOLVED";
+/// Note prefix carrying the identifier of an `ORNA-S012-UNRESOLVED` diagnostic.
+pub const UNRESOLVED_NAME_NOTE: &str = "unresolved name: ";
+
+/// Returns the unresolved identifier recorded on an unresolved-name diagnostic.
+pub fn unresolved_name(diagnostic: &Diagnostic) -> Option<&str> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_NAME_NOTE))
+}
+
+/// Note prefix carrying `module.member` for an unresolved module member.
+pub const UNRESOLVED_MEMBER_NOTE: &str = "unresolved member: ";
+
+/// Returns the `(module, member)` pair recorded on an unresolved module member diagnostic.
+pub fn unresolved_member(diagnostic: &Diagnostic) -> Option<(&str, &str)> {
+    diagnostic
+        .notes()
+        .iter()
+        .find_map(|note| note.as_str().strip_prefix(UNRESOLVED_MEMBER_NOTE))
+        .and_then(|path| path.rsplit_once('.'))
+}
+
 pub const DIAG_DUPLICATE: &str = "ORNA-S013-DUPLICATE";
 pub const DIAG_ANNOTATION: &str = "ORNA-S020-ANNOTATION";
 pub const DIAG_TYPE: &str = "ORNA-S021-TYPE";
@@ -57,6 +81,51 @@ pub const DIAG_ASSERTION_EFFECT: &str = "ORNA-A091-007";
 pub const DIAG_LEGACY_SYS_RUNTIME: &str = "ORNA100-E-SYS-RUNTIME";
 pub const DIAG_LEGACY_TRYFROM: &str = "ORNA091-E-TRYFROM";
 pub const DIAG_LEGACY_RESULT: &str = "ORNA091-E-RESULT";
+/// Published typecheck classifications for construction fields
+/// (`tests/invalid-metadata.json`: wrong-field-type, missing-required-field
+/// and unknown-field). Enum payload construction emits them at the source.
+pub const DIAG_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_FIELD: &str = "E2002";
+pub const DIAG_UNKNOWN_FIELD: &str = "E2003";
+pub const DIAG_ASSERTION_OWNER_PIPE: &str = "ORNA-A091-002";
+/// Spec diagnostic codes (`33-diagnostics.md`) emitted directly at the rule
+/// that detects the violation; the message text never selects the code.
+pub const DIAG_RESERVED_SYS: &str = "E1008";
+pub const DIAG_RESERVED_STD: &str = "E1009";
+pub const DIAG_PRIMARY_KEY_IMMUTABLE: &str = "E3002";
+pub const DIAG_PRIMARY_KEY_FLOAT: &str = "E3003";
+pub const DIAG_PRIMARY_KEY_RANGE: &str = "E3010";
+pub const DIAG_COMPUTED_INSERT: &str = "E3010";
+pub const DIAG_COMPUTED_DIRECT_WRITE: &str = "E3011";
+pub const DIAG_COMPUTED_NONDETERMINISTIC: &str = "E3012";
+pub const DIAG_AUTOMATIC_KEY_REKEY: &str = "E3013";
+pub const DIAG_RELATION_EQUALITY_AMBIGUOUS: &str = "E4107";
+pub const DIAG_TIME_ENERGY_ADD: &str = "E5001";
+pub const DIAG_AFFINE_TEMPERATURE_ADD: &str = "E5002";
+pub const DIAG_ABSOLUTE_QUANTITY_SUM: &str = "E5003";
+pub const DIAG_CURRENCY_MISMATCH: &str = "E5003";
+pub const DIAG_MONEY_FROM_FLOAT: &str = "E5004";
+pub const DIAG_MONEY_BINARY_FLOAT: &str = "E5103";
+pub const DIAG_CALENDAR_BUCKET_ZONE: &str = "E6001";
+pub const DIAG_SYS_COMMIT_READ_ONLY: &str = "E7001";
+pub const DIAG_SECRET_DISPLAY: &str = "E7002";
+pub const DIAG_DISPLAY_READ_ONLY: &str = "E7201";
+pub const DIAG_CROSS_DATABASE_WRITE: &str = "E9001";
+pub const DIAG_AMBIGUOUS_DURABLE_CONSUMER: &str = "E9101";
+pub const DIAG_DURABLE_CONSUMER_SOURCE_ROOTS: &str = "E9102";
+pub const DIAG_CURRENCY_SYMBOL: &str = "ORNA091-E-CURRENCY-SYMBOL";
+pub const DIAG_CONVERSION_CHAIN: &str = "ORNA091-E-CONVERSION-CHAIN";
+pub const DIAG_SYS_ADMIN_METHOD: &str = "ORNA100-E-SYS-ADMIN-METHOD";
+pub const DIAG_SYS_STORAGE_CALL: &str = "ORNA100-E-SYS-STORAGE-CALL";
+pub const DIAG_TABLE_FIELD_TYPE: &str = "E2001";
+pub const DIAG_MISSING_REQUIRED_FIELD: &str = "E2002";
+pub const DIAG_TABLE_UNKNOWN_FIELD: &str = "E2003";
+/// Published typecheck classification for an operand whose static type does
+/// not fit its operator (the spec's "expected X, found Y" type mismatch).
+pub const DIAG_TYPE_MISMATCH: &str = "E2001";
+/// Published classification for adding or subtracting quantities whose
+/// reduced dimensions differ (ORNA-UNIT-004).
+pub const DIAG_INCOMPATIBLE_DIMENSIONS: &str = "E5001";
 /// Portable failure code for a required `sys` member that has no linked
 /// production provider (ORNA-SYS-008, `api/sys.json` `failure_codes`).
 pub const DIAG_SYS_VERSION_INCOMPATIBLE: &str = "sys.version.incompatible";
@@ -481,6 +550,10 @@ pub struct TableSchema {
     pub admission: Option<TableAdmission>,
     /// Nested nominal From implementations exported with the target type.
     pub conversions: Vec<(Type, EffectSummary)>,
+    /// The nominal type implements the core `Currency` protocol, so it can
+    /// parameterize `Money` and select a currency literal (ORNA-MONEY-004,
+    /// ORNA-LIT-007). Exported so importers never infer it from a name.
+    pub currency: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1090,6 +1163,10 @@ impl Catalogue {
             fixture_table("Audit", audit),
             contact_table.clone(),
             fixture_type("Customer", customer),
+            // The corpus snippets use `GBP` and `EUR` without declaring them;
+            // the manifest's fixture environment supplies that support.
+            fixture_currency("EUR"),
+            fixture_currency("GBP"),
             fixture_table("Message", Type::Named("Message".into())),
             fixture_nominal_type(
                 "EmailHeader",
@@ -1432,6 +1509,7 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
             fields,
             admission: None,
             conversions: Vec::new(),
+            currency: false,
         });
     }
     (name.into(), symbol)
@@ -1456,7 +1534,18 @@ fn fixture_nominal_type(name: &str, row: Type) -> (String, Symbol) {
             fields,
             admission: None,
             conversions: Vec::new(),
+            currency: false,
         });
+    }
+    (name, symbol)
+}
+
+/// An attached nominal currency with no public fields. It implements the core
+/// `Currency` protocol (ORNA-MONEY-004).
+fn fixture_currency(name: &str) -> (String, Symbol) {
+    let (name, mut symbol) = fixture_nominal_type(name, Type::Record(BTreeMap::new()));
+    if let Some(schema) = &mut symbol.table_schema {
+        schema.currency = true;
     }
     (name, symbol)
 }
@@ -1853,7 +1942,7 @@ pub fn admit_row_unit_with_owner_fields(
         {
             result
                 .diagnostics
-                .push(diag(DIAG_TYPE, "project row omits a required stored field"));
+                .push(diag(DIAG_MISSING_REQUIRED_FIELD, "project row omits a required stored field"));
         }
     }
     result
@@ -1976,9 +2065,9 @@ fn analyze_retaining_context_with_providers(
     }
     result.source_units = analyze_source_units(&source_unit_items);
     let mut dependency_summaries = BTreeMap::new();
-    let source_payload_enums = parsed
+    let source_enums = parsed
         .iter()
-        .map(|(namespace, tree)| (namespace.clone(), payload_enum_names(tree)))
+        .map(|(namespace, tree)| (namespace.clone(), source_enum_variant_rows(namespace, tree)))
         .collect::<BTreeMap<_, _>>();
     stabilize_function_summaries(
         &parsed,
@@ -2014,13 +2103,14 @@ fn analyze_retaining_context_with_providers(
             .filter(|(identity, _)| visible_unit_namespaces.contains(&identity.namespace))
             .map(|(identity, metadata)| (identity.clone(), metadata.clone()))
             .collect();
-        scope
-            .payload_enum_types
-            .extend(imported_payload_enum_bindings(
-                tree,
-                &source_payload_enums,
-                &result.modules,
-            ));
+        let imported_enums = imported_enum_bindings(tree, &source_enums, &result.modules);
+        scope.payload_enum_types.extend(
+            imported_enums
+                .iter()
+                .filter(|(_, variants)| variants.values().any(|fields| !fields.is_empty()))
+                .map(|(spelling, _)| spelling.clone()),
+        );
+        scope.imported_enum_variants = imported_enums;
         let mut symbols = header.symbols.clone();
         for symbol in symbols.values_mut() {
             canonicalize_symbol(symbol, &scope.nominal_identities);
@@ -2047,6 +2137,7 @@ fn analyze_retaining_context_with_providers(
         }
         let conversion_metadata = conversion_metadata(&scope);
         attach_conversion_metadata(&mut symbols, &conversion_metadata);
+        attach_currency_metadata(&mut symbols, &scope.currency_types);
         if let Some(module) = result.modules.get_mut(namespace) {
             module.symbols = symbols;
             module.exports = module
@@ -2418,6 +2509,7 @@ fn stabilize_function_summaries(
             }
             let conversion_metadata = conversion_metadata(&scope);
             attach_conversion_metadata(&mut symbols, &conversion_metadata);
+            attach_currency_metadata(&mut symbols, &scope.currency_types);
             if let Some(module) = modules.get_mut(namespace) {
                 module.symbols = symbols;
                 module.exports = module
@@ -3391,14 +3483,19 @@ struct Scope {
     /// closed `Port.from(value)` constructor can check the source value
     /// without erasing the refined nominal result.
     refined_types: BTreeMap<String, Type>,
-    /// Local nominal types with an explicit nested `Currency` implementation.
-    /// This is intentionally not inferred from names or static members.
+    /// Canonical identities of the local, imported and attached nominal types
+    /// that implement the core `Currency` protocol (ORNA-MONEY-004). Never
+    /// inferred from names or static members.
     currency_types: BTreeSet<String>,
     /// Local enum payloads retained for closed constructor-pattern checking.
     enum_variants: BTreeMap<String, BTreeMap<String, BTreeMap<String, Type>>>,
     /// Local or explicitly imported enum types whose variants carry payloads.
     /// This compact admission metadata is kept separately from public Symbols.
     payload_enum_types: BTreeSet<String>,
+    /// Payload rows of explicitly imported source enums, keyed by the
+    /// spelling that names the enum here (`Level`, or `alias.Level` through a
+    /// module binding). Construction checks qualified variants against them.
+    imported_enum_variants: BTreeMap<String, EnumVariantRows>,
     /// Local transparent aliases. Refined and nominal type declarations are
     /// deliberately excluded so alias resolution cannot erase identity.
     type_aliases: BTreeMap<String, Type>,
@@ -3425,6 +3522,9 @@ struct Scope {
     nominal_conversions: BTreeMap<String, Vec<Type>>,
     /// Effects/failure summaries of each conversion body.
     nominal_conversion_effects: BTreeMap<String, Vec<(Type, EffectSummary)>>,
+    /// Function bodies being inferred, innermost last. Each frame checks or
+    /// joins the `return` statements that it owns.
+    return_frames: RefCell<Vec<ReturnFrame>>,
 }
 fn resolve_imports(
     namespace: &Namespace,
@@ -3522,9 +3622,10 @@ fn resolve_imports_with_dependencies(
                 _ => None,
             })
             .collect(),
-        currency_types: currency_types(tree),
+        currency_types: BTreeSet::new(),
         enum_variants: enum_variant_types(tree, diagnostics),
         payload_enum_types: payload_enum_names(tree),
+        imported_enum_variants: BTreeMap::new(),
         type_aliases: tree
             .items
             .iter()
@@ -3578,6 +3679,7 @@ fn resolve_imports_with_dependencies(
         protocol_implementations: BTreeMap::new(),
         nominal_conversions: BTreeMap::new(),
         nominal_conversion_effects: BTreeMap::new(),
+        return_frames: RefCell::new(Vec::new()),
     };
     for (name, symbol) in attached_symbols {
         scope
@@ -3939,6 +4041,7 @@ fn resolve_imports_with_dependencies(
         }
     }
     canonicalize_scope_metadata(&mut scope, namespace, tree);
+    scope.currency_types = currency_types(namespace, tree, &scope);
     for (name, symbol) in attached_symbols {
         if symbol.kind == SymbolKind::Type
             && let Some(row) = symbol.table_fields()
@@ -4172,6 +4275,23 @@ fn attach_conversion_metadata(
     }
 }
 
+/// Export which local nominal types implement the core `Currency` protocol,
+/// so an importer accepts them as currencies without reading their source.
+fn attach_currency_metadata(symbols: &mut BTreeMap<String, Symbol>, currencies: &BTreeSet<String>) {
+    for symbol in symbols.values_mut() {
+        if symbol.kind != SymbolKind::Type {
+            continue;
+        }
+        let Type::Named(identity) = &symbol.ty else {
+            continue;
+        };
+        let currency = currencies.contains(identity);
+        if let Some(schema) = symbol.table_schema.as_mut() {
+            schema.currency = currency;
+        }
+    }
+}
+
 fn merge_exported_conversion_metadata(
     scope: &mut Scope,
     modules: &BTreeMap<Namespace, ModuleHeader>,
@@ -4274,7 +4394,7 @@ fn check_item(
                     && name == "symbol"
                 {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_CURRENCY_SYMBOL,
                         "currency symbols belong to locale-aware formatting, not Currency identity",
                     ));
                 }
@@ -4299,9 +4419,9 @@ fn check_item(
             ..
         } => {
             if name == "std" {
-                diagnostics.push(diag(DIAG_TYPE, "`std` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_STD, "`std` is reserved"));
             } else if name == "sys" {
-                diagnostics.push(diag(DIAG_TYPE, "`sys` is reserved"));
+                diagnostics.push(diag(DIAG_RESERVED_SYS, "`sys` is reserved"));
             }
             let mut key_names = BTreeSet::new();
             for key in keys {
@@ -4332,8 +4452,10 @@ fn check_item(
                     .as_ref()
                     .map(|annotation| resolved_type_of(annotation, scope))
                     .unwrap_or(Type::Error);
-                if let Some(message) = primary_key_type_error(&ty, scope, &mut BTreeSet::new()) {
-                    diagnostics.push(diag(DIAG_TYPE, message));
+                if let Some((code, message)) =
+                    primary_key_type_error(&ty, scope, &mut BTreeSet::new())
+                {
+                    diagnostics.push(diag(code, message));
                 }
             }
             // Keep the catalogue's key encoding types transparent through
@@ -4494,7 +4616,7 @@ fn check_item(
                             && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
                         {
                             diagnostics.push(diag(
-                                DIAG_TYPE,
+                                DIAG_COMPUTED_NONDETERMINISTIC,
                                 "computed field must be deterministic and row-local",
                             ));
                         }
@@ -5202,11 +5324,8 @@ fn validate_nested_implementation_function(
         });
     if let Some(expected) = effective_result {
         let before = diagnostics.len();
-        let FunctionBodyInference {
-            inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
-        if !direct_return && diagnostics.len() == before {
+        let inferred = infer_function_body(body, Some(&expected), scope, &local, diagnostics);
+        if diagnostics.len() == before {
             require_same(&expected, &inferred.ty, diagnostics);
         }
     } else if local.values().any(|symbol| symbol.ty != Type::Error) {
@@ -5892,7 +6011,7 @@ fn validate_implementation_restrictions(
                 && implementation_has_write(implementation, scope) =>
         {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_DISPLAY_READ_ONLY,
                 "Display and Present implementations must be read-only",
             ));
         }
@@ -6172,8 +6291,8 @@ fn validate_type_annotation(
         } => {
             // Numeric unit and currency arguments use the dimensional
             // identity surface rather than ordinary generic type arguments.
-            // They still must resolve to a declared type, an explicit
-            // currency code, or one of the closed unit identities.
+            // A unit must resolve to a declared type or one of the closed
+            // unit identities; `Money` takes a currency type.
             let dimensional_constructor = path.len() == 1
                 && matches!(path[0].as_str(), "Int" | "Decimal" | "Float" | "Money");
             if !annotation_type_name_is_declared(path, scope, generic_names) {
@@ -6191,7 +6310,9 @@ fn validate_type_annotation(
                 ));
             }
             if dimensional_constructor && !arguments.is_empty() {
-                if arguments.len() != 1
+                if path[0] == "Money" {
+                    validate_money_currency(arguments, scope, generic_names, diagnostics);
+                } else if arguments.len() != 1
                     || !dimensional_argument_is_declared(&arguments[0], scope, generic_names)
                 {
                     diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
@@ -6262,9 +6383,39 @@ fn dimensional_argument_is_declared(
     }
     annotation_type_name_is_declared(path, scope, generic_names)
         || source_unit_for_path(path, scope).is_some()
-        || path
-            .last()
-            .is_some_and(|name| is_currency_code(name) || is_implicit_unit(name))
+        || path.last().is_some_and(|name| is_implicit_unit(name))
+}
+
+/// `Money<C>` takes one currency: a nominal type that implements the core
+/// `Currency` protocol, or a generic parameter bounded by it
+/// (ORNA-MONEY-004). An unbound name stays unresolved.
+fn validate_money_currency(
+    arguments: &[TypeExpr],
+    scope: &Scope,
+    generic_names: &BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let [
+        currency @ TypeExpr::Name {
+            path,
+            arguments: currency_arguments,
+            ..
+        },
+    ] = arguments
+    else {
+        diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+        return;
+    };
+    if !currency_arguments.is_empty()
+        || !annotation_type_name_is_declared(path, scope, generic_names)
+    {
+        diagnostics.push(diag(DIAG_UNRESOLVED, "type name cannot be resolved"));
+    } else if !is_currency_type(&resolved_type_of(currency, scope), scope) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "Money currency must be a nominal type that implements Currency",
+        ));
+    }
 }
 
 fn source_unit_for_path<'a>(path: &[String], scope: &'a Scope) -> Option<&'a SourceUnitMetadata> {
@@ -6371,117 +6522,245 @@ fn annotation_type_name_is_declared(
         })
 }
 
-struct FunctionBodyInference {
-    inferred: Inferred,
-    direct_return: bool,
+/// One function body whose `return` statements are being typed. Ownership is
+/// lexical: a `return` inside a nested anonymous function exits that
+/// function, not the enclosing declaration (ORNA-CFLOW-008).
+#[derive(Clone)]
+struct ReturnFrame {
+    /// Addresses of the `return` statements that this body owns.
+    owned: Vec<usize>,
+    /// The declared result type, when the signature has one.
+    expected: Option<Type>,
+    /// Types of the owned `return` values, in source order.
+    returned: Vec<Type>,
 }
 
+/// Infers a function or anonymous-function body (ORNA-FN-009). With a known
+/// result, each owned `return` value is checked where it occurs; a body that
+/// completes only through `return` produces that result. Without one, the
+/// result joins the tail with every reachable return path.
 fn infer_function_body(
     body: &Expr,
     expected: Option<&Type>,
     scope: &Scope,
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
-) -> FunctionBodyInference {
-    let Expr::Block { statements, .. } = body else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
+) -> Inferred {
+    let mut owned = Vec::new();
+    collect_owned_returns(body, &mut owned);
+    if owned.is_empty() {
+        return match expected {
+            Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+            None => infer(body, scope, local, diagnostics),
         };
+    }
+    scope.return_frames.borrow_mut().push(ReturnFrame {
+        owned,
+        expected: expected.cloned(),
+        returned: Vec::new(),
+    });
+    let inferred = match expected {
+        Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
+        None => infer(body, scope, local, diagnostics),
     };
-    let Some(return_index) = statements
-        .iter()
-        .position(|statement| matches!(statement, Statement::Return { .. }))
-    else {
-        return FunctionBodyInference {
-            inferred: match expected {
-                Some(expected) => infer_contextual(body, expected, scope, local, diagnostics),
-                None => infer(body, scope, local, diagnostics),
-            },
-            direct_return: false,
-        };
-    };
+    let frame = scope
+        .return_frames
+        .borrow_mut()
+        .pop()
+        .expect("function return frames are pushed and popped in pairs");
+    if let Some(expected) = expected {
+        if inferred.ty == Type::Bottom && !frame.returned.is_empty() {
+            return Inferred {
+                ty: expected.clone(),
+                effects: inferred.effects,
+            };
+        }
+        return inferred;
+    }
+    Inferred {
+        ty: join_return_paths(inferred.ty, frame.returned, diagnostics),
+        effects: inferred.effects,
+    }
+}
 
-    let mut locals = local.clone();
-    let mut effects = EffectSummary::default();
-    for statement in &statements[..return_index] {
-        match statement {
-            Statement::Let {
-                pattern,
-                annotation,
-                value,
-                ..
-            } => {
-                let inferred = if let Some(annotation) = annotation {
-                    validate_type_annotation(annotation, scope, &BTreeSet::new(), diagnostics);
-                    let expected = resolved_type_of(annotation, scope);
-                    let inferred = infer_contextual(value, &expected, scope, &locals, diagnostics);
-                    require_same(&expected, &inferred.ty, diagnostics);
-                    inferred
-                } else {
-                    infer(value, scope, &locals, diagnostics)
-                };
-                effects.join(&inferred.effects);
-                bind_pattern(pattern, inferred.ty, scope, &mut locals, diagnostics);
-            }
-            Statement::Assert { value, .. } => {
-                let inferred = infer(value, scope, &locals, diagnostics);
-                effects.join(&inferred.effects);
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-            }
-            Statement::Expression { value, .. } | Statement::Control { value, .. } => {
-                effects.join(&infer(value, scope, &locals, diagnostics).effects);
-            }
-            Statement::Assignment {
-                target,
-                operator,
-                value,
-                ..
-            } => effects.join(&infer_assignment(
-                target,
-                operator,
-                value,
-                scope,
-                &mut locals,
-                diagnostics,
-            )),
-            Statement::Break { value, .. } => {
-                if let Some(value) = value {
-                    effects.join(&infer(value, scope, &locals, diagnostics).effects);
+/// Records the `return` statements whose nearest enclosing function is the
+/// body being walked. Anonymous-function bodies own their own returns.
+fn collect_owned_returns(expression: &Expr, owned: &mut Vec<usize>) {
+    match expression {
+        Expr::Name { .. }
+        | Expr::Literal { .. }
+        | Expr::ReplBinding { .. }
+        | Expr::Lambda { .. } => {}
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    collect_owned_returns(value, owned);
                 }
             }
-            Statement::Continue { .. } => {}
-            Statement::Return { .. } => unreachable!("return is outside the function-body prefix"),
+        }
+        Expr::Unary { rhs: inner, .. }
+        | Expr::Group { inner, .. }
+        | Expr::Field { base: inner, .. } => collect_owned_returns(inner, owned),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Index {
+            base: lhs,
+            index: rhs,
+            ..
+        } => {
+            collect_owned_returns(lhs, owned);
+            collect_owned_returns(rhs, owned);
+        }
+        Expr::Range { lower, upper, .. } => {
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_owned_returns(bound, owned);
+            }
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            collect_owned_returns(callee, owned);
+            for argument in arguments {
+                collect_owned_returns(&argument.value, owned);
+            }
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                collect_owned_returns(element, owned);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_owned_returns(&field.value, owned);
+            }
+        }
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                match statement {
+                    Statement::Return { value, .. } => {
+                        owned.push(std::ptr::from_ref(statement).addr());
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Break { value, .. } => {
+                        if let Some(value) = value {
+                            collect_owned_returns(value, owned);
+                        }
+                    }
+                    Statement::Let { value, .. }
+                    | Statement::Assert { value, .. }
+                    | Statement::Assignment { value, .. }
+                    | Statement::Expression { value, .. }
+                    | Statement::Control { value, .. } => collect_owned_returns(value, owned),
+                    Statement::Continue { .. } => {}
+                }
+            }
+            if let Some(tail) = tail {
+                collect_owned_returns(tail, owned);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            for part in [condition, body, alternate].into_iter().flatten() {
+                collect_owned_returns(part, owned);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_owned_returns(guard, owned);
+                }
+                collect_owned_returns(&arm.body, owned);
+            }
         }
     }
+}
 
-    let Statement::Return { value, .. } = &statements[return_index] else {
-        unreachable!("function-body return index must identify a return statement");
-    };
-    let returned = match (value, expected) {
-        (Some(value), Some(expected)) => {
-            infer_contextual(value, expected, scope, &locals, diagnostics)
+/// Types one `return` statement against the function body that owns it. A
+/// bare `return;` completes with `Unit` (ORNA-CFLOW-001). A `return` outside
+/// every inferred body, such as one in a nested `From` conversion, has no
+/// result to check and is only inferred.
+fn infer_return_statement(
+    statement: &Statement,
+    value: Option<&Expr>,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Inferred {
+    let address = std::ptr::from_ref(statement).addr();
+    let (owner, expected) = {
+        let frames = scope.return_frames.borrow();
+        match frames
+            .iter()
+            .rposition(|frame| frame.owned.contains(&address))
+        {
+            Some(index) => (Some(index), frames[index].expected.clone()),
+            None => (None, None),
         }
-        (Some(value), None) => infer(value, scope, &locals, diagnostics),
+    };
+    let returned = match (value, &expected) {
+        (Some(value), Some(expected)) => {
+            infer_contextual(value, expected, scope, local, diagnostics)
+        }
+        (Some(value), None) => infer(value, scope, local, diagnostics),
         (None, _) => Inferred {
-            ty: Type::Null,
+            ty: Type::Unit,
             effects: EffectSummary::default(),
         },
     };
-    if let Some(expected) = expected {
-        require_same(expected, &returned.ty, diagnostics);
+    if let Some(index) = owner {
+        if let Some(expected) = &expected {
+            require_same(expected, &returned.ty, diagnostics);
+        }
+        scope.return_frames.borrow_mut()[index]
+            .returned
+            .push(returned.ty.clone());
     }
-    effects.join(&returned.effects);
-    FunctionBodyInference {
-        inferred: Inferred {
-            ty: returned.ty,
-            effects,
-        },
-        direct_return: true,
+    returned
+}
+
+/// Joins an unannotated function's tail with its return paths (ORNA-FN-009).
+/// `Bottom` contributes nothing and `null` joins an ordinary value as its
+/// optional; any other disagreement has no single static result type.
+fn join_return_paths(tail: Type, returned: Vec<Type>, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    let mut joined = tail;
+    for path in returned {
+        joined = match (joined, path) {
+            (Type::Error, _) | (_, Type::Error) => Type::Error,
+            (Type::Bottom, path) => path,
+            (joined, Type::Bottom) => joined,
+            (joined, path) if joined == path => joined,
+            (Type::Null, Type::Optional(inner)) | (Type::Optional(inner), Type::Null) => {
+                Type::Optional(inner)
+            }
+            (Type::Optional(inner), path) if types_match(&inner, &path) => Type::Optional(inner),
+            (joined, Type::Optional(inner)) if types_match(&inner, &joined) => {
+                Type::Optional(inner)
+            }
+            (Type::Null, path) if path != Type::Unit => Type::Optional(Box::new(path)),
+            (joined, Type::Null) if joined != Type::Unit => Type::Optional(Box::new(joined)),
+            (joined, path) => {
+                diagnostics.push(diag(
+                    DIAG_TYPE,
+                    format!(
+                        "return paths have incompatible static types: {} and {}",
+                        diagnostic_type_name(&joined),
+                        diagnostic_type_name(&path),
+                    ),
+                ));
+                Type::Error
+            }
+        };
     }
+    joined
 }
 
 fn check_function(
@@ -6493,7 +6772,6 @@ fn check_function(
     let Declaration::Function { signature, body } = &item.declaration else {
         unreachable!("function checker called for a non-function declaration");
     };
-    validate_function_signature_annotations(signature, scope, diagnostics);
     let mut function_scope = scope.clone();
     function_scope.generic_type_parameters = signature
         .generics
@@ -6505,6 +6783,8 @@ fn check_function(
         .iter()
         .map(|generic| (generic.name.clone(), generic.bounds.clone()))
         .collect();
+    // Bounds are in scope so `Money<C>` can accept a `C impl Currency`.
+    validate_function_signature_annotations(signature, &function_scope, diagnostics);
     let mut local = BTreeMap::new();
     let mut default_effects = EffectSummary::default();
     for parameter in &signature.parameters {
@@ -6554,22 +6834,15 @@ fn check_function(
         .as_ref()
         .map(|result| resolved_type_of(result, &function_scope))
     {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return,
-        } = infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
+        let mut inferred =
+            infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        if !direct_return {
-            require_same(&expected, &inferred.ty, diagnostics);
-        }
+        require_same(&expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
     } else {
-        let FunctionBodyInference {
-            mut inferred,
-            direct_return: _,
-        } = infer_function_body(body, None, &function_scope, &local, diagnostics);
+        let mut inferred = infer_function_body(body, None, &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
@@ -7324,7 +7597,7 @@ fn validate_loop_transfers(
                     }
                     Statement::Break { value, .. } => match loops.last() {
                         Some(LoopTransferContext::Typed(expected)) => {
-                            let actual = value.as_ref().map_or(Type::Null, |value| {
+                            let actual = value.as_ref().map_or(Type::Unit, |value| {
                                 infer(value, scope, &block_locals, &mut Vec::new()).ty
                             });
                             require_same(expected, &actual, diagnostics);
@@ -7384,7 +7657,7 @@ fn validate_loop_transfers(
             }
             let loop_context = match kind {
                 ControlKind::For | ControlKind::While => {
-                    Some(LoopTransferContext::Typed(Type::Null))
+                    Some(LoopTransferContext::Typed(Type::Unit))
                 }
                 ControlKind::Loop => Some(LoopTransferContext::Unsupported),
                 ControlKind::If | ControlKind::Case => None,
@@ -7932,11 +8205,13 @@ fn infer_contextual_lambda(
         );
         types.push(ty);
     }
-    let inferred = if matches!(expected_result, Type::Error) {
-        infer(body, scope, &callback_locals, diagnostics)
-    } else {
-        infer_contextual(body, expected_result, scope, &callback_locals, diagnostics)
-    };
+    let inferred = infer_function_body(
+        body,
+        (!matches!(expected_result, Type::Error)).then_some(expected_result),
+        scope,
+        &callback_locals,
+        diagnostics,
+    );
     require_same(expected_result, &inferred.ty, diagnostics);
     Inferred {
         ty: Type::Function {
@@ -8038,7 +8313,7 @@ fn infer_node(
                         effects: EffectSummary::default(),
                     },
                     None => {
-                        diagnostics.push(diag(
+                        let mut diagnostic = diag(
                             if matches!(text.as_str(), "Ok" | "Err") {
                                 DIAG_LEGACY_RESULT
                             } else {
@@ -8049,7 +8324,14 @@ fn infer_node(
                             } else {
                                 "name cannot be resolved"
                             },
-                        ));
+                        );
+                        if !matches!(text.as_str(), "Ok" | "Err") {
+                            diagnostic = diagnostic.with_note(
+                                SafeText::new(format!("{UNRESOLVED_NAME_NOTE}{text}"))
+                                    .expect("identifier text is safe"),
+                            );
+                        }
+                        diagnostics.push(diagnostic);
                         Inferred {
                             ty: Type::Error,
                             effects: EffectSummary::default(),
@@ -8296,6 +8578,9 @@ fn infer_node(
             if let Some(projection) = infer_table_projection(expr, scope, local) {
                 return projection;
             }
+            if let Some(variant) = infer_enum_variant_reference(expr, scope, local, diagnostics) {
+                return variant;
+            }
             if let Some(path) = qualified_path(expr)
                 && !local.contains_key(path[0])
                 && module_member_namespace(&path, scope).is_some()
@@ -8351,7 +8636,7 @@ fn infer_node(
                 };
             }
             if let Some(message) = legacy_sys_admin_message(&base.ty, name) {
-                diagnostics.push(diag(DIAG_TYPE, message));
+                diagnostics.push(diag(DIAG_SYS_ADMIN_METHOD, message));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8376,7 +8661,7 @@ fn infer_node(
                 };
             }
             if name == "display" && contains_secret_value_type(&base.ty) {
-                diagnostics.push(diag(DIAG_TYPE, "secret values cannot be displayed"));
+                diagnostics.push(diag(DIAG_SECRET_DISPLAY, "secret values cannot be displayed"));
                 return Inferred {
                     ty: Type::Error,
                     effects: base.effects,
@@ -8388,7 +8673,13 @@ fn infer_node(
                     effects: base.effects,
                 };
             }
-            if let Some(ty) = infer_numeric_postfix(&base.ty, name, scope) {
+            if let Some(ty) = infer_currency_suffix(&base.ty, name, scope, diagnostics) {
+                return Inferred {
+                    ty,
+                    effects: base.effects,
+                };
+            }
+            if let Some(ty) = infer_numeric_postfix(&base.ty, name) {
                 return Inferred {
                     ty,
                     effects: base.effects,
@@ -8507,7 +8798,7 @@ fn infer_node(
                     effects: EffectSummary::default(),
                 }
             } else {
-                infer(body, scope, &locals, diagnostics)
+                infer_function_body(body, None, scope, &locals, diagnostics)
             };
             Inferred {
                 ty: Type::Function {
@@ -8571,7 +8862,7 @@ fn infer_node(
                 .is_some_and(|path| path == ["work", "Contact", "insert"])
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_CROSS_DATABASE_WRITE,
                     "cross-database writes are not atomic/supported",
                 ));
                 return Inferred {
@@ -8589,7 +8880,7 @@ fn infer_node(
                         && !consumers.insert(path.join("."))
                     {
                         diagnostics.push(diag(
-                            DIAG_TYPE,
+                            DIAG_AMBIGUOUS_DURABLE_CONSUMER,
                             "same durable source consumed twice without distinct consumer identity",
                         ));
                         break;
@@ -8602,7 +8893,7 @@ fn infer_node(
                 && elements.len() > 1
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_DURABLE_CONSUMER_SOURCE_ROOTS,
                     "a durable consumer function may own only one checkpointed source root; extract separate named consumer functions",
                 ));
             }
@@ -8623,7 +8914,7 @@ fn infer_node(
             }
             if qualified_path(callee).as_deref() == Some(["sys", "storage"].as_slice()) {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_SYS_STORAGE_CALL,
                     "`sys.storage` is a grouping namespace; use `sys.Storage` or `sys.admin` storage functions",
                 ));
                 return Inferred {
@@ -8632,7 +8923,7 @@ fn infer_node(
                 };
             }
             if qualified_path(callee).as_deref() == Some(["sys", "Commit", "insert"].as_slice()) {
-                diagnostics.push(diag(DIAG_TYPE, "sys.Commit is read-only"));
+                diagnostics.push(diag(DIAG_SYS_COMMIT_READ_ONLY, "sys.Commit is read-only"));
                 return Inferred {
                     ty: Type::Error,
                     effects: EffectSummary::default(),
@@ -8653,7 +8944,7 @@ fn infer_node(
             }
             if let Some(currency) = money_constructor_currency(callee)
                 && let Some(inferred) = infer_money_constructor(
-                    Type::Named(currency.into()),
+                    Type::Named(canonical_nominal_name(currency, scope)),
                     arguments,
                     scope,
                     local,
@@ -8879,18 +9170,9 @@ fn infer_node(
         }
         Expr::Unary { op, rhs, .. } => {
             let inferred = infer(rhs, scope, local, diagnostics);
-            if op == "!" {
-                require_same(&Type::Bool, &inferred.ty, diagnostics);
-                Inferred {
-                    ty: if inferred.ty == Type::Bool {
-                        Type::Bool
-                    } else {
-                        Type::Error
-                    },
-                    effects: inferred.effects,
-                }
-            } else {
-                inferred
+            Inferred {
+                ty: infer_unary_operator(op, &inferred.ty, diagnostics),
+                effects: inferred.effects,
             }
         }
         Expr::Range { lower, upper, .. } => {
@@ -8978,7 +9260,7 @@ fn infer_node(
                 && (matches!(left.ty, Type::Relation(_)) || matches!(right.ty, Type::Relation(_)))
             {
                 diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_RELATION_EQUALITY_AMBIGUOUS,
                     "relation equality is ambiguous; choose sequence or row-set comparison explicitly",
                 ));
                 return Inferred {
@@ -9037,99 +9319,18 @@ fn infer_node(
                     effects,
                 };
             }
-            // Elapsed Duration arithmetic is distinct from calendar periods:
-            // it can shift an Instant or combine with another Duration.
-            let duration = Type::Named("std.DURATION".into());
-            let elapsed_result = match (op.as_str(), &left.ty, &right.ty) {
-                ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
-                ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
-                ("-", Type::Instant, Type::Instant) => Some(duration.clone()),
-                ("+" | "-", left, right) if left == &duration && right == &duration => {
-                    Some(duration)
-                }
-                // Duration scaling accepts exact numeric factors only; the
-                // runtime rejects results finer than its nanosecond grid.
-                ("*", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", Type::Int, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Int) if left == &duration => Some(duration.clone()),
-                ("*", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                ("*", Type::Decimal, right) if right == &duration => Some(duration.clone()),
-                ("/", left, Type::Decimal) if left == &duration => Some(duration.clone()),
-                _ => None,
-            };
-            if let Some(ty) = elapsed_result {
-                return Inferred { ty, effects };
-            }
-            if op == "-"
-                && left.ty == Type::Instant
-                && matches!(
-                    &right.ty,
-                    Type::Applied { base, arguments }
-                        if matches!(base.as_str(), "Int" | "Decimal" | "Float")
-                            && arguments.len() == 1
-                )
-            {
-                return Inferred {
-                    ty: Type::Instant,
-                    effects,
-                };
-            }
-            if op == "*" {
-                if (is_binary_float(&left.ty) && is_money_rate(&right.ty))
-                    || (is_money_rate(&left.ty) && is_binary_float(&right.ty))
-                {
-                    diagnostics.push(diag(
-                        DIAG_TYPE,
-                        "binary Float cannot enter an exact Money calculation implicitly",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-                if let Some(ty) = reduce_exact_money_rate(&left.ty, &right.ty) {
-                    return Inferred { ty, effects };
-                }
-                if matches!(left.ty, Type::MoneyPerUnit { .. })
-                    || matches!(right.ty, Type::MoneyPerUnit { .. })
-                {
-                    diagnostics.push(diag(
-                        DIAG_UNSUPPORTED,
-                        "dimensional algebra is outside this semantic slice",
-                    ));
-                    return Inferred {
-                        ty: Type::Error,
-                        effects,
-                    };
-                }
-            }
-            if op == "+"
-                && let Some(message) = incompatible_addition_message(&left.ty, &right.ty)
-            {
-                diagnostics.push(diag(DIAG_TYPE, message));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
-            if op == "+" && left.ty == right.ty && is_absolute_affine_temperature(&left.ty) {
-                diagnostics.push(diag(
-                    DIAG_TYPE,
-                    "cannot add two absolute affine temperatures",
-                ));
-                return Inferred {
-                    ty: Type::Error,
-                    effects,
-                };
-            }
             let ty = if matches!(op.as_str(), "==" | "!=") {
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if !types_match(&left.ty, &right.ty)
                     && !types_match(&right.ty, &left.ty)
                 {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
@@ -9138,14 +9339,18 @@ fn infer_node(
                 if left.ty == Type::Error || right.ty == Type::Error {
                     Type::Error
                 } else if left.ty != right.ty || !is_evaluator_ordered_comparison_type(&left.ty) {
-                    diagnostics.push(diag(DIAG_TYPE, "static types are incompatible"));
+                    diagnostics.push(type_mismatch(
+                        DIAG_TYPE,
+                        "static types are incompatible",
+                        &left.ty,
+                        &right.ty,
+                    ));
                     Type::Error
                 } else {
                     Type::Bool
                 }
             } else {
-                require_same(&left.ty, &right.ty, diagnostics);
-                left.ty
+                binary_arithmetic_type(op, &left.ty, &right.ty, diagnostics)
             };
             Inferred { ty, effects }
         }
@@ -9235,13 +9440,13 @@ fn infer_node(
                     }
                     Statement::Continue { .. } => {}
                     Statement::Return { value, .. } => {
-                        let returned = value
-                            .as_ref()
-                            .map(|value| infer(value, scope, &locals, diagnostics))
-                            .unwrap_or(Inferred {
-                                ty: Type::Null,
-                                effects: EffectSummary::default(),
-                            });
+                        let returned = infer_return_statement(
+                            statement,
+                            value.as_ref(),
+                            scope,
+                            &locals,
+                            diagnostics,
+                        );
                         effects.join(&returned.effects);
                         final_control = Some(Inferred {
                             ty: Type::Bottom,
@@ -9251,10 +9456,12 @@ fn infer_node(
                     }
                 }
             }
+            // A block without a final expression completes with `Unit`
+            // (ORNA-CFLOW-001); `Null` is reserved for the `null` literal.
             let tail = final_control
                 .or_else(|| tail.as_ref().map(|x| infer(x, scope, &locals, diagnostics)))
                 .unwrap_or(Inferred {
-                    ty: Type::Null,
+                    ty: Type::Unit,
                     effects: EffectSummary::default(),
                 });
             effects.join(&tail.effects);
@@ -9345,6 +9552,437 @@ fn infer_node(
                 effects: EffectSummary::default(),
             }
         }
+    }
+}
+
+/// Types a prefix operator. `!` requires `Bool` because Orna has no implicit
+/// truthiness (ORNA-CFLOW-009); a numeric sign keeps its operand's type.
+fn infer_unary_operator(op: &str, operand: &Type, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    if matches!(operand, Type::Error | Type::Bottom) {
+        return operand.clone();
+    }
+    if op == "!" {
+        require_same(&Type::Bool, operand, diagnostics);
+        return if *operand == Type::Bool {
+            Type::Bool
+        } else {
+            Type::Error
+        };
+    }
+    let signed = matches!(op, "-" | "+")
+        && (matches!(
+            operand,
+            Type::Int | Type::Decimal | Type::Float | Type::Quantity { affine: false, .. }
+        ) || money_currency(operand).is_some()
+            || unit_suffix_scalar(operand).is_some()
+            // Negated elapsed time, and a negated instant used as a descending
+            // sort key (`examples/valid/sys-run-history.orna`).
+            || (op == "-"
+                && (matches!(operand, Type::Instant)
+                    || matches!(operand, Type::Named(name) if name == "std.DURATION"))));
+    if signed {
+        return operand.clone();
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {}",
+            diagnostic_type_name(operand)
+        ),
+    ));
+    Type::Error
+}
+
+/// Types `+ - * / % ^` once both operands are inferred (ORNA-INFER-001,
+/// ORNA-TYPE-008). Compound assignment applies the same table, because
+/// `count += 1` means `count = count + 1` (ORNA-CFLOW-006). Orna has no
+/// implicit numeric promotion and no string or calendar-date arithmetic, so
+/// every pair the table does not admit is reported.
+fn binary_arithmetic_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Type {
+    if matches!(left, Type::Error) || matches!(right, Type::Error) {
+        return Type::Error;
+    }
+    // A diverging operand means the operation itself never completes.
+    if matches!(left, Type::Bottom) || matches!(right, Type::Bottom) {
+        return Type::Bottom;
+    }
+    if let Some(ty) = elapsed_time_operator_type(op, left, right) {
+        return ty;
+    }
+    if op == "*" {
+        if (is_binary_float(left) && is_money_rate(right))
+            || (is_money_rate(left) && is_binary_float(right))
+        {
+            diagnostics.push(diag(
+                DIAG_MONEY_BINARY_FLOAT,
+                "binary Float cannot enter an exact Money calculation implicitly",
+            ));
+            return Type::Error;
+        }
+        if let Some(ty) = reduce_exact_money_rate(left, right) {
+            return ty;
+        }
+        if matches!(left, Type::MoneyPerUnit { .. }) || matches!(right, Type::MoneyPerUnit { .. }) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            return Type::Error;
+        }
+    }
+    if op == "+"
+        && let Some((code, message)) = incompatible_addition_message(left, right)
+    {
+        diagnostics.push(diag(code, message));
+        return Type::Error;
+    }
+    // Subtracting is adding the negation, so it needs the same conversion
+    // (ORNA-MONEY-002).
+    if op == "-"
+        && let (Some(left_currency), Some(right_currency)) =
+            (money_currency(left), money_currency(right))
+        && left_currency != right_currency
+        && !matches!(left_currency, Type::Error)
+        && !matches!(right_currency, Type::Error)
+    {
+        diagnostics.push(diag(
+            DIAG_CURRENCY_MISMATCH,
+            "cannot subtract different currencies without conversion",
+        ));
+        return Type::Error;
+    }
+    if op == "+" && left == right && is_absolute_affine_temperature(left) {
+        diagnostics.push(diag(
+            DIAG_AFFINE_TEMPERATURE_ADD,
+            "cannot add two absolute affine temperatures",
+        ));
+        return Type::Error;
+    }
+    if let Some(ty) = arithmetic_operator_type(op, left, right, diagnostics) {
+        return ty;
+    }
+    diagnostics.push(diag(
+        DIAG_TYPE_MISMATCH,
+        format!(
+            "operator `{op}` is not defined for {} and {}",
+            diagnostic_type_name(left),
+            diagnostic_type_name(right),
+        ),
+    ));
+    Type::Error
+}
+
+/// Elapsed `Duration` arithmetic is distinct from calendar periods: it can
+/// shift an `Instant` or combine with another `Duration` (ORNA-TIME-004).
+fn elapsed_time_operator_type(op: &str, left: &Type, right: &Type) -> Option<Type> {
+    let duration = Type::Named("std.DURATION".into());
+    match (op, left, right) {
+        ("+", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("+", left, Type::Instant) if left == &duration => Some(Type::Instant),
+        ("-", Type::Instant, right) if right == &duration => Some(Type::Instant),
+        ("-", Type::Instant, Type::Instant) => Some(duration),
+        ("+" | "-", left, right) if left == &duration && right == &duration => Some(duration),
+        // Duration scaling accepts exact numeric factors only; the runtime
+        // rejects results finer than its nanosecond grid.
+        ("*" | "/", left, Type::Int | Type::Decimal) if left == &duration => Some(duration),
+        ("*", Type::Int | Type::Decimal, right) if right == &duration => Some(duration),
+        // A look-back window such as `now() - 7.days`; only a Time-dimension
+        // unit can move an Instant.
+        ("-", Type::Instant, unit)
+            if numeric_unit(unit).and_then(unit_dimension) == Some("Time") =>
+        {
+            Some(Type::Instant)
+        }
+        _ => None,
+    }
+}
+
+/// The admitted arithmetic table. `None` is an undefined operand pair; a rule
+/// with its own published diagnostic reports it and returns `Error`.
+fn arithmetic_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (left, right) {
+        // Int, Decimal and Float never mix implicitly (ORNA-NUM-001..003).
+        (Type::Int, Type::Int) | (Type::Decimal, Type::Decimal) | (Type::Float, Type::Float) => {
+            Some(left.clone())
+        }
+        _ if money_currency(left).is_some() || money_currency(right).is_some() => {
+            money_operator_type(op, left, right, diagnostics)
+        }
+        (Type::MoneyPerUnit { .. }, Type::MoneyPerUnit { .. }) => {
+            (matches!(op, "+" | "-") && left == right).then(|| left.clone())
+        }
+        (Type::Quantity { .. }, _) | (_, Type::Quantity { .. }) => {
+            quantity_operator_type(op, left, right, diagnostics)
+        }
+        _ => unit_suffix_operator_type(op, left, right, diagnostics),
+    }
+}
+
+/// Money keeps its currency and exact decimal semantics: same-currency
+/// addition and exact scaling only (ORNA-MONEY-001..003).
+fn money_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let binary_float = |ty: &Type| {
+        is_binary_float(ty)
+            || matches!(ty, Type::Quantity { numeric, .. } if **numeric == Type::Float)
+    };
+    if binary_float(left) || binary_float(right) {
+        diagnostics.push(diag(
+            DIAG_MONEY_BINARY_FLOAT,
+            "binary Float cannot enter an exact Money calculation implicitly",
+        ));
+        return Some(Type::Error);
+    }
+    let money = |ty: &Type| money_currency(ty).is_some();
+    let exact = |ty: &Type| matches!(ty, Type::Int | Type::Decimal);
+    match op {
+        "+" | "-"
+            if money(left)
+                && money(right)
+                && (types_match(left, right) || types_match(right, left)) =>
+        {
+            Some(left.clone())
+        }
+        "*" | "/" if money(left) && exact(right) => Some(left.clone()),
+        "*" if exact(left) && money(right) => Some(right.clone()),
+        _ => None,
+    }
+}
+
+/// Declared-unit quantities follow dimension-basis algebra (ORNA-UNIT-001,
+/// ORNA-UNIT-004) and the affine point/vector rules (ORNA-UNIT-005).
+fn quantity_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    match (op, left, right) {
+        ("+" | "-", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_sum_type(op, left, right, diagnostics)
+        }
+        ("*" | "/", Type::Quantity { .. }, Type::Quantity { .. }) => {
+            quantity_product_type(op == "/", left, right)
+        }
+        ("%", Type::Quantity { affine: false, .. }, _) if left == right => Some(left.clone()),
+        (
+            "*" | "/",
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+            scalar,
+        ) if numeric.as_ref() == scalar => Some(left.clone()),
+        (
+            "*",
+            scalar,
+            Type::Quantity {
+                numeric,
+                affine: false,
+                ..
+            },
+        ) if numeric.as_ref() == scalar => Some(right.clone()),
+        ("/", scalar, Type::Quantity { numeric, .. }) if numeric.as_ref() == scalar => {
+            let dimensionless = Type::Quantity {
+                numeric: numeric.clone(),
+                dimension_basis: BTreeMap::new(),
+                scale: UnitFraction::one().public(),
+                offset: UnitFraction::zero().public(),
+                affine: false,
+            };
+            quantity_product_type(true, &dimensionless, right)
+        }
+        _ => None,
+    }
+}
+
+fn quantity_sum_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            offset: right_offset,
+            affine: right_affine,
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if dimension_basis != right_basis {
+        diagnostics.push(diag(
+            DIAG_INCOMPATIBLE_DIMENSIONS,
+            if op == "+" {
+                "cannot add quantities with incompatible dimensions"
+            } else {
+                "cannot subtract quantities with incompatible dimensions"
+            },
+        ));
+        return Some(Type::Error);
+    }
+    // Different scales need an explicit unit conversion first.
+    if numeric != right_numeric || scale != right_scale {
+        return None;
+    }
+    let zero = UnitFraction::zero().public();
+    match (op, *affine, *right_affine) {
+        ("+", true, true) => {
+            diagnostics.push(diag(
+                DIAG_AFFINE_TEMPERATURE_ADD,
+                "cannot add two absolute affine temperatures",
+            ));
+            Some(Type::Error)
+        }
+        // Absolute<U> - Absolute<U> -> Delta<U>
+        ("-", true, true) if offset == right_offset => Some(Type::Quantity {
+            numeric: numeric.clone(),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: zero,
+            affine: false,
+        }),
+        // Absolute<U> + Delta<U> and Absolute<U> - Delta<U> -> Absolute<U>
+        (_, true, false) if *right_offset == zero => Some(left.clone()),
+        // Delta<U> + Absolute<U> -> Absolute<U>
+        ("+", false, true) if *offset == zero => Some(right.clone()),
+        (_, false, false) if offset == right_offset => Some(left.clone()),
+        _ => None,
+    }
+}
+
+/// `*` and `/` over non-affine quantities add or subtract dimension exponents
+/// and multiply or divide the exact unit scales.
+fn quantity_product_type(divide: bool, left: &Type, right: &Type) -> Option<Type> {
+    let (
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            affine: false,
+            ..
+        },
+        Type::Quantity {
+            numeric: right_numeric,
+            dimension_basis: right_basis,
+            scale: right_scale,
+            affine: false,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return None;
+    };
+    if numeric != right_numeric {
+        return None;
+    }
+    let mut basis = dimension_basis.clone();
+    for (dimension, exponent) in right_basis {
+        let current = basis.entry(dimension.clone()).or_insert(0);
+        *current = if divide {
+            current.checked_sub(*exponent)?
+        } else {
+            current.checked_add(*exponent)?
+        };
+    }
+    basis.retain(|_, exponent| *exponent != 0);
+    let left_scale = unit_fraction(scale)?;
+    let right_scale = unit_fraction(right_scale)?;
+    let scale = if divide {
+        left_scale.divide(&right_scale)?
+    } else {
+        left_scale.multiply(&right_scale)?
+    };
+    if basis.is_empty() && scale == UnitFraction::one() {
+        return Some(numeric.as_ref().clone());
+    }
+    Some(Type::Quantity {
+        numeric: numeric.clone(),
+        dimension_basis: basis,
+        scale: scale.public(),
+        offset: UnitFraction::zero().public(),
+        affine: false,
+    })
+}
+
+fn unit_fraction(rational: &SourceUnitRational) -> Option<UnitFraction> {
+    UnitFraction::new(
+        rational.numerator.parse().ok()?,
+        rational.denominator.parse().ok()?,
+    )
+}
+
+/// Unit-suffixed numerics such as `Int<kWh>` keep their unit through
+/// same-unit addition and exact scalar scaling. Their dimensions are not
+/// resolved here, so products of two such quantities are unsupported.
+fn unit_suffix_operator_type(
+    op: &str,
+    left: &Type,
+    right: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    let left_scalar = unit_suffix_scalar(left);
+    let right_scalar = unit_suffix_scalar(right);
+    let same_unit = types_match(left, right) || types_match(right, left);
+    match (op, left_scalar, right_scalar) {
+        ("+" | "-" | "%", Some(_), Some(_)) if same_unit => Some(left.clone()),
+        ("/", Some(scalar), Some(_)) if left == right => Some(scalar),
+        ("*" | "/", Some(scalar), None) if &scalar == right => Some(left.clone()),
+        ("*", None, Some(scalar)) if &scalar == left => Some(right.clone()),
+        ("*" | "/", Some(_), Some(_)) | ("^", Some(_), None) => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        ("/", None, Some(scalar)) if &scalar == left => {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "dimensional algebra is outside this semantic slice",
+            ));
+            Some(Type::Error)
+        }
+        _ => None,
+    }
+}
+
+/// The scalar of a unit-suffixed numeric such as `Int<kWh>`.
+fn unit_suffix_scalar(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Applied { base, arguments } if arguments.len() == 1 => match base.as_str() {
+            "Int" => Some(Type::Int),
+            "Decimal" => Some(Type::Decimal),
+            "Float" => Some(Type::Float),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -9956,7 +10594,18 @@ fn infer_assignment(
             }
         }
         (AssignmentTarget::Name { name, .. }, _) => match local.get(name) {
-            Some(symbol) => require_same(&symbol.ty, &value.ty, diagnostics),
+            Some(symbol) => {
+                // `count += 1` is `count = count + 1` (ORNA-CFLOW-006).
+                let op = match operator {
+                    AssignmentOperator::Add => "+",
+                    AssignmentOperator::Subtract => "-",
+                    AssignmentOperator::Multiply => "*",
+                    AssignmentOperator::Divide => "/",
+                    AssignmentOperator::Set => unreachable!("`=` has its own assignment arm"),
+                };
+                let result = binary_arithmetic_type(op, &symbol.ty, &value.ty, diagnostics);
+                require_same(&symbol.ty, &result, diagnostics);
+            }
             None => diagnostics.push(diag(
                 DIAG_UNRESOLVED,
                 "assignment target cannot be resolved",
@@ -10097,9 +10746,10 @@ fn infer_if(
     let Some(alternate) = alternate else {
         let mut effects = condition.effects;
         effects.join(&body.effects);
+        // The untaken branch completes without a value (ORNA-CFLOW-001).
         if body.ty == Type::Bottom {
             return Inferred {
-                ty: Type::Null,
+                ty: Type::Unit,
                 effects,
             };
         }
@@ -11051,6 +11701,10 @@ fn infer_nominal(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Some(variant) = infer_enum_payload_construction(path, fields, scope, local, diagnostics)
+    {
+        return variant;
+    }
     let mut actual = BTreeMap::new();
     let mut supplied = Vec::with_capacity(fields.len());
     let mut effects = EffectSummary::default();
@@ -11189,6 +11843,184 @@ fn infer_nominal(
         // unrelated modules.
         ty: constructor_type,
         effects,
+    }
+}
+
+/// Declared payload rows of one enum, by variant name. A payload-free
+/// variant has an empty row.
+type EnumVariantRows = BTreeMap<String, BTreeMap<String, Type>>;
+
+/// A closed source enum named by a value path, with the static type its
+/// constructed values carry.
+struct EnumConstructor<'a> {
+    ty: Type,
+    variants: &'a EnumVariantRows,
+}
+
+/// Resolves the owner of `Enum.variant` or `module.Enum.variant`. An
+/// unqualified and a qualified name follow the same construction rule, and
+/// resolution must identify a constructible enum (lexical construction
+/// rule; ORNA-ENUM-002/003). A local binding shadows an enum of the same
+/// name, so field access on that value keeps ordinary record semantics.
+fn enum_constructor<'a>(
+    owner: &[&str],
+    scope: &'a Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<EnumConstructor<'a>> {
+    if local.contains_key(*owner.first()?) {
+        return None;
+    }
+    let symbol = match owner {
+        [name] => scope.names.get(*name),
+        _ => qualified_module_symbol(owner, scope),
+    }
+    .filter(|symbol| symbol.kind == SymbolKind::Enum)?;
+    let variants = match owner {
+        [name] => scope.enum_variants.get(*name),
+        _ => None,
+    }
+    .or_else(|| scope.imported_enum_variants.get(&owner.join(".")))?;
+    Some(EnumConstructor {
+        ty: symbol.ty.clone(),
+        variants,
+    })
+}
+
+/// ORNA-ENUM-002: `Enum.variant` references a payload-free variant. A
+/// payload variant has no bare reference form (ORNA-ENUM-003 constructs it
+/// with its named fields), so each omitted payload field is missing.
+fn infer_enum_variant_reference(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = qualified_path(expr)?;
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let ty = match constructor.variants.get(*variant) {
+        Some(payload) if payload.is_empty() => constructor.ty,
+        Some(payload) => {
+            for name in payload.keys() {
+                diagnostics.push(missing_payload_field(name));
+            }
+            Type::Error
+        }
+        None => {
+            diagnostics.push(unknown_enum_variant(owner, variant));
+            Type::Error
+        }
+    };
+    Some(Inferred {
+        ty,
+        effects: EffectSummary::default(),
+    })
+}
+
+/// ORNA-ENUM-003 and ORNA-SYNTAX-001: `Enum.variant { field: value }` checks
+/// each supplied field once, in written order, against the declared payload
+/// row. Unknown, duplicated, missing and mistyped fields are rejected, and a
+/// payload-free variant accepts no field. Returns `None` when the path does
+/// not name an enum, leaving nominal record construction unchanged.
+fn infer_enum_payload_construction(
+    path: &[orna_syntax_v1::NameSegment],
+    fields: &[orna_syntax_v1::RecordField],
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Inferred> {
+    let path = path
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>();
+    let (variant, owner) = path.split_last()?;
+    let constructor = enum_constructor(owner, scope, local)?;
+    let payload = constructor.variants.get(*variant);
+    let mut valid = payload.is_some();
+    if !valid {
+        diagnostics.push(unknown_enum_variant(owner, variant));
+    }
+    let mut effects = EffectSummary::default();
+    let mut supplied = BTreeSet::new();
+    for field in fields {
+        let expected = payload.and_then(|payload| payload.get(&field.name));
+        let value = match expected {
+            Some(expected) => infer_contextual(&field.value, expected, scope, local, diagnostics),
+            None => infer(&field.value, scope, local, diagnostics),
+        };
+        effects.join(&value.effects);
+        if !supplied.insert(field.name.as_str()) {
+            diagnostics.push(diag(
+                DIAG_DUPLICATE,
+                format!(
+                    "duplicate payload field `{}`",
+                    diagnostic_field_name(&field.name)
+                ),
+            ));
+            valid = false;
+            continue;
+        }
+        match expected {
+            Some(expected) if !types_match(expected, &value.ty) => {
+                diagnostics.push(diag(
+                    DIAG_FIELD_TYPE,
+                    format!(
+                        "expected {}, found {}",
+                        diagnostic_type_name(expected),
+                        diagnostic_type_name(&value.ty),
+                    ),
+                ));
+                valid = false;
+            }
+            None if payload.is_some() => {
+                diagnostics.push(diag(
+                    DIAG_UNKNOWN_FIELD,
+                    format!("unknown field `{}`", diagnostic_field_name(&field.name)),
+                ));
+                valid = false;
+            }
+            _ => {}
+        }
+    }
+    for name in payload
+        .into_iter()
+        .flat_map(BTreeMap::keys)
+        .filter(|name| !supplied.contains(name.as_str()))
+    {
+        diagnostics.push(missing_payload_field(name));
+        valid = false;
+    }
+    Some(Inferred {
+        ty: if valid { constructor.ty } else { Type::Error },
+        effects,
+    })
+}
+
+fn missing_payload_field(name: &str) -> Diagnostic {
+    diag(
+        DIAG_MISSING_FIELD,
+        format!("missing required field `{}`", diagnostic_field_name(name)),
+    )
+}
+
+/// ORNA-ENUM-001: an enum is closed to the variants declared in its body.
+fn unknown_enum_variant(owner: &[&str], variant: &str) -> Diagnostic {
+    let owner = owner.join(".");
+    diag(
+        DIAG_UNRESOLVED,
+        if diagnostic_identifier(&owner) && diagnostic_identifier(variant) {
+            format!("enum `{owner}` has no variant `{variant}`")
+        } else {
+            "enum variant cannot be resolved".to_owned()
+        },
+    )
+}
+
+fn diagnostic_field_name(name: &str) -> &str {
+    if diagnostic_identifier(name) {
+        name
+    } else {
+        "<field>"
     }
 }
 
@@ -12476,7 +13308,7 @@ fn infer_finite_list_numeric_aggregate(
     if !valid {
         if matches!(&rows, Type::List(element) if is_absolute_affine_temperature(element)) {
             diagnostics.push(diag(
-                DIAG_TYPE,
+                DIAG_ABSOLUTE_QUANTITY_SUM,
                 format!("cannot {operation} absolute affine quantities"),
             ));
         } else {
@@ -12778,7 +13610,7 @@ fn infer_finite_list_predicate(
         };
         let mut callback_locals = local.clone();
         insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-        let inferred = infer(body, scope, &callback_locals, diagnostics);
+        let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
         require_same(&Type::Bool, &inferred.ty, diagnostics);
         return Inferred {
             ty: inferred.ty,
@@ -14972,18 +15804,27 @@ fn infer_success_pipeline(
             && arguments[1].name.as_deref() == Some("zone")
             && values[1] == Type::Named("std.TimeZone".into());
         let message = if !instant {
-            Some("bucket_by requires Instant values or rows with an Instant time field")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires Instant values or rows with an Instant time field",
+            ))
         } else if !positional_period || !(calendar || elapsed) {
-            Some("bucket_by requires an elapsed Duration or calendar-day period")
+            Some((
+                DIAG_TYPE,
+                "bucket_by requires an elapsed Duration or calendar-day period",
+            ))
         } else if calendar && arguments.len() == 1 {
-            Some("calendar bucketing of Instant requires a time zone")
+            Some((
+                DIAG_CALENDAR_BUCKET_ZONE,
+                "calendar bucketing of Instant requires a time zone",
+            ))
         } else if !(zone || elapsed && arguments.len() == 1) {
-            Some("bucket_by requires a named TimeZone argument")
+            Some((DIAG_TYPE, "bucket_by requires a named TimeZone argument"))
         } else {
             None
         };
-        if let Some(message) = message {
-            diagnostics.push(diag(DIAG_TYPE, message));
+        if let Some((code, message)) = message {
+            diagnostics.push(diag(code, message));
             return Inferred {
                 ty: Type::Error,
                 effects,
@@ -15095,7 +15936,7 @@ fn infer_recovery_pipeline(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, error_value_type(), &mut callback_locals, diagnostics);
-    let recovered = infer(body, scope, &callback_locals, diagnostics);
+    let recovered = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     let mut effects = input.effects;
     effects
         .effects
@@ -15269,7 +16110,7 @@ fn infer_lambda_pipeline_stage(
     require_same(&parameter_type, &input.ty, diagnostics);
     let mut lambda_locals = local.clone();
     insert_local_binding(name, parameter_type, &mut lambda_locals, diagnostics);
-    let body = infer(body, scope, &lambda_locals, diagnostics);
+    let body = infer_function_body(body, None, scope, &lambda_locals, diagnostics);
     let mut effects = input.effects;
     effects.join(&body.effects);
     Inferred {
@@ -15438,7 +16279,7 @@ fn infer_generic_pipeline_stage(
     }
     if let Some(currency) = money_generic_constructor_currency(callee, type_arguments, scope) {
         if arguments.is_empty() {
-            let stage = infer_money_constructor_type(currency, &input.ty, diagnostics);
+            let stage = infer_money_constructor_type(currency, &input.ty, scope, diagnostics);
             effects.join(&stage.effects);
             return Inferred {
                 ty: stage.ty,
@@ -15527,7 +16368,7 @@ fn infer_affine_collection_aggregate(
         "mean" => Some(Type::Optional(Box::new(element.clone()))),
         "min" | "max" => Some(Type::Optional(Box::new(element.clone()))),
         "sum" => {
-            diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+            diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
             Some(Type::Error)
         }
         _ => None,
@@ -15545,7 +16386,7 @@ fn infer_relation_sum(
         return None;
     }
     if is_absolute_affine_temperature(element) {
-        diagnostics.push(diag(DIAG_TYPE, "cannot sum absolute affine quantities"));
+        diagnostics.push(diag(DIAG_ABSOLUTE_QUANTITY_SUM, "cannot sum absolute affine quantities"));
         return Some(Type::Error);
     }
     if is_sum_numeric(element) {
@@ -15607,7 +16448,7 @@ fn infer_callback(
     };
     let mut callback_locals = local.clone();
     insert_local_binding(name, parameter, &mut callback_locals, diagnostics);
-    let inferred = infer(body, scope, &callback_locals, diagnostics);
+    let inferred = infer_function_body(body, None, scope, &callback_locals, diagnostics);
     require_same(&result, &inferred.ty, diagnostics);
     inferred
 }
@@ -15807,14 +16648,14 @@ fn infer_table_operation(
     );
     if name == "rekey" && automatic_key {
         diagnostics.push(diag(
-            DIAG_TYPE,
+            DIAG_AUTOMATIC_KEY_REKEY,
             "an automatic-key table cannot be explicitly re-keyed",
         ));
     }
     let (parameters, result, effect) = match name.as_str() {
         "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
         "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
-        "delete" => (1, Type::Null, Some("database write")),
+        "delete" => (1, Type::Unit, Some("database write")),
         "count" => (0, Type::Int, Some("database read")),
         "first" => (
             0,
@@ -15885,7 +16726,7 @@ fn infer_table_operation(
                         for field in &schema.required {
                             if !supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -15904,7 +16745,7 @@ fn infer_table_operation(
                                 && !supplied.contains_key(field)
                             {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    DIAG_MISSING_REQUIRED_FIELD,
                                     if authoritative_contact {
                                         format!("missing required field `{field}`")
                                     } else {
@@ -15918,7 +16759,11 @@ fn infer_table_operation(
                         for field in &schema.computed {
                             if supplied.contains_key(field) {
                                 diagnostics.push(diag(
-                                    DIAG_TYPE,
+                                    if insertion_like {
+                                        DIAG_COMPUTED_INSERT
+                                    } else {
+                                        DIAG_COMPUTED_DIRECT_WRITE
+                                    },
                                     if authoritative_contact {
                                         if insertion_like {
                                             format!(
@@ -15947,7 +16792,7 @@ fn infer_table_operation(
                     {
                         diagnostics
                             .push(diag(
-                                DIAG_TYPE,
+                                DIAG_PRIMARY_KEY_IMMUTABLE,
                                 if authoritative_contact {
                                     "primary keys are immutable through update"
                                 } else {
@@ -16023,7 +16868,7 @@ fn infer_table_row_input(
         for (name, actual) in actual {
             match fields.get(name) {
                 None => diagnostics.push(diag(
-                    DIAG_TYPE,
+                    DIAG_TABLE_UNKNOWN_FIELD,
                     format!(
                         "table write contains an unknown field `{}`",
                         if diagnostic_identifier(name) {
@@ -16035,7 +16880,7 @@ fn infer_table_row_input(
                 )),
                 Some(expected) if !types_match(expected, actual) => {
                     diagnostics.push(diag(
-                        DIAG_TYPE,
+                        DIAG_TABLE_FIELD_TYPE,
                         format!(
                             "table write field has an incompatible type: expected {}, found {}",
                             diagnostic_type_name(expected),
@@ -16063,6 +16908,7 @@ fn diagnostic_type_name(ty: &Type) -> String {
         Type::Text => "Str".into(),
         Type::Bool => "Bool".into(),
         Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
         Type::List(element) => format!("[{}]", diagnostic_type_name(element)),
         Type::Optional(element) => format!("{}?", diagnostic_type_name(element)),
         Type::Named(name) if diagnostic_identifier(name) => name.clone(),
@@ -16210,7 +17056,16 @@ fn resolve_qualified_module_member(
             effects: symbol.effects.clone(),
         },
         None => {
-            diagnostics.push(diag(DIAG_UNRESOLVED, "module member cannot be resolved"));
+            diagnostics.push(
+                diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
+                    SafeText::new(format!(
+                        "{UNRESOLVED_MEMBER_NOTE}{}.{}",
+                        path[..path.len() - 1].join("."),
+                        path[path.len() - 1]
+                    ))
+                    .expect("identifier text is safe"),
+                ),
+            );
             Inferred {
                 ty: Type::Error,
                 effects: EffectSummary::default(),
@@ -16223,13 +17078,67 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
-        let message = match (expected, actual) {
-            (Type::Named(expected), Type::Named(actual)) if expected != actual => {
-                "implicit conversion chains are not searched; name each conversion explicitly"
-            }
-            _ => "static types are incompatible",
+        let (code, message) = match (expected, actual) {
+            (Type::Named(expected), Type::Named(actual)) if expected != actual => (
+                DIAG_CONVERSION_CHAIN,
+                "implicit conversion chains are not searched; name each conversion explicitly",
+            ),
+            _ => (DIAG_TYPE, "static types are incompatible"),
         };
-        diagnostics.push(diag(DIAG_TYPE, message));
+        diagnostics.push(type_mismatch(code, message, expected, actual));
+    }
+}
+
+/// A static type mismatch that names both types, so the person can see which
+/// side has which type. The message stays stable; the types ride in a note.
+fn type_mismatch(code: &'static str, message: &str, expected: &Type, actual: &Type) -> Diagnostic {
+    diag(code, message).with_note(
+        SafeText::new(format!(
+            "expected {}, found {}",
+            type_label(expected),
+            type_label(actual)
+        ))
+        .expect("valid diagnostic note"),
+    )
+}
+
+/// Spells a static type the way source writes it.
+fn type_label(ty: &Type) -> String {
+    match ty {
+        Type::Int => "Int".into(),
+        Type::Decimal => "Decimal".into(),
+        Type::Float => "Float".into(),
+        Type::Date => "Date".into(),
+        Type::Instant => "Instant".into(),
+        Type::Text => "Text".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::Unit => "Unit".into(),
+        Type::List(element) => format!("List<{}>", type_label(element)),
+        Type::Range(element) => format!("Range<{}>", type_label(element)),
+        Type::Relation(element) => format!("Relation<{}>", type_label(element)),
+        Type::Stream(element) => format!("Stream<{}>", type_label(element)),
+        Type::Optional(inner) => format!("Optional<{}>", type_label(inner)),
+        Type::Tuple(items) => format!(
+            "({})",
+            items.iter().map(type_label).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Record(_) => "record".into(),
+        Type::Applied { base, arguments } if arguments.is_empty() => base.clone(),
+        Type::Applied { base, arguments } => format!(
+            "{base}<{}>",
+            arguments
+                .iter()
+                .map(type_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Quantity { .. } => "quantity".into(),
+        Type::MoneyPerUnit { .. } => "money rate".into(),
+        Type::Function { .. } => "function".into(),
+        Type::Named(name) => name.clone(),
+        Type::Bottom => "no value".into(),
+        Type::Error => "unknown type".into(),
     }
 }
 
@@ -23339,16 +24248,44 @@ fn infer_numeric_member(base: &Type, name: &str) -> Option<Type> {
     }
 }
 
-fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type> {
-    match base {
-        Type::Int | Type::Decimal
-            if scope.currency_types.contains(name) =>
-        {
-            Some(Type::Applied {
-                base: "Money".into(),
-                arguments: vec![Type::Named(canonical_nominal_name(name, scope))],
-            })
+/// `decimal_expression.CurrencyType` constructs exact `Money<CurrencyType>`
+/// only when that nominal type implements `Currency` (ORNA-LIT-007,
+/// ORNA-MONEY-010). A binary `Float` never becomes money (ORNA-NUM-003).
+fn infer_currency_suffix(
+    base: &Type,
+    name: &str,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Type> {
+    if !matches!(base, Type::Int | Type::Decimal | Type::Float) {
+        return None;
+    }
+    let identity = canonical_nominal_name(name, scope);
+    if scope.currency_types.contains(&identity) {
+        if *base == Type::Float {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "Money cannot be constructed from an inexact Float without explicit rounding",
+            ));
+            return Some(Type::Error);
         }
+        return Some(Type::Applied {
+            base: "Money".into(),
+            arguments: vec![Type::Named(identity)],
+        });
+    }
+    if scope.nominal_identities.contains_key(name) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "currency suffix names a type that does not implement Currency",
+        ));
+        return Some(Type::Error);
+    }
+    None
+}
+
+fn infer_numeric_postfix(base: &Type, name: &str) -> Option<Type> {
+    match base {
         Type::Int | Type::Decimal | Type::Float if name == "decimal" => Some(Type::Decimal),
         // These postfix units are evaluated as elapsed Duration values. Keep
         // their static type aligned with the runtime representation so the
@@ -23378,15 +24315,14 @@ fn infer_numeric_postfix(base: &Type, name: &str, scope: &Scope) -> Option<Type>
     }
 }
 
-fn is_currency_code(name: &str) -> bool {
-    name.len() == 3 && name.bytes().all(|byte| byte.is_ascii_uppercase())
-}
-
-fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static str> {
+fn incompatible_addition_message(left: &Type, right: &Type) -> Option<(&'static str, &'static str)> {
     if let (Some(left), Some(right)) = (money_currency(left), money_currency(right))
         && left != right
     {
-        return Some("cannot add different currencies without conversion");
+        return Some((
+            DIAG_CURRENCY_MISMATCH,
+            "cannot add different currencies without conversion",
+        ));
     }
     let (Some(left), Some(right)) = (numeric_unit(left), numeric_unit(right)) else {
         return None;
@@ -23395,7 +24331,7 @@ fn incompatible_addition_message(left: &Type, right: &Type) -> Option<&'static s
         return None;
     };
     (matches!((left, right), ("Time", "Energy") | ("Energy", "Time")))
-        .then_some("cannot add Time and Energy")
+        .then_some((DIAG_TIME_ENERGY_ADD, "cannot add Time and Energy"))
 }
 
 fn money_currency(ty: &Type) -> Option<&Type> {
@@ -23497,21 +24433,34 @@ fn infer_money_constructor(
         return None;
     }
     let value = infer(&arguments[0].value, scope, local, diagnostics);
-    let mut inferred = infer_money_constructor_type(currency, &value.ty, diagnostics);
+    let mut inferred = infer_money_constructor_type(currency, &value.ty, scope, diagnostics);
     inferred.effects = value.effects;
     Some(inferred)
 }
 
+/// `Money<C>(value)` constructs exact money from an exact value whose currency
+/// `C` implements `Currency` (ORNA-MONEY-004, ORNA-NUM-003).
 fn infer_money_constructor_type(
     currency: Type,
     value: &Type,
+    scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    if is_binary_float(value) {
+    let currency_is_valid = is_currency_type(&currency, scope);
+    if !currency_is_valid {
         diagnostics.push(diag(
             DIAG_TYPE,
+            "Money currency must be a nominal type that implements Currency",
+        ));
+    }
+    let value_is_float = is_binary_float(value);
+    if value_is_float {
+        diagnostics.push(diag(
+            DIAG_MONEY_FROM_FLOAT,
             "Money cannot be constructed from an inexact Float without explicit rounding",
         ));
+    }
+    if !currency_is_valid || value_is_float {
         return Inferred {
             ty: Type::Error,
             effects: EffectSummary::default(),
@@ -23799,7 +24748,7 @@ fn infer_table_assertion(
             _ => None,
         };
         if let Some(message) = message {
-            diagnostics.push(diag(DIAG_ASSERTION, message));
+            diagnostics.push(diag(DIAG_ASSERTION_OWNER_PIPE, message));
             return Inferred {
                 ty: Type::Bool,
                 effects: EffectSummary::default(),
@@ -24376,6 +25325,7 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
             automatic_key: false,
         }),
         conversions: Vec::new(),
+        currency: false,
     })
 }
 
@@ -24433,6 +25383,7 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
             automatic_key: keys.is_empty(),
         }),
         conversions: Vec::new(),
+        currency: false,
     })
 }
 
@@ -24463,34 +25414,41 @@ fn table_row_type(item: &Item) -> Type {
     Type::Record(fields)
 }
 
+/// Returns the spec diagnostic code and message for a primary-key type
+/// violation. Other primary-key rejections keep the generic type code.
 fn primary_key_type_error(
     ty: &Type,
     scope: &Scope,
     visiting_tables: &mut BTreeSet<String>,
-) -> Option<&'static str> {
+) -> Option<(&'static str, &'static str)> {
     let resolved = resolve_type_aliases(ty, &scope.type_aliases, &mut BTreeSet::new());
     if &resolved != ty {
         return primary_key_type_error(&resolved, scope, visiting_tables);
     }
     match ty {
         Type::Int | Type::Decimal | Type::Date | Type::Instant | Type::Text | Type::Bool => None,
-        Type::Tuple(elements) if elements.is_empty() => {
-            Some("Unit is not a primary-key type in version 1.0")
-        }
+        Type::Tuple(elements) if elements.is_empty() => Some((
+            DIAG_TYPE,
+            "Unit is not a primary-key type in version 1.0",
+        )),
         Type::Tuple(elements) => elements
             .iter()
             .find_map(|element| primary_key_type_error(element, scope, visiting_tables)),
         Type::Named(name) if matches!(name.as_str(), "Uuid" | "UUID" | "std.UUID") => None,
-        Type::Named(name) if scope.payload_enum_types.contains(name) => {
-            Some("payload-bearing enums cannot be primary-key types")
-        }
+        Type::Named(name) if scope.payload_enum_types.contains(name) => Some((
+            DIAG_TYPE,
+            "payload-bearing enums cannot be primary-key types",
+        )),
         Type::Named(name) => {
             let symbol = scope_named_symbol(name, scope);
             match symbol {
                 Some(symbol) if symbol.kind == SymbolKind::Enum => None,
                 Some(symbol) if symbol.kind == SymbolKind::Table => {
                     if !visiting_tables.insert(name.clone()) {
-                        return Some("table reference key type is recursively defined");
+                        return Some((
+                            DIAG_TYPE,
+                            "table reference key type is recursively defined",
+                        ));
                     }
                     let result = match symbol
                         .table_schema
@@ -24499,33 +25457,39 @@ fn primary_key_type_error(
                     {
                         Some(admission) => {
                             if admission.keys.is_empty() {
-                                Some("table reference has no canonical primary key")
+                                Some((DIAG_TYPE, "table reference has no canonical primary key"))
                             } else {
                                 admission.keys.iter().find_map(|(_, key_type)| {
                                     primary_key_type_error(key_type, scope, visiting_tables)
                                 })
                             }
                         }
-                        None => Some("table reference has no canonical primary key"),
+                        None => Some((DIAG_TYPE, "table reference has no canonical primary key")),
                     };
                     visiting_tables.remove(name);
                     result
                 }
-                _ => Some("type has no canonical primary-key encoding"),
+                _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
             }
         }
-        Type::Float => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Applied { base, .. } if base == "Float" => {
-            Some("Float is not a valid primary-key type")
-        }
-        Type::Range(_) => Some("Range<T> is not a primary-key type in version 1.0"),
-        Type::Applied { base, .. } if base == "Range" => {
-            Some("Range<T> is not a primary-key type in version 1.0")
-        }
+        Type::Float => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Applied { base, .. } if base == "Float" => Some((
+            DIAG_PRIMARY_KEY_FLOAT,
+            "Float is not a valid primary-key type",
+        )),
+        Type::Range(_) => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
+        Type::Applied { base, .. } if base == "Range" => Some((
+            DIAG_PRIMARY_KEY_RANGE,
+            "Range<T> is not a primary-key type in version 1.0",
+        )),
         Type::Error => None,
-        _ => Some("type has no canonical primary-key encoding"),
+        _ => Some((DIAG_TYPE, "type has no canonical primary-key encoding")),
     }
 }
 
@@ -24567,10 +25531,14 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
     Some((name.clone(), Type::Record(fields)))
 }
 
-fn currency_types(tree: &SyntaxTree) -> BTreeSet<String> {
-    tree.items
-        .iter()
-        .filter_map(|item| {
+/// Canonical identities of the nominal types in scope that implement the core
+/// `Currency` protocol (ORNA-MONEY-004): this module's declarations whose
+/// nested `impl Currency` names it, and the imported or attached nominal types
+/// exported as currencies. Nothing is inferred from a name.
+fn currency_types(namespace: &Namespace, tree: &SyntaxTree, scope: &Scope) -> BTreeSet<String> {
+    let mut currencies = BTreeSet::new();
+    if currency_is_core_protocol(scope) {
+        currencies.extend(tree.items.iter().filter_map(|item| {
             let Declaration::Type {
                 name,
                 representation: TypeRepresentation::Nominal { members },
@@ -24585,16 +25553,79 @@ fn currency_types(tree: &SyntaxTree) -> BTreeSet<String> {
                     matches!(
                         member,
                         TypeMember::Implementation { implementation, .. }
-                            if matches!(
-                                &implementation.protocol,
-                                TypeExpr::Name { path, arguments, .. }
-                                    if path.as_slice() == ["Currency"] && arguments.is_empty()
-                            )
+                            if names_currency_protocol(&implementation.protocol)
                     )
                 })
-                .then_some(name.clone())
+                .then(|| nominal_identity(namespace, name))
+        }));
+    }
+    let exported = scope.names.values().chain(
+        scope
+            .available_modules
+            .values()
+            .flat_map(|module| module.exports.values()),
+    );
+    currencies.extend(
+        exported.filter_map(|symbol| match (&symbol.ty, &symbol.table_schema) {
+            (Type::Named(identity), Some(schema))
+                if symbol.kind == SymbolKind::Type && schema.currency =>
+            {
+                Some(identity.clone())
+            }
+            _ => None,
+        }),
+    );
+    currencies
+}
+
+/// Whether a protocol reference is the unqualified, argument-free `Currency`.
+fn names_currency_protocol(protocol: &TypeExpr) -> bool {
+    matches!(
+        protocol,
+        TypeExpr::Name { path, arguments, .. }
+            if path.as_slice() == ["Currency"] && arguments.is_empty()
+    )
+}
+
+/// Whether `Currency` names the core protocol in this scope. A declared or
+/// imported protocol named `Currency` takes precedence (ORNA-IMPORT-007), and
+/// it is the core protocol only when its member surface is exactly the core
+/// surface.
+fn currency_is_core_protocol(scope: &Scope) -> bool {
+    match resolve_local_protocol_name("Currency", scope) {
+        Some(protocol) => scope.local_protocols.get(&protocol).is_some_and(|members| {
+            static_protocol_surface(members)
+                == static_protocol_surface(CORE_CURRENCY_SURFACE.as_slice())
+        }),
+        None => !scope.names.contains_key("Currency"),
+    }
+}
+
+/// A protocol's static properties by name and type, or `None` when it also
+/// declares functions. Spans and member order are not part of the surface.
+fn static_protocol_surface(members: &[ProtocolMember]) -> Option<BTreeMap<&str, Type>> {
+    members
+        .iter()
+        .map(|member| match member {
+            ProtocolMember::Static { name, ty, .. } => Some((name.as_str(), type_of(ty))),
+            ProtocolMember::Function { .. } => None,
         })
         .collect()
+}
+
+/// Whether `ty` can parameterize `Money`: a nominal type that implements the
+/// core `Currency` protocol, or a generic parameter bounded by it.
+fn is_currency_type(ty: &Type, scope: &Scope) -> bool {
+    let Type::Named(identity) = ty else {
+        return false;
+    };
+    scope.currency_types.contains(identity)
+        || (scope.generic_type_parameters.contains(identity)
+            && scope
+                .generic_type_bounds
+                .get(identity)
+                .is_some_and(|bounds| bounds.iter().any(names_currency_protocol))
+            && currency_is_core_protocol(scope))
 }
 
 fn enum_variant_types(
@@ -24643,12 +25674,46 @@ fn payload_enum_names(tree: &SyntaxTree) -> BTreeSet<String> {
         .collect()
 }
 
-fn imported_payload_enum_bindings(
+/// Declared payload rows of every enum in one source module. Payload field
+/// types name that module's own nominal records by their module identity, so
+/// an importer checks construction against the same types the declaring
+/// module uses. Duplicate declarations are reported by the declaring module.
+fn source_enum_variant_rows(
+    namespace: &Namespace,
     tree: &SyntaxTree,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+) -> BTreeMap<String, EnumVariantRows> {
+    let identities = tree
+        .items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            } => Some((name.clone(), nominal_identity(namespace, name))),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut enums = enum_variant_types(tree, &mut Vec::new());
+    for field in enums
+        .values_mut()
+        .flat_map(BTreeMap::values_mut)
+        .flat_map(BTreeMap::values_mut)
+    {
+        *field = canonicalize_type_with_identities(field, &identities);
+    }
+    enums
+}
+
+/// Payload rows of the source enums each `use` declaration makes visible,
+/// keyed by the spelling that names the enum in this module: `Level` for a
+/// named, glob or prelude import, and `alias.Level` through a module binding.
+fn imported_enum_bindings(
+    tree: &SyntaxTree,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
-) -> BTreeSet<String> {
-    let mut bindings = BTreeSet::new();
+) -> BTreeMap<String, EnumVariantRows> {
+    let mut bindings = BTreeMap::new();
     for item in &tree.items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
@@ -24657,70 +25722,52 @@ fn imported_payload_enum_bindings(
         let Some(module) = modules.get(&target) else {
             continue;
         };
+        let enums = source_enums.get(&target).into_iter().flatten();
         match tail {
             UseTail::None => {
                 if let Some(binding) = target.0.last() {
-                    add_qualified_payload_enum_bindings(
+                    add_qualified_enum_bindings(
                         &mut bindings,
                         binding,
                         &target,
-                        payload_enums,
+                        source_enums,
                         modules,
                     );
                 }
             }
             UseTail::Alias { name, .. } if name != "_" => {
-                add_qualified_payload_enum_bindings(
-                    &mut bindings,
-                    name,
-                    &target,
-                    payload_enums,
-                    modules,
-                );
+                add_qualified_enum_bindings(&mut bindings, name, &target, source_enums, modules);
             }
-            UseTail::Alias { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    for name in names {
-                        if module.prelude_exports.contains(name) && is_exported_enum(module, name) {
-                            bindings.insert(name.clone());
-                        }
-                    }
-                }
-            }
-            UseTail::Glob { .. } => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        names
-                            .iter()
-                            .filter(|name| is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
-            UseTail::Names(imports) => {
-                if let Some(names) = payload_enums.get(&target) {
-                    bindings.extend(
-                        imports
-                            .iter()
-                            .map(|import| &import.name)
-                            .filter(|name| names.contains(*name) && is_exported_enum(module, name))
-                            .cloned(),
-                    );
-                }
-            }
+            UseTail::Alias { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| {
+                        module.prelude_exports.contains(*name) && is_exported_enum(module, name)
+                    })
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Glob { .. } => bindings.extend(
+                enums
+                    .filter(|(name, _)| is_exported_enum(module, name))
+                    .map(|(name, variants)| (name.clone(), variants.clone())),
+            ),
+            UseTail::Names(imports) => bindings.extend(imports.iter().filter_map(|import| {
+                let variants = source_enums.get(&target)?.get(&import.name)?;
+                is_exported_enum(module, &import.name)
+                    .then(|| (import.name.clone(), variants.clone()))
+            })),
         }
     }
     bindings
 }
 
-fn add_qualified_payload_enum_bindings(
-    bindings: &mut BTreeSet<String>,
+fn add_qualified_enum_bindings(
+    bindings: &mut BTreeMap<String, EnumVariantRows>,
     binding: &str,
     target: &Namespace,
-    payload_enums: &BTreeMap<Namespace, BTreeSet<String>>,
+    source_enums: &BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     modules: &BTreeMap<Namespace, ModuleHeader>,
 ) {
-    for (namespace, names) in payload_enums {
+    for (namespace, enums) in source_enums {
         if namespace.0.len() < target.0.len() || namespace.0[..target.0.len()] != target.0[..] {
             continue;
         }
@@ -24729,11 +25776,11 @@ fn add_qualified_payload_enum_bindings(
         };
         let mut prefix = vec![binding.to_owned()];
         prefix.extend(namespace.0[target.0.len()..].iter().cloned());
-        for name in names {
+        for (name, variants) in enums {
             if is_exported_enum(module, name) {
                 let mut qualified = prefix.clone();
                 qualified.push(name.clone());
-                bindings.insert(qualified.join("."));
+                bindings.insert(qualified.join("."), variants.clone());
             }
         }
     }
@@ -26206,7 +27253,7 @@ mod tests {
             analysis.diagnostics
         );
         assert!(analysis.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }));
         assert!(
             !has(&analysis, DIAG_UNRESOLVED),

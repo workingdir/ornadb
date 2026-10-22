@@ -11,28 +11,31 @@ use std::{
     process::{Command, Output},
 };
 
-const MAIN: &str = r#"use contacts;
+// Module names avoid the fixture catalogue's namespaces (contacts, mail,
+// google, vehicle, ...): production admission inherits those modules today,
+// so a user module reusing one collides (ornadb-5il1.285).
+const MAIN: &str = r#"use people;
 use a;
-use vehicle.corsa;
-use mail.google;
+use telemetry.rig;
+use cloud.drive;
 
 pub fn seed() {
-    contacts.Contact.insert({ id: "ada", name: "Ada" });
-    contacts.Contact.insert({ id: "bob", name: "Bob" });
+    people.Contact.insert({ id: "ada", name: "Ada" });
+    people.Contact.insert({ id: "bob", name: "Bob" });
     a.Item.insert({ id: "x", v: 1 });
     b.Item.insert({ id: "x", w: "wide" });
-    corsa.Reading.insert({ id: 1, rpm: 900 });
-    vehicle.corsa.Reading.insert({ id: 2, rpm: 0 });
+    rig.Reading.insert({ id: 1, rpm: 900 });
+    telemetry.rig.Reading.insert({ id: 2, rpm: 0 });
 }
 
 pub fn verify() {
-    assert (contacts.Contact | filter(contact => contact.name == "Ada") | count()) == 1;
+    assert (people.Contact | filter(contact => contact.name == "Ada") | count()) == 1;
     assert (a.Item | filter(item => item.v == 1) | count()) == 1;
     assert (b.Item | filter(item => item.w == "wide") | count()) == 1;
-    assert (vehicle.corsa.Reading | filter(reading => reading.rpm > 0) | count()) == 1;
+    assert (telemetry.rig.Reading | filter(reading => reading.rpm > 0) | count()) == 1;
     assert a.b_items() == 1;
-    assert google.sync() == 3;
-    assert mail.google.sync() == 3;
+    assert drive.sync() == 3;
+    assert cloud.drive.sync() == 3;
 }
 
 pub fn verify_rejects() {
@@ -80,11 +83,11 @@ fn module_project() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("project directory");
     for (path, source) in [
         ("main.orna", MAIN),
-        ("contacts.orna", CONTACTS),
+        ("people.orna", CONTACTS),
         ("a.orna", A),
         ("b.orna", B),
-        ("vehicle/corsa/main.orna", CORSA),
-        ("mail/google.orna", GOOGLE),
+        ("telemetry/rig/main.orna", CORSA),
+        ("cloud/drive.orna", GOOGLE),
     ] {
         let path = directory.path().join(path);
         std::fs::create_dir_all(path.parent().expect("module directory")).expect("directory");
@@ -108,7 +111,7 @@ fn module_tables_check_run_and_query_through_qualified_identities() {
     assert_success(&project_command(directory.path(), &["run", "main.seed"]), "seed");
     assert_success(&project_command(directory.path(), &["run", "main.verify"]), "verify");
     assert_success(
-        &project_command(directory.path(), &["run", "vehicle.corsa.trips"]),
+        &project_command(directory.path(), &["run", "telemetry.rig.trips"]),
         "nested module function by full path",
     );
 
