@@ -1792,6 +1792,19 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
+/// The bounded pure path receives reachable standard modules through
+/// `load_standard_sources`, which verifies them against the captured profile.
+/// The project unit therefore carries neither those source units nor a
+/// standard dependency that the bounded evaluator would reject.
+fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let mut execution = execution_project(project);
+    execution
+        .modules
+        .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
+    execution.expectations.environment.stdlib = None;
+    execution
+}
+
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
@@ -2097,7 +2110,10 @@ fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    if project.modules().len() == 1 {
+    // Projects that import pinned standard modules take the bounded path below,
+    // which loads those bodies through the verified profile. The single-module
+    // authority admits only the user module, so it would fall back to host code.
+    if project.modules().len() == 1 && project.standard_runtime_modules().is_empty() {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
         let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
@@ -2177,7 +2193,29 @@ fn run_pure_invocation(
     }
 
     let mut evaluator = BoundedEvaluator::default();
-    match evaluator.evaluate_project(&execution_project(&project)) {
+    if let Some(profile) = project.standard_profile() {
+        let runtime = project.standard_runtime_modules();
+        let sources = project
+            .standard_sources()
+            .iter()
+            .filter(|(logical_path, _)| runtime.contains(logical_path))
+            .cloned()
+            .collect::<Vec<_>>();
+        match evaluator.load_standard_sources(profile, sources) {
+            StageOutcome::Passed => {}
+            StageOutcome::Cancelled(diagnostic) => {
+                return Err(cancellation_diagnostic(&diagnostic));
+            }
+            StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                ));
+            }
+        }
+    }
+    match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
