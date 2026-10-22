@@ -102,6 +102,12 @@ fn release_dead_mount(repository: &Repository, mountpoint: &Path) -> Result<(), 
         Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
         _ => return Ok(()),
     }
+    // Re-check the identity validated above before the lazy detach: a live
+    // mount attached since then would be removed without quiesce. This is the
+    // same check `run_unmount` makes before unmounting.
+    if mounted_mount_for_path(&mountpoint)?.as_ref() != Some(&identity) {
+        return Ok(());
+    }
     crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
         .map_err(|error| mount_error("Dead Orna mount could not be released", error))?;
     if let Some(view_id) = identity.source.strip_prefix("orna-") {
@@ -906,6 +912,12 @@ struct MountedFuseIdentity {
 fn mounted_mount_for_path(path: &Path) -> Result<Option<MountedFuseIdentity>, Diagnostic> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| mount_error("Mount table could not be read", error.to_string()))?;
+    Ok(mount_identity_in_mountinfo(&mountinfo, path))
+}
+
+/// The identity of the mount at `path` in a `/proc/self/mountinfo` table.
+#[cfg(target_os = "linux")]
+fn mount_identity_in_mountinfo(mountinfo: &str, path: &Path) -> Option<MountedFuseIdentity> {
     for line in mountinfo.lines() {
         let Some((mount_fields, filesystem_fields)) = line.split_once(" - ") else {
             continue;
@@ -926,13 +938,13 @@ fn mounted_mount_for_path(path: &Path) -> Result<Option<MountedFuseIdentity>, Di
         let mut fields = filesystem_fields.split_whitespace();
         let filesystem = fields.next().unwrap_or_default().to_owned();
         let source = fields.next().unwrap_or_default().to_owned();
-        return Ok(Some(MountedFuseIdentity {
+        return Some(MountedFuseIdentity {
             mount_id,
             filesystem,
             source,
-        }));
+        });
     }
-    Ok(None)
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -1072,5 +1084,39 @@ mod tests {
     fn escape_json_leaves_ordinary_paths_unchanged() {
         assert_eq!(escape_json("/mnt/library"), "/mnt/library");
         assert_eq!(escape_json("tab\there"), "tab\\there");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mountinfo_identity_tests {
+    use super::{MountedFuseIdentity, mount_identity_in_mountinfo};
+    use std::path::Path;
+
+    const VIEW: &str = "orna-0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn release_recheck_sees_a_live_mount_that_replaced_the_dead_one() {
+        let path = Path::new("/mnt/orna");
+        let dead = format!("41 35 0:45 / /mnt/orna rw,nosuid,nodev - fuse.orna-cli {VIEW} rw\n");
+        let live = format!("52 35 0:50 / /mnt/orna rw,nosuid,nodev - fuse.orna-cli {VIEW} rw\n");
+        let identity = mount_identity_in_mountinfo(&dead, path).expect("dead mount is listed");
+        assert_eq!(
+            identity,
+            MountedFuseIdentity {
+                mount_id: 41,
+                filesystem: "fuse.orna-cli".to_owned(),
+                source: VIEW.to_owned(),
+            }
+        );
+        assert_eq!(mount_identity_in_mountinfo(&dead, path), Some(identity.clone()));
+        assert_ne!(mount_identity_in_mountinfo(&live, path), Some(identity));
+    }
+
+    #[test]
+    fn unrelated_or_absent_mountpoints_have_no_identity() {
+        let path = Path::new("/mnt/orna");
+        let other = "36 35 98:0 /other /mnt/other rw - ext4 /dev/sda1 rw\n";
+        assert_eq!(mount_identity_in_mountinfo(other, path), None);
+        assert_eq!(mount_identity_in_mountinfo("", path), None);
     }
 }
