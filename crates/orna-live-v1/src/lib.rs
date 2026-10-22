@@ -6264,6 +6264,7 @@ impl LiveTransport {
             .iter()
             .filter_map(|(session, record)| {
                 (!self.delivering_upgrades.contains_key(session)
+                    && !self.host.attachments.values().any(|owner| owner == session)
                     && record.metadata.expires_at <= now)
                     .then_some(*session)
             })
@@ -6476,6 +6477,15 @@ impl LiveTransport {
             && !self.host.attachments.contains_key(&attachment)
         {
             self.queue_retired_attachment(session, attachment);
+        }
+        // The lease is the finite reconnection grace that starts when the
+        // session loses its socket (30-protocol, Session creation and
+        // ownership), so it is measured from this detachment.
+        if let Some(session) = session
+            && !self.host.attachments.values().any(|owner| *owner == session)
+            && let Some(record) = self.sessions.get_mut(&session)
+        {
+            record.metadata.expires_at = now.saturating_add(self.limits.lease_ms);
         }
         outcome
     }
@@ -10842,6 +10852,11 @@ mod tests {
                 origin,
             },
         );
+        // Expiry only applies to detached sessions; the socket's detachment
+        // starts the lease, which the test then pins to an expired deadline.
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion::default();
         let mut children = ExpiryChildren {
             fail: true,
@@ -10880,6 +10895,87 @@ mod tests {
         assert_eq!(deletion.calls, 1);
         assert!(!transport.sessions.contains_key(&[1; 16]));
         assert!(transport.take_retired_attachments().is_empty());
+    }
+
+    fn attached_session_transport() -> LiveTransport {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = subscribed_host(None);
+        host.application_sessions.insert([1; 16]);
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential,
+                origin,
+            },
+        );
+        transport
+    }
+
+    #[test]
+    fn attached_session_is_not_expired_by_its_lease_deadline() {
+        let mut transport = attached_session_transport();
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                10,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+
+        assert_eq!(children.calls, 0);
+        assert_eq!(deletion.calls, 0);
+        assert!(transport.sessions.contains_key(&[1; 16]));
+    }
+
+    #[test]
+    fn detaching_the_socket_restarts_the_lease_from_detachment() {
+        let mut transport = attached_session_transport();
+        let lease_ms = transport.limits.lease_ms;
+
+        futures::executor::block_on(transport.close_attachment([4; 16], 20))
+            .expect("detaching the attachment starts the reconnection lease");
+        assert_eq!(
+            transport.sessions[&[1; 16]].metadata.expires_at,
+            20 + lease_ms
+        );
+
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                20 + lease_ms - 1,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(transport.sessions.contains_key(&[1; 16]));
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                20 + lease_ms,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(!transport.sessions.contains_key(&[1; 16]));
     }
 
     #[test]
