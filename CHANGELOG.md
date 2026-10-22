@@ -14,7 +14,11 @@ been published.
   commit that fails leaves its newly staged tables free to change or drop, and
   `orna commit` refuses to stage while an interrupted publication awaits
   recovery. `orna publish` refuses rows whose table has no relation in the
-  committed store.
+  committed store. Identity rows record each object's kind as the
+  specification's `sys.ObjectKind` ordinal (table 2, field 3, unit 15, type 8,
+  variant 10, type and variant fields 9), not a private integer. Stores written
+  with the private integers are not readable, and the sidecar's version 1 codes
+  are mapped only when reading an older commit.
 - Enum values can be written in source: `Level.low` references a payload-free
   variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
   through named imports and module bindings. `orna check` reports an unknown
