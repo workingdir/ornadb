@@ -61,6 +61,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0115 | Superseded: editor artifacts now come from `orna-syntax-v1` metadata. | TextMate remains a lexical fallback; diagnostics and semantic tokens come from the v1 LSP. |
 | 0116 | Superseded by 0117: the browser playground and its app-specific runtime path are retired. | Historical rationale only; no current product or runtime commitment remains. |
 | 0117 | D6 retires the browser playground and keeps generic native serving. | `orna serve`, Git transport, and the removable `std.devtools` frontend remain under ORNA-SERVE-001 and ORNA-SERVE-007..009; no app-specific browser or WASM path remains. |
+| 0118 | Format-3 schema expression digests hash tokens with free references replaced by their resolved declarations, under `ornadb.computed-selector.v2` and `ornadb.refinement-assertion.v2`. | Postfix unit and currency suffixes and member names keep their spelling. |
 | 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
@@ -276,6 +277,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Playground as a Database-Hosted Application](0116-playground-in-db-application.md)
 * **work ADR 0117:**
   [Retire the Browser Playground](0117-retire-browser-playground.md)
+* **work ADR 0118:**
+  [Format-3 Schema Expression Digests](0118-schema-expression-digests.md)
 
 ## External reference records
 
