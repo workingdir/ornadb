@@ -939,13 +939,16 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         Diagnostic::usage(
             "E1002",
             "unsupported `migrate` arguments",
-            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers` or `migrate abort DEST`",
+            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers`, `migrate abort DEST`, or `migrate activate DEST`",
         )
     };
     let mut arguments = arguments.iter().map(String::as_str);
     let subcommand = arguments.next();
     if subcommand == Some("abort") {
         return run_migrate_abort(endpoint, arguments);
+    }
+    if subcommand == Some("activate") {
+        return run_migrate_activate(endpoint, arguments);
     }
     if subcommand != Some("copy") {
         return Err(usage());
@@ -1167,6 +1170,53 @@ fn run_migrate_abort<'a>(
         destination.display()
     );
     Ok(())
+}
+
+fn run_migrate_activate<'a>(
+    endpoint: &Endpoint,
+    mut arguments: impl Iterator<Item = &'a str>,
+) -> Result<(), Diagnostic> {
+    let destination = arguments.next().ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate activate` needs a destination",
+            "supply DEST after `migrate activate`",
+        )
+    })?;
+    if arguments.next().is_some() {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "unsupported `migrate activate` arguments",
+            "use `migrate activate DEST`",
+        ));
+    }
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository_v1::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
+        )
+    })?;
+    let destination = std::path::PathBuf::from(destination);
+    orna_repository_v1::migration_copy::verify_prepared_format3_migration(
+        &repository,
+        &destination,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration copy could not be verified for activation",
+            "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })?;
+    Err(Diagnostic::target(
+        "E2100",
+        "activation is not available in this build: the protected format transition has not completed; candidate and source unchanged",
+        "keep DEST for review, or run `migrate abort DEST` to discard it",
+    ))
 }
 
 fn run_status_short_with_runtime_summary(
