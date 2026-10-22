@@ -2818,6 +2818,7 @@ mod tests {
             read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_secs(5),
+                &mut false,
             )
         });
         let mut client = TcpStream::connect(address).expect("loopback connection");
@@ -2850,6 +2851,7 @@ mod tests {
             let result = read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_secs(30),
+                &mut false,
             );
             (result.err(), started.elapsed())
         });
@@ -2878,6 +2880,7 @@ mod tests {
             let result = read_request_head(
                 &mut BufReader::new(stream),
                 Instant::now() + StdDuration::from_millis(300),
+                &mut false,
             );
             (result.err(), started.elapsed())
         });
