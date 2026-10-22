@@ -4442,6 +4442,12 @@ impl FsBuilder {
 
     /// Drops a generation that is no longer reachable by name. Open handles keep it
     /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
+    ///
+    /// Accepted FUSE nodeid-lifetime deviation: retention follows tracked open handles, not
+    /// kernel lookup counts. `forget` and `batch_forget` keep fuser's no-op defaults, so a
+    /// retired generation is removed once no handle holds it, even if the kernel still
+    /// caches its nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes
+    /// on use; a stale nodeid then fails with ENOENT instead of serving retired bytes.
     fn retire_node(&mut self, inode: u64) {
         if self.open_blobs.contains_key(&inode) {
             self.superseded_blobs.insert(inode);
