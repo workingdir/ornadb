@@ -5132,6 +5132,7 @@ a2a46cdb8e4e4dce4ff72aa29df0296d04dd0bab888af8b8ae787a4196e39a0a  crates/orna-sy
 757b065ff221ff761795268e097c00a21470733960c410cfea581eb743b86c16  crates/orna-syntax-v1/tests/fixtures/deep-compound-implicit-suffix.orna
 885ce196e7aa9914bf44045d2e4da47c00b71543b17516f12e597f26d98377e1  crates/orna-syntax-v1/tests/fixtures/deep-nested-case-compound-suffix.orna
 5ce52cc95c76fe4186fa05b6de480555e2e915d2f0da3b9c85c5478cc3a93da8  crates/orna-syntax-v1/tests/fixtures/editor-expressions.orna
+fbff817c36955f7a2cad87406e9fec54c71ef95637092b075658bbb83050bb09  crates/orna-syntax-v1/tests/fixtures/editor-highlight-sample.orna
 e33ceb924626255267826882ca0afa29692c51dde909183a6b9c33be395349a3  crates/orna-syntax-v1/tests/fixtures/editor-keywords.orna
 a2b07e6b9c837daac019cfe262b3b7962bd8a10ce2001cb5ebfd065d703a75db  crates/orna-syntax-v1/tests/fixtures/empty-generic-parameters.orna
 825aa773fc01fd89c585da6e1b7937d7834a42066d3afebea7069fc14c2fbe0f  crates/orna-syntax-v1/tests/fixtures/empty-generic-type-arguments.orna
