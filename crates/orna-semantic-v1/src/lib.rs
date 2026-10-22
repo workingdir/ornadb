@@ -25236,6 +25236,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
         None => EffectSummary::default(),
     }
 }
+
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
     match expr {
         Expr::Name { text, .. } => Some(vec![text]),
