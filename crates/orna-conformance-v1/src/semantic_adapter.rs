@@ -14,11 +14,12 @@ use crate::{
 };
 use num_bigint::{BigInt, Sign};
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, Functions, Limits as EvaluatorLimits,
-    NominalDefinition, NominalDefinitions, NominalField, PureFunction as RetainedFunction,
-    RelationPage, StepBudget, evaluate_expression, evaluate_expression_with_functions,
-    evaluate_with_functions_and_budget, evaluate_with_functions_and_nominals,
-    invoke_named_with_effects_and_budget, invoke_named_with_nominals,
+    ActivationExplainCatalogue, EffectHandler, Environment, EvaluationError, ExplainCatalogue,
+    Functions, Limits as EvaluatorLimits, NominalDefinition, NominalDefinitions, NominalField,
+    PureFunction as RetainedFunction, RelationPage, StepBudget, evaluate_expression,
+    evaluate_expression_with_functions, evaluate_with_functions_and_budget,
+    evaluate_with_functions_and_nominals, invoke_named_with_effects_and_budget,
+    invoke_named_with_nominals,
 };
 use orna_foundation_v1::{
     Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
@@ -1827,6 +1828,7 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    explain_catalogue: Option<ActivationExplainCatalogue>,
 }
 
 impl TransactionalEvaluator {
@@ -1838,6 +1840,7 @@ impl TransactionalEvaluator {
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
+            explain_catalogue: None,
         }
     }
 
@@ -1848,6 +1851,12 @@ impl TransactionalEvaluator {
 
     fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    /// Pins `sys.explain` inputs to the activation's snapshot.
+    fn with_explain_catalogue(mut self, catalogue: ActivationExplainCatalogue) -> Self {
+        self.explain_catalogue = Some(catalogue);
         self
     }
 
@@ -2008,6 +2017,7 @@ impl TransactionalEvaluator {
                 limits,
                 activation_time: self.activation_time,
                 publication_rows: self.publication_rows.clone(),
+                explain_catalogue: self.explain_catalogue.as_ref(),
             };
             let mut budget = StepBudget::new(limits.max_steps);
             let result = invoke_named_with_effects_and_budget(
@@ -3690,9 +3700,25 @@ impl DurableTransactionalEvaluator {
         };
         let context = snapshot.context();
         self.record_activation_time(context.activation_time());
+        // The activation can name its admitted tables and the system relations
+        // it serves from publication metadata, all at its pinned CWD snapshot.
+        let explain_catalogue = match ActivationExplainCatalogue::new(
+            context.capture().snapshot(),
+            admitted
+                .key_fields
+                .keys()
+                .map(String::as_str)
+                .chain(PUBLICATION_RELATIONS),
+        ) {
+            Ok(catalogue) => catalogue,
+            Err(_) => {
+                return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+            }
+        };
         let mut evaluator = TransactionalEvaluator::new(entry, self.limits)
             .with_activation_time(context.activation_time())
-            .with_publication_rows(publication_rows);
+            .with_publication_rows(publication_rows)
+            .with_explain_catalogue(explain_catalogue);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -5543,6 +5569,10 @@ impl RuntimeEvaluator for TransactionalEvaluator {
     }
 }
 
+/// System relations whose rows the durable run host serves from runtime
+/// publication metadata.
+const PUBLICATION_RELATIONS: [&str; 2] = ["sys.Storage", "sys.MaintenanceJob"];
+
 struct TableEffectHandler<'activation, 'runtime> {
     activation: &'activation mut TransactionActivation<'runtime>,
     key_fields: &'activation TableKeys,
@@ -5552,6 +5582,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
 }
 
 impl EffectHandler for TableEffectHandler<'_, '_> {
@@ -5670,6 +5701,11 @@ impl EffectHandler for TableEffectHandler<'_, '_> {
             self.mutations.truncate(mutation_len);
         }
         result
+    }
+
+    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
+        self.explain_catalogue
+            .map(|catalogue| catalogue as &dyn ExplainCatalogue)
     }
 }
 
@@ -9964,6 +10000,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
 
@@ -10312,6 +10349,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
@@ -10500,6 +10538,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    explain_catalogue: None,
                 };
                 let mut budget = StepBudget::new(limits.max_steps);
                 let first = handler
