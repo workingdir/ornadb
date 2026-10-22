@@ -136,7 +136,6 @@ c5f2a3dac8aeb08c9384b9df6e8d367ff556516c3e91a054504fe770be3fa0d4  crates/orna-cl
 14f83b2257c410a55fccf5e9a9608e969a664371ca194b90171c2dc07f4987b3  crates/orna-cli-v1/tests/fixtures/enum-construction/wrong-field-type.orna
 96b8acf285b129f8039828b2d0b659a0df9ca6eaabb9ca30c431c9c79f223b0e  crates/orna-cli-v1/tests/fixtures/format-context/database-sidecar.orna
 f6eb0b50dcb910e9766f4014ac69659508f8817b372189b22e269dcf9003071a  crates/orna-cli-v1/tests/fixtures/format-context/format-1-ornadb-1.0.orna
-cc8bb4733b30c0273d0edba6337c2997ae51c70c9f497e6042d19368a57d791e  crates/orna-cli-v1/tests/fixtures/format-context/format-1.orna
 8b8ef9c99d02824d2e29fb1ccf1f9d5d21812a195de43ff3cd8ba54dfcb3cbff  crates/orna-cli-v1/tests/fixtures/format-context/format-2-draft-1.1.0.orna
 fa370caf837c9f5f602f4edbc6e4d7f2401239f2524827e0e43ea396ed18126e  crates/orna-cli-v1/tests/fixtures/function-expression-staged.orna
 fd1db994cb47cf7e21a59c01ae97eedc6e00e1df9ba8ed2e9ad8b0d789226b3b  crates/orna-cli-v1/tests/fixtures/function-expression-unstaged.orna
@@ -198,6 +197,8 @@ cb898749d76e51fdaf6c6636920ccdb4f415fc1cffd1e2497636b38cc2469807  crates/orna-cl
 4a8e1a46ef6e3c72890aff6c6cc340f0f27d056c9df4db38db0e0d43fd3e9f31  crates/orna-cli-v1/tests/fixtures/repl-cli-numeric-context.orna
 ae18ae32f312236e0426c7dda0a07d9160a43afa55c215923fe823e44c9df39a  crates/orna-cli-v1/tests/fixtures/repl-effect-preview.orna
 ad84e30122fdfb1bd49761e9a86cbe6dd323c7b5f413a8ca6a65824871669958  crates/orna-cli-v1/tests/fixtures/repl-list-aggregates.orna
+0b074e0f072798c827395fb219783a4102aad257685fd67eebdb3f9ef8201dc7  crates/orna-cli-v1/tests/fixtures/repl-project-items-input.orna
+537c0b1272d940d2cf0949d7a86203d0cb9534557c7179f8a84ee7e1b1d1b2e5  crates/orna-cli-v1/tests/fixtures/repl-project-items.orna
 c51923175ec365d3db5d77cad486e830b3dc5e7a2074a9ee9ac685731e962b5f  crates/orna-cli-v1/tests/fixtures/repl-retained-result.orna
 2755dd327f63d7fb5c8d16233fbe095adebfeab08141dbc465ffd1044f596571  crates/orna-cli-v1/tests/fixtures/repl-status-binding.orna
 29e38749dbdc4179b8e8ef5b0c9f28799f71a771c5f08449ddd8ab13be124656  crates/orna-cli-v1/tests/fixtures/repl-unlisted-std-import.orna
@@ -3482,9 +3483,7 @@ d558c4edae9936931ce34816ce7d78e55b03de4d3a9af5df868cfdae67413f28  crates/orna-re
 7d9e975892062d0fc9a4f886dd5d0adfaa97f09d7f68804779e81bbdec6acfd0  crates/orna-repository-v1/tests/fixtures/format-context/database-unknown-format.orna
 59331f80cbfdc29535ed0893d325f8c417a1b625a1adf04e3c2e48c554634976  crates/orna-repository-v1/tests/fixtures/format-context/database-uppercase-uuid.orna
 f6eb0b50dcb910e9766f4014ac69659508f8817b372189b22e269dcf9003071a  crates/orna-repository-v1/tests/fixtures/format-context/format-1-ornadb-1.0.orna
-cc8bb4733b30c0273d0edba6337c2997ae51c70c9f497e6042d19368a57d791e  crates/orna-repository-v1/tests/fixtures/format-context/format-1.orna
 8b8ef9c99d02824d2e29fb1ccf1f9d5d21812a195de43ff3cd8ba54dfcb3cbff  crates/orna-repository-v1/tests/fixtures/format-context/format-2-draft-1.1.0.orna
-3f6c98c1a91abd031a2eff55b87700f8544d2468100a376ec3db34d2fecc4fc7  crates/orna-repository-v1/tests/fixtures/format-context/format-2.orna
 b2823394fdb97bf78fff414dd10c741ac1e232ad03277a7ff52c7f1021d0e8ab  crates/orna-repository-v1/tests/fixtures/format-context/profile-1-unknown.orna
 e135e88ea724373eded488eca7b9aef9e871b22379d5aa456b1af647db94c424  crates/orna-repository-v1/tests/fixtures/format-context/profile-2-unknown.orna
 5075d2e2d2ea0ceedb49a53ad8daf559c89cb9c3f86b11853bcc1586907cf3d1  crates/orna-repository-v1/tests/fixtures/foundation-adapter-main.orna
@@ -4397,7 +4396,7 @@ c0d90029ab57a79385164f3799e69a744ef2ae63479ebaeba96ea1c4b6d5bef5  crates/orna-se
 8aa8810528357c832ddbc15cb23d1ef91fa3db4219046167740ee5d009fd647b  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8aa881052835.orna
 8ac44df179306829288c0082a051eeb5d85c3d6e6f601af552a072938889879d  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8ac44df17930.orna
 8b9ef94631cab1e68769854aac5f674edb85fedcb31bb0cc5c8921d04b6a8eca  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8b9ef94631ca.orna
-9cd440684e99318425a57d97d47aa81ef8f962c8c43daae34ecd91e03fa764a9  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8be4f4900cfc.orna
+0f72ff4b052c27055a877d34256f8cb3d0ee995a9d535fa69a880c543b82e813  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8be4f4900cfc.orna
 8c006f368079079d78a223bd4ad7095436b00716620e77770e935e4a305f8712  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8c006f368079.orna
 8c1b51ec5b67c2b780527e1f5760c607ec1e3bfeeb828455cbd1bd05f2f6b015  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8c1b51ec5b67.orna
 8c85c43ad3e8497a93aa1a79f3a03ca2534dc6847a1baad579bb92811729090a  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8c85c43ad3e8.orna
@@ -4410,7 +4409,7 @@ c0d90029ab57a79385164f3799e69a744ef2ae63479ebaeba96ea1c4b6d5bef5  crates/orna-se
 3d0871ac7a63e965a4b8809777f1c04bd33af9440c3a703e17585ee076e91e5a  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8fac65264f2b.orna
 8fcd56f0b5d4b522cf02145cbb39fe26e54b9ed8eebea9e1ee3b1def6b069482  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/8fcd56f0b5d4.orna
 9018248ac127e43bf65af0db7523939b760f1007c491ae1a4855737e60efb3b2  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/9018248ac127.orna
-172c9a495b2cb8bdc97c4586bab795653dd04e0d0501f716dc3a2d35fa2d1b26  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/906d103234a6.orna
+959ccb9c25da4a3756267d2a79a8369739d23e949c60d1a3b633e319ab53feb5  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/906d103234a6.orna
 912d8d2b3ffa4221c3a733bc2fd984a66575557d6b2894e8118a35bc06ef2e98  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/912d8d2b3ffa.orna
 91f9f0bd5d11bb66ebaa471119d477ccc841daffecef47b75ef789dd64c86dc2  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/91f9f0bd5d11.orna
 93ddf69e4c595624b0d2cf42ba8e0ea0f8e9fb1d3fa9afeeb79de94b6b89bf5a  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/93ddf69e4c59.orna
@@ -4601,7 +4600,7 @@ ecf247280c89eb0662992bcbaca2330f5f1fc1a1407fdfaac3d0e5e601e8af83  crates/orna-se
 8ce9961d4932612160ff68c130b822ed52b9789a34c854873ba668cefe100b8e  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ed6057c5f866.orna
 ed99cd38996dcc63fb89a1692e07e0435e03c7a29ce4bf8f7a5974c4a7e7e3a8  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ed99cd38996d.orna
 ee1c82416217feae89710d4cb6871f423b6fc2ac2daaf87b6a7a911ad9b16a5f  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ee1c82416217.orna
-ee4e105090e195010c939f2576b75196758b70b480de17ba96b8d691a8d095fe  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ee4e105090e1.orna
+d7f678c4624bef033bac220b9808dc7503ae7c304781c6da42b89d4fa0b62b48  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ee4e105090e1.orna
 ef89978ed4a6fed2320f57f3131f2dd9ea174bc0c27ba2aa08e6fe5030cbca10  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/ef89978ed4a6.orna
 efd83b5f37e78e01ed9284d9e52c65b968bedf5b55cf5e7cc881b140c42c5c56  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/efd83b5f37e7.orna
 f05087c7aa49493945912445b9ce5e71cca5600921b013bcfd7bb8f56aa130f9  crates/orna-semantic-v1/tests/fixtures/inline-semantic_graph/f05087c7aa49.orna
@@ -4846,7 +4845,7 @@ d1ed4165830722f07c68846f43cc89b89424fbfd421a62ea872c9afacccc2345  crates/orna-se
 b02c516455b43dde4445ffc346b408c7b2efbc74a125ddaa3c0f4d367ef2261b  crates/orna-semantic-v1/tests/fixtures/source-row-contact-grace.orna
 7231f8be954bcaa3b6bf9dfea764c9dd4544f946b3adda7b6f0646e5e3c2560f  crates/orna-semantic-v1/tests/fixtures/source-row-contact.orna
 9ce25e23e4569e643c2e10f1695b9c654d4e4f696ec09cc024b0e13fb4ba89ec  crates/orna-semantic-v1/tests/fixtures/source-row-object-pixel.orna
-913f7081a766eede1d895f3f7fffff9a858147dbbcb0d4bc41a4fb7f4d6af785  crates/orna-semantic-v1/tests/fixtures/source-row-object-schema.orna
+2d3318f8a92b777af0cd371db0d935558d116ad83d244556cc79f199789cd639  crates/orna-semantic-v1/tests/fixtures/source-row-object-schema.orna
 96c2d6104c1976ed6fb62c987de3eb9ec5513e58013bf9b5e809a1283cb266b8  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a-content-variant.orna
 1d878346651541c7e44b5faa68316284e621a1061f5cad9113691800a8bedde2  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a-digest-mismatch.orna
 96a467c60d97920c24f5e36aa8d0a998c1adf810c9d9b5210cb8d9963ef0c151  crates/orna-semantic-v1/tests/fixtures/standard-dependency-a.orna
@@ -5133,6 +5132,7 @@ a2a46cdb8e4e4dce4ff72aa29df0296d04dd0bab888af8b8ae787a4196e39a0a  crates/orna-sy
 757b065ff221ff761795268e097c00a21470733960c410cfea581eb743b86c16  crates/orna-syntax-v1/tests/fixtures/deep-compound-implicit-suffix.orna
 885ce196e7aa9914bf44045d2e4da47c00b71543b17516f12e597f26d98377e1  crates/orna-syntax-v1/tests/fixtures/deep-nested-case-compound-suffix.orna
 5ce52cc95c76fe4186fa05b6de480555e2e915d2f0da3b9c85c5478cc3a93da8  crates/orna-syntax-v1/tests/fixtures/editor-expressions.orna
+fbff817c36955f7a2cad87406e9fec54c71ef95637092b075658bbb83050bb09  crates/orna-syntax-v1/tests/fixtures/editor-highlight-sample.orna
 e33ceb924626255267826882ca0afa29692c51dde909183a6b9c33be395349a3  crates/orna-syntax-v1/tests/fixtures/editor-keywords.orna
 a2b07e6b9c837daac019cfe262b3b7962bd8a10ce2001cb5ebfd065d703a75db  crates/orna-syntax-v1/tests/fixtures/empty-generic-parameters.orna
 825aa773fc01fd89c585da6e1b7937d7834a42066d3afebea7069fc14c2fbe0f  crates/orna-syntax-v1/tests/fixtures/empty-generic-type-arguments.orna

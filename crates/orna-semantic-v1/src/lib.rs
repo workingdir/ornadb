@@ -1757,6 +1757,9 @@ pub struct Analysis {
     pub assertions: BTreeMap<Namespace, Vec<AssertionPlan>>,
     pub source_units: BTreeMap<SourceUnitIdentity, SourceUnitMetadata>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Payload rows of every admitted module's source enums, keyed by module,
+    /// so a REPL session admits the same enum spellings as the project.
+    pub(crate) source_enums: BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
     /// Whether `sys` members were admitted against production providers.
     production_sys_providers: bool,
 }
@@ -2270,6 +2273,7 @@ fn analyze_retaining_context_with_providers(
             contexts.push((namespace.clone(), tree.clone(), scope));
         }
     }
+    result.source_enums = source_enums;
     if let Some(record) = &unlinked_system_members {
         report_unlinked_system_members(record, &mut result.diagnostics);
     }
@@ -4883,11 +4887,22 @@ fn check_item(
                         );
                     }
                     orna_syntax_v1::TableMember::Field {
+                        initializer: None,
+                        ty,
+                        ..
+                    } => {
+                        validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        validate_stored_field_type(ty, scope, diagnostics);
+                    }
+                    orna_syntax_v1::TableMember::Field {
                         initializer: Some(initializer),
                         ty,
                         ..
                     } => {
                         validate_type_annotation(ty, scope, &BTreeSet::new(), diagnostics);
+                        if matches!(initializer, FieldInitializer::Default(_)) {
+                            validate_stored_field_type(ty, scope, diagnostics);
+                        }
                         let value = match initializer {
                             FieldInitializer::Default(value)
                             | FieldInitializer::Computed(value) => value,
@@ -5131,6 +5146,15 @@ fn validate_nested_implementation_members(
             ));
             return;
         };
+        if let Type::Named(target_name) = target
+            && scope.refined_types.get(target_name) == Some(&source)
+        {
+            diagnostics.push(diag(
+                DIAG_TYPE,
+                "overlapping protocol implementations are invalid",
+            ));
+            return;
+        }
         if let Some(from) = implementation.members.as_slice().first()
             && implementation.members.len() == 1
         {
@@ -5178,16 +5202,7 @@ fn validate_nested_implementation_members(
                 return;
             }
             let mut local = BTreeMap::new();
-            let source_binding = match &source {
-                Type::Named(name) => scope
-                    .nominal_rows
-                    .get(name)
-                    .or_else(|| scope.table_rows.get(name))
-                    .cloned()
-                    .unwrap_or_else(|| source.clone()),
-                _ => source.clone(),
-            };
-            bind_pattern(&parameter.pattern, source_binding, scope, &mut local, diagnostics);
+            bind_pattern(&parameter.pattern, source.clone(), scope, &mut local, diagnostics);
             if matches!(target, Type::Named(name) if scope.nominal_rows.contains_key(name)) {
                 let inferred = infer_from_nominal_target(
                     body,
@@ -6666,6 +6681,46 @@ fn validate_type_annotation(
             }
             validate_type_annotation(result, scope, generic_names, diagnostics);
         }
+    }
+}
+
+/// Stored fields (no initialiser, or a `=` default) persist their value, so
+/// their type must lie in the serialisable subset (29-formats). Secrets are
+/// never committed (ORNA-SECRET-001), and a live relation, stream or function
+/// is not a finite stored value. Computed (`=>`) fields are never stored and
+/// are not checked here.
+fn validate_stored_field_type(
+    type_expr: &TypeExpr,
+    scope: &Scope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let resolved = resolved_type_of(type_expr, scope);
+    if contains_secret_value_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "secret values cannot be stored in table fields",
+        ));
+    } else if contains_non_serialisable_type(&resolved) {
+        diagnostics.push(diag(
+            DIAG_TYPE,
+            "stored table field type must be serialisable",
+        ));
+    }
+}
+
+fn contains_non_serialisable_type(ty: &Type) -> bool {
+    match ty {
+        Type::Relation(_) | Type::Stream(_) | Type::Function { .. } => true,
+        Type::List(inner) | Type::Range(inner) | Type::Optional(inner) => {
+            contains_non_serialisable_type(inner)
+        }
+        Type::Record(fields) => fields.values().any(contains_non_serialisable_type),
+        Type::Tuple(values) => values.iter().any(contains_non_serialisable_type),
+        Type::Applied { base, arguments } => {
+            matches!(base.as_str(), "Stream" | "Relation" | "Query")
+                || arguments.iter().any(contains_non_serialisable_type)
+        }
+        _ => false,
     }
 }
 
@@ -19965,6 +20020,18 @@ fn infer_nominal_conversion_call(
             effects,
         });
     }
+    // A refined type's base conversion `T.from(base)` is not a nested From
+    // implementation, so an explicit From for other sources must not remove it.
+    if scope
+        .refined_types
+        .get(target)
+        .is_some_and(|underlying| *underlying == argument.ty)
+    {
+        return Some(Inferred {
+            ty: Type::Named(target.clone()),
+            effects: argument.effects,
+        });
+    }
     diagnostics.push(diag(
         DIAG_TYPE,
         "no matching From implementation for the source type",
@@ -25171,6 +25238,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
         None => EffectSummary::default(),
     }
 }
+
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
     match expr {
         Expr::Name { text, .. } => Some(vec![text]),
@@ -28045,13 +28113,11 @@ mod tests {
         }
     }
 
+    /// Portable `sys` members without a linked production provider are rejected with
+    /// `sys.version.incompatible` before evaluation can perform writes (ORNA-SYS-008).
     #[test]
     fn unlinked_sys_members_are_rejected_with_version_incompatible() {
         for (source, member) in [
-            (
-                "pub fn info() = sys.rt.info();",
-                "portable system callable `sys.rt.info`",
-            ),
             (
                 "pub fn head() = sys.snapshot(\"HEAD~1\");",
                 "portable system callable `sys.snapshot(Str)`",
@@ -28091,6 +28157,9 @@ mod tests {
         }
     }
 
+    /// Linked `sys` members are admitted. `sys.rt.info()` is one of them: ORNA-SYS-006
+    /// requires the runtime to expose the RuntimeInfo coordinates, which the production
+    /// host links (source/15-system.md:46).
     #[test]
     fn linked_sys_members_are_admitted() {
         let analysis = admitted(&[ModuleInput::new(
@@ -28101,6 +28170,7 @@ mod tests {
             pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
             pub fn storage() = sys.Storage;
             pub fn maintenance() = sys.MaintenanceJob;
+            pub fn info() = sys.rt.info();
             pub fn plan() = sys.Storage | sys.explain();",
         )]);
         assert!(
@@ -28115,23 +28185,26 @@ mod tests {
         let analysis = admitted(&[
             ModuleInput::new(
                 "a.orna",
-                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+                "pub fn first() = sys.snapshot(\"HEAD~1\"); pub fn second() = sys.snapshot(\"HEAD~1\");",
             ),
-            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+            ModuleInput::new("b.orna", "pub fn third() = sys.snapshot(\"HEAD~1\");"),
         ]);
         assert_eq!(
             diagnostic_texts(&analysis.diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
     }
 
     #[test]
     fn provider_linkage_leaves_type_checking_unchanged() {
-        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let source = [ModuleInput::new(
+            "typed.orna",
+            "pub fn head(): Int = sys.snapshot(\"HEAD~1\");",
+        )];
         let declared = diagnostic_texts(&checked(&source).diagnostics);
         let mut production = diagnostic_texts(&admitted(&source).diagnostics);
         assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
-        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        let unlinked_member = unlinked("portable system callable `sys.snapshot(Str)`");
         assert!(production.contains(&unlinked_member), "{production:#?}");
         production.retain(|text| *text != unlinked_member);
         assert_eq!(production, declared);
@@ -28139,14 +28212,14 @@ mod tests {
 
     #[test]
     fn repl_admission_rejects_unlinked_sys_members() {
-        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        let rejected = orna_syntax_v1::parse_repl("sys.snapshot(\"HEAD~1\")");
         assert!(rejected.is_ok());
         let diagnostics = ReplContext::with_providers(SystemProviders::Production)
             .stage(&rejected.value)
-            .expect_err("no production provider is linked for sys.rt.info");
+            .expect_err("no production provider is linked for sys.snapshot(Str)");
         assert_eq!(
             diagnostic_texts(&diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
 
         assert!(ReplContext::empty().stage(&rejected.value).is_ok());

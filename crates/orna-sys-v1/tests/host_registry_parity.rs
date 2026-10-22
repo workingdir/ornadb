@@ -620,6 +620,7 @@ fn native_provider_error_taxonomies_match_the_generated_operation_vocabularies()
                 CaptureFileError::UnauthorizedRoot.failure_code(),
                 CaptureFileError::InvalidPath.failure_code(),
                 CaptureFileError::SourceUnavailable.failure_code(),
+                CaptureFileError::BoundOutOfRange.failure_code(),
                 CaptureFileError::LimitExceeded.failure_code(),
                 CaptureFileError::SourceChanged.failure_code(),
             ]

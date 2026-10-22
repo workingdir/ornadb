@@ -46,7 +46,8 @@ use crate::{
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        RowIndexMutation, StoreRelationEntry, sync_all_pack_files, sync_directory,
+        RowIndexMutation, StoreRelationEntry,
+        sync_object_files,
     },
     row_store::{
         KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowMapSnapshot, RowValue, TypedKey,
@@ -54,26 +55,29 @@ use crate::{
     schema_evolution::{EvolutionPlan, EvolutionRefusal, SchemaChanges},
 };
 
-/// Stable relation UUID of the sealed object-identity system relation.
+/// Stable relation UUID of the sealed object-identity inventory: the
+/// committed metadata that holds stable object IDs (ORNA-OBJECT-002). It is
+/// implementation storage, not the `sys.Object` catalogue view.
 ///
 /// It is the UUIDv8 derived from SHA-256 of `orna.system-relation.v1`, NUL and
-/// `sys.Object`, so it can never equal an allocated UUIDv4 table identity.
+/// `orna.object-identity`, so it can never equal an allocated UUIDv4 table
+/// identity.
 pub const OBJECT_IDENTITY_RELATION_ID: [u8; 16] = [
-    0x99, 0x82, 0xa7, 0xd7, 0xa9, 0x7c, 0x8e, 0x78, 0xbf, 0x3e, 0x76, 0x4a, 0x22, 0xb0, 0x3f, 0xc6,
+    0x2a, 0x3c, 0xc8, 0x5f, 0x98, 0x9e, 0x8a, 0x79, 0xa2, 0x42, 0xee, 0xf6, 0x9e, 0x41, 0x17, 0x4b,
 ];
 /// Field UUIDs of the sealed descriptor, derived like the relation UUID from
-/// `sys.Object.<field>`.
+/// `orna.object-identity.<field>`.
 const OBJECT_ID_FIELD: [u8; 16] = [
-    0xb8, 0xe0, 0x37, 0x81, 0x58, 0xf5, 0x85, 0x07, 0x85, 0xfc, 0xa7, 0x93, 0xfa, 0x4d, 0xab, 0x80,
+    0x29, 0xa2, 0x2c, 0x32, 0x7d, 0x5e, 0x8d, 0x40, 0x9f, 0x4a, 0xd4, 0xe9, 0xd7, 0x65, 0xa0, 0x4d,
 ];
 const OBJECT_KIND_FIELD: [u8; 16] = [
-    0xf2, 0x7d, 0x3e, 0x98, 0xa1, 0x6a, 0x81, 0x6c, 0xba, 0x23, 0xeb, 0xc9, 0x26, 0xb3, 0x18, 0xad,
+    0xab, 0x30, 0x41, 0x93, 0x50, 0xd6, 0x87, 0x7a, 0x98, 0x73, 0x3a, 0x16, 0x28, 0x56, 0x68, 0xdb,
 ];
 const OBJECT_QUALIFIED_NAME_FIELD: [u8; 16] = [
-    0xf4, 0x43, 0x73, 0x6e, 0x47, 0x57, 0x8f, 0x72, 0xa8, 0xa0, 0x85, 0x18, 0xfb, 0xd6, 0x87, 0x59,
+    0x7d, 0x16, 0x18, 0xf5, 0x59, 0xad, 0x8e, 0xb2, 0xad, 0x6b, 0x68, 0xf4, 0x64, 0xaa, 0x46, 0xef,
 ];
 const OBJECT_RETIRED_FIELD: [u8; 16] = [
-    0x3b, 0xe9, 0xf1, 0x3a, 0x2b, 0x65, 0x83, 0xeb, 0xb5, 0x7d, 0xf6, 0xb3, 0xdb, 0x4c, 0x31, 0x5b,
+    0xc1, 0xba, 0x14, 0xb3, 0xf7, 0x90, 0x8d, 0xcc, 0x95, 0x9a, 0x61, 0xe2, 0xe5, 0xe6, 0x7d, 0xbb,
 ];
 
 /// Stable relation UUID of the sealed automatic-key allocator summary,
@@ -129,8 +133,19 @@ pub enum RelationAdmissionError {
         relation_id: [u8; 16],
         refusal: EvolutionRefusal,
     },
-    /// One relation was supplied twice, or a table used a sealed system
-    /// relation's identity.
+    /// The staged store lacks a relation `HEAD` commits for a table the
+    /// staged source still declares, so committing it would drop the
+    /// relation's rows.
+    CommittedRelationUnstaged {
+        relation_id: [u8; 16],
+    },
+    /// A relation no commit has received holds staged rows, so it cannot be
+    /// rebuilt or dropped with the staged source without losing them.
+    UncommittedRelationRows {
+        relation_id: [u8; 16],
+    },
+    /// One relation was supplied twice, or a table used the system relation's
+    /// identity.
     DuplicateRelation {
         relation_id: [u8; 16],
     },
@@ -172,6 +187,16 @@ impl std::fmt::Display for RelationAdmissionError {
             } => write!(
                 formatter,
                 "relation {} cannot evolve to the staged schema: {refusal}",
+                Uuid::from_bytes(*relation_id)
+            ),
+            Self::CommittedRelationUnstaged { relation_id } => write!(
+                formatter,
+                "the staged store lacks committed relation {}; restore it with `git restore --staged .orna/store`",
+                Uuid::from_bytes(*relation_id)
+            ),
+            Self::UncommittedRelationRows { relation_id } => write!(
+                formatter,
+                "relation {} has staged rows but was never committed; commit its table unchanged first or unstage the rows",
                 Uuid::from_bytes(*relation_id)
             ),
             Self::DuplicateRelation { relation_id } => write!(
@@ -219,7 +244,8 @@ impl From<AllocatorError> for RelationAdmissionError {
 }
 
 /// One committed stable object identity (ORNA-OBJECT-001): its UUID, its
-/// object kind code, its qualified source name and whether it is retired.
+/// object kind (its `sys.ObjectKind` ordinal), its qualified source name and
+/// whether it is retired.
 /// Retired identities stay in the inventory so they are never reused
 /// (ORNA-OBJECT-005).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -256,69 +282,95 @@ impl StoredObjectIdentity {
         self.retired
     }
 
-    /// The row key: the identity's canonical hyphenated UUID text.
-    fn row_key(&self) -> TypedKey {
-        TypedKey::Text(Uuid::from_bytes(self.id).hyphenated().to_string())
+    /// The row key: the identity as a canonical tag-37 Uuid value.
+    fn row_key(&self) -> Result<TypedKey, RelationAdmissionError> {
+        Value::new(uuid_value(self.id))
+            .map_err(|_| RelationAdmissionError::InvalidIdentity)
+            .and_then(|value| {
+                TypedKey::from_value(&value).map_err(|_| RelationAdmissionError::InvalidIdentity)
+            })
     }
 
-    /// The stored fields in descriptor (field-UUID) order: `retired`, `kind`,
-    /// `qualified_name`.
+    /// The stored fields in descriptor (field-UUID) order: `qualified_name`,
+    /// `kind`, `retired`.
     fn row_fields(&self) -> Result<Vec<u8>, RelationAdmissionError> {
         Value::new(Raw::Array(vec![
-            Raw::Bool(self.retired),
-            Raw::Int(self.kind.into()),
             Raw::Text(self.qualified_name.clone()),
+            Raw::Int(self.kind.into()),
+            Raw::Bool(self.retired),
         ]))
         .and_then(|value| value.encode())
         .map_err(|_| RelationAdmissionError::InvalidIdentity)
     }
 
     fn from_row(key: &TypedKey, fields: &[u8]) -> Result<Self, RelationAdmissionError> {
-        let TypedKey::Text(text) = key else {
+        let TypedKey::Value(key) = key else {
             return Err(RelationAdmissionError::InvalidIdentity);
         };
-        let id = Uuid::parse_str(text).map_err(|_| RelationAdmissionError::InvalidIdentity)?;
-        if id.hyphenated().to_string() != *text {
+        let Raw::Tag(37, payload) = key.value().raw() else {
             return Err(RelationAdmissionError::InvalidIdentity);
-        }
+        };
+        let Raw::Bytes(bytes) = payload.as_ref() else {
+            return Err(RelationAdmissionError::InvalidIdentity);
+        };
+        let id = <[u8; 16]>::try_from(bytes.as_slice())
+            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
         let Raw::Array(values) = decode_canonical_storage_value(fields)
             .map_err(|_| RelationAdmissionError::InvalidIdentity)?
         else {
             return Err(RelationAdmissionError::InvalidIdentity);
         };
         let [
-            Raw::Bool(retired),
-            Raw::Int(kind),
             Raw::Text(qualified_name),
+            Raw::Int(kind),
+            Raw::Bool(retired),
         ] = values.as_slice()
         else {
             return Err(RelationAdmissionError::InvalidIdentity);
         };
         let kind = u64::try_from(kind).map_err(|_| RelationAdmissionError::InvalidIdentity)?;
-        Ok(Self::new(
-            *id.as_bytes(),
-            kind,
-            qualified_name.clone(),
-            *retired,
-        ))
+        Ok(Self::new(id, kind, qualified_name.clone(), *retired))
     }
 }
 
-/// The sealed closed descriptor of the object-identity system relation. Its
-/// key is the identity UUID text; its stored fields are the retirement flag,
-/// the object kind code and the qualified name.
+/// A tag-37 Uuid value.
+fn uuid_value(id: [u8; 16]) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+}
+
+/// The sealed closed descriptor of the object-identity inventory relation.
+/// Its key is the identity UUID; its stored fields are the qualified name,
+/// the `sys.ObjectKind` ordinal of the object kind and the retirement flag.
 pub fn object_identity_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
-    sealed_descriptor(
-        OBJECT_IDENTITY_RELATION_ID,
-        OBJECT_ID_FIELD,
-        &[
-            (OBJECT_RETIRED_FIELD, "retired", "Bool", 1),
-            (OBJECT_ID_FIELD, "id", "Str", 0),
-            (OBJECT_KIND_FIELD, "kind", "Int", 1),
-            (OBJECT_QUALIFIED_NAME_FIELD, "qualified_name", "Str", 1),
-        ],
-    )
-    .ok_or(RelationAdmissionError::InvalidIdentity)
+    let field = |id: [u8; 16], name: &str, primitive: &str, role: u64| {
+        Raw::Array(vec![
+            uuid_value(id),
+            Raw::Text(name.to_owned()),
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.to_owned())]),
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    };
+    // A closed descriptor lists its fields in ascending field-UUID order.
+    SchemaDescriptor::new(Raw::Map(vec![
+        (Raw::Int(0.into()), Raw::Int(1.into())),
+        (Raw::Int(1.into()), uuid_value(OBJECT_IDENTITY_RELATION_ID)),
+        (
+            Raw::Int(2.into()),
+            Raw::Array(vec![uuid_value(OBJECT_ID_FIELD)]),
+        ),
+        (
+            Raw::Int(3.into()),
+            Raw::Array(vec![
+                field(OBJECT_ID_FIELD, "id", "Uuid", 0),
+                field(OBJECT_QUALIFIED_NAME_FIELD, "qualified_name", "Str", 1),
+                field(OBJECT_KIND_FIELD, "kind", "Int", 1),
+                field(OBJECT_RETIRED_FIELD, "retired", "Bool", 1),
+            ]),
+        ),
+        (Raw::Int(4.into()), Raw::Array(Vec::new())),
+    ]))
+    .map_err(|_| RelationAdmissionError::InvalidIdentity)
 }
 
 /// The sealed closed descriptor of the allocator summary relation. Its key
@@ -617,6 +669,32 @@ impl Repository {
         })
     }
 
+    /// Refuses the staged index, before any commit object is written, when it
+    /// has no `.orna/store` while `HEAD` commits a relation in one: that
+    /// candidate drops rows the commit holds, so 16-administration treats it
+    /// as invalid (`sys.admin.assertion_failed`). The capture itself stays a
+    /// pure observation; the commit path calls this first.
+    pub fn refuse_unretained_committed_store(&self) -> Result<(), RelationAdmissionError> {
+        self.ensure_no_git_operation_in_progress()?;
+        let index = self.index_generation()?;
+        let (Some(head), Some(tree)) = (index.head(), index.tree()) else {
+            return Ok(());
+        };
+        if self.tree_store_root(tree.as_str())?.is_some() {
+            return Ok(());
+        }
+        let format = self.open_pinned_format_context(head.as_str())?;
+        if format.repository_format() != RepositoryFormat::Format3 {
+            return Ok(());
+        }
+        match self.committed_store_relations(head)?.into_iter().next() {
+            Some(relation_id) => {
+                Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id })
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Stages the format-3 store for the captured candidate's admitted tables
     /// and its complete identity inventory.
     ///
@@ -652,7 +730,7 @@ impl Repository {
             watermarks.insert(relation.relation_id, watermark);
         }
         let mut writer = NodeWriter::new(self)?;
-        let (base, committed) = match staged.store_root.as_ref() {
+        let (base, evolution_source) = match staged.store_root.as_ref() {
             Some(root) => (
                 NativeGraphContext::read_store_relations(
                     self,
@@ -664,10 +742,20 @@ impl Repository {
             ),
             None => (Vec::new(), None),
         };
+        // An unborn branch commits no relation.
+        let committed: BTreeMap<[u8; 16], NativeOid> = match staged.index.head() {
+            Some(head) => self
+                .store_entries_in(head.as_str(), database_id)?
+                .into_iter()
+                .map(|entry| (entry.relation_id, entry.schema_oid))
+                .collect(),
+            None => BTreeMap::new(),
+        };
         let admitted = admit_relations(
             &mut writer,
             base,
-            committed.as_ref(),
+            &committed,
+            evolution_source.as_ref(),
             relations,
             identities,
             &watermarks,
@@ -888,24 +976,35 @@ impl Repository {
         )?))
     }
 
-    /// The relation UUIDs bound by the store a tree-ish names, validated.
-    fn store_relations_in(
+    /// The validated relation entries of the store a tree-ish names; empty
+    /// when it has no store.
+    fn store_entries_in(
         &self,
         treeish: &str,
         database_id: [u8; 16],
-    ) -> Result<BTreeSet<[u8; 16]>, RelationAdmissionError> {
+    ) -> Result<Vec<StoreRelationEntry>, RelationAdmissionError> {
         let Some(store_root) = self.tree_store_root(treeish)? else {
-            return Ok(BTreeSet::new());
+            return Ok(Vec::new());
         };
         Ok(NativeGraphContext::read_store_relations(
             self,
             store_root.algorithm(),
             database_id,
             &store_root,
-        )?
-        .into_iter()
-        .map(|entry| entry.relation_id)
-        .collect())
+        )?)
+    }
+
+    /// The relation UUIDs bound by the store a tree-ish names, validated.
+    fn store_relations_in(
+        &self,
+        treeish: &str,
+        database_id: [u8; 16],
+    ) -> Result<BTreeSet<[u8; 16]>, RelationAdmissionError> {
+        Ok(self
+            .store_entries_in(treeish, database_id)?
+            .into_iter()
+            .map(|entry| entry.relation_id)
+            .collect())
     }
 
     /// Reads the identity relation of the store `treeish` names through the
@@ -1120,25 +1219,33 @@ impl Repository {
 
     /// Replaces the ordinary index's `.orna/store` entry with `store_root`
     /// and drops the legacy identity sidecar, while holding the coordination
-    /// lock and Git's own `index.lock`. The captured index and `HEAD` must be
-    /// unchanged, and the new index is installed by an atomic rename.
+    /// lock and Git's own `index.lock`. A retained publication or checkout
+    /// recovery record owns the index and store worktree until its recovery
+    /// completes, so staging refuses before touching either (22-publication
+    /// recovery table, ORNA-PUB-007; CHECKOUT-3 step 7). The captured index
+    /// and `HEAD` must be unchanged, and the new index is installed by an
+    /// atomic rename. If the index cannot be installed after the store
+    /// worktree moved, the worktree is moved back to the captured store.
     fn install_staged_store(
         &self,
         staged: &StagedCandidate,
         store_root: &NativeOid,
     ) -> Result<(), RelationAdmissionError> {
         let _coordination = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
+        self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
         let index = self.git_path("index")?;
         let _git_lock = GitIndexLock::acquire(index.with_extension("lock"))?;
         let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        let unchanged = |base: &[u8]| -> Result<bool, RelationAdmissionError> {
+        let unchanged = || -> Result<bool, RelationAdmissionError> {
+            let current = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
             Ok(
-                <[u8; 32]>::from(Sha256::digest(base)) == staged.index_digest
+                <[u8; 32]>::from(Sha256::digest(current)) == staged.index_digest
                     && self.head()?.as_ref() == staged.index.head(),
             )
         };
-        if !unchanged(&base_index)? {
+        if !unchanged()? {
             return Err(RelationAdmissionError::StaleIndex);
         }
         let candidate_index = index
@@ -1174,19 +1281,41 @@ impl Repository {
             let tree =
                 self.index_tree_from_native_oid(crate::trim_output(&self.run(write_tree)?.stdout))?;
             let next = self.private_commit_for_tree(&tree, staged.index.head())?;
+            // A writer that bypassed Git's index lock is detected before the
+            // store worktree changes.
+            if !unchanged()? {
+                return Err(RelationAdmissionError::StaleIndex);
+            }
             // Envelope `data` leaves are materialized and payload chunks stay
             // skip-worktree, exactly as a publication reconciles the store.
             self.reconcile_store_worktree_transition(&staged.index, &next, true)?;
-            self.configure_store_tree_skip_worktree(&candidate_index)?;
-            fs::File::open(&candidate_index)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            let current = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
-            if !unchanged(&current)? {
-                return Err(RelationAdmissionError::StaleIndex);
+            let installed = (|| -> Result<(), RelationAdmissionError> {
+                self.configure_store_tree_skip_worktree(&candidate_index)?;
+                fs::File::open(&candidate_index)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                if !unchanged()? {
+                    return Err(RelationAdmissionError::StaleIndex);
+                }
+                fs::rename(&candidate_index, &index)
+                    .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+                Ok(())
+            })();
+            if let Err(error) = installed {
+                // The index keeps the captured store, so its worktree files
+                // go back to that store's.
+                let captured_tree = staged
+                    .index
+                    .tree()
+                    .ok_or(RelationAdmissionError::EmptyIndex)?;
+                let captured = self.private_commit_for_tree(captured_tree, staged.index.head())?;
+                let moved = IndexGeneration {
+                    head: staged.index.head().cloned(),
+                    tree: Some(tree),
+                };
+                self.reconcile_store_worktree_transition(&moved, &captured, true)?;
+                return Err(error);
             }
-            fs::rename(&candidate_index, &index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
             fs::File::open(
                 index
                     .parent()
@@ -1212,16 +1341,19 @@ struct AdmittedRelations {
 }
 
 /// Merges `relations` into the validated `base` relation entries of the
-/// store `committed` reads. New relations get their schema node and one empty
-/// leaf; a relation under a changed descriptor evolves; a base relation no
-/// staged table owns is removed; the inventory relation is rewritten from
-/// `identities` and the allocator summary from `watermarks`, which a store
-/// without automatic-key tables does not hold. Evolution and removal need
-/// `changes` to allow them.
+/// staged store. `committed` maps each relation `HEAD` commits to its schema
+/// node. A committed relation keeps its rows and evolves when its descriptor
+/// changes (ORNA-EVOL-002), reading them from `evolution_source`; it cannot
+/// be unstaged. Any other relation is admitted by this commit: a new one, or
+/// one only an earlier staging created, gets its schema node and one empty
+/// leaf, and an uncommitted relation the staged source no longer declares is
+/// dropped; either is refused when the relation holds rows. When a committed
+/// relation's table retires it leaves the store with its rows (ORNA-OBJECT-004).
 fn admit_relations(
     writer: &mut NodeWriter<'_>,
     base: Vec<StoreRelationEntry>,
-    committed: Option<&RepositoryFormatContext>,
+    committed: &BTreeMap<[u8; 16], NativeOid>,
+    evolution_source: Option<&RepositoryFormatContext>,
     relations: &[StagedRelation],
     identities: &[StoredObjectIdentity],
     watermarks: &AllocatorWatermarks,
@@ -1240,50 +1372,57 @@ fn admit_relations(
             Err(RelationAdmissionError::PendingRuntimeRows { relation_id })
         }
     };
+    let mut removed = Vec::new();
     for relation in relations {
-        if is_system_relation(&relation.relation_id) || !staged.insert(relation.relation_id) {
-            return Err(RelationAdmissionError::DuplicateRelation {
-                relation_id: relation.relation_id,
-            });
+        let relation_id = relation.relation_id;
+        if is_system_relation(&relation_id) || !staged.insert(relation_id) {
+            return Err(RelationAdmissionError::DuplicateRelation { relation_id });
         }
         let (schema_oid, schema_digest) = write_schema_node(writer, &relation.descriptor)?;
-        match entries.get(&relation.relation_id).cloned() {
+        let existing = entries.get(&relation_id).cloned();
+        if committed.contains_key(&relation_id) && existing.is_none() {
+            return Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id });
+        }
+        match existing {
             Some(existing) if existing.schema_oid == schema_oid => {}
-            Some(existing) => {
-                allow(relation.relation_id)?;
-                let committed = committed.ok_or(RelationAdmissionError::InvalidStoreEntry)?;
+            Some(existing) if committed.contains_key(&relation_id) => {
+                allow(relation_id)?;
+                let source = evolution_source.ok_or(RelationAdmissionError::InvalidStoreEntry)?;
                 let (entry, schema_changes) = evolve_relation(
                     writer,
-                    committed,
+                    source,
                     relation,
                     &existing,
                     schema_oid,
                     schema_digest,
                 )?;
                 evolved.push(EvolvedRelation {
-                    relation_id: relation.relation_id,
+                    relation_id,
                     changes: schema_changes,
                     rows: entry.row_count,
                 });
-                entries.insert(relation.relation_id, entry);
+                entries.insert(relation_id, entry);
             }
-            None => {
+            Some(existing) if existing.row_count != 0 => {
+                return Err(RelationAdmissionError::UncommittedRelationRows { relation_id });
+            }
+            _ => {
                 let primary_root = NativeGraphContext::build_canonical_ordered_map(
-                    &rows_domain(&relation.relation_id, &schema_digest),
+                    &rows_domain(&relation_id, &schema_digest),
                     &[],
                     &mut |node| writer.node(node),
                 )?;
                 entries.insert(
-                    relation.relation_id,
+                    relation_id,
                     StoreRelationEntry {
-                        relation_id: relation.relation_id,
+                        relation_id,
                         schema_oid,
                         primary_root,
                         secondary_root: None,
                         row_count: 0,
                     },
                 );
-                created.push(relation.relation_id);
+                created.push(relation_id);
             }
         }
     }
@@ -1292,8 +1431,14 @@ fn admit_relations(
         .filter(|id| !is_system_relation(id) && !staged.contains(*id))
         .copied()
         .collect::<Vec<_>>();
-    let mut removed = Vec::with_capacity(retired.len());
     for relation_id in retired {
+        let uncommitted_rows = !committed.contains_key(&relation_id)
+            && entries
+                .get(&relation_id)
+                .is_some_and(|entry| entry.row_count != 0);
+        if uncommitted_rows {
+            return Err(RelationAdmissionError::UncommittedRelationRows { relation_id });
+        }
         allow(relation_id)?;
         if let Some(entry) = entries.remove(&relation_id) {
             removed.push(RemovedRelation {
@@ -1386,6 +1531,7 @@ fn write_identity_relation(
     writer: &mut NodeWriter<'_>,
     identities: &[StoredObjectIdentity],
 ) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let descriptor = object_identity_descriptor()?;
     let mut ids = BTreeSet::new();
     let mut rows = Vec::with_capacity(identities.len());
     for identity in identities {
@@ -1395,12 +1541,20 @@ fn write_identity_relation(
         {
             return Err(RelationAdmissionError::InvalidIdentity);
         }
-        rows.push((identity.row_key(), identity.row_fields()?));
+        let key = identity.row_key()?;
+        let key_bytes = key
+            .canonical_bytes()
+            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
+        let fields = identity.row_fields()?;
+        descriptor
+            .validate_stored_row(OBJECT_IDENTITY_RELATION_ID, &key_bytes, &fields)
+            .map_err(|_| RelationAdmissionError::InvalidIdentity)?;
+        rows.push((key, fields));
     }
     write_sealed_relation(
         writer,
         OBJECT_IDENTITY_RELATION_ID,
-        &object_identity_descriptor()?,
+        &descriptor,
         rows,
         || RelationAdmissionError::InvalidIdentity,
     )
@@ -1780,38 +1934,12 @@ impl<'a> NodeWriter<'a> {
         self.tree(&entries)
     }
 
-    /// Flushes every written loose object and its fan-out directory, or the
-    /// pack files when Git stored an object packed.
+    /// Flushes every written object through the shared barrier: each loose
+    /// object and its fan-out directory, or the pack files when Git stored an
+    /// object packed.
     fn sync(&self) -> Result<(), RelationAdmissionError> {
         let objects = self.repository.git_path("objects")?;
-        match fs::symlink_metadata(objects.join("info").join("alternates")) {
-            Ok(metadata) if !metadata.file_type().is_file() || metadata.len() != 0 => {
-                return Err(GraphError::ObjectDurabilityUnavailable.into());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable.into()),
-        }
-        let mut packed = false;
-        for oid in &self.written {
-            let hex = oid.to_hex();
-            let loose = objects.join(&hex[..2]).join(&hex[2..]);
-            match fs::symlink_metadata(&loose) {
-                Ok(metadata) if metadata.file_type().is_file() => {
-                    fs::File::open(&loose)
-                        .and_then(|file| file.sync_all())
-                        .map_err(|_| GraphError::DurabilityFailed)?;
-                    sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
-                }
-                Ok(_) => return Err(GraphError::DurabilityFailed.into()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => packed = true,
-                Err(_) => return Err(GraphError::DurabilityFailed.into()),
-            }
-        }
-        if packed {
-            sync_all_pack_files(&objects.join("pack"))?;
-        }
-        Ok(sync_directory(&objects)?)
+        Ok(sync_object_files(&objects, &self.written, || Ok(()))?)
     }
 }
 
@@ -1833,14 +1961,20 @@ mod tests {
 
     #[test]
     fn sealed_identities_are_the_documented_uuidv8_derivations() {
-        assert_eq!(OBJECT_IDENTITY_RELATION_ID, system_uuid("sys.Object"));
-        assert_eq!(OBJECT_ID_FIELD, system_uuid("sys.Object.id"));
-        assert_eq!(OBJECT_KIND_FIELD, system_uuid("sys.Object.kind"));
+        assert_eq!(
+            OBJECT_IDENTITY_RELATION_ID,
+            system_uuid("orna.object-identity")
+        );
+        assert_eq!(OBJECT_ID_FIELD, system_uuid("orna.object-identity.id"));
+        assert_eq!(OBJECT_KIND_FIELD, system_uuid("orna.object-identity.kind"));
         assert_eq!(
             OBJECT_QUALIFIED_NAME_FIELD,
-            system_uuid("sys.Object.qualified_name")
+            system_uuid("orna.object-identity.qualified_name")
         );
-        assert_eq!(OBJECT_RETIRED_FIELD, system_uuid("sys.Object.retired"));
+        assert_eq!(
+            OBJECT_RETIRED_FIELD,
+            system_uuid("orna.object-identity.retired")
+        );
         assert_eq!(
             Uuid::from_bytes(OBJECT_IDENTITY_RELATION_ID).get_version_num(),
             8
@@ -1884,17 +2018,26 @@ mod tests {
     fn identity_rows_round_trip_through_the_sealed_descriptor() {
         let descriptor = object_identity_descriptor().expect("sealed descriptor is valid");
         let identity = StoredObjectIdentity::new([0x42; 16], 2, "Music.title", true);
-        let key = identity.row_key().canonical_bytes().unwrap();
+        let row_key = identity.row_key().unwrap();
+        // The key is the tag-37 Uuid value, not UUID text.
+        assert_eq!(
+            row_key.canonical_bytes().unwrap(),
+            [&[0xd8, 0x25, 0x50][..], &[0x42; 16][..]].concat()
+        );
+        let key = row_key.canonical_bytes().unwrap();
         let fields = identity.row_fields().unwrap();
         descriptor
             .validate_stored_row(OBJECT_IDENTITY_RELATION_ID, &key, &fields)
             .expect("an identity row matches the sealed descriptor");
         assert_eq!(
-            StoredObjectIdentity::from_row(&identity.row_key(), &fields).unwrap(),
+            StoredObjectIdentity::from_row(&row_key, &fields).unwrap(),
             identity
         );
         assert!(matches!(
-            StoredObjectIdentity::from_row(&TypedKey::Text("not-a-uuid".to_owned()), &fields),
+            StoredObjectIdentity::from_row(
+                &TypedKey::Text(Uuid::from_bytes([0x42; 16]).hyphenated().to_string()),
+                &fields
+            ),
             Err(RelationAdmissionError::InvalidIdentity)
         ));
     }
@@ -2062,7 +2205,7 @@ mod tests {
             table_descriptor(music, "Str")
         );
         let mut expected = identities;
-        expected.sort_by_key(StoredObjectIdentity::row_key);
+        expected.sort_by_key(|identity| identity.row_key().expect("a valid identity key"));
         assert_eq!(
             repository.read_committed_object_identities(&head).unwrap(),
             Some(expected)
@@ -2116,10 +2259,9 @@ mod tests {
                 .expect("read the allocator summary")
         };
         let admission = stage_automatic(&[automatic(music)]).expect("stage the table");
-        assert_eq!(
-            admission.admitted(),
-            &[music, ALLOCATOR_RELATION_ID, OBJECT_IDENTITY_RELATION_ID]
-        );
+        let mut expected = [music, ALLOCATOR_RELATION_ID, OBJECT_IDENTITY_RELATION_ID];
+        expected.sort_unstable();
+        assert_eq!(admission.admitted(), &expected);
         git(root, &["commit", "--quiet", "-m", "automatic table"]);
         let first = repository.head().unwrap().expect("committed HEAD");
         // Before its first reservation a table's watermark is zero.
@@ -2206,6 +2348,7 @@ mod tests {
         let entries = admit_relations(
             &mut writer,
             Vec::new(),
+            &BTreeMap::new(),
             None,
             &tables,
             &identities_for(&all),
@@ -2601,5 +2744,195 @@ mod tests {
         assert_eq!(git(root, &["ls-files", "--", "notes.txt"]), "");
         assert_eq!(fs::read(root.join("notes.txt")).unwrap(), b"tracked");
         assert_eq!(git(root, &["status", "--porcelain"]), "?? notes.txt\n");
+    }
+
+    fn review(repository: &Repository) -> crate::ReviewedCandidateReview {
+        repository
+            .review_staged_candidate(
+                Uuid::from_bytes([10; 16]),
+                Uuid::from_bytes([11; 16]),
+                3,
+                RepositoryFormat::Format3,
+                crate::RuntimeGeneration::new(4),
+                vec![0x81, 0x00],
+            )
+            .expect("review the staged candidate")
+    }
+
+    /// Every file below the store's worktree directory, for byte-exact
+    /// comparison.
+    fn store_worktree_files(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(directory: &Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.expect("read a store directory entry").path();
+                if path.is_dir() {
+                    walk(&path, files);
+                } else {
+                    let bytes = fs::read(&path).expect("read a store worktree file");
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        walk(&root.join(".orna/store"), &mut files);
+        files
+    }
+
+    /// ORNA-PUB-005, PUB-3 step 3: the root commit and every object of its
+    /// tree are flushed before the new branch ref names them. An object that
+    /// cannot be flushed refuses the commit while the branch is still unborn.
+    #[test]
+    fn the_first_reviewed_commit_flushes_its_objects_before_creating_the_branch() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        fs::write(root.join("notes.txt"), b"tracked notes").unwrap();
+        git(root, &["add", "notes.txt"]);
+        stage(&repository, &[relation(1)]).expect("stage the store");
+        let review = review(&repository);
+        let blob = git(root, &["rev-parse", ":notes.txt"]).trim().to_owned();
+        let loose = root.join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+        let aside = root.join(".git/orna-test-notes-object");
+        fs::rename(&loose, &aside).unwrap();
+        // The object path no longer names a file that can be flushed.
+        fs::create_dir(&loose).unwrap();
+
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, "initial source"),
+            Err(RepositoryError::Graph(GraphError::DurabilityFailed))
+        ));
+        assert!(
+            repository.head().unwrap().is_none(),
+            "the branch stays unborn"
+        );
+
+        fs::remove_dir(&loose).unwrap();
+        fs::rename(&aside, &loose).unwrap();
+        let committed = repository
+            .commit_reviewed_candidate(&review, "initial source")
+            .expect("the flushed candidate creates the branch");
+        assert_eq!(repository.head().unwrap(), Some(committed));
+    }
+
+    /// 22-publication recovery table, ORNA-PUB-007: a retained publication
+    /// journal owns the index and the store worktree until its recovery
+    /// completes, so staging refuses before changing either.
+    #[test]
+    fn staging_refuses_while_a_publication_recovery_is_retained() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        stage(&repository, &[relation(1)]).expect("stage the first store");
+        let head = review_and_commit(&repository, "first");
+        let index_before = repository.index_generation().unwrap();
+        let managed = crate::ManagedPath::new("generated/row.orna").unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[crate::ManagedFileChange::new(
+                    managed.clone(),
+                    Some(b"candidate row\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let journal = crate::PublicationJournal::new_with_runtime_intent(
+            head,
+            candidate.commit().clone(),
+            index_before.tree().unwrap().clone(),
+            [7; 16],
+            vec![crate::PublicationJournalEntry::new(
+                managed,
+                None,
+                Some(b"candidate row\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+
+        let index = root.join(".git/index");
+        let index_bytes = fs::read(&index).unwrap();
+        let store_files = store_worktree_files(root);
+        assert!(
+            !store_files.is_empty(),
+            "the committed store is materialized"
+        );
+        assert!(matches!(
+            stage(&repository, &[relation(1), relation(2)]),
+            Err(RelationAdmissionError::Repository(
+                RepositoryError::PublicationPending
+            ))
+        ));
+        assert_eq!(fs::read(&index).unwrap(), index_bytes);
+        assert_eq!(store_worktree_files(root), store_files);
+        assert_eq!(
+            repository.read_publication_journal().unwrap(),
+            Some(journal)
+        );
+    }
+
+    /// ORNA-ADMIN-003: a relation that only a failed commit staged was never
+    /// committed, so the next staging follows the staged source: the table
+    /// may be dropped or its schema changed. Once committed, both are
+    /// refused, and so is a staged store that lost a committed relation.
+    #[test]
+    fn staging_follows_the_source_for_relations_no_commit_received() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (music, video) = (relation(1), relation(2));
+        // An earlier `orna commit` staged both tables and then failed before
+        // the branch moved.
+        stage(&repository, &[music, video]).expect("stage two relations");
+        assert!(repository.head().unwrap().is_none(), "nothing is committed");
+
+        let edited = [StagedRelation::new(music, table_descriptor(music, "Int"))];
+        let staged = repository.capture_staged_candidate().unwrap();
+        let admission = repository
+            .stage_store_admission(&staged, &edited, &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .expect("uncommitted relations follow the staged source");
+        let admitted = [music];
+        assert_eq!(admission.admitted(), admitted.as_slice());
+        let committed = review_and_commit(&repository, "first");
+        assert_eq!(
+            repository.committed_store_relations(&committed).unwrap(),
+            BTreeSet::from([music, OBJECT_IDENTITY_RELATION_ID])
+        );
+
+        let staged = repository.capture_staged_candidate().unwrap();
+        let original = [StagedRelation::new(music, table_descriptor(music, "Str"))];
+        let evolved = repository
+            .stage_store_admission(&staged, &original, &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .expect("a committed relation without rows evolves to its staged schema");
+        assert!(evolved.evolved().iter().any(|change| *change.relation_id() == music));
+        let staged = repository.capture_staged_candidate().unwrap();
+        let removed = repository
+            .stage_store_admission(&staged, &[], &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .expect("a relation the source no longer declares leaves the store");
+        assert!(removed.removed().iter().any(|change| *change.relation_id() == music));
+
+        // Payload chunks are skip-worktree; clear that bit so `rm --cached`
+        // removes the whole store index, as a user's removal would.
+        let listed = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["ls-files", "-z", "--", ".orna/store"])
+            .output()
+            .unwrap();
+        assert!(listed.status.success());
+        let mut clear = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["update-index", "--no-skip-worktree", "-z", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(clear.stdin.as_mut().unwrap(), &listed.stdout).unwrap();
+        assert!(clear.wait().unwrap().success());
+        git(root, &["rm", "--cached", "-r", "--quiet", ".orna/store"]);
+        let staged = repository.capture_staged_candidate().unwrap();
+        assert!(matches!(
+            repository.stage_store_admission(&staged, &edited, &identities_for(&[music]), CommittedRelationChanges::Allowed),
+            Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id })
+                if relation_id == music
+        ));
     }
 }
