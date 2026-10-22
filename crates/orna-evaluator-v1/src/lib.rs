@@ -4858,6 +4858,7 @@ impl Context<'_, '_> {
             .3
             .get(qualified.as_deref().unwrap_or_default())
             .or_else(|| scope.3.get(&spelling))
+            .or_else(|| root_module_short_name(&spelling).and_then(|name| scope.3.get(name)))
             .cloned()
         else {
             return self.enum_variant_construction(path, supplied, scope, depth);
@@ -13461,6 +13462,15 @@ fn payload_free_enum_variant(
     })
 }
 
+/// The bare key of a root-project declaration reached as `main.Name`. A root
+/// project has no namespace, so its nominal and enum declarations keep bare
+/// keys while the semantic layer admits them under `main.`.
+fn root_module_short_name(spelling: &str) -> Option<&str> {
+    spelling
+        .strip_prefix("main.")
+        .filter(|name| !name.is_empty() && !name.contains('.'))
+}
+
 /// Resolves `owner.variant` against the admitted enums. A declaration of the
 /// evaluating module shadows a same-named enum reached by its short name.
 fn enum_variant_identity<'scope>(
@@ -13472,6 +13482,7 @@ fn enum_variant_identity<'scope>(
     if let Some(definition) = namespace
         .and_then(|namespace| scope.3.get(&format!("{namespace}.{owner}")))
         .or_else(|| scope.3.get(owner))
+        .or_else(|| root_module_short_name(owner).and_then(|name| scope.3.get(name)))
     {
         return definition
             .variants
