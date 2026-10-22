@@ -427,6 +427,32 @@ fn cli_migration_copy_rejects_mixed_worktree_metadata() {
     }
 }
 
+#[test]
+fn cli_migration_copy_names_unparseable_committed_format_record() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    // The bare `format 1` spelling is never written by a repository writer, so
+    // committed metadata holding it must fail with its own cause, not a generic
+    // copy failure.
+    initialize_legacy_source_with_format(&source, "format 1\n");
+    let destination = parent.path().join("migrated");
+    let trace = parent.path().join("git-trace.log");
+
+    let output = run_copy(&source, &destination, "0", &trace);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(
+        stderr.contains(
+            "migration source could not be admitted: repository metadata is invalid"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("ORNA-REPO-CONTEXT-002"), "{stderr}");
+    assert!(!destination.exists(), "{stderr}");
+}
+
 /// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: a source whose
 /// `format.orna` holds a record a legacy writer actually produced migrates
 /// like any other legacy source. OrnaDB 1.0's `orna init` wrote the format-1

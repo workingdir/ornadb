@@ -9816,6 +9816,9 @@ pub enum RepositoryError {
     /// Native graph work failed while building or pinning a publication
     /// candidate. The graph context's own error identity is preserved.
     Graph(GraphError),
+    /// Source format admission failed. The format context's own error
+    /// identity is preserved so callers can report the exact cause.
+    FormatContext(FormatContextError),
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
@@ -9893,6 +9896,7 @@ impl fmt::Display for RepositoryError {
                 f.write_str("runtime publication completion is required")
             }
             Self::Graph(error) => write!(f, "native graph operation failed: {error}"),
+            Self::FormatContext(error) => write!(f, "repository format context failed: {error}"),
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
