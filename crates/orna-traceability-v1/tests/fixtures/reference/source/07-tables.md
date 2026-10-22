@@ -28,7 +28,7 @@ Parameters before the body form the ordered primary key. Body fields are non-key
 
 **ORNA-KEY-001** A table parameter list MUST define the complete primary key in parameter order.
 
-**ORNA-KEY-002** Primary-key fields MUST be visible as ordinary logical row fields even if their loose-row values are encoded in the path.
+**ORNA-KEY-002** Primary-key fields MUST be visible as ordinary logical row fields even when a virtual/interchange row document obtains its key from a schema-aware path. Canonical persisted rows retain the complete key in the primary index.
 
 ## Composite keys
 
@@ -290,111 +290,19 @@ Version 1.0 primary-key components may contain values with stable equality, tota
 
 This means v1 has no built-in declaration for a gap-permitting exclusive timeline such as employment or vehicle ownership. Such data may still be represented with an ordinary identity key plus `Range<T>` fields and validated by ordinary code, but kernel-enforced temporal exclusion is explicitly deferred rather than implementation-defined.
 
-## Key-to-path encoding
+## Persisted rows and path projections
 
-Editable row files use one canonical, reversible path encoding. The internal compatibility identifier is `key-path-v1`; normal user-facing output calls this **editable row storage** and does not expose that identifier. The exact algorithm and vectors are also reproduced in `profiles/key-path.md`, but the numbered requirements in this section are the single authoritative requirement identifiers.
+Keys are logical values, not host paths. New-format rows live in one ordered
+row store. The virtual filesystem projects a table/key to a row directory
+with `data.orna` and content fields using [VFS-1](#vfs). Legacy `key-path-v1`
+loose-row rules are frozen in the compatibility archive and MUST NOT impose
+case-folding/path-length restrictions on new-format table keys.
 
-### Type-specific key text
-
-Each key component is first converted to canonical Orna text for its logical type:
-
-- `Bool`: `false` or `true`;
-- `Int`: shortest signed decimal form;
-- `Decimal`: canonical exact decimal form;
-- `Str`: its exact Unicode scalar sequence;
-- `Uuid`: lowercase hyphenated form;
-- `Date`: `YYYY-MM-DD`;
-- `Instant`: canonical UTC RFC 3339 form;
-- a payload-free enum: its stable variant spelling;
-- a stored table reference: the referenced primary-key components;
-- a tuple/composite key: its components recursively, in declared order.
-
-**ORNA-PATH-001** ASCII letters `A-Z` and `a-z`, digits `0-9`, `.`, `_` and `-` MUST remain byte-for-byte readable unless the complete component is specially reserved below.
-
-```text
-alice-smith -> alice-smith
-K1          -> K1
-2026-09-03  -> 2026-09-03
-42          -> 42
-```
-
-**ORNA-PATH-002** Literal `~` and every byte outside the readable set MUST be encoded as `~` followed by exactly two lowercase hexadecimal digits representing one UTF-8 byte.
-
-```text
-a~b       -> a~7eb
-foo/bar   -> foo~2fbar
-hello you -> hello~20you
-é         -> ~c3~a9
-```
-
-**ORNA-PATH-003** The empty key component MUST encode as the complete component `~ff`. The byte `0xff` cannot occur in well-formed UTF-8, so this reserved two-digit form cannot collide with an encoded non-empty canonical key. `~ff` is valid only as the entire encoded component; any occurrence inside a longer component is malformed. A literal string key `"~ff"` encodes as `~7eff`.
-
-**ORNA-PATH-004** `.` MUST encode as `~2e`; `..` MUST encode as `~2e~2e`. Every trailing `.` byte MUST be escaped.
-
-**ORNA-PATH-005** Repository format 1 MUST use one host-independent reserved-name predicate. Let `original` be the canonical key text and let `trimmed` be `original` with trailing ASCII spaces and dots removed for this predicate only. Compare ASCII letters case-insensitively. The component is reserved when (a) `original` is exactly `.` or `..`, (b) `trimmed` is `.git`, or (c) the portion of `trimmed` before its first `.` is `CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM1` through `COM9`, or `LPT1` through `LPT9`. A reserved component MUST be made safe by hex-escaping the first UTF-8 byte that would otherwise be emitted. This corpus and algorithm MUST NOT vary with host locale, filesystem or installed Git version.
-
-```text
-con     -> ~63on
-NUL.txt -> ~4eUL.txt
-.git    -> ~2egit
-```
-
-**ORNA-PATH-006** Letter case MUST be preserved in the encoded path, but editable storage MUST be portable by construction. Within any one editable-key directory, two distinct encoded components whose ASCII letters become equal after ASCII lowercase conversion are a path collision on every host. Insert, direct-row discovery, checkout/load, re-key, storage rewrite and semantic merge MUST reject such a pair before any path is overwritten. No implementation may accept the pair merely because its current filesystem is case-sensitive, and no implementation may add an order-dependent suffix. Under `automatic` placement, a collision is reported rather than silently moving an existing editable row; the user may explicitly place/rewrite the affected rows or table in compact storage.
-
-Examples of forbidden editable sibling pairs:
-
-```text
-Alice / alice
-K1    / k1
-```
-
-**ORNA-PATH-007** Composite primary keys MUST map to nested components in declared key order. `.orna` is appended only to the final component and is not part of the encoded key.
-
-**ORNA-PATH-008** An encoded key component MUST contain at most **200 UTF-8 bytes before the final `.orna` extension**.
-
-**ORNA-PATH-009** The complete table-relative path, including separators and the final `.orna` extension, MUST contain at most **1024 UTF-8 bytes**.
-
-**ORNA-PATH-010** A key exceeding either limit MUST NOT be truncated, hashed or silently renamed. Editable storage fails before mutation; automatic storage placement may choose compact storage only when doing so does not silently move an already editable collision peer.
-
-**ORNA-PATH-011** Decoding MUST reject malformed escapes, uppercase hexadecimal escapes, `~ff` outside a complete empty component, and non-canonical aliases. Both identities MUST hold:
-
-```text
-decode(encode(key)) = key
-encode(decode(path)) = path
-```
-
-For example, `~61lice` is rejected because `alice` is the canonical readable encoding, `~e` is rejected, and `~FF` is rejected.
-
-**ORNA-PATH-012** Path decoding and materialisation MUST prevent absolute paths, traversal, symlink escape and writes outside the table's row directory.
-
-These constants and encodings are fixed for repository format 1. Cross-platform tests are release evidence, not permission for implementations to choose different limits or collision semantics.
-
-## Loose row units
-
-For a table declared in `contacts/main.orna`:
-
-```text
-contacts/Contact/alice-smith.orna
-```
-
-contains:
-
-```orna
-{
-    name: "Alice Smith",
-    emails: ["alice@example.com"],
-}
-```
-
-**ORNA-ROW-001** A loose row unit MUST contain non-key fields only.
-
-**ORNA-ROW-002** The row key MUST be reconstructed from the row path and table key schema.
-
-**ORNA-ROW-003** A row unit's record fields MUST be validated against the table schema.
-
-**ORNA-ROW-004** Unknown fields, missing required fields and incompatible values MUST produce diagnostics.
-
-**ORNA-ROW-005** Comments and source formatting MAY be preserved in manually edited row units.
+A row projection is data-only and schema-directed. Key fields are supplied by
+the directory address; repeated keys in `data.orna` are rejected. Complete
+interchange exports may include keys explicitly under their export profile.
+No arbitrary row file is executed on load. Copying a projected row document
+alone does not copy the referenced content.
 
 ## Mutations
 
@@ -415,7 +323,7 @@ Contact.delete(alice.id);
 
 **ORNA-MUT-002** Successful mutations MUST become visible in CWD atomically at the enclosing activation boundary.
 
-**ORNA-MUT-003** Ordinary mutations MUST NOT automatically create a human Git commit unless publication rules for managed compact data apply.
+**ORNA-MUT-003** Ordinary mutations MUST NOT automatically create a human Git commit unless an explicitly enabled publication policy publishes the accepted batch.
 
 **ORNA-MUT-004** Primary keys MUST be immutable through ordinary `update`.
 
@@ -429,7 +337,7 @@ Contact.delete(alice.id);
 
 **ORNA-MUT-009** Re-keying a table with the implicit automatic integer key is prohibited. Such an identity is never rewritten; create a new row and delete the old row instead.
 
-**ORNA-MUT-010** `sys.Change` and semantic diff MUST represent a successful explicit re-key as one `rekey` change containing the old and new keys, even if its physical representation is a file move or a compact deletion plus insertion.
+**ORNA-MUT-010** `sys.Change` and semantic diff MUST represent a successful explicit re-key as one `rekey` change containing the old and new keys, even if its physical representation is a VFS directory change or a page replacement.
 
 **ORNA-MUT-011** A raw filesystem path rename is not authoritative evidence of semantic continuity. Unless it corresponds to a pending explicit `rekey` intent, it is interpreted as deletion plus insertion; tooling MAY suggest the explicit operation but MUST NOT silently guess.
 
@@ -463,41 +371,14 @@ pub table Vehicle(id: Uuid) {
 
 **ORNA-REF-003** Non-optional references default to `restrict` on target delete or re-key. Weak/dangling references and automatic cascade are outside version 1.0.
 
-## Filesystem equivalence
+## Filesystem projection and mutation equivalence
 
-For loose rows:
-
-```text
-create row file -> insert
-edit row file   -> update
-delete row file -> delete
-rename path     -> explicit re-key candidate
-```
-
-**ORNA-ROW-006** Orna MUST give equivalent logical meaning to valid direct filesystem edits and corresponding table operations.
-
-## Crash-safe loose-row projection
-
-A multi-row activation cannot rely on several filesystem writes being atomic. Therefore programmatic loose-table mutations first commit to the Turso activation transaction and are then projected to row files through a recoverable intent.
-
-Algorithm **ROW-PROJECT-1**:
-
-1. During the activation transaction, store each logical mutation, its base blob/hash and intended canonical row body.
-2. Commit the activation; the changes are now visible in CWD through the Turso overlay.
-3. For each affected row, write a temporary file beside the destination, flush it, then atomically rename it over the destination where the platform permits.
-4. Record each successful projection in Turso.
-5. After every row is projected, mark the projection batch complete.
-6. On restart, replay incomplete projections idempotently.
-
-**ORNA-PROJECT-001** Queries MUST use the Turso overlay while a committed activation has not yet been fully projected to loose row files.
-
-**ORNA-PROJECT-002** A crash during file projection MUST NOT lose or partially roll back the logical activation.
-
-**ORNA-PROJECT-003** If a row file changed externally after the activation's recorded base hash, Orna MUST NOT overwrite it silently; it MUST create a typed CWD conflict.
-
-**ORNA-PROJECT-004** Before staging or committing a loose row, Orna MUST complete or diagnose its pending projection.
-
-
+The VFS is an optional adapter over the same row engine. A completed valid
+save of `Music/london/data.orna` performs one ordinary row replacement against
+its captured version; a Blob file save replaces that field's immutable value.
+There is no authoritative loose-row projection to synchronize. Filesystem
+save, local row commitment and Git publication are distinct boundaries.
+See EDIT-1 for durable candidates, invalid edits and editor limitations.
 
 ## Assertion categories
 
@@ -538,13 +419,13 @@ Algorithm **ROW-PROJECT-1**:
 
 **ORNA-ASSERT-044** They run before accepting checkout/reset state as current when logical state changes.
 
-**ORNA-ASSERT-045** They run before compact publication, editable/compact rewrite or other representation transition becomes visible.
+**ORNA-ASSERT-045** They run before graph publication, migration or a new physical root becomes visible.
 
 **ORNA-ASSERT-046** Concurrent writers validate against the transactionally serialized candidate state selected by the storage engine.
 
 **ORNA-ASSERT-047** A replayable stream checkpoint MUST NOT advance when an assertion aborts the item or batch transaction.
 
-**ORNA-ASSERT-048** Git history, compact pages, loose rows and the embedded high-rate tail are representations of one logical state and MUST NOT bypass assertions.
+**ORNA-ASSERT-048** Git snapshots, indexed row pages and the embedded unpublished tail are representations of one logical state and MUST NOT bypass assertions.
 
 **ORNA-ASSERT-049** Evaluation failure inside an assertion propagates through the normal failure model and aborts the same boundary as a false assertion.
 
@@ -588,4 +469,3 @@ Algorithm **ROW-PROJECT-1**:
 | `ORNA-A091-010` | removed alias/mini-language | use sole `assert` form |
 | `ORNA-A091-011` | empty assertion | provide proposition |
 | `ORNA-A091-012` | zero-table module assertion | place check in executable/test code |
-
