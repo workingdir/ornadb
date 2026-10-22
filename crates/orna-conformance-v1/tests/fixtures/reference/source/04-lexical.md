@@ -167,4 +167,3 @@ Calendar literals use the proleptic Gregorian calendar, years 0001–9999 and va
 String escapes are `\"`, `\\`, `\n`, `\r`, `\t`, `\0` and `\u{hex}`. A Unicode escape contains one to six hexadecimal digits naming a Unicode scalar, not a surrogate or value above U+10FFFF. `\u{7b}` writes a literal opening brace without starting interpolation. Interpolation expressions use the same lexer and nested-delimiter rules as ordinary source. Literal string data is not NFC-normalised; normalisation of identifiers does not rewrite user strings.
 
 **ORNA-SYNTAX-002** A processor MUST use the pinned lexical profile, validate calendar/scalar values after tokenisation, and report byte spans without reinterpreting malformed tokens as another expression.
-

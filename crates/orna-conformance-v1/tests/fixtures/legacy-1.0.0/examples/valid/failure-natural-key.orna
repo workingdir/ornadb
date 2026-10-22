@@ -1,0 +1,21 @@
+pub fn replay_mail_failure(
+    source_identity: Str,
+    partition: Str?,
+    position_format: Str,
+    position,
+) {
+    let failure =
+        sys.Failure
+        | one(failure =>
+            failure.consumer == mail.google.sync
+            && failure.source_identity == source_identity
+            && failure.partition == partition
+            && failure.position_format == position_format
+            && failure.position == position
+        );
+
+    sys.admin.replay_failure(
+        failure.reference,
+        expected_status: failure.status,
+    )
+}
