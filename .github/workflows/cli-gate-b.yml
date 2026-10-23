@@ -1,11 +1,21 @@
 name: CLI Gate B
 
 # Gate B: a 10 GiB network payload streamed into a Blob with bounded RSS and zero
-# metadata reads. The test takes about an hour, so it does not run inside the
-# per-PR cli-tests job. It runs on every push to main, on demand, and on pull
-# requests that touch the code it exercises (capture, runtime, repository, storage,
-# value, evaluator bindings, the test itself, the dependency lock, or this file).
-# The nightly gate run (nightly-gates.yml, when present) also covers it.
+# metadata reads. The test takes between one and two hours (3611 s, 5032 s and 6091 s
+# in the last three runs on main), so it does not run inside the per-PR cli-tests job.
+#
+# When it runs:
+# - on every push to main, once per commit (the group is keyed on the commit);
+# - on demand (workflow_dispatch);
+# - on pull requests that touch the data path it drives (listed below). An older run for
+#   the same pull request is cancelled when a new commit arrives.
+#
+# Known limit: a pull request that changes only a crate this test depends on
+# transitively and that is not listed (for example orna-application-v1 or
+# orna-semantic-v1) does not run Gate B before merge. The run on main after the merge
+# catches it. No branch protection rule requires this check today; a path-filtered
+# workflow must not become a required check, because on pull requests outside the
+# paths it never reports and the required check would stay "Expected".
 
 on:
   push:
@@ -17,10 +27,7 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "stdlib/**"
-      - "crates/orna-cli-v1/tests/media_import_query.rs"
-      - "crates/orna-cli-v1/tests/fixtures/**"
-      - "crates/orna-cli-v1/src/cli_import*.rs"
-      - "crates/orna-cli-v1/src/media*.rs"
+      - "crates/orna-cli-v1/**"
       - "crates/orna-evaluator-v1/**"
       - "crates/orna-repository-v1/**"
       - "crates/orna-runtime-v1/**"
@@ -37,13 +44,13 @@ env:
   RUST_TEST_THREADS: 2
 
 concurrency:
-  group: cli-gate-b-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: cli-gate-b-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate-b:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 240
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -54,4 +61,6 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Gate B large network payload
+        env:
+          ORNA_REQUIRE_FUSE: "1"
         run: cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact
