@@ -1,4 +1,4 @@
-//! Drives `orna-cli-v1 --db <dir> repl` as a child process for REPL tests.
+//! Drives `orna --db <dir> repl` as a child process for REPL tests.
 //!
 //! Scripted sessions write each line to stdin and then `:quit`; long-lived
 //! sessions use [`ReplProcess`] so a test can submit lines, inspect output and
@@ -23,7 +23,7 @@ pub struct ReplRun {
     pub stderr: String,
 }
 
-/// A running `orna-cli-v1 --db <dir> repl` process with reader threads.
+/// A running `orna --db <dir> repl` process with reader threads.
 pub struct ReplProcess {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -42,7 +42,7 @@ fn capture<R: std::io::Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>
 impl ReplProcess {
     /// Starts `repl` with `directory` as the `--db` project.
     pub fn start(directory: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
             .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::piped())
@@ -111,9 +111,9 @@ pub fn run_lines(directory: &Path, lines: &[&str]) -> ReplRun {
     process.finish()
 }
 
-/// Runs the one-shot form `orna-cli-v1 --db <dir> repl <expression>`.
+/// Runs the one-shot form `orna --db <dir> repl <expression>`.
 pub fn run_one_shot(directory: &Path, expression: &str) -> ReplRun {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             directory.to_str().expect("UTF-8 path"),
@@ -130,11 +130,11 @@ pub fn run_one_shot(directory: &Path, expression: &str) -> ReplRun {
     }
 }
 
-/// Creates a temporary project with `orna-cli-v1 init` and writes `files`
+/// Creates a temporary project with `orna init` and writes `files`
 /// (relative path, contents) into it. The returned directory must outlive the test.
 pub fn initialized_project(files: &[(&str, &str)]) -> TempDir {
     let directory = tempfile::tempdir().expect("temporary Orna project");
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
