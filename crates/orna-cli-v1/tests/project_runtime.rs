@@ -734,6 +734,33 @@ fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
 }
 
 #[test]
+fn binary_run_reports_false_assertion_with_its_spec_code_without_debug() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/main.orna"),
+    )
+    .expect("root source");
+    std::fs::write(
+        directory.path().join("library.orna"),
+        include_str!("fixtures/run/assert-false-library.orna"),
+    )
+    .expect("library source");
+    initialize_project(directory.path());
+
+    let output = invoke(directory.path(), "run", "library.answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error[ORNA-A091-008]: assertion is false"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("E2200"), "stderr: {stderr}");
+}
+
+#[test]
 fn binary_run_without_a_target_executes_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
     std::fs::write(
