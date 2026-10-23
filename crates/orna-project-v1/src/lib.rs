@@ -1061,6 +1061,30 @@ impl ProjectLoader {
         repository: &Repository,
         standard_profile: Option<StandardDependencyProfile>,
     ) -> Result<LoadedProject, ProjectLoadError> {
+        self.load_worktree(repository, standard_profile, &BTreeMap::new())
+    }
+
+    /// Loads the worktree project exactly as [`Self::load`] does, except that
+    /// a module with an entry in `overlays` (logical path to source text) is
+    /// read from that entry instead of the worktree, and an overlay path is
+    /// importable before it exists on disk. Editors use this to check unsaved
+    /// buffers the way `check` checks the saved files.
+    pub fn load_with_overlays(
+        &self,
+        repository: &Repository,
+        overlays: &BTreeMap<String, String>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
+        let project = self.load_worktree(repository, None, overlays)?;
+        let commit = repository.head().map_err(ProjectLoadError::Repository)?;
+        self.bind_attached_standard_module(repository, commit.as_ref(), project)
+    }
+
+    fn load_worktree(
+        &self,
+        repository: &Repository,
+        standard_profile: Option<StandardDependencyProfile>,
+        overlays: &BTreeMap<String, String>,
+    ) -> Result<LoadedProject, ProjectLoadError> {
         let root = canonical_worktree(repository)?;
         validate_repository_paths(&root, self.limits)?;
         load_reachable_project(
@@ -1068,11 +1092,12 @@ impl ProjectLoader {
             standard_profile,
             vec![String::from("main.orna")],
             false,
-            |logical_path, total_bytes| read_module(&root, logical_path, total_bytes, self.limits),
-            |_, segments| resolve_import(&root, segments),
-            |tables, total_bytes| {
-                discover_worktree_rows(&root, tables, total_bytes, self.limits)
+            |logical_path, total_bytes| match overlays.get(logical_path) {
+                Some(source) => read_overlay(source, total_bytes, self.limits),
+                None => read_module(&root, logical_path, total_bytes, self.limits),
             },
+            |_, segments| resolve_import(&root, segments, overlays),
+            |tables, total_bytes| discover_worktree_rows(&root, tables, total_bytes, self.limits),
         )
     }
 
@@ -2034,7 +2059,11 @@ fn is_module_source_logical(logical_path: &str) -> bool {
     components.next().is_none() || logical_path.ends_with("/main.orna") || first == "main.orna"
 }
 
-fn resolve_import(root: &Path, segments: &[&str]) -> Result<String, ProjectLoadError> {
+fn resolve_import(
+    root: &Path,
+    segments: &[&str],
+    overlays: &BTreeMap<String, String>,
+) -> Result<String, ProjectLoadError> {
     if segments.iter().any(|segment| !valid_component(segment)) {
         return Err(ProjectLoadError::UnsupportedImport);
     }
@@ -2044,8 +2073,11 @@ fn resolve_import(root: &Path, segments: &[&str]) -> Result<String, ProjectLoadE
     }
     let file = base.with_extension("orna");
     let directory = base.join("main.orna");
-    let file_exists = checked_candidate(root, &file)?;
-    let directory_exists = checked_candidate(root, &directory)?;
+    let logical_base = segments.join("/");
+    let file_exists =
+        overlays.contains_key(&format!("{logical_base}.orna")) || checked_candidate(root, &file)?;
+    let directory_exists = overlays.contains_key(&format!("{logical_base}/main.orna"))
+        || checked_candidate(root, &directory)?;
     match (file_exists, directory_exists) {
         (false, false) => Err(ProjectLoadError::ImportUnavailable),
         (true, true) => Err(ProjectLoadError::AmbiguousImport),
@@ -2314,6 +2346,19 @@ fn read_module(
     }
     *total_bytes += source.len();
     Ok(source)
+}
+
+/// Admits one in-memory module under the same source budget as a worktree read.
+fn read_overlay(
+    source: &str,
+    total_bytes: &mut usize,
+    limits: ProjectLimits,
+) -> Result<String, ProjectLoadError> {
+    if source.len() > limits.max_source_bytes.saturating_sub(*total_bytes) {
+        return Err(ProjectLoadError::SourceTooLarge);
+    }
+    *total_bytes += source.len();
+    Ok(source.to_owned())
 }
 
 fn read_committed_module(

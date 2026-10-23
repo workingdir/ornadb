@@ -247,6 +247,10 @@ pub fn prepare_format3_migration(
     if destination == source_root || destination.starts_with(&source_root) {
         return Err(RepositoryError::InvalidSelector);
     }
+    if path_exists(&quarantine_for(&destination)?)? {
+        // A pending abort owns the reserved quarantine name; finish it first.
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
     if path_exists(&destination)? {
         return recover_prepared_copy(source, &destination, continuity, annotation_defaults);
     }
@@ -269,17 +273,7 @@ pub fn prepare_format3_migration(
         let parent = destination
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?;
-        crate::init::publish_directory_noreplace(parent, &staging, &destination).map_err(
-            |error| match error {
-                crate::RepositoryInitError::MetadataChanged => {
-                    RepositoryError::PublicationRecoveryConflict
-                }
-                crate::RepositoryInitError::PlatformUnsupported => {
-                    RepositoryError::PlatformUnsupported
-                }
-                _ => RepositoryError::LocalStateUnavailable,
-            },
-        )?;
+        publish_copy_noreplace(parent, &staging, &destination)?;
         copy.destination = destination;
         Ok(copy)
     })();
@@ -287,6 +281,180 @@ pub fn prepare_format3_migration(
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// What [`discard_prepared_format3_migration`] found at the destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// The prepared copy, or the quarantine an interrupted discard left behind,
+    /// was removed.
+    Discarded,
+    /// Neither the destination nor its quarantine exists; nothing changed.
+    NothingToDiscard,
+}
+
+/// The reserved sibling a prepared copy is renamed to before it is removed.
+///
+/// The name depends only on the destination's final component, so a discard
+/// interrupted after the rename finds the same quarantine again.
+pub fn discard_quarantine_path(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    quarantine_for(&canonical_destination(destination)?)
+}
+
+fn quarantine_for(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    let name = destination
+        .file_name()
+        .ok_or(RepositoryError::InvalidSelector)?;
+    let mut hash = Sha256::new();
+    hash.update(b"orna.migration-abort-quarantine.v1\0");
+    hash.update(name.as_encoded_bytes());
+    let digest: [u8; 32] = hash.finalize().into();
+    let suffix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(parent.join(format!(".orna-migration-abort-{suffix}")))
+}
+
+/// Discards a prepared format-3 migration copy at `destination`, leaving the
+/// source worktree and its snapshot untouched.
+///
+/// The destination must be the disposable copy this module prepared from
+/// `source`: a worktree root of its own that still holds the prepared journal
+/// and the working tree that journal recorded. Anything else is refused before
+/// a byte is removed, so a directory the operator owns is never a discard
+/// target.
+///
+/// Removal survives a crash at every step. A verified copy is first renamed to
+/// its quarantine in one atomic step, which is the commit point: from then on
+/// `destination` is absent and only the quarantine's removal remains. Running
+/// the discard again finishes an interrupted removal, and reports
+/// [`DiscardOutcome::NothingToDiscard`] once nothing is left.
+pub fn discard_prepared_format3_migration(
+    source: &Repository,
+    destination: &Path,
+) -> Result<DiscardOutcome, RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    let quarantine = quarantine_for(&destination)?;
+    if destination == source_root
+        || destination.starts_with(&source_root)
+        || source_root.starts_with(&destination)
+        || quarantine == source_root
+        || source_root.starts_with(&quarantine)
+    {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    match (path_exists(&destination)?, path_exists(&quarantine)?) {
+        (false, false) => {
+            sync_directory(parent)?;
+            Ok(DiscardOutcome::NothingToDiscard)
+        }
+        (true, true) => Err(RepositoryError::PublicationRecoveryConflict),
+        (true, false) => {
+            require_directory(&destination)?;
+            let journal =
+                copy_journal(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+            let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
+            recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
+            publish_copy_noreplace(parent, &destination, &quarantine)?;
+            remove_quarantined_copy(parent, &quarantine)?;
+            Ok(DiscardOutcome::Discarded)
+        }
+        (false, true) => {
+            // The rename that created this quarantine validated the copy and is
+            // the commit point. The quarantine is not re-validated: a source
+            // changed since then must not strand the removal.
+            require_directory(&quarantine)?;
+            remove_quarantined_copy(parent, &quarantine)?;
+            Ok(DiscardOutcome::Discarded)
+        }
+    }
+}
+
+/// Installs `staging` as `destination` without replacing anything there. A
+/// concurrent occupant of `destination` is a recovery conflict.
+fn publish_copy_noreplace(
+    parent: &Path,
+    staging: &Path,
+    destination: &Path,
+) -> Result<(), RepositoryError> {
+    crate::init::publish_directory_noreplace(parent, staging, destination).map_err(|error| {
+        match error {
+            crate::RepositoryInitError::MetadataChanged => {
+                RepositoryError::PublicationRecoveryConflict
+            }
+            crate::RepositoryInitError::PlatformUnsupported => RepositoryError::PlatformUnsupported,
+            _ => RepositoryError::LocalStateUnavailable,
+        }
+    })
+}
+
+/// Reads the journal of a copy that is its own repository. A path with no Git
+/// metadata has no journal. So does a repository without a runtime directory:
+/// that directory is not created here, because opening the journal would.
+fn copy_journal(copy: &Path) -> Result<Option<PublicationJournal>, RepositoryError> {
+    let Some(repository) = owned_copy_repository(copy)? else {
+        return Ok(None);
+    };
+    if !repository.runtime_paths().root().is_dir() {
+        return Ok(None);
+    }
+    repository.read_publication_journal()
+}
+
+fn migration_coordinates(
+    journal: &PublicationJournal,
+) -> Result<(MigrationContinuityRecord, MigrationAnnotationDefaults), RepositoryError> {
+    let continuity = journal
+        .migration_continuity()
+        .cloned()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let annotation_defaults = journal
+        .migration_annotation_defaults()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    Ok((continuity, annotation_defaults))
+}
+
+fn require_directory(path: &Path) -> Result<(), RepositoryError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(())
+}
+
+/// Opens `path` as a Git worktree of its own, or returns `None` when it has no
+/// Git metadata. Discovery walks up to any enclosing repository, so a worktree
+/// that is not `path` itself is refused rather than mistaken for the copy.
+fn owned_copy_repository(path: &Path) -> Result<Option<Repository>, RepositoryError> {
+    if !path_exists(&path.join(".git"))? {
+        return Ok(None);
+    }
+    let repository = Repository::discover(path)?;
+    if repository.worktree().canonicalize().ok().as_deref() != Some(path) {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(Some(repository))
+}
+
+/// Removes a quarantined copy and flushes the removal to `parent`. Only a
+/// discard creates the quarantine name, so a directory there is a copy the
+/// discard already committed to removing. An interrupted removal is finished
+/// by running the discard again.
+fn remove_quarantined_copy(parent: &Path, copy: &Path) -> Result<(), RepositoryError> {
+    fs::remove_dir_all(copy).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    sync_directory(parent)
 }
 
 fn prepare_format3_migration_in(
@@ -364,6 +532,14 @@ fn prepare_format3_migration_in(
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
     )?;
+    let runtime_intent_id = migration_runtime_intent_id(
+        source_index_generation
+            .tree()
+            .ok_or(RepositoryError::InvalidFormatMigration)?,
+        &source_working_tree_identity,
+        &record,
+        &continuity,
+    );
     let candidate_journal = PublicationJournal::new_with_runtime_intent(
         source_commit.clone(),
         candidate.commit().clone(),
@@ -371,7 +547,7 @@ fn prepare_format3_migration_in(
             .tree()
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
-        fresh_runtime_intent_id()?,
+        runtime_intent_id,
         vec![
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(".orna/database.orna")?,
@@ -1163,12 +1339,51 @@ fn require_index_tree(generation: &IndexGeneration) -> Result<(), RepositoryErro
     Ok(())
 }
 
-fn fresh_runtime_intent_id() -> Result<[u8; 16], RepositoryError> {
-    let uuid = crate::Uuid::new_v4().into_bytes();
-    if uuid == [0; 16] {
-        return Err(RepositoryError::InvalidFormatMigration);
+/// Names the migration's inputs, so a retried preparation of the same source
+/// carries the same runtime intent instead of a fresh random one. The candidate
+/// commit is excluded: the intent identifies the migration, not one written commit.
+/// The source's working tree identity is included: two sources at the same
+/// commit and index that differ only in unstaged or untracked work are different
+/// migrations.
+fn migration_runtime_intent_id(
+    index_tree: &crate::IndexTreeRef,
+    source_working_tree_identity: &[u8; 32],
+    record: &[u8],
+    continuity: &MigrationContinuityRecord,
+) -> [u8; 16] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.migration-runtime-intent.v2\0");
+    hash_length_prefixed(&mut hash, index_tree.as_str().as_bytes());
+    hash.update(source_working_tree_identity);
+    hash_length_prefixed(&mut hash, record);
+    hash.update((continuity.predecessors().len() as u64).to_be_bytes());
+    for predecessor in continuity.predecessors() {
+        hash.update(predecessor.legacy_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.legacy_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.legacy_partition_identity());
+        hash.update(predecessor.format3_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.format3_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.format3_partition_identity());
     }
-    Ok(uuid)
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut intent = [0; 16];
+    intent.copy_from_slice(&digest[..16]);
+    intent
+}
+
+fn hash_length_prefixed(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn hash_optional_length_prefixed(hash: &mut Sha256, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            hash.update([1]);
+            hash_length_prefixed(hash, bytes);
+        }
+        None => hash.update([0]),
+    }
 }
 
 /// Settles the copy's index, repairing the stat entries its own checkout left
