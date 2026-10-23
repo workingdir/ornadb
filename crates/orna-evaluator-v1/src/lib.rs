@@ -10245,7 +10245,7 @@ impl Context<'_, '_> {
         match (name, values.as_slice()) {
             ("__encode" | "encode", [Value::Blob(bytes)]) => {
                 self.items(bytes.len())?;
-                self.string(encode_base64(bytes)).map(Value::String)
+                self.string(orna_value_v1::base64_encode(bytes)).map(Value::String)
             }
             ("__decode" | "decode", [Value::String(text)]) => {
                 self.string(text.clone())?;
@@ -12693,67 +12693,10 @@ impl Context<'_, '_> {
     }
 }
 
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn encode_base64(input: &[u8]) -> String {
-    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or_default();
-        let c = chunk.get(2).copied().unwrap_or_default();
-        output.push(BASE64_ALPHABET[usize::from(a >> 2)] as char);
-        output.push(BASE64_ALPHABET[usize::from(((a & 0x03) << 4) | (b >> 4))] as char);
-        output.push(if chunk.len() > 1 {
-            BASE64_ALPHABET[usize::from(((b & 0x0f) << 2) | (c >> 6))] as char
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            BASE64_ALPHABET[usize::from(c & 0x3f)] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
+/// Strict RFC 4648 decoding is owned by `orna-value-v1`; this wrapper only
+/// maps its rejection onto the evaluator diagnostic.
 fn decode_base64(input: &str) -> Result<Vec<u8>, EvaluationError> {
-    if !input.is_ascii() || input.len() % 4 != 0 {
-        return Err(error("ORNA-EVAL-VALUE"));
-    }
-    let mut output = Vec::with_capacity(input.len() / 4 * 3);
-    let chunks = input.as_bytes().chunks_exact(4);
-    let count = chunks.len();
-    for (index, chunk) in chunks.enumerate() {
-        let final_chunk = index + 1 == count;
-        let decode = |byte: u8| {
-            BASE64_ALPHABET
-                .iter()
-                .position(|candidate| *candidate == byte)
-        };
-        let a = decode(chunk[0]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
-        let b = decode(chunk[1]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
-        let first = (a << 2) | (b >> 4);
-        output.push(first);
-        if chunk[2] == b'=' {
-            if !final_chunk || chunk[3] != b'=' || b & 0x0f != 0 {
-                return Err(error("ORNA-EVAL-VALUE"));
-            }
-            continue;
-        }
-        let c = decode(chunk[2]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
-        output.push((b << 4) | (c >> 2));
-        if chunk[3] == b'=' {
-            if !final_chunk || c & 0x03 != 0 {
-                return Err(error("ORNA-EVAL-VALUE"));
-            }
-            continue;
-        }
-        let d = decode(chunk[3]).ok_or_else(|| error("ORNA-EVAL-VALUE"))? as u8;
-        output.push((c << 6) | d);
-    }
-    Ok(output)
+    orna_value_v1::base64_decode(input).map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
 #[derive(Debug)]
@@ -13097,7 +13040,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
         }
         Value::Option(None) => "null".to_owned(),
         Value::Option(Some(value)) => format!("Some({})", encode_orna_value(value, depth + 1)?),
-        Value::Blob(value) => encode_orna_string(&encode_base64(value)),
+        Value::Blob(value) => encode_orna_string(&orna_value_v1::base64_encode(value)),
         Value::AnnotatedBlob(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         Value::ContextualBlob(_) => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         Value::Date(value) => format!("date{}", encode_orna_string(value)),
@@ -13105,7 +13048,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
-        Value::Reference(value) => encode_orna_string(&encode_base64(
+        Value::Reference(value) => encode_orna_string(&orna_value_v1::base64_encode(
             &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
         )),
         Value::Period { .. }
@@ -18371,5 +18314,28 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let failure = evaluate_expression(source, &Environment::new(), limits)
             .expect_err("the same loop must stop when its activation budget is exhausted");
         assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    #[test]
+    fn evaluator_base64_follows_the_workspace_strict_profile() {
+        let cases: &[(&str, bool)] = &[
+            ("", true),
+            ("Zm8=", true),
+            ("+/8=", true),
+            ("-_8=", false),
+            ("Zm8", false),
+            ("Zm9v=", false),
+            ("Zh==", false),
+            ("Zm8= ", false),
+            ("Zg==Zm9v", false),
+        ];
+        for &(input, accepted) in cases {
+            assert_eq!(decode_base64(input).is_ok(), accepted, "input {input:?}");
+        }
     }
 }
