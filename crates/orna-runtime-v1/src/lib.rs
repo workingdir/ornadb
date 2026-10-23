@@ -2592,6 +2592,29 @@ pub enum TableActivationError {
     ValidationFailed(SafeDiagnostic),
 }
 
+/// An accepted content pin the runtime recorded for a descriptor. It names
+/// candidate content only; admission through the graph is what verifies it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedContentPin {
+    pin_id: [u8; 16],
+    content_length: u64,
+    content_sha256: [u8; 32],
+}
+
+impl AcceptedContentPin {
+    pub const fn pin_id(&self) -> &[u8; 16] {
+        &self.pin_id
+    }
+
+    pub const fn content_length(&self) -> u64 {
+        self.content_length
+    }
+
+    pub const fn content_sha256(&self) -> &[u8; 32] {
+        &self.content_sha256
+    }
+}
+
 pub struct RuntimeState {
     connection: Connection,
     graph_repository_id: Option<[u8; 32]>,
@@ -13551,6 +13574,57 @@ impl RuntimeState {
         Ok(accepted_pending)
     }
 
+    /// Lists the accepted content pins this runtime's graph repository holds
+    /// for `descriptor_oid`, ordered by pin id. A listed pin is only a
+    /// candidate: the caller must admit it through the graph, which checks Git.
+    /// A runtime without a graph repository identity holds no candidates.
+    pub async fn accepted_content_pins_for_descriptor(
+        &self,
+        descriptor_oid: &NativeOid,
+    ) -> Result<Vec<AcceptedContentPin>, RuntimeError> {
+        let Some(repository_id) = self.graph_repository_id else {
+            return Ok(Vec::new());
+        };
+        let algorithm = match descriptor_oid.algorithm() {
+            GitHashAlgorithm::Sha1 => 1_i64,
+            GitHashAlgorithm::Sha256 => 2_i64,
+        };
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT pin.pin_id, pin.content_length, pin.content_sha256
+                 FROM accepted_content_pin AS pin
+                 JOIN runtime_meta AS runtime
+                   ON runtime.singleton = 1 AND runtime.database_id = pin.database_id
+                 WHERE pin.repository_id = ?1
+                   AND pin.descriptor_oid_algorithm = ?2
+                   AND pin.descriptor_oid = ?3
+                 ORDER BY pin.pin_id",
+                params![&repository_id[..], algorithm, descriptor_oid.as_bytes()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut pins = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let pin_id: [u8; 16] = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let content_length: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let content_length =
+                u64::try_from(content_length).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let content_sha256: [u8; 32] =
+                fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            pins.push(AcceptedContentPin {
+                pin_id,
+                content_length,
+                content_sha256,
+            });
+        }
+        Ok(pins)
+    }
+
     async fn validate_accepted_content_pin_recovery(
         &self,
         current_generation: u64,
@@ -23527,6 +23601,76 @@ mod tests {
         assert_eq!(
             pins.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_content_pins_for_descriptor_lists_only_matching_pins() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let graph_repository_id = state
+            .graph_repository_id
+            .expect("a repository-opened runtime carries its graph repository id");
+        let descriptor = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x44; 20]).unwrap();
+        let other_descriptor = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x45; 20]).unwrap();
+        // Pin metadata is injected directly: this exercises the lookup over
+        // persisted rows, not a pin issuer or transfer proof.
+        for (pin, repository, oid, length) in [
+            (88, graph_repository_id, &descriptor, 5_i64),
+            (89, graph_repository_id, &descriptor, 6_i64),
+            (90, [0x99; 32], &descriptor, 7_i64),
+            (91, graph_repository_id, &other_descriptor, 8_i64),
+        ] {
+            state
+                .connection
+                .execute(
+                    "INSERT INTO accepted_content_pin
+                     (pin_id, repository_id, database_id, descriptor_oid_algorithm,
+                      descriptor_oid, content_length, content_sha256, owner_id,
+                      owner_epoch, checkpoint_generation)
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 1, NULL)",
+                    params![
+                        id(pin).to_vec(),
+                        repository.to_vec(),
+                        id(1).to_vec(),
+                        oid.as_bytes().to_vec(),
+                        length,
+                        vec![pin; 32],
+                        id(7).to_vec(),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        let pins = state
+            .accepted_content_pins_for_descriptor(&descriptor)
+            .await
+            .unwrap();
+        let listed = pins
+            .iter()
+            .map(|pin| (*pin.pin_id(), pin.content_length(), *pin.content_sha256()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![(id(88), 5, [88; 32]), (id(89), 6, [89; 32])],
+            "wrong repository (pin 90) and wrong descriptor (pin 91) are excluded"
+        );
+
+        let other = state
+            .accepted_content_pins_for_descriptor(&other_descriptor)
+            .await
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].pin_id(), &id(91));
+
+        let absent = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x46; 20]).unwrap();
+        assert!(
+            state
+                .accepted_content_pins_for_descriptor(&absent)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 
