@@ -14,7 +14,7 @@ const SOURCE_WITH_ROW: &str = "pub table Media(id: Str) { name: Str, age: Int, }
 const ROW_SOURCE: &str = "{ name: \"reachable\", age: 42 }";
 
 fn run_cli(directory: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory)
         .args(args)
