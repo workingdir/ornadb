@@ -401,13 +401,6 @@ bead = "ornadb-5il1.207"
 reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
 
 [[failure]]
-package = "orna-lsp"
-target = "lib"
-test = "server::persisted_object_rename_tests::sequential_unsaved_renames_preserve_original_object_identity"
-bead = "ornadb-5il1.226"
-reason = "Fails in PR 9186 CI; the PR changes no crate code. Main baseline not yet measured; LSP rename identity gap tracked by ornadb-5il1.226."
-
-[[failure]]
 package = "orna-project-v1"
 target = "lib"
 test = "object_identity::tests::portable_scalar_spellings_map_to_closed_primitives_and_unsupported_types_fail"
