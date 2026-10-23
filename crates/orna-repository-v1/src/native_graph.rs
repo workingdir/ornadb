@@ -9908,6 +9908,158 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
     }
 
     #[test]
+    fn accepted_blob_pin_lease_graph_refuses_a_pin_held_by_another_lease_owner() {
+        let (_directory, derived) = capture_test_context();
+        let owner_b = lease_owned_graph(&derived, [0xb0; 16]);
+        let scope_b = owner_b.open_read_scope().expect("lease B read scope");
+        let payload = b"pin captured under lease owner B";
+        let candidate = owner_b
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope_b)
+            .expect("capture authorized stream");
+        let pin = owner_b
+            .protect_captured_blob(candidate, &scope_b)
+            .expect("protect complete OGB-2 closure");
+        owner_b
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_b,
+            )
+            .expect("lease B admits its own pin");
+
+        let owner_a = lease_owned_graph(&derived, [0xa0; 16]);
+        let scope_a = owner_a.open_read_scope().expect("lease A read scope");
+        assert!(matches!(
+            owner_a.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_a,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+        // The derived fallback holds no ref for lease B's pin, so it cannot admit it either.
+        let with_fallback = owner_a.with_accepted_pin_fallback_owner(derived.owner_id);
+        assert!(matches!(
+            with_fallback.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_a,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+    }
+
+    #[test]
+    fn accepted_blob_pin_own_ref_naming_another_descriptor_is_refused_without_fallback() {
+        let (directory, derived) = capture_test_context();
+        let derived_scope = derived.open_read_scope().expect("derived read scope");
+        let payload = b"pin whose lease-owned ref names another descriptor";
+        let candidate = derived
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &derived_scope)
+            .expect("capture authorized stream");
+        let pin = derived
+            .protect_captured_blob(candidate, &derived_scope)
+            .expect("protect complete OGB-2 closure");
+        let other_payload = b"a different Blob supplies the mismatched descriptor";
+        let other_candidate = derived
+            .capture_blob_candidate(&other_payload[..], other_payload.len() as u64, &derived_scope)
+            .expect("capture authorized stream");
+        let other = derived
+            .protect_captured_blob(other_candidate, &derived_scope)
+            .expect("protect complete OGB-2 closure");
+        assert_ne!(other.descriptor_oid, pin.descriptor_oid);
+
+        // The lease owner's own accepted ref names a different descriptor. The derived
+        // fallback still holds the matching ref, and must not be consulted.
+        let lease_owner = [0x5c; 16];
+        let own_ref = accepted_content_ref(&lease_owner, pin.pin_id());
+        let written = Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-ref", own_ref.as_str(), other.descriptor_oid.to_hex().as_str()])
+            .status()
+            .expect("write the lease owner's mismatched accepted ref");
+        assert!(written.success(), "write {own_ref}");
+
+        let lease = lease_owned_graph(&derived, lease_owner);
+        let lease_scope = lease.open_read_scope().expect("lease read scope");
+        let with_fallback = lease_owned_graph(&derived, lease_owner)
+            .with_accepted_pin_fallback_owner(derived.owner_id);
+        for graph in [&lease, &with_fallback] {
+            assert!(matches!(
+                graph.admit_accepted_blob_pin(
+                    pin.pin_id(),
+                    &pin.descriptor_oid,
+                    pin.content_identity(),
+                    &lease_scope,
+                ),
+                Err(GraphError::InvalidProtectedRef)
+            ));
+        }
+        derived
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &derived_scope,
+            )
+            .expect("the derived owner still admits its own matching pin");
+    }
+
+    #[test]
+    fn accepted_blob_pin_reclaimed_after_its_owner_departed_is_refused() {
+        let (directory, derived) = capture_test_context();
+        let departed = lease_owned_graph(&derived, [0xd0; 16]);
+        let departed_scope = departed.open_read_scope().expect("departed owner read scope");
+        let payload = b"pin captured under an owner that departs";
+        let candidate = departed
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &departed_scope)
+            .expect("capture authorized stream");
+        let pin = departed
+            .protect_captured_blob(candidate, &departed_scope)
+            .expect("protect complete OGB-2 closure");
+        let successor = lease_owned_graph(&derived, [0x5c; 16])
+            .with_accepted_pin_fallback_owner(departed.owner_id);
+        let successor_scope = successor.open_read_scope().expect("successor read scope");
+        successor
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &successor_scope,
+            )
+            .expect("the departed owner's accepted pin admits before reclamation");
+
+        // An empty manifest names no accepted pin, so recovery deletes the departed ref.
+        reclaim_dead_owner_pin_refs(&departed.repository, departed.owner_id, &BTreeMap::new())
+            .expect("reclaim the departed owner's pins");
+        assert!(!fixture_ref_exists(
+            directory.path(),
+            &accepted_content_ref(&departed.owner_id, pin.pin_id()),
+        ));
+        assert!(matches!(
+            successor.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &successor_scope,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+        assert!(matches!(
+            departed.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &departed_scope,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+    }
+
+    #[test]
     fn pin_description_round_trips_the_captured_fixture_bytes() {
         let (_directory, graph) = capture_test_context();
         let scope = graph.open_read_scope().expect("owner read scope");
