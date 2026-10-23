@@ -275,7 +275,7 @@ jobs:
 
       - name: Summarize gate evidence
         run: >-
-          python3 scripts/gate_evidence.py summarize
+          python3 scripts/gate_evidence.py summarize --expect-commit "${{ needs.revision.outputs.sha || github.sha }}"
           --records "$RUNNER_TEMP/gate-evidence"
           --out "$RUNNER_TEMP/gate-evidence-summary/gate-evidence-summary.json"
           --markdown "$GITHUB_STEP_SUMMARY"

@@ -76,7 +76,11 @@ LIST_HEADER = re.compile(r"^(?P<kind>successes|failures):$")
 LIST_ENTRY = re.compile(r"^    (?P<name>\S.*)$")
 RUNNING_COUNT = re.compile(r"^running (?P<count>\d+) tests?$")
 RERUN = re.compile(r"^error: test failed, to rerun pass `(?P<args>[^`]+)`")
-BUILD_ERROR = re.compile(r"^error: could not compile `(?P<package>[^`]+)`(?: \((?P<what>[^)]*)\))?")
+BUILD_ERROR = re.compile(
+    r"^error: (?:could not compile `(?P<package>[^`]+)`(?: \((?P<what>[^)]*)\))?"
+    r"|failed to run custom build command for `(?P<script>[^`\s]+)[^`]*`)"
+)
+RESULT_COUNTS = re.compile(r"^test result: (?:ok|FAILED)\. (?P<passed>\d+) passed; (?P<failed>\d+) failed")
 # Tests in this workspace report an early return as `SKIP: ...` or `... skipped: set NAME=1 ...`.
 SKIP_LINE = re.compile(r"^SKIP: |\bskipped: set [A-Z][A-Z0-9_]*=")
 COUNTER_PAIR = re.compile(r"=(?P<value>\S*)")
@@ -319,7 +323,11 @@ def parse_log(
             continue
         failed_build = BUILD_ERROR.match(line)
         if failed_build:
-            parsed.build_errors.append((failed_build.group("package"), build_target(failed_build.group("what"))))
+            script = failed_build.group("script")
+            if script:
+                parsed.build_errors.append((script.split(" ", 1)[0], "<build>"))
+            else:
+                parsed.build_errors.append((failed_build.group("package"), build_target(failed_build.group("what"))))
             continue
         running = RUNNING.match(line)
         if running:
@@ -367,6 +375,16 @@ def parse_log(
     return parsed
 
 
+def executed_tests(text: str) -> int:
+    """Count the tests cargo actually ran (passed or failed) from its `test result:` lines."""
+    total = 0
+    for line in text.splitlines():
+        counts = RESULT_COUNTS.match(line.strip())
+        if counts:
+            total += int(counts.group("passed")) + int(counts.group("failed"))
+    return total
+
+
 def observed_failures(parsed: ParsedLog, exit_status: int | None, timed_out: bool) -> list[Failure]:
     """Return every failure the log shows, plus one for any failure it does not explain."""
     failures: list[Failure] = []
@@ -388,7 +406,7 @@ def observed_failures(parsed: ParsedLog, exit_status: int | None, timed_out: boo
         failures.append(Failure(package, target, "<build>", "build failed"))
     if timed_out and not any(not target.completed for target in parsed.targets):
         failures.append(Failure("*", "*", "<timeout>", "the recorder killed the command at its timeout"))
-    elif not timed_out and exit_status not in (0, None) and not failures:
+    elif not timed_out and exit_status not in (0, None) and not (parsed.build_errors or parsed.reruns):
         failures.append(Failure("*", "*", "<exit>", f"cargo exited {exit_status} without a failure the log explains"))
     return failures
 
@@ -463,7 +481,10 @@ def baseline_status(entry: KnownFailure, record: str, targets: list[dict], failu
     for target in targets:
         if (target["package"], target["target"]) != (entry.package, entry.target) or not target["completed"]:
             continue
-        if entry.test == "*" or target["tests"].get(entry.test) == "passed":
+        if entry.test == "*":
+            if "passed" in target["tests"].values():
+                return "passed"
+        elif target["tests"].get(entry.test) == "passed":
             return "passed"
     return None
 
@@ -853,7 +874,9 @@ def evaluate_selector(selector: dict, records: dict[str, dict], expected: list[s
         state, reason = "failed", "a selected test failed or its binary did not finish"
     elif not matched and any(records[name]["state"] == "unavailable" for name in names):
         state, reason = "unavailable", "a prerequisite of the producing run was unavailable"
-    elif (missing and "record" in selector) or not names:
+    elif "test" in selector and len(test_names) > 1:
+        state, reason = "not-executed", f"selector {selector['test']!r} matches {len(test_names)} tests; name the full libtest name"
+    elif missing or not names:
         state, reason = "not-executed", f"no record from {', '.join(missing) or pattern}"
     elif outcomes["skipped"]:
         state, reason = "not-executed", "a selected test returned early and reported a skip"
@@ -971,6 +994,16 @@ def gate_rollup(items: list[dict]) -> list[dict]:
     for gate in GATES:
         members = [item for item in items if item["gate"] == gate]
         if not members:
+            gates.append(
+                {
+                    "gate": gate,
+                    "conditional": False,
+                    "state": "not-executed",
+                    "reason": "no items mapped",
+                    "items": {s: [] for s in STATES},
+                    "items_with_limitations": [],
+                }
+            )
             continue
         state = worst(item["state"] for item in members)
         limited = [item["id"] for item in members if item["limitations"]]
@@ -1058,6 +1091,8 @@ def command_summarize(arguments: argparse.Namespace) -> int:
     commits = sorted({record["commit"] for record in records.values() if record.get("commit")})
     if len(commits) > 1:
         problems.append(f"records test different commits: {', '.join(commits)}")
+    if arguments.expect_commit and commits != [arguments.expect_commit]:
+        problems.append(f"records must test {arguments.expect_commit}, found {', '.join(commits) or 'none'}")
     items = [evaluate_item(item, records, directories, manifest.expected_records) for item in manifest.items]
     new_failures = [{**failure, "record": name} for name, record in sorted(records.items()) for failure in record["failures"]["new"]]
     entries = []
@@ -1070,6 +1105,12 @@ def command_summarize(arguments: argparse.Namespace) -> int:
         ]
         status = "observed" if "observed" in statuses else "passed" if "passed" in statuses else "not-executed"
         entries.append({**entry.as_json(), "status": status})
+    if arguments.expect_commit:
+        problems += [
+            f"known failure {entry['test']} passed on {arguments.expect_commit}: remove its baseline entry"
+            for entry in entries
+            if entry["status"] == "passed"
+        ]
     summary = {
         "schema": SCHEMA,
         "recorder": RECORDER_VERSION,
@@ -1187,7 +1228,39 @@ def command_test(arguments: argparse.Namespace) -> int:
             command += ["--features", arguments.features]
         command += ["--", "--exact", *[argument for name in names for argument in ("--skip", name)], "--nocapture"]
         print(f"ornadb: {shlex.join(command)}", flush=True)
-        if subprocess.run(command, cwd=WORKSPACE_ROOT, check=False).returncode != 0:
+        collected: list[str] = []
+        timed_out = [False]
+        process = subprocess.Popen(
+            command,
+            cwd=WORKSPACE_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        def kill_on_timeout() -> None:
+            timed_out[0] = True
+            process.kill()
+
+        watchdog = threading.Timer(arguments.timeout_minutes * 60, kill_on_timeout) if arguments.timeout_minutes else None
+        if watchdog:
+            watchdog.start()
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            collected.append(line)
+        status = process.wait()
+        if watchdog:
+            watchdog.cancel()
+        if timed_out[0]:
+            print(f"ornadb: {package} {target} was killed at --timeout-minutes", file=sys.stderr)
+            failed.append(f"{package} {target}")
+        elif status != 0:
+            failed.append(f"{package} {target}")
+        elif executed_tests("".join(collected)) == 0:
+            print(f"ornadb: {package} {target} ran zero tests; a filter or ignore hides every test", file=sys.stderr)
             failed.append(f"{package} {target}")
     for item in failed:
         print(f"ornadb: test failed: {item}", file=sys.stderr)
@@ -1222,6 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
     summarize.add_argument("--markdown", help="append a Markdown summary to this file")
     summarize.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
     summarize.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
+    summarize.add_argument("--expect-commit", help="the commit every record must test; a known failure that passed is then a problem")
 
     check = commands.add_parser("check", help="validate the baseline and the gate-item manifest")
     check.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
@@ -1232,6 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
     tests.add_argument("--target", action="append", default=[], help="only this target: lib, test:NAME or bin:NAME (repeatable)")
     tests.add_argument("--integration", action="store_true", help="only integration test targets (test:NAME)")
     tests.add_argument("--features", help="Cargo features to enable")
+    tests.add_argument("--timeout-minutes", type=float, default=None, help="kill each test binary after this long")
     tests.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
 
     arguments = parser.parse_args(argv)
