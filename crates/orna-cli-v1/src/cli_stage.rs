@@ -36,18 +36,29 @@ fn matches_key_path(components: &[String], key: &str) -> bool {
         })
 }
 
-/// Resolve the full logical table/key path through the project loader and stage
-/// exactly the source bytes captured in that candidate.
-pub(super) fn add_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(), Diagnostic> {
+/// Normalises a KEY_TEXT argument: a JSON string literal is decoded, any other
+/// text is taken verbatim.
+fn key_text(key: &str) -> String {
+    serde_json::from_str::<String>(key).unwrap_or_else(|_| key.to_owned())
+}
+
+/// Resolves one logical worktree row through the project loader and passes its
+/// logical path and captured source bytes to `action`. `key` is already
+/// normalised by `key_text`.
+fn with_worktree_row<T>(
+    endpoint: &Endpoint,
+    table: &str,
+    key: &str,
+    action: impl FnOnce(&Repository, &str, &[u8]) -> Result<T, Diagnostic>,
+) -> Result<T, Diagnostic> {
     let repository = repository(endpoint)?;
     let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .map_err(|e| error("project rows could not be loaded", format!("{e:?}")))?;
-    let key = serde_json::from_str::<String>(key).unwrap_or_else(|_| key.to_owned());
     let mut candidates = project
         .loose_rows()
         .iter()
-        .filter(|row| row.table_path() == table && matches_key_path(row.key_path(), &key));
+        .filter(|row| row.table_path() == table && matches_key_path(row.key_path(), key));
     let candidate = candidates.next().ok_or_else(|| {
         error(
             "logical row was not found",
@@ -60,15 +71,41 @@ pub(super) fn add_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(),
             format!("more than one worktree row matches table {table:?} and key path {key:?}"),
         ));
     }
-    let path = ManagedPath::new(candidate.logical_path())
-        .map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
-    let index = repository
-        .index_generation()
-        .map_err(|e| error("Git index could not be inspected", format!("{e:?}")))?;
-    repository
-        .stage_managed_contents(&index, &path, candidate.source_bytes())
-        .map_err(|e| error("row could not be staged", e.to_string()))?;
-    println!("staged row {table} {key:?}: {}", candidate.logical_path());
-    Ok(())
+    action(&repository, candidate.logical_path(), candidate.source_bytes())
+}
+
+/// Stage exactly the source bytes captured in the resolved worktree row.
+pub(super) fn add_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(), Diagnostic> {
+    let key = key_text(key);
+    with_worktree_row(endpoint, table, &key, |repository, logical, source| {
+        let path = ManagedPath::new(logical)
+            .map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
+        let index = repository
+            .index_generation()
+            .map_err(|e| error("Git index could not be inspected", format!("{e:?}")))?;
+        repository
+            .stage_managed_contents(&index, &path, source)
+            .map_err(|e| error("row could not be staged", e.to_string()))?;
+        println!("staged row {table} {key:?}: {logical}");
+        Ok(())
+    })
+}
+
+/// Restore one logical row's index entry to its committed (HEAD) state, the
+/// inverse of `add_row` (ORNA-STAGE-002).
+pub(super) fn unstage_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(), Diagnostic> {
+    let key = key_text(key);
+    with_worktree_row(endpoint, table, &key, |repository, logical, _source| {
+        let path = ManagedPath::new(logical)
+            .map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
+        let index = repository
+            .index_generation()
+            .map_err(|e| error("Git index could not be inspected", format!("{e:?}")))?;
+        repository
+            .unstage_managed(&index, std::slice::from_ref(&path))
+            .map_err(|e| error("row could not be unstaged", e.to_string()))?;
+        println!("unstaged row {table} {key:?}: {logical}");
+        Ok(())
+    })
 }
 

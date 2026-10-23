@@ -24,7 +24,7 @@ use orna_repository_v1::publication_crash_barrier;
 
 use super::*;
 
-const USAGE: &str = "usage: orna publish [--message MESSAGE]";
+const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
 
 fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
@@ -36,8 +36,9 @@ fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     )
 }
 
-/// Parses the optional `--message` value. Every other argument is refused, so
-/// a misspelled flag never publishes under an unintended message.
+/// Parses the optional `--message` value. Every other argument is a usage error
+/// (E1002) that names the offending word, so a misspelled flag never publishes
+/// under an unintended message.
 fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     let mut message = None;
     let mut words = arguments.iter().map(String::as_str);
@@ -46,27 +47,32 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
             "--message" => {
                 let value = words
                     .next()
-                    .ok_or_else(|| publish_error("--message needs a value", USAGE))?;
-                if value.is_empty() {
-                    return Err(publish_error("--message needs a value", USAGE));
-                }
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| usage_error("`--message` needs a value".to_owned()))?;
                 message = Some(value.to_owned());
             }
             flag if flag.starts_with("--") => {
-                return Err(publish_error(
-                    "Unknown publish flag",
-                    format!("got {flag:?}; accepted: --message"),
-                ));
+                return Err(usage_error(format!("unknown publish flag `{flag}`")));
             }
             extra => {
-                return Err(publish_error(
-                    "Publish takes no positional arguments",
-                    format!("unexpected {extra:?}; {USAGE}"),
-                ));
+                return Err(usage_error(format!(
+                    "publish takes no positional arguments; got `{extra}`"
+                )));
             }
         }
     }
     Ok(message.unwrap_or_else(|| DEFAULT_MESSAGE.to_owned()))
+}
+
+fn usage_error(title: String) -> Diagnostic {
+    Diagnostic {
+        code: "E1002",
+        title: std::borrow::Cow::Owned(title),
+        help: USAGE_HELP,
+        exit: Exit::Usage,
+        detail: None,
+        body: None,
+    }
 }
 
 /// Refuses a format-1/2 `HEAD` before recovery, runtime access or any freeze,
@@ -396,7 +402,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // two invocations from sharing one frozen range (ORNA-PUB-006).
     let mut intent_id = [0_u8; 16];
     getrandom::fill(&mut intent_id)
-        .map_err(|_| publish_error("publication intent could not be created", USAGE))?;
+        .map_err(|_| publish_error("publication intent could not be created", USAGE_HELP))?;
 
     let commit = runtime.block_on(async {
         let freeze = state
@@ -492,7 +498,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             .map_err(|error| {
                 publish_error("published snapshot could not be read", format!("{error:?}"))
             })?
-            .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE))?;
+            .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE_HELP))?;
         Ok(Some((commit.as_str().to_owned(), counts)))
     })?;
 

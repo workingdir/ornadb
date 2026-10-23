@@ -233,8 +233,10 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [CLIENT VM Trust and Sandbox](0091-client-vm-trust-and-sandbox.md)
 * **work ADR 0092:**
   [Function-Backed CLI Sessions](0092-function-backed-cli-sessions.md)
-* **work ADR 0093 (deferred):**
-  [Source Introspection Reference Gate](0093-source-introspection-reference-gate.md)
+* **work ADR 0106 (deferred):**
+  [Studio Source Reload and Hot-Revision Deferral](0106-studio-source-reload-and-hot-revision-deferral.md)
+* **work ADR 0107:**
+  [Studio SQL and Source Editor Boundary](0107-studio-sql-source-editor-boundary.md)
 * **work ADR 0093:**
   [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
 * **work ADR 0094:**
@@ -271,6 +273,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Source Introspection Reference Gate](0110-source-introspection-reference-gate.md)
 * **work ADR 0111:**
   [`sys` Baked Module ABI and Extensible Provider Protocol](0111-sys-baked-module-abi.md)
+* **work ADR 0112:**
+  [Phase 1 Typed `sys` Provider Protocol](0112-sys-provider-protocol-phase-1.md)
 * **work ADR 0115:**
   [Single-source editor syntax artifacts](0115-single-source-editor-syntax-artifacts.md)
 * **work ADR 0116 (superseded by 0117):**
