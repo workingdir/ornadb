@@ -66,6 +66,8 @@ const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
 /// exit before it reports orderly termination. A cancelled worker finishes
 /// its in-flight step, sends a Close frame and exits.
 const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+/// Longest the accept loop waits for a refused connection's request head.
+const REFUSAL_HEAD_TIMEOUT: StdDuration = StdDuration::from_millis(250);
 /// Default for [`ServeOptions::max_connections`].
 const MAX_CONNECTIONS: usize = 64;
 
@@ -551,7 +553,12 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let transport_limits = TransportLimits::default();
+    // The listener is plaintext HTTP on loopback. A `Secure` cookie would be
+    // dropped by the browser over http, so TLS is declared off here.
+    let transport_limits = TransportLimits {
+        tls: false,
+        ..TransportLimits::default()
+    };
     let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -684,17 +691,27 @@ impl Drop for ConnectionSlot {
 }
 
 /// Answers a connection beyond [`ServeOptions::max_connections`] from the
-/// accept loop itself: a 503 written without waiting, which fits in the new
-/// socket's empty send buffer, then the end of the connection. Its request
-/// is never read, so the peer cannot hold up the accept loop.
-fn refuse_connection(mut stream: TcpStream) {
-    let response = unavailable_response();
-    let mut bytes = response_head(&response);
-    bytes.extend_from_slice(&response.body);
-    if stream.set_nonblocking(true).is_ok() {
-        let _ = stream.write_all(&bytes);
-    }
-    let _ = stream.shutdown(Shutdown::Write);
+/// accept loop itself, with a 503 in the shape its route expects (30-protocol,
+/// Creation/resume errors: `{ "code", "message" }` on `/orna/`). The request
+/// head is read first, bounded by [`REFUSAL_HEAD_TIMEOUT`], so a silent peer
+/// cannot hold up the accept loop for longer than that.
+fn refuse_connection(stream: TcpStream) {
+    let mut reader = BufReader::new(stream);
+    let mut orna_route = false;
+    // Whatever the head read yields, the route is known from its request line
+    // when that line arrived; an unreadable head gets the generic shape.
+    let _ = read_request_head(
+        &mut reader,
+        Instant::now() + REFUSAL_HEAD_TIMEOUT,
+        &mut orna_route,
+    );
+    let response = if orna_route {
+        live_error_response(503, "live.unavailable", "request rejected")
+    } else {
+        unavailable_response()
+    };
+    let _ = write_response(reader.get_mut(), response, TransferBudget::default());
+    let _ = reader.get_mut().shutdown(Shutdown::Write);
 }
 
 /// Maps a live WebSocket failure to the RFC 6455 close code the socket is
@@ -3585,6 +3602,66 @@ mod tests {
         }
     }
 
+    /// 30-protocol:15: the listener is plaintext HTTP, so the session cookie
+    /// must not carry `Secure`, which a browser would not return over http.
+    #[test]
+    fn session_cookie_is_not_secure_over_plain_http() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=cookie"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let reply = create_session_as(
+            address,
+            &address.to_string(),
+            Some(&format!("http://{address}")),
+        );
+        assert_eq!(reply.status, 201, "{}", reply.body);
+        let cookie = reply
+            .head
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+            .expect("session cookie");
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(!cookie.contains("Secure"), "{cookie}");
+    }
+
+    /// 30-protocol:21: a connection refused by the cap on a `/orna/` route is
+    /// answered in the protocol's `{ "code", "message" }` shape.
+    #[test]
+    fn over_cap_refusal_on_orna_routes_uses_the_protocol_error_shape() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=refusal"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        // The open socket holds the only slot for as long as it stays attached.
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert_eq!(
+            refused.body,
+            r#"{"code":"live.unavailable","message":"request rejected"}"#
+        );
+    }
+
     /// ORNA-WIRE-005: a request body must arrive within one transfer budget
     /// measured over the whole body. A peer that trickles a declared body a
     /// byte at a time is answered 400 at the deadline, instead of keeping its
@@ -3770,6 +3847,7 @@ mod tests {
 
     struct Reply {
         status: u16,
+        head: String,
         body: String,
     }
 
@@ -3794,6 +3872,7 @@ mod tests {
             .expect("response status");
         Reply {
             status,
+            head: head.to_owned(),
             body: body.to_owned(),
         }
     }
