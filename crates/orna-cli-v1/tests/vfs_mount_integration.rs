@@ -346,27 +346,8 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 
     let data_path = mountpoint.join("Music/london/data.orna");
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() || !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the row files; root=[{}], Music=[{}], london=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/london")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path(), blob_path.as_path()]) {
+        return;
     }
 
     let output = Command::new("cat")
@@ -581,21 +562,8 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(Instant::now() < deadline, "FUSE mount did not expose the row document");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return;
     }
     std::fs::write(
         repository_directory.path().join("main.orna"),
@@ -738,24 +706,8 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return None;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the row document"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return None;
     }
     Some(MountedMusicRow {
         mounted,
@@ -1017,21 +969,8 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("historical mount exited {status}: {stderr}");
-        }
-        assert!(Instant::now() < deadline, "historical mount did not expose the row document");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return;
     }
 
     let scripts = TempDir::new().unwrap();
@@ -1164,24 +1103,8 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
         mountpoint: mountpoint.clone(),
     };
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the captured Blob"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[blob_path.as_path()]) {
+        return;
     }
 
     let scratch_path = mountpoint.join("Music/london/.content.mp3.replace");
@@ -1321,27 +1244,8 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         mountpoint: mountpoint.clone(),
     };
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the Blob; root=[{}], Music=[{}], london=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/london")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[blob_path.as_path()]) {
+        return;
     }
 
 
@@ -1488,27 +1392,8 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     };
     let good_data_path = mountpoint.join("Music/good/data.orna");
     let bad_data_path = mountpoint.join("Music/bad/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !good_data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose good row; root=[{}], Music=[{}], good=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/good")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[good_data_path.as_path()]) {
+        return;
     }
 
     let rows = std::fs::read_dir(mountpoint.join("Music"))
@@ -1566,24 +1451,8 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         child,
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mountpoint) {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not appear in /proc/self/mountinfo"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[mountpoint.as_path()]) {
+        return;
     }
 
     let signal = Command::new("kill")
@@ -1663,30 +1532,15 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         child,
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mountpoint) {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not appear in /proc/self/mountinfo"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[mountpoint.as_path()]) {
+        return;
     }
 
     assert_eq!(repository.mount_status().unwrap().len(), 1);
-    repository.unmount_view(&mountpoint).unwrap();
-    assert!(repository.mount_status().unwrap().is_empty());
 
+    // SIGKILL the daemon and reap it before anything touches the view record. The record stays
+    // registered to a dead owner, so the daemon's signal helper (which unmounts only once the record
+    // is gone) never runs: the mount stays orphaned and the directory request below sees ENOTCONN.
     let signal = Command::new("kill")
         .args(["-KILL", &mounted.child.id().to_string()])
         .status()
@@ -1707,9 +1561,16 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         !child_status.success(),
         "SIGKILL should terminate the mount child"
     );
+    assert!(
+        mountinfo_contains(&mountpoint),
+        "the orphaned FUSE mount remains until orna unmount releases it"
+    );
     let dead_mount_error = std::fs::read_dir(&mountpoint)
         .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>().map(|_| ()))
         .err();
+
+    repository.unmount_view(&mountpoint).unwrap();
+    assert!(repository.mount_status().unwrap().is_empty());
     run_unmount_from(
         repository_directory.path(),
         mount_parent.path(),
@@ -1794,13 +1655,8 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -1901,13 +1757,8 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         child: start_mount(),
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -1926,13 +1777,8 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         child: start_mount(),
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("remount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not reappear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let truncated = Command::new("python3")
@@ -2027,13 +1873,8 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -2140,13 +1981,8 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -2245,13 +2081,8 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let document = OpenOptions::new()
@@ -2331,36 +2162,47 @@ fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
     }
 }
 
-/// Waits for `path` in the live mount. Returns `false` when FUSE setup is optionally unavailable.
-fn wait_for_mount_path(mounted: &mut MountedProcess, path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
+/// Deadline for a `mount --cwd` daemon to expose its mountpoint and the requested paths. Startup
+/// under load can exceed ten seconds, so readiness is polled against the kernel mount table.
+const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Waits until `mounted` is attached at its mountpoint (listed in /proc/self/mountinfo) and every
+/// path in `paths` resolves through it. Returns `false` when FUSE setup is optionally unavailable
+/// and the skip is allowed. Panics with the daemon's exit status and stderr when the daemon exits
+/// before readiness, and with its stderr when it is still not ready after `MOUNT_READY_TIMEOUT`.
+fn wait_for_mount_paths(mounted: &mut MountedProcess, paths: &[&Path]) -> bool {
+    let deadline = Instant::now() + MOUNT_READY_TIMEOUT;
+    while !(mountinfo_contains(&mounted.mountpoint) && paths.iter().all(|path| path.exists())) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
+            let stderr = take_child_stderr(&mut mounted.child);
             if is_optional_fuse_setup_failure(&stderr) {
                 eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
                 return false;
             }
-            panic!("mount exited {status}: {stderr}");
+            panic!("mount exited {status} before {paths:?} was exposed: {stderr}");
         }
         if Instant::now() >= deadline {
             let _ = mounted.child.kill();
             let _ = mounted.child.wait();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
+            let stderr = take_child_stderr(&mut mounted.child);
             panic!(
-                "FUSE mount did not expose {}; mount stderr: {stderr}",
-                path.display()
+                "FUSE mount did not expose {paths:?} within {MOUNT_READY_TIMEOUT:?} (mountinfo has mountpoint: {}; root=[{}]); mount stderr: {stderr}",
+                mountinfo_contains(&mounted.mountpoint),
+                directory_entries(&mounted.mountpoint),
             );
         }
         thread::sleep(Duration::from_millis(20));
     }
     true
+}
+
+/// Reads what the mount process wrote to stderr, once it has exited or been killed.
+fn take_child_stderr(child: &mut Child) -> String {
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    stderr
 }
 
 /// Unmounts through `orna unmount` and requires the mount process to exit cleanly.
@@ -2451,10 +2293,8 @@ async fn mount_captured_media(
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
-    if !wait_for_mount_path(
-        &mut mounted,
-        &mountpoint.join("Music/london").join(mounted_name),
-    ) {
+    let captured_path = mountpoint.join("Music/london").join(mounted_name);
+    if !wait_for_mount_paths(&mut mounted, &[captured_path.as_path()]) {
         return None;
     }
     Some(MountedBlobRow {
@@ -2525,7 +2365,7 @@ async fn cwd_mount_rename_replacement_survives_remount() {
     let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &remount_point);
     let remounted_blob = remount_point.join("Music/london/content.mp3");
     assert!(
-        wait_for_mount_path(&mut remounted, &remounted_blob),
+        wait_for_mount_paths(&mut remounted, &[remounted_blob.as_path()]),
         "FUSE remount must expose the committed Blob after a successful mount"
     );
     let restarted = std::fs::read(&remounted_blob).unwrap();
@@ -2640,7 +2480,7 @@ async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
     std::fs::create_dir(&mountpoint).unwrap();
     let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
     let cover_path = mountpoint.join("Music/london/cover.png");
-    if !wait_for_mount_path(&mut mounted, &cover_path) {
+    if !wait_for_mount_paths(&mut mounted, &[cover_path.as_path()]) {
         return;
     }
     assert_eq!(std::fs::read(&cover_path).unwrap(), cover);
@@ -2656,7 +2496,7 @@ async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
     let mut remounted = spawn_cwd_mount(repository_directory.path(), &remount_point);
     let remounted_cover = remount_point.join("Music/london/cover.png");
     assert!(
-        wait_for_mount_path(&mut remounted, &remounted_cover),
+        wait_for_mount_paths(&mut remounted, &[remounted_cover.as_path()]),
         "FUSE remount must expose the replacement Blob"
     );
     let restarted = std::fs::read(&remounted_cover).unwrap();
