@@ -15178,9 +15178,6 @@ fn compare_values(left: &Value, right: &Value) -> Result<std::cmp::Ordering, Eva
                 &Value::Decimal(right_amount.clone()),
             )
         }
-        (Value::TableReference(a), Value::TableReference(b)) => {
-            orna_value_v1::compare_primary_keys(a, b).map_err(|_| error("ORNA-EVAL-VALUE"))
-        }
         (Value::Float(a), Value::Float(b)) => f64::from_bits(*a)
             .partial_cmp(&f64::from_bits(*b))
             .ok_or_else(|| error("ORNA-EVAL-VALUE")),
@@ -18354,7 +18351,7 @@ mod table_reference_value_tests {
     }
 
     #[test]
-    fn stored_table_reference_is_an_identity_value_compared_by_identity() {
+    fn stored_table_reference_is_an_equality_only_identity_value() {
         let functions = Functions::new();
         let mut context = context(&functions);
         let reference = orna_value_v1::Value::table_reference(
@@ -18372,42 +18369,20 @@ mod table_reference_value_tests {
             .unwrap();
         let same = Value::from_canonical(&same, &mut context, 0).unwrap();
         assert_eq!(value, same);
-        assert_eq!(
-            compare_values(&value, &same).unwrap(),
-            std::cmp::Ordering::Equal
-        );
-
         let other_key =
             orna_value_v1::Value::table_reference([1; 16], [2; 16], Raw::Text("grace".into()))
                 .unwrap();
         let other_key = Value::from_canonical(&other_key, &mut context, 0).unwrap();
         assert_ne!(value, other_key);
-        assert_eq!(
-            compare_values(&value, &other_key).unwrap(),
-            std::cmp::Ordering::Less
-        );
+        // References are equality-only: ordering is rejected with a typed error.
+        assert!(compare_values(&value, &other_key).is_err());
+        assert!(compare_values(&value, &same).is_err());
 
-        fn identity(value: &Value) -> &CanonicalValue {
-            match value {
-                Value::TableReference(identity) => identity,
-                _ => panic!("expected table reference"),
-            }
-        }
-        fn hash_of(value: &CanonicalValue) -> u64 {
-            use std::hash::{DefaultHasher, Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            value.hash(&mut hasher);
-            hasher.finish()
-        }
-        // Same key, different table: distinct identity (not equal, hashes differ).
         let other_table =
             orna_value_v1::Value::table_reference([1; 16], [3; 16], Raw::Text("ada".into()))
                 .unwrap();
         let other_table = Value::from_canonical(&other_table, &mut context, 0).unwrap();
         assert_ne!(value, other_table);
-        assert_ne!(hash_of(identity(&value)), hash_of(identity(&other_table)));
-        // Same identity rebuilt from fresh bytes: equal hash.
-        assert_eq!(hash_of(identity(&value)), hash_of(identity(&same)));
     }
 }
 

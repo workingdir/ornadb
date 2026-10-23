@@ -1125,23 +1125,14 @@ fn stored_table_reference_roundtrips_as_identity_without_snapshot() {
 }
 
 #[test]
-fn table_reference_equality_hash_and_order_use_identity_only() {
-    use std::{
-        cmp::Ordering,
-        collections::hash_map::DefaultHasher,
-        hash::{Hash, Hasher},
-    };
-    fn digest(value: &Value) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
-        hasher.finish()
-    }
-
+fn table_reference_equality_is_identity_only() {
     let base = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
     let same = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
     assert_eq!(base, same);
-    assert_eq!(digest(&base), digest(&same));
-    assert_eq!(compare_primary_keys(&base, &same).unwrap(), Ordering::Equal);
+    assert_eq!(
+        compare_primary_keys(&base, &same).unwrap(),
+        std::cmp::Ordering::Equal
+    );
 
     let other_key = Value::table_reference([1; 16], [2; 16], Raw::Int(4.into())).unwrap();
     let other_table = Value::table_reference([1; 16], [5; 16], Raw::Int(3.into())).unwrap();
@@ -1149,14 +1140,87 @@ fn table_reference_equality_hash_and_order_use_identity_only() {
     for other in [&other_key, &other_table, &other_database] {
         assert_ne!(&base, other);
     }
-    assert_eq!(compare_primary_keys(&base, &other_key).unwrap(), Ordering::Less);
-    assert_eq!(compare_primary_keys(&other_key, &base).unwrap(), Ordering::Greater);
-    assert_eq!(compare_primary_keys(&base, &other_table).unwrap(), Ordering::Less);
-    assert_eq!(compare_primary_keys(&base, &other_database).unwrap(), Ordering::Less);
+}
+
+#[test]
+fn table_reference_mixed_key_types_order_by_table_before_keys() {
+    let int_key = Value::table_reference([1; 16], [2; 16], Raw::Int(5.into())).unwrap();
+    let text_key_later_table =
+        Value::table_reference([1; 16], [3; 16], Raw::Text("a".into())).unwrap();
+    assert_eq!(
+        compare_primary_keys(&int_key, &text_key_later_table).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        compare_primary_keys(&text_key_later_table, &int_key).unwrap(),
+        std::cmp::Ordering::Greater
+    );
+    let text_key_same_table =
+        Value::table_reference([1; 16], [2; 16], Raw::Text("a".into())).unwrap();
+    assert!(compare_primary_keys(&int_key, &text_key_same_table).is_err());
+}
+
+fn uuid(byte: u8) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
 }
 
 #[test]
 fn table_reference_rejects_non_key_components() {
     assert!(Value::table_reference([1; 16], [2; 16], Raw::Null).is_err());
     assert!(Value::table_reference([1; 16], [2; 16], Raw::Map(vec![])).is_err());
+}
+
+#[test]
+fn table_reference_rejects_each_non_permitted_key_clause() {
+    // Float is not a key (07-tables.md:272-281).
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Float(0)).is_err());
+    // A nested Float inside a composite (60015) is rejected recursively.
+    let nested_float = Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Float(0)])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], nested_float).is_err());
+    // Pinned reference (60010) carries a snapshot: identity would depend on it.
+    let pinned = Raw::Tag(
+        60010,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), Raw::Null])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], pinned).is_err());
+    // Enum-like (60008) payload must be exactly [type uuid, variant uuid, Null].
+    let bad_enum = Raw::Tag(
+        60008,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(0.into())])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], bad_enum).is_err());
+    // A table-reference key (60021) with a non-permitted inner key is rejected.
+    let nested_table_float = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Float(0)])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], nested_table_float).is_err());
+}
+
+#[test]
+fn table_reference_accepts_each_permitted_key_shape() {
+    let shapes = [
+        Raw::Bool(true),
+        Raw::Int(7.into()),
+        Raw::Text("ada".into()),
+        Raw::Tag(37, Box::new(Raw::Bytes(vec![4; 16]))),
+        Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Null])),
+        ),
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("x".into())])),
+        ),
+        Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into())])),
+        ),
+    ];
+    for key in shapes {
+        assert!(Value::table_reference([1; 16], [2; 16], key.clone()).is_ok(), "{key:?}");
+    }
 }

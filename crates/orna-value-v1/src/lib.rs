@@ -219,7 +219,7 @@ impl Value {
     /// (tag 60021, ORNA-REF-001). The key must be one primary-key value; no row
     /// or snapshot context is embedded.
     pub fn table_reference(database_id: [u8; 16], table_id: [u8; 16], key: Raw) -> Result<Self> {
-        if !is_primary_key_component(&key) {
+        if !is_permitted_key(&key) {
             return Err(Error::InvalidValue);
         }
         Self::new(Raw::Tag(
@@ -2510,32 +2510,50 @@ fn primary_key_components(raw: &Raw) -> Result<Vec<&Raw>> {
     match raw {
         Raw::Tag(60015, payload) => {
             let values = array(payload)?;
-            if values.is_empty() {
+            if values.is_empty() || !values.iter().all(is_permitted_key) {
                 return Err(Error::InvalidValue);
             }
             Ok(values.iter().collect())
         }
-        Raw::Array(values) if !values.is_empty() => Ok(values.iter().collect()),
-        _ if is_primary_key_component(raw) => Ok(vec![raw]),
+        Raw::Array(values) if !values.is_empty() && values.iter().all(is_permitted_key) => {
+            Ok(values.iter().collect())
+        }
+        _ if is_permitted_key(raw) => Ok(vec![raw]),
         _ => Err(Error::InvalidValue),
     }
 }
 
-fn is_primary_key_component(raw: &Raw) -> bool {
-    matches!(
-        raw,
-        Raw::Bool(_)
-            | Raw::Int(_)
-            | Raw::Text(_)
-            | Raw::Tag(37, _)
-            | Raw::Tag(60000, _)
-            | Raw::Tag(60001, _)
-            | Raw::Tag(60002, _)
-            | Raw::Tag(60008, _)
-            | Raw::Tag(60010, _)
-            | Raw::Tag(60015, _)
-            | Raw::Tag(60021, _)
-    )
+/// ORNA-KEY-003 and the permitted key values of 07-tables.md:272-281, applied
+/// recursively. Float and snapshot-bearing pinned references (60010) are never
+/// keys: a key's identity must not depend on a snapshot (08-relations.md:31).
+fn is_permitted_key(raw: &Raw) -> bool {
+    match raw {
+        Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
+        Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
+        Raw::Tag(60008, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [type_id, variant_id, Raw::Null]
+                    if uuid_array(type_id).is_ok() && uuid_array(variant_id).is_ok()
+            )
+        ),
+        Raw::Tag(60015, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if !values.is_empty() && values.iter().all(is_permitted_key)
+        ),
+        Raw::Tag(60021, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [database_id, table_id, key]
+                    if uuid_array(database_id).is_ok()
+                        && uuid_array(table_id).is_ok()
+                        && is_permitted_key(key)
+            )
+        ),
+        _ => false,
+    }
 }
 
 fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
@@ -2572,21 +2590,6 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .cmp(&uuid_array(right_type)?)
                 .then(uuid_array(left_variant)?.cmp(&uuid_array(right_variant)?))
         }
-        (Raw::Tag(60010, left), Raw::Tag(60010, right)) => {
-            let left = array(left)?;
-            let right = array(right)?;
-            let [left_db, left_table, left_key, left_snapshot] = left.as_slice() else {
-                return Err(Error::InvalidValue);
-            };
-            let [right_db, right_table, right_key, right_snapshot] = right.as_slice() else {
-                return Err(Error::InvalidValue);
-            };
-            uuid_array(left_db)?
-                .cmp(&uuid_array(right_db)?)
-                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
-                .then(compare_key_component(left_key, right_key)?)
-                .then(compare_raw_order(left_snapshot, right_snapshot)?)
-        }
         (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
             compare_key_components(array(left)?, array(right)?)?
         }
@@ -2599,10 +2602,13 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
             let [right_db, right_table, right_key] = right.as_slice() else {
                 return Err(Error::InvalidValue);
             };
-            uuid_array(left_db)?
+            let identity = uuid_array(left_db)?
                 .cmp(&uuid_array(right_db)?)
-                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
-                .then(compare_key_component(left_key, right_key)?)
+                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?));
+            if identity != Ordering::Equal {
+                return Ok(identity);
+            }
+            compare_key_component(left_key, right_key)?
         }
         _ => return Err(Error::InvalidValue),
     };
@@ -2681,36 +2687,6 @@ fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
     } else {
         ordering
     })
-}
-
-fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
-    match (left, right) {
-        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
-        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
-        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
-        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
-        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
-        (Raw::Array(left), Raw::Array(right)) => {
-            for (left, right) in left.iter().zip(right) {
-                let ordering = compare_raw_order(left, right)?;
-                if ordering != Ordering::Equal {
-                    return Ok(ordering);
-                }
-            }
-            Ok(left.len().cmp(&right.len()))
-        }
-        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
-            match left_tag {
-                60000 => compare_decimal_raw(
-                    &Raw::Tag(*left_tag, left.clone()),
-                    &Raw::Tag(*right_tag, right.clone()),
-                ),
-                60015 => compare_key_components(array(left)?, array(right)?),
-                _ => compare_raw_order(left, right),
-            }
-        }
-        _ => Err(Error::InvalidValue),
-    }
 }
 
 /// A type-directed failure from a canonical value decoder.
