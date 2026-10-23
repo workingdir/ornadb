@@ -2,7 +2,8 @@
 
 `orna-syntax-v1` is the source for editor keyword, scalar-type, delimiter,
 operator, punctuation, and language metadata. The generated editor packages
-and LSP metadata use the frozen Orna 1.0 vocabulary.
+and LSP metadata describe the Orna 1.1.0 vocabulary and record that version as
+`languageVersion`.
 
 The checked-in editor files are generated from this metadata:
 
@@ -77,3 +78,31 @@ Generated artifact checks do not launch editor hosts. Tree-sitter generation
 is structurally checked by Node, and the grammar/query package is drift-checked
 as generated text. The `orna-lsp` integration tests separately launch supported
 editor hosts when their client dependencies are available.
+
+## Language server behaviour
+
+Inside an Orna project (a Git worktree whose root holds `main.orna`),
+`orna-lsp` checks the open buffers exactly as `orna check` checks the saved
+files and publishes the same diagnostics. Names resolve through the project's
+`use` imports, so definition, references, rename, call and type hierarchies
+and code lenses follow the module graph rather than matching names as text.
+Rename edits only the occurrences that resolve to the renamed declaration, and
+it is refused with a reason (`RequestFailed`) when an occurrence of the name
+cannot be resolved, when the new name is not a valid identifier, or when
+`orna check` would report a new diagnostic afterwards.
+
+Go to definition on a standard-library name opens a read-only copy of the
+standard source the analysis used: the project's captured `stdlib/std`
+snapshot, or for documents outside a project the reference library the server
+ships. The copies live below `$XDG_CACHE_HOME/orna/std/<digest>/` (by default
+`~/.cache/orna/std`), one directory per source set. A project without a
+captured standard library has no standard definitions, as `orna check`
+rejects its standard imports.
+
+Each document version is parsed and indexed once and shared by every request.
+Requests run on worker threads, so a slow request does not delay edits or
+other requests, and `$/cancelRequest` answers a cancelled request with
+`RequestCancelled`. Semantic tokens classify names by what they resolve to:
+modules are `namespace`, fields `property`, enum variants `enumMember`, and
+names from the standard library or the intrinsic type environment carry the
+`defaultLibrary` modifier.

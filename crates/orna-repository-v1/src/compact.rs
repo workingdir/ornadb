@@ -2167,7 +2167,7 @@ fn required_physical_metadata(
         ("orna.profile".to_owned(), COMPACT_PROFILE.to_owned()),
         ("orna.table".to_owned(), table.to_string()),
         ("orna.schema.sha256".to_owned(), hex(&schema)),
-        ("orna.columns.ovb".to_owned(), base64(columns)),
+        ("orna.columns.ovb".to_owned(), orna_value_v1::base64_encode(columns)),
         ("orna.encoder".to_owned(), encoder_version.to_owned()),
     ])
 }
@@ -4111,7 +4111,7 @@ fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, Reposit
             entry.max_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
             entry.row_count,
             entry.compressed_bytes,
-            base64(&entry.columns),
+            orna_value_v1::base64_encode(&entry.columns),
             entry.row_group_index,
             entry.bloom,
         ));
@@ -4450,72 +4450,8 @@ fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {
         .map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for group in bytes.chunks(3) {
-        let first = group[0];
-        let second = group.get(1).copied().unwrap_or(0);
-        let third = group.get(2).copied().unwrap_or(0);
-        output.push(ALPHABET[usize::from(first >> 2)] as char);
-        output.push(ALPHABET[usize::from((first & 0x03) << 4 | second >> 4)] as char);
-        output.push(if group.len() > 1 {
-            ALPHABET[usize::from((second & 0x0f) << 2 | third >> 6)] as char
-        } else {
-            '='
-        });
-        output.push(if group.len() > 2 {
-            ALPHABET[usize::from(third & 0x3f)] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
 fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    if !value.len().is_multiple_of(4) {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let mut output = Vec::with_capacity(value.len() / 4 * 3);
-    let (groups, []) = value.as_bytes().as_chunks::<4>() else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    for (index, group) in groups.iter().enumerate() {
-        let last = index + 1 == value.len() / 4;
-        let first = base64_value(group[0])?;
-        let second = base64_value(group[1])?;
-        let (third, fourth) = match (group[2], group[3]) {
-            (b'=', b'=') if last => (None, None),
-            (third, b'=') if last => (Some(base64_value(third)?), None),
-            (third, fourth) if third != b'=' && fourth != b'=' => {
-                (Some(base64_value(third)?), Some(base64_value(fourth)?))
-            }
-            _ => return Err(RepositoryError::InvalidCompactManifest),
-        };
-        output.push(first << 2 | second >> 4);
-        if let Some(third) = third {
-            output.push(second << 4 | third >> 2);
-            if let Some(fourth) = fourth {
-                output.push(third << 6 | fourth);
-            }
-        }
-    }
-    if base64(&output) != value {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(output)
-}
-
-fn base64_value(byte: u8) -> Result<u8, RepositoryError> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
+    orna_value_v1::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
 fn is_hex(byte: u8) -> bool {
@@ -4898,9 +4834,9 @@ mod tests {
             ),
             KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(base64(&schema.encode().unwrap())),
+                Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".into(), Some(base64(columns))),
+            KeyValue::new("orna.columns.ovb".into(), Some(orna_value_v1::base64_encode(columns))),
             KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
@@ -5069,9 +5005,9 @@ mod tests {
             ),
             KeyValue::new(
                 "orna.schema.ovb".to_owned(),
-                Some(base64(&schema.encode().unwrap())),
+                Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+            KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
             KeyValue::new(
                 "orna.encoder".to_owned(),
                 Some("test-encoder-v1".to_owned()),
@@ -6272,5 +6208,28 @@ mod tests {
             Some(&&OvbRaw::Text("GB".into()))
         );
         assert!(!projected_values.contains_key(&computed));
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    #[test]
+    fn manifest_base64_follows_the_workspace_strict_profile() {
+        let cases: &[(&str, bool)] = &[
+            ("", true),
+            ("Zm8=", true),
+            ("+/8=", true),
+            ("-_8=", false),
+            ("Zm8", false),
+            ("Zm9v=", false),
+            ("Zh==", false),
+            ("Zm8= ", false),
+            ("Zg==Zm9v", false),
+        ];
+        for &(input, accepted) in cases {
+            assert_eq!(decode_base64(input).is_ok(), accepted, "input {input:?}");
+        }
     }
 }
