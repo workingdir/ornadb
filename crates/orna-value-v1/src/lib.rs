@@ -4125,10 +4125,10 @@ pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
 }
 /// Encodes bytes with the RFC 4648 standard Base64 alphabet and mandatory
 /// padding. The output never contains whitespace.
-pub fn base64_encode(bytes: &[u8]) -> Result<String> {
+pub fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let groups = bytes.len().checked_add(2).ok_or(Error::Limit)? / 3;
-    let capacity = groups.checked_mul(4).ok_or(Error::Limit)?;
+    // `len.div_ceil(3) * 4` cannot overflow: slices are at most `isize::MAX` bytes.
+    let capacity = bytes.len().div_ceil(3) * 4;
     let mut output = String::with_capacity(capacity);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
@@ -4147,7 +4147,7 @@ pub fn base64_encode(bytes: &[u8]) -> Result<String> {
             None => '=',
         });
     }
-    Ok(output)
+    output
 }
 
 /// Decodes strict RFC 4648 standard Base64.
