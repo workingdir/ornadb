@@ -3,7 +3,7 @@
 //! that has no object of the source.
 //!
 //! The repository is a real format-3 fixture built by `support/format3.rs`; the
-//! archive is written and read by the real `orna-cli-v1` binary, so this proves
+//! archive is written and read by the real `orna` binary, so this proves
 //! the three export modes are wired to the shared complete-copy path rather
 //! than to a private one.
 
@@ -23,10 +23,10 @@ use format3::*;
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
