@@ -1638,6 +1638,7 @@ dependencies = [
  "orna-security-v1",
  "orna-serving-v1",
  "orna-stream-v1",
+ "orna-value-v1",
 ]
 
 [[package]]
