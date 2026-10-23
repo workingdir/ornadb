@@ -60,7 +60,8 @@ use std::{
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use crate::{GitCommitRef, Repository, scrub_git_routing_environment};
+use crate::object_reader::ObjectReader;
+use crate::{GitCommitRef, Repository, RepositoryError, scrub_git_routing_environment};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -1170,6 +1171,12 @@ fn committed_gitlinks(
     directory: &Path,
     commit: &str,
 ) -> Result<Vec<(String, String)>, CompleteCopyError> {
+    ObjectReader::new(directory.to_path_buf())
+        .check_expansion(commit, "")
+        .map_err(|error| match error {
+            RepositoryError::SourceTreeLimit => CompleteCopyError::ClosureTooLarge,
+            _ => CompleteCopyError::GitUnavailable,
+        })?;
     let output = git_output(directory, &["ls-tree", "-r", "-z", "--full-tree", commit])?;
     let mut gitlinks = Vec::new();
     let mut entries = 0;

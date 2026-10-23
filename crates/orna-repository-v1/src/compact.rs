@@ -3048,6 +3048,8 @@ impl Repository {
         &self,
         commit: &GitCommitRef,
     ) -> Result<BTreeMap<Uuid, CompactManifest>, RepositoryError> {
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.command();
         command.args([
             "ls-tree",
@@ -3403,6 +3405,8 @@ impl Repository {
         ) {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.observer_command();
         command.env("GIT_NO_LAZY_FETCH", "1").args([
             "ls-tree",
