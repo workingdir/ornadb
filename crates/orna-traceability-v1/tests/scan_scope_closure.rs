@@ -14,6 +14,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Crate directory names under `crates/` reached from every workspace binary through normal and build path dependencies.
+/// Build dependencies are included on purpose: they may run during the shipped build, so the set over-approximates and never hides a shipped crate. Dev-dependencies are excluded.
 fn shipped_closure() -> BTreeSet<String> {
     let cargo = env::var_os("CARGO").expect("cargo test sets CARGO");
     let output = Command::new(cargo)
