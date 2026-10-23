@@ -1,6 +1,6 @@
 # ADR 0063: The Client Offers the Installed Runtime and Accepts a Runtime Override
 
-**Status:** Accepted
+**Status:** Accepted; archived as not implemented. Wire types exist only in the 1.0 island crate `orna-core` (`invocation.rs`, `InvocationRuntimeOffer`/`runtime_offers`); no `--runtime` flag and no client runtime population exist. To be deleted with island step 7 (W07).
 
 ## Decision
 

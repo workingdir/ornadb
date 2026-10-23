@@ -5,7 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- The read-side `sys.blob` operations run natively: `length`, `digest`, `read`, `verify` and `to_bytes` answer from the Blob value, with `read` returning a bounded Blob slice. `to_bytes` and `read` refuse more than 8 MiB in one call with `sys.blob.limit`, and `from_bytes` builds a Blob from integers in `0..=255` with the `application/octet-stream` fallback, refusing an out-of-range integer with `sys.blob.bounds`. `sys.blob.capture_file` is invoked as an effect, not read. The write-side `begin`, `append`, `finish` and `abort`, and `media_type`, `suffix`, `same_content`, `resource`, are not yet implemented.
+- The read-side `sys.blob` operations `length`, `read`, `verify` and `to_bytes` run natively and answer from the Blob value, with `read` returning a bounded Blob slice. `to_bytes` and `read` refuse more than 8 MiB in one call with `sys.blob.limit`, `verify` streams the content in bounded chunks, and `from_bytes` builds a Blob from integers in `0..=255` with the `application/octet-stream` fallback, refusing an out-of-range integer with `sys.blob.bounds`. `sys.blob.digest` is not yet implemented: it fails with `ORNA-EVAL-UNSUPPORTED` because the evaluator has no Digest value representation. `sys.blob.capture_file` is invoked as an effect, not read. The write-side `begin`, `append`, `finish` and `abort`, and `media_type`, `suffix`, `same_content`, `resource`, are not yet implemented.
+- Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
+  archived under `docs/decisions/archive/1.0/` with an evidence table in
+  `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
+  0119 (was 0059) and the CLIENT VM trust boundary ADR is 0120 (was 0101).
+- The live WebSocket handshake no longer accepts URL-alphabet or mixed-alphabet `Sec-WebSocket-Key` values; only padded standard base64 is accepted (RFC 6455).
 - `orna --help` names the command `orna`. It says that `unmount DIR` detaches
   the kernel mount, including an orphaned Orna mount, and releases its view
   record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
@@ -412,7 +417,7 @@ decision does not declare the product baseline complete. This checkout now has
 a minimal `packaging/linux/` provenance/install artifact recipe and focused
 tests, but it has no Debian changelog, signed artifact, or clean-host
 production-package evidence.
-See the [release-mechanics decision](docs/decisions/0047-first-one-zero-release.md)
+See the [release-mechanics decision](docs/decisions/archive/1.0/0047-first-one-zero-release.md)
 for the required release authority and the
 [maintainer runbook](docs/maintainer-runbook.md) for evidence rules.
 
