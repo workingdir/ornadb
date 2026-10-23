@@ -257,6 +257,7 @@ impl ConformanceAdapter for SemanticAdapter {
     }
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         TransactionalEvaluator::default()
+            .with_fixture_catalogue()
             .execute_duplicate_key_fixture(unit)
             .unwrap_or_else(Self::unsupported_runtime)
     }
@@ -10219,16 +10220,13 @@ mod transaction_admission_tests {
 
         let outcome = evaluator.execute_source(&unit);
         match outcome {
-            // The authoritative fixture currently reports the unresolved-name
-            // boundary for a `std.net.http.get` call in an ordinary helper
-            // body, rather than a propagated `ORNA-EVAL-EFFECT` summary. The
-            // admission boundary must still reject before activation; this
-            // records that precise observed diagnostic until the catalogue can
-            // resolve the helper body transitively.
+            // The production catalogue now propagates the external effect
+            // from the ordinary helper body and reports `ORNA-EVAL-EFFECT`.
+            // The admission boundary must still reject before activation.
             StageOutcome::Failed(diagnostic) => assert_eq!(
                 diagnostic.code(),
-                "ORNA-EVAL-NAME",
-                "the current authoritative catalogue rejection must remain fail-closed"
+                "ORNA-EVAL-EFFECT",
+                "the production catalogue must propagate the helper effect fail-closed"
             ),
             outcome => panic!(
                 "a transitive external effect must be rejected before table activation: {outcome:?}"
