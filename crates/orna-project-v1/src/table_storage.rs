@@ -13,11 +13,11 @@ use std::fmt;
 
 use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, KeyRange, Repository, RepositoryFormatContext};
-use orna_runtime_v1::TableObjectId;
-use orna_semantic_v1::{TableSchema, Type};
+use orna_runtime_v1::{TableMutation, TableObjectId};
+use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value_v1::{decode_canonical_storage_value, Raw, Value};
 
-use crate::ProjectLoader;
+use crate::{ObjectIdentityManifest, ObjectKind, ProjectLoader};
 
 /// Committed table storage violates the descriptor or row contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,22 +138,147 @@ pub fn evaluator_rows(
     table: &CommittedTable,
     schema: &TableSchema,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
+    let (key_names, text_primary_key) = evaluator_keying(schema)?;
+    let mut rows = BTreeMap::new();
+    for (runtime_key, storage_row) in &table.rows {
+        let (key_bytes, record) = evaluator_row_with_keying(
+            &key_names,
+            text_primary_key,
+            runtime_key,
+            storage_row,
+            &table.storage_order,
+        )?;
+        if rows.insert(key_bytes, record).is_some() {
+            return Err(TableStorageError);
+        }
+    }
+    Ok(rows.into_iter().collect())
+}
+
+/// Converts one runtime row into its canonical evaluator key and evaluator record.
+pub fn evaluator_row_from_storage(
+    runtime_key: &[u8],
+    storage_row: &[u8],
+    schema: &TableSchema,
+    storage_order: &[String],
+) -> Result<(Vec<u8>, Vec<u8>), TableStorageError> {
+    let (key_names, text_primary_key) = evaluator_keying(schema)?;
+    evaluator_row_with_keying(
+        &key_names,
+        text_primary_key,
+        runtime_key,
+        storage_row,
+        storage_order,
+    )
+}
+
+/// The key-field names and text-key flag that evaluator records of `schema` use.
+fn evaluator_keying(schema: &TableSchema) -> Result<(Vec<String>, bool), TableStorageError> {
     let admission = schema.admission.as_ref().ok_or(TableStorageError)?;
     let key_names = admission
         .keys
         .iter()
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
+    Ok((key_names, has_text_primary_key(schema)))
+}
+
+/// Builds one runtime row's evaluator key and evaluator record from its key names.
+fn evaluator_row_with_keying(
+    key_names: &[String],
+    text_primary_key: bool,
+    runtime_key: &[u8],
+    storage_row: &[u8],
+    storage_order: &[String],
+) -> Result<(Vec<u8>, Vec<u8>), TableStorageError> {
+    let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
+    let record = evaluator_record(key_names, &key_bytes, storage_order, storage_row)?;
+    Ok((key_bytes, record))
+}
+
+/// Projects one table mutation from evaluator form into the runtime keyspace and binds it to
+/// the committed table identity `object_id`. Key fields are re-encoded as runtime keys, and a
+/// row value is projected from its evaluator record onto the stored tuple. The operation kind,
+/// mutation identity and protected-content evidence are retained.
+pub fn normalize_table_mutation(
+    mutation: TableMutation,
+    schema: &TableSchema,
+    object_id: TableObjectId,
+    storage_order: &[String],
+) -> Result<TableMutation, TableStorageError> {
+    if mutation
+        .table_object_id()
+        .is_some_and(|bound| bound != object_id)
+    {
+        return Err(TableStorageError);
+    }
     let text_primary_key = has_text_primary_key(schema);
-    let mut rows = BTreeMap::new();
-    for (runtime_key, storage_row) in &table.rows {
-        let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
-        let record = evaluator_record(&key_names, &key_bytes, &table.storage_order, storage_row)?;
-        if rows.insert(key_bytes, record).is_some() {
+    let key = runtime_key_from_evaluator(mutation.key(), text_primary_key)?;
+    let rekey_to = mutation
+        .rekey_to()
+        .map(|destination| runtime_key_from_evaluator(destination, text_primary_key))
+        .transpose()?;
+    let stored_row = mutation
+        .value()
+        .map(|record| storage_row_from_record(record, storage_order))
+        .transpose()?;
+    let mutation = mutation
+        .with_reencoded_keys(key, rekey_to)
+        .map_err(|_| TableStorageError)?;
+    let mutation = match stored_row {
+        Some(row) => mutation
+            .with_reencoded_value(row)
+            .map_err(|_| TableStorageError)?,
+        None => mutation,
+    };
+    Ok(mutation.with_table_object_id(object_id))
+}
+
+/// Resolves the committed object identity of each named table at `commit`. A name must match
+/// exactly one live table record; any other result is refused.
+pub fn committed_table_object_ids<'a>(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, TableObjectId>, TableStorageError> {
+    let identities = ObjectIdentityManifest::read_committed(repository, commit)
+        .map_err(|_| TableStorageError)?;
+    let mut ids = BTreeMap::new();
+    for name in names {
+        let mut matching = identities.records().iter().filter(|record| {
+            record.kind() == ObjectKind::Table
+                && !record.is_retired()
+                && record.qualified_name().rsplit('.').next() == Some(name)
+        });
+        let record = matching.next().ok_or(TableStorageError)?;
+        if matching.next().is_some() {
+            return Err(TableStorageError);
+        }
+        if ids
+            .insert(name.to_owned(), TableObjectId::new(*record.id()))
+            .is_some()
+        {
             return Err(TableStorageError);
         }
     }
-    Ok(rows.into_iter().collect())
+    Ok(ids)
+}
+
+/// The admitted table schemas a module header declares, keyed by table name. A table whose
+/// admission did not succeed is omitted.
+pub fn admitted_table_schemas(header: &ModuleHeader) -> BTreeMap<String, TableSchema> {
+    header
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| symbol.kind == SymbolKind::Table)
+        .filter_map(|(name, symbol)| {
+            symbol
+                .table_schema
+                .clone()
+                .filter(|schema| schema.admission.is_some())
+                .map(|schema| (name.clone(), schema))
+        })
+        .collect()
 }
 
 /// Projects a canonical evaluator record onto its stored tuple: the values of
