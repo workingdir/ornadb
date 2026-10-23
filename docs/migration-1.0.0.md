@@ -48,7 +48,7 @@ predecessor and forward-edge sets. In particular:
   must fail closed, not acquire different semantics.
 - Do not treat a retained evidence artifact, a local binary, or a build directory as
   a production distribution authority. The old
-  [first-release decision](decisions/0047-first-one-zero-release.md) records a
+  [first-release decision](decisions/archive/1.0/0047-first-one-zero-release.md) records a
   historical managed-product release plan; it does not amend the immutable
   1.0.0 contract or establish a current distribution requirement.
 
