@@ -61,7 +61,7 @@ fn run_unmount(repository: &Path, mountpoint: &Path) {
 }
 
 fn run_unmount_from(repository: &Path, working_directory: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(working_directory)
         .args([
             "--db",
@@ -326,7 +326,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -563,7 +563,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -618,7 +618,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -720,7 +720,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -780,7 +780,7 @@ impl MountedMusicRow {
         )
         .unwrap();
         std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 self.repository_directory.path().to_str().unwrap(),
@@ -931,7 +931,7 @@ async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
         return;
     };
     let repository = row.repository_directory.path().to_path_buf();
-    let rename = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let rename = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(&repository)
         .args(["mv", "Music", "Archive"])
         .output()
@@ -998,7 +998,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("history");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1039,7 +1039,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let marker = scripts.path().join("editor-was-run");
     std::fs::write(&editor, "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1147,7 +1147,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1304,7 +1304,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
      let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1470,7 +1470,7 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1550,7 +1550,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1618,7 +1618,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         !mountinfo_contains(&mountpoint),
         "SIGTERM left the FUSE mountpoint in /proc/self/mountinfo"
     );
-    let status = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let status = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1647,7 +1647,7 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1777,7 +1777,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1809,7 +1809,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         .open(&data_path)
         .unwrap();
     document.write_all(b"{ title: \"after\", }\n").unwrap();
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1883,7 +1883,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let start_mount = || {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 repository_directory.path().to_str().unwrap(),
@@ -1945,7 +1945,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         "path-based truncate failed: {}",
         String::from_utf8_lossy(&truncated.stderr)
     );
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2010,7 +2010,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2048,7 +2048,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     );
     drop(document);
 
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2123,7 +2123,7 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2228,7 +2228,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2313,7 +2313,7 @@ struct MountedBlobRow {
 }
 
 fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository.to_str().expect("repository path is UTF-8"),
