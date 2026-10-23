@@ -308,9 +308,9 @@ PostgreSQL behaviour.
 ## Precedence
 
 This record makes the accepted duplicate behaviour in
-`docs/decisions/0002-public-language-contract.md` concrete for one
+`docs/decisions/archive/1.0/0002-public-language-contract.md` concrete for one
 parameter-free SERVER query form. It preserves the version boundaries and
-runtime rules in `docs/decisions/0009-identity-selected-server-select.md` and
+runtime rules in `docs/decisions/archive/1.0/0009-identity-selected-server-select.md` and
 narrows the broader relational direction in
 `spec/docs/12-object-relational-model.md`,
 `spec/docs/25-source-compiler-ir.md`, and `spec/docs/39-testing.md`.
