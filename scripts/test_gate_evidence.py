@@ -30,7 +30,10 @@ from scripts.gate_evidence import (
     known_failures_for,
     load_baseline,
     load_items,
+    cargo_test_command,
     main,
+    parse_timeout_override,
+    timeout_for,
     observed_failures,
     package_name,
     parse_log,
@@ -634,6 +637,51 @@ class ReviewFindingTests(unittest.TestCase):
         source = (root / "source-audits.yml").read_text(encoding="utf-8")
         self.assertIn("sudo apt-get -o Acquire::Retries=3", source)
         self.assertNotIn("sudo apt-get update\n", source)
+
+    def test_cargo_command_skips_the_named_tests_exactly(self) -> None:
+        # The per-PR run skips the Gate B test; the skip must reach cargo as an exact --skip.
+        command = cargo_test_command(
+            "orna-cli-v1", "test:media_import_query", None,
+            ["gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata"],
+        )
+        self.assertEqual(
+            command,
+            [
+                "cargo", "test", "--locked", "-p", "orna-cli-v1", "--test", "media_import_query",
+                "--", "--exact", "--skip",
+                "gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata",
+                "--nocapture",
+            ],
+        )
+
+    def test_timeout_override_applies_to_its_target_only(self) -> None:
+        # The Gate B binary may run past the 40-minute default; other targets keep the default.
+        overrides = {"test:media_import_query": 150.0}
+        self.assertEqual(timeout_for("test:media_import_query", 40.0, overrides), 150.0)
+        self.assertEqual(timeout_for("test:other", 40.0, overrides), 40.0)
+        self.assertIsNone(timeout_for("test:other", None, overrides))
+
+    def test_timeout_override_parses_label_and_positive_minutes(self) -> None:
+        self.assertEqual(parse_timeout_override("test:media_import_query=150"), ("test:media_import_query", 150.0))
+        for bad in ("media_import_query=150", "test:x=0", "test:x=abc", "test:x"):
+            with self.assertRaises(Exception, msg=bad):
+                parse_timeout_override(bad)
+
+    def test_per_pr_cli_run_skips_the_gate_b_test_through_the_recorder(self) -> None:
+        # Main moved Gate B to cli-gate-b.yml; the per-PR cli run must skip it and keep the recorder.
+        root = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+        text = (root / "cli-tests.yml").read_text(encoding="utf-8")
+        cli_run = [line for line in text.splitlines() if "gate_evidence.py test -p orna-cli-v1 --timeout-minutes" in line]
+        self.assertEqual(len(cli_run), 1, cli_run)
+        self.assertIn("--skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata", cli_run[0])
+        self.assertNotIn("cargo test", text)
+
+    def test_gate_b_items_name_the_nightly_cli_record(self) -> None:
+        # B1-B3 are evidence from the nightly workspace-cli record; per-PR runs skip the test.
+        manifest = load_items(ITEMS)
+        for item_id in ("B1", "B2", "B3"):
+            item = next(i for i in manifest.items if i["id"] == item_id)
+            self.assertTrue(all(sel["record"] == "workspace-cli" for sel in item["select"]), item_id)
 
     def test_summarize_rejects_a_foreign_commit_and_a_known_failure_that_passed(self) -> None:
         # M9: with --expect-commit, records from another commit and a passing known failure are problems.

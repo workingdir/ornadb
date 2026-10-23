@@ -179,6 +179,33 @@ def target_flags(target: str) -> list[str]:
     return [f"--{kind}", name]
 
 
+def cargo_test_command(package: str, target: str, features: str | None, skips: list[str]) -> list[str]:
+    """Return the cargo command that runs one test target, skipping the named libtest tests exactly."""
+    command = ["cargo", "test", "--locked", "-p", package, *target_flags(target)]
+    if features:
+        command += ["--features", features]
+    return command + ["--", "--exact", *[argument for name in skips for argument in ("--skip", name)], "--nocapture"]
+
+
+def parse_timeout_override(text: str) -> tuple[str, float]:
+    """Parse TARGET=MINUTES, for example test:media_import_query=150."""
+    label, separator, minutes = text.rpartition("=")
+    if not separator or not TARGET_PATTERN.fullmatch(label):
+        raise argparse.ArgumentTypeError(f"{text!r} is not TARGET=MINUTES, for example test:NAME=150")
+    try:
+        value = float(minutes)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r}: minutes must be a number") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: minutes must be positive")
+    return label, value
+
+
+def timeout_for(target: str, default: float | None, overrides: dict[str, float]) -> float | None:
+    """Return the watchdog minutes for one target label: its override, else the default."""
+    return overrides.get(target, default)
+
+
 def target_label(kinds: list[str], name: str) -> str:
     if LIB_KINDS.intersection(kinds):
         return "lib"
@@ -1216,6 +1243,7 @@ def command_test(arguments: argparse.Namespace) -> int:
         if not TARGET_PATTERN.fullmatch(target):
             raise EvidenceError(f"target {target!r} is not lib, doc or KIND:NAME")
     baseline = load_baseline(Path(arguments.baseline))
+    overrides = dict(arguments.timeout_override)
     selected = select_test_targets(cargo_metadata(), arguments.package, arguments.target, arguments.integration)
     failed: list[str] = []
     for package, target in selected:
@@ -1223,10 +1251,8 @@ def command_test(arguments: argparse.Namespace) -> int:
         if whole:
             print(f"ornadb: skipped {package} {target}: a known failure aborts the whole binary", file=sys.stderr)
             continue
-        command = ["cargo", "test", "--locked", "-p", package, *target_flags(target)]
-        if arguments.features:
-            command += ["--features", arguments.features]
-        command += ["--", "--exact", *[argument for name in names for argument in ("--skip", name)], "--nocapture"]
+        skips = sorted(set(names) | set(arguments.skip_test))
+        command = cargo_test_command(package, target, arguments.features, skips)
         print(f"ornadb: {shlex.join(command)}", flush=True)
         collected: list[str] = []
         timed_out = [False]
@@ -1244,7 +1270,8 @@ def command_test(arguments: argparse.Namespace) -> int:
             timed_out[0] = True
             process.kill()
 
-        watchdog = threading.Timer(arguments.timeout_minutes * 60, kill_on_timeout) if arguments.timeout_minutes else None
+        minutes = timeout_for(target, arguments.timeout_minutes, overrides)
+        watchdog = threading.Timer(minutes * 60, kill_on_timeout) if minutes else None
         if watchdog:
             watchdog.start()
         assert process.stdout is not None
@@ -1307,6 +1334,15 @@ def main(argv: list[str] | None = None) -> int:
     tests.add_argument("--integration", action="store_true", help="only integration test targets (test:NAME)")
     tests.add_argument("--features", help="Cargo features to enable")
     tests.add_argument("--timeout-minutes", type=float, default=None, help="kill each test binary after this long")
+    tests.add_argument("--skip-test", action="append", default=[], help="libtest name to skip in every selected target (repeatable)")
+    tests.add_argument(
+        "--timeout-override",
+        action="append",
+        default=[],
+        type=parse_timeout_override,
+        metavar="TARGET=MINUTES",
+        help="watchdog minutes for one target label, for example test:media_import_query=150 (repeatable)",
+    )
     tests.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
 
     arguments = parser.parse_args(argv)
