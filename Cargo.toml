@@ -43,4 +43,3 @@ license = "Apache-2.0"
 [workspace.dependencies]
 base64 = "0.22.1"
 uuid = { version = "1.18.1", features = ["v4"] }
-sha2 = "0.10.9"
