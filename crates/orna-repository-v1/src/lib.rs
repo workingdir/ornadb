@@ -3839,6 +3839,20 @@ impl Repository {
         &self,
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
+        let pins = Self::publication_pins(journal);
+        let keep: Vec<String> = pins
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        self.sweep_publication_pins_locked(&keep)?;
+        for (reference, oid) in &pins {
+            self.pin_publication_object_locked(reference, oid)?;
+        }
+        Ok(())
+    }
+
+    /// The pin refs and the objects they keep for one journal.
+    fn publication_pins(journal: &PublicationJournal) -> Vec<(String, String)> {
         let mut pins = Vec::new();
         if let Some(tree) = journal.base_index_tree.as_ref() {
             pins.push((
@@ -3850,15 +3864,22 @@ impl Repository {
             Self::publication_candidate_pin_ref(journal.new_head.as_str()),
             journal.new_head.as_str().to_owned(),
         ));
-        let keep: Vec<String> = pins
-            .iter()
-            .map(|(reference, _)| reference.clone())
-            .collect();
-        self.sweep_publication_pins_locked(&keep)?;
-        for (reference, oid) in &pins {
-            self.pin_publication_object_locked(reference, oid)?;
-        }
-        Ok(())
+        pins
+    }
+
+    /// Releases the pins of a failed publication attempt. A retained journal
+    /// keeps its own pins; with no journal every publication pin is swept.
+    /// Acquires the coordination lock, so callers must not hold it.
+    fn release_unjournaled_publication_pins(&self) -> Result<(), RepositoryError> {
+        let _coordination_lock = self.acquire_coordination_lock()?;
+        let keep: Vec<String> = match self.read_publication_journal_locked()? {
+            Some(journal) => Self::publication_pins(&journal)
+                .into_iter()
+                .map(|(reference, _)| reference)
+                .collect(),
+            None => Vec::new(),
+        };
+        self.sweep_publication_pins_locked(&keep)
     }
 
     fn publication_index_pin_ref(tree: &str) -> String {
@@ -3877,18 +3898,18 @@ impl Repository {
         reference: &str,
         oid: &str,
     ) -> Result<(), RepositoryError> {
-        let mut exists = self.command();
-        exists.args(["cat-file", "-e", oid]);
-        let present = exists
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if !present.status.success() {
+        if !self.publication_object_present(oid)? {
             return Ok(());
         }
         let zero = "0".repeat(oid.len());
         let mut update = self.command();
         update.args(["update-ref", "--no-deref", reference, oid, zero.as_str()]);
         if self.run(update).is_ok() {
+            return Ok(());
+        }
+        // A GC that removed the object after the check above makes the create
+        // fail. That is the same absent-object case: leave it unpinned.
+        if !self.publication_object_present(oid)? {
             return Ok(());
         }
         // Creation is refused when the pin already names this object. Accept
@@ -3903,6 +3924,15 @@ impl Repository {
         } else {
             Err(RepositoryError::InvalidPublicationJournal)
         }
+    }
+
+    fn publication_object_present(&self, oid: &str) -> Result<bool, RepositoryError> {
+        let mut exists = self.command();
+        exists.args(["cat-file", "-e", oid]);
+        let output = exists
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        Ok(output.status.success())
     }
 
     /// Deletes every publication pin not named in `keep`. Callers hold the
@@ -4532,7 +4562,36 @@ impl Repository {
 
     /// The common PUB-1 ref/index/worktree machinery. A compact journal is
     /// refused: its retired writer has no completion path in this build.
+    /// Pins adopted by an attempt that no journal names are released before
+    /// the error is returned (ORNA-GIT-010).
     fn publish_candidate_impl_with_migration(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        permit_legacy_migration: bool,
+        review: Option<&ReviewedCandidateReview>,
+        on_stage: impl FnMut(PublicationJournalStage),
+    ) -> Result<IndexGeneration, RepositoryError> {
+        let published = self.publish_candidate_body(
+            expected_index,
+            candidate,
+            journal,
+            permit_legacy_migration,
+            review,
+            on_stage,
+        );
+        if published.is_err() {
+            // The refusal is the caller's error. If the release itself fails,
+            // the pins remain for the next recovery to sweep.
+            let _ = self.release_unjournaled_publication_pins();
+        }
+        published
+    }
+
+    /// The body of [`Self::publish_candidate_impl_with_migration`]. It takes
+    /// the coordination lock itself and releases it before returning.
+    fn publish_candidate_body(
         &self,
         expected_index: &IndexGeneration,
         candidate: &PrivateCommit,
