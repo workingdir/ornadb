@@ -1,18 +1,20 @@
 # orna-cli-v1
 
-A developing CLI for the current Orna 1.0 source language.
+A developing CLI for Orna 1.1.0 (publication `final-2026-10-05`, repository
+writer format 3). The installed command is `orna`; Cargo builds it as the
+`orna-cli-v1` binary.
 
 ## Command surface
 
-This binary currently accepts `init`, `status`, `fetch`, `push`, `serve`,
-`mount`, `unmount`, `diff`, `log`, `annotate`, `import`, `export`, `migrate copy`,
-`migrate abort`, `publish`, `semantic-legend`, `history`,
-`query`, `check`, `invoke`, `explain`,
-`repl`, and `run`, plus help and version options. The available command groups and
-option forms are listed by `orna --help`; that list describes this bounded
-implementation, not the complete Orna 1.0 command set.
+This binary currently accepts `init`, `add --row`, `mv`, `status`, `fetch`,
+`push`, `serve`, `mount`, `edit`, `unmount`, `diff`, `log`, `annotate`,
+`import`, `export`, `migrate copy`, `migrate abort`, `publish`, `commit`, `semantic-legend`,
+`history`, `query`, `check`, `invoke`, `explain`, `repl`, and `run`, plus help
+and version options. The available command groups and option forms are listed
+by `orna --help`; that list describes this bounded implementation, not the
+complete Orna 1.1.0 command set.
 
-The frozen CLI reference also names `serve`, `fmt`, `verify`, and `prune`, as
+The CLI reference also names `fmt`, `verify`, and `prune`, as
 well as Git-compatible operations that this binary does not yet implement.
 Their presence in the canonical list is not a claim that this binary supports
 them. The package remains explicit about the boundary rather than accepting
@@ -21,9 +23,9 @@ placeholder commands without their command-specific behavior.
 The reference requires no separate `stream`, `checkpoint`, `failure`,
 `grants`, or extension-permission command hierarchies. Under `ORNA-CLI-002`,
 runtime, checkpoint, failure, and uncommon recovery details belong in typed
-`sys` values available to REPL code and optional `std.devtools` pages. Storage
-preference and rewrite operations likewise remain typed administration rather
-than a built-in command family (`ORNA-STORAGE-010`).
+`sys` values available to REPL code and optional `std.devtools` pages. Orna
+1.1.0 retires the storage preference and rewrite operations (`api/retired.json`),
+so there is no storage command family either.
 
 `ORNA-CLI-001` covers Git-compatible command naming, flags, and observable
 semantics; `ORNA-DIAG-002` covers extended diagnostic documentation through
@@ -49,15 +51,16 @@ orna --db ./legacy migrate copy ./migrated --annotation-defaults 0 --no-persiste
 ```
 
 `--annotation-defaults N` must be the count derived from decoded legacy
-annotation metadata. `--no-persistent-consumers` acknowledges that persistent
-consumer checkpoints are carried into the candidate under identity
+annotation metadata. `--no-persistent-consumers` is required. Despite its
+name, it confirms that persistent consumer checkpoints are carried into the
+candidate, not reset. Each carried checkpoint must match a consumer identity
 correspondence recorded there before any row is imported, so a migrated
-stream resumes without resetting its consumer identity. A source holding live
-per-attempt stream state (leases, claims, failures, receipts) is refused and
-its state is left unchanged. The source repository, including its commit and
-dirty workspace, remains unchanged. This
-command prepares a journalled candidate only; it does not convert legacy rows
-into a format-3 store or activate a writable format-3 repository.
+stream resumes without resetting its consumer identity (ORNA-UPGRADE-008). A
+source holding live per-attempt stream state (leases, claims, failures,
+receipts) is refused and its state is left unchanged. The source repository,
+including its commit and dirty workspace, remains unchanged. This command
+prepares a journalled candidate only; it does not convert legacy rows into a
+format-3 store or activate a writable format-3 repository.
 
 `migrate abort DEST` discards the prepared format-3 copy in DEST. It verifies
 first that DEST is the copy this source prepared, so a directory the operator
@@ -104,8 +107,8 @@ foreground until `orna unmount DIR` releases the kernel mount and view record.
 `$EDITOR`. Its absolute row-directory path must be inside the active Orna FUSE
 mount; the edit is validated before the durable row changes.
 
-`orna mount DIR --at SELECTOR` attaches a read-only snapshot record for one
-resolved selector without starting a host FUSE mount. `orna mount status`
+`orna mount DIR --at SELECTOR` starts a read-only host FUSE session pinned to
+one resolved commit. `orna mount status`
 reports attached views in human or `--json` form. Host FUSE mounts are supported
 on Linux only.
 
@@ -137,5 +140,5 @@ deterministic.
 cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-git diff --check -- orna-cli-v1
+git diff --check -- crates/orna-cli-v1
 ```
