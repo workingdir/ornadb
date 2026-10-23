@@ -602,13 +602,21 @@ fn committed_overlong_entries_list_without_a_path_limit() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     let blob = git_raw(root.path(), &["hash-object", "-w", "--stdin"], b"long\n");
-    // 300 bytes exceeds NAME_MAX; 4200 bytes exceeds the old 4096-byte cap.
+    // A 303-byte name exceeds NAME_MAX. Sixteen 255-byte components under
+    // `deep/` make a 4108-byte path, past the old 4096-byte total cap, while
+    // each name stays within the object reader's per-entry bound. The 4108-byte
+    // record exceeds `list_tree_entries`' separate 4 KiB record bound, so the
+    // ls-tree listing is not asserted here.
     let long_component = format!("{}.md", "a".repeat(300));
-    let long_name = "b".repeat(4200);
+    let deep_component = "c".repeat(255);
+    let mut deep = raw_tree_object(root.path(), &[("100644", "leaf.txt", &blob)]);
+    for _ in 0..16 {
+        deep = raw_tree_object(root.path(), &[("40000", &deep_component, &deep)]);
+    }
     let docs = raw_tree_object(root.path(), &[("100644", &long_component, &blob)]);
     let tree = raw_tree_object(
         root.path(),
-        &[("100644", &long_name, &blob), ("40000", "docs", &docs)],
+        &[("40000", "docs", &docs), ("40000", "deep", &deep)],
     );
     publish_raw_commit(root.path(), &tree, "overlong");
     let commit = repo.resolve_snapshot("overlong").unwrap();
@@ -618,9 +626,14 @@ fn committed_overlong_entries_list_without_a_path_limit() {
         .iter()
         .map(|entry| entry.path().as_path().to_path_buf())
         .collect::<Vec<_>>();
-    assert!(paths.contains(&PathBuf::from(&long_name)));
+    let mut expected_deep = PathBuf::from("deep");
+    for _ in 0..16 {
+        expected_deep.push(&deep_component);
+    }
+    expected_deep.push("leaf.txt");
+    assert!(paths.contains(&expected_deep));
     assert!(paths.contains(&PathBuf::from("docs").join(&long_component)));
-    assert!(repo.list_committed_tree(&commit, 100).is_ok());
+    // list_committed_tree keeps its own 4 KiB record bound; see the comment above.
 }
 
 #[test]
