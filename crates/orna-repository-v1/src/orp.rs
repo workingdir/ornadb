@@ -361,7 +361,7 @@ mod tests {
     const ORP1_VECTORS: &str = include_str!("../tests/fixtures/orp1-vectors/orp1-vectors.json");
     /// The release's golden native objects (Orna 1.1.0 tests/final-vectors.json).
     const RELEASE_VECTORS: &str =
-        include_str!("../../orna-value-v1/src/fixtures/reference/tests/final-vectors.json");
+        include_str!("../tests/fixtures/reference/tests/final-vectors.json");
     const BLOB_MEDIA_TYPE: &str = "application/octet-stream";
 
     fn sha256(bytes: &[u8]) -> [u8; 32] {
