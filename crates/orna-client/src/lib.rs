@@ -193,8 +193,8 @@ pub use live_presentation::{
     WatchPresentation,
 };
 pub use live_session::{
-    AuthenticatedLiveTransport, LiveByteDriver, LiveSessionDriver, LiveSessionError,
-    LiveSessionEvent, PresentRenderer, RequestIdAllocator,
+    AuthenticatedLiveTransport, LiveByteDriver, LiveDiagnostic, LiveSessionDriver,
+    LiveSessionError, LiveSessionEvent, PresentRenderer, RequestIdAllocator,
 };
 pub use live_transport::{
     AuthenticatedWebSocketTransport, LiveClient, LiveClientConfig, LiveSession, LiveTransportError,
