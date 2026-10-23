@@ -12,7 +12,7 @@ The readiness audit identifies three Debian production-release paths:
 `origin/main` tree. The current tree has Linux package scripts under
 `packaging/linux/`; their presence does not supply the missing Debian paths or
 establish the authenticated Debian package and repository release authority
-specified by accepted decision `docs/decisions/0047-first-one-zero-release.md`
+specified by accepted decision `docs/decisions/archive/1.0/0047-first-one-zero-release.md`
 (see its decision section and implementation plan rows 886–891).
 
 This is a scoped repository-state finding and deferral, not a release-readiness
