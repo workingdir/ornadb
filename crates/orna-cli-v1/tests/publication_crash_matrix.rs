@@ -491,8 +491,26 @@ fn publication_pin_refs(root: &Path) -> Vec<String> {
     String::from_utf8_lossy(&listing).lines().map(str::to_owned).collect()
 }
 
+/// Pre-Prepared pins belong to this attempt alone: an index pin names its base index tree, and a
+/// candidate pin names a commit whose peeled object is itself and whose parent is the base head.
+fn assert_attempt_pins(root: &Path, base_head: &str, base_tree: &str, boundary: &str) {
+    for reference in publication_pin_refs(root) {
+        if let Some(tree) = reference.strip_prefix("refs/orna/publication-indexes/") {
+            assert_eq!(tree, base_tree, "index pin {reference} is not this attempt's base tree at {boundary}");
+        } else if let Some(commit) = reference.strip_prefix("refs/orna/publication-candidates/") {
+            let peeled = git_output(root, &["rev-parse", "--verify", &format!("{commit}^{{commit}}")], None);
+            assert_eq!(String::from_utf8_lossy(&peeled).trim(), commit, "candidate pin {reference} is not a commit at {boundary}");
+            let parent = git_output(root, &["rev-parse", "--verify", &format!("{commit}^")], None);
+            assert_eq!(String::from_utf8_lossy(&parent).trim(), base_head, "candidate pin {reference} does not extend the base head at {boundary}");
+        } else {
+            panic!("unexpected publication pin {reference} at {boundary}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary() {
+    // ORNA-PUB-018: pending pins stay protected through publication/recovery.
     publish_kill_matrix(|_, _| {}).await;
 }
 
@@ -549,6 +567,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
+        let base_tree = String::from_utf8_lossy(&git_output(root, &["write-tree"], None)).trim().to_owned();
         let mut child = launch(root, boundary, crash.path());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() && Instant::now() < deadline {
@@ -564,6 +583,11 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
         assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        // Before the Prepared journal, every publication pin an attempt holds must be its own base
+        // index tree or its own candidate commit (parent = base head). Anything else is foreign.
+        if matches!(boundary, "index-lock" | "capture" | "row" | "candidate") {
+            assert_attempt_pins(root, base.as_str(), &base_tree, boundary);
+        }
         let pins_before = publication_pin_refs(root);
         if let Some(journal) = repository.read_publication_journal().unwrap() {
             let mut expected = vec![format!("refs/orna/publication-candidates/{}", journal.new_head().as_str())];
