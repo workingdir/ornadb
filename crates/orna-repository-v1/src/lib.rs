@@ -4261,15 +4261,7 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
-        let Some(old_head) = review.cwd.head().cloned() else {
-            return self.commit_reviewed_root_candidate(
-                review,
-                message,
-                &result_path,
-                &intent_hex,
-                &message_digest_hex,
-            );
-        };
+
         // 16-administration `commit`: the staged candidate is validated before
         // its commit is created, and a missing identity fails before any commit
         // object exists. A refused candidate therefore leaves no object or ref.
@@ -4279,6 +4271,15 @@ impl Repository {
         }
         self.validate_format3_index_tree(&review.index_tree)
             .map_err(|_| RepositoryError::InvalidCommitCandidate)?;
+        let Some(old_head) = review.cwd.head().cloned() else {
+            return self.commit_reviewed_root_candidate(
+                review,
+                message,
+                &result_path,
+                &intent_hex,
+                &message_digest_hex,
+            );
+        };
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-p", old_head.as_str(), "-m"])
