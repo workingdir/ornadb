@@ -21,7 +21,7 @@ fn full_publication_root_is_explicit() -> bool {
 #[test]
 fn default_corpus_loads_from_the_checked_in_fixture_root() {
     let corpus = Corpus::load_default().expect("checked-in conformance corpus loads by default");
-    assert_eq!(corpus.publication_digests.len(), 46);
+    assert_eq!(corpus.publication_digests.len(), 58);
     if !full_publication_root_is_explicit() {
         assert_eq!(
             Corpus::default_root(),
@@ -88,7 +88,7 @@ fn frozen_release_inventory_and_provenance_bind_the_complete_bundle() {
     if !full_publication_root_is_explicit() {
         // The checked-in subset covers runtime corpus consumers; whole-package
         // distributor inventory checks remain available with an explicit bundle.
-        assert_eq!(corpus.publication_digests.len(), 46);
+        assert_eq!(corpus.publication_digests.len(), 58);
         return;
     }
     let release: Value = serde_json::from_slice(
@@ -99,7 +99,7 @@ fn frozen_release_inventory_and_provenance_bind_the_complete_bundle() {
     let normative_digests: BTreeMap<String, String> =
         serde_json::from_value(release["normative_payload_sha256"].clone())
             .expect("normative digest map");
-    assert_eq!(normative_digests.len(), 46);
+    assert_eq!(normative_digests.len(), 58);
     assert_eq!(corpus.publication_digests, normative_digests);
 
     let manifest: Value = serde_json::from_slice(
@@ -199,7 +199,7 @@ fn release_file_walk_matches_the_reference_packager_exclusion_rules() {
     let root = reference_root();
     if !full_publication_root_is_explicit() {
         let corpus = Corpus::load(&root).expect("checked-in corpus is complete for conformance");
-        assert_eq!(corpus.publication_digests.len(), 46);
+        assert_eq!(corpus.publication_digests.len(), 58);
         return;
     }
     let files = actual_distribution_files(&root);

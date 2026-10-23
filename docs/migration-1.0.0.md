@@ -1,5 +1,10 @@
 # Migrating to OrnaDB 1.0.0
 
+> **Legacy guide.** The source-command workflow below belongs to the removed
+> `orna` binary and the legacy `orna-core` crate, not the current `orna-cli-v1`
+> CLI. Command names in this file were checked against
+> `crates/orna-cli-v1/src/cli_args.rs`.
+
 **Status:** This is migration guidance for the current source tree, not a
 promise that a production package is available. The checkout has no
 tracked production package or in-place upgrade command. The immutable Orna
@@ -47,104 +52,31 @@ predecessor and forward-edge sets. In particular:
   historical managed-product release plan; it does not amend the immutable
   1.0.0 contract or establish a current distribution requirement.
 
-The distinction below is important: changing an application source revision is
-implemented; upgrading the Orna engine/product from a predecessor is not.
+The current CLI has no application source-revision command, and no engine
+upgrade path exists in this checkout.
 
-## Application source changes (managed-product route)
+## Application source changes (legacy, not in the v1 CLI)
 
-Use this workflow when the database is already on a supported current engine
-and you are changing its backend-neutral `.orna` source.
+The `orna source check`, `orna source diff` and `orna source apply` commands
+that earlier revisions of this guide documented are not part of the current
+`orna` CLI. The verb list in `crates/orna-cli-v1/src/cli_args.rs` has no
+`source` verb. These commands existed only in the legacy `orna-core` crate and
+the removed `orna` binary; [CHANGELOG.md](../CHANGELOG.md) records their
+removal. Do not follow the removed workflow to change an installed
+application. This guide does not give a replacement command for source
+revisions.
 
-### 1. Keep the source as the portable input
+## Backend-neutral storage boundary (legacy)
 
-Submit one regular UTF-8 source file. The source compiler, not user-written
-SQL, describes functions, values, objects, and application changes. Internal
-storage adapters lower the typed migration representation for their own
-private schema; those generated statements are not a public migration format.
-
-### 2. Check without touching a database
-
-```text
-orna source check app.orna
-```
-
-`source check` reads one source file and emits diagnostics without opening a
-database, loading configuration, using the network, starting a child process,
-or writing files. It checks against the empty application catalogue. A clean
-check therefore does **not** prove that the source is continuous with, or
-applicable to, an installed revision.
-
-### 3. Review the semantic change
-
-For the managed local instance:
-
-```text
-orna source diff app.orna
-```
-
-For a direct SQLite path:
-
-```text
-orna --db ./data/app.sqlite source diff app.orna
-```
-
-`source diff` is read-only and compares the candidate with the active source
-and catalogue revision. It is the review step; it does not activate a
-candidate. The SQLite route requires an existing database for this comparison.
-
-### 4. Apply only the reviewed candidate
-
-For the managed local instance:
-
-```text
-orna source apply app.orna
-```
-
-For a direct SQLite path:
-
-```text
-orna --db ./data/app.sqlite source apply app.orna
-```
-
-The apply path checks and prepares the complete file, constructs a typed
-physical migration artifact, and commits the candidate revision and its
-application-migration ledger entry atomically. Error diagnostics leave the
-active revision and ledger unchanged. A concurrent apply that changes the
-expected base fails closed; re-run the check and diff against the new active
-revision instead of forcing the old candidate. Post-apply recovery must
-reproduce the prepared source/catalogue hashes.
-
-`source apply` is an application revision operation. It is not an engine
-upgrade, package installation, SQL import, or general-purpose SQL execution
-path.
-
-## Backend-neutral storage boundary
-
-The `.orna` source and its typed application model are the portable contract.
-The current adapters do not expose equivalent *implementation capacity* for
-every runtime surface yet:
-
-- A filesystem endpoint uses the direct SQLite adapter. Its current physical
-  implementation is bounded: supported object creation and field additions
-  use the typed storage model, while unsupported value/enum/record/binding
-  shapes, unsupported scalar fields, and other unimplemented physical
-  operations fail closed. SQLite does not reinterpret the source as a second
-  language or silently add backend-specific semantics.
-- The source remains portable across supported adapters. A SQLite rejection
-  identifies an adapter capability boundary that must be implemented before
-  that deployment can use the source shape; it is not permission to fork the
-  source or write backend-specific SQL.
-- Direct SQLite invocation currently accepts SERVER functions only. It does
-  not provide CLIENT/Qt/resource transports, `--trace`, or a Qt runtime. USER
-  state, security administration, bounded raw calls, and redacted inspection
-  have direct local routes.
-
-The internal migration language is deliberately closed and typed rather than
-SQL. The checked-in application migration source is
-`crates/orna-storage/migrations/0046_application_migrations.orna`; users should
-not edit it or its generated adapter artifacts.
-SQLite has its own internal schema bootstrap and migration boundary. This is an
-adapter implementation detail and does not alter the source language.
+The `.orna` source is the portable contract. The adapter capability statements
+that earlier revisions of this section made (a direct SQLite filesystem
+adapter, its supported and rejected shapes, and a checked-in
+`0046_application_migrations.orna` migration source) describe the legacy
+`orna-core` surface. None of them is verified against the v1 CLI in this
+checkout: `crates/orna-storage` does not exist (the storage crate is
+`crates/orna-storage-v1`), and no `0046_application_migrations.orna` file is
+present. Do not rely on those statements. For the `--db` endpoint forms the
+v1 CLI accepts, read `Endpoint::parse` in `crates/orna-cli-v1/src/main.rs`.
 
 
 ## Standard-library compatibility (managed-product evidence)

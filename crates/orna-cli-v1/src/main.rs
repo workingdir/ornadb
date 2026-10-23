@@ -121,11 +121,14 @@ fn write_cli_line(
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "CLI output could not be written",
-                "check the output stream, then retry the command",
-            )
+            Diagnostic {
+                code: "E2200",
+                title: Cow::Borrowed("CLI output could not be written"),
+                help: "check the output stream, then retry the command",
+                exit: Exit::Presentation,
+                detail: None,
+                body: None,
+            }
         })
 }
 #[allow(
@@ -215,10 +218,18 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
-    if let orna_project_v1::ProjectLoadError::InvalidModule {
-        logical_path,
-        diagnostics,
-    } = &error
+    let invalid_unit = match &error {
+        orna_project_v1::ProjectLoadError::InvalidModule {
+            logical_path,
+            diagnostics,
+        }
+        | orna_project_v1::ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        } => Some((logical_path, diagnostics)),
+        _ => None,
+    };
+    if let Some((logical_path, diagnostics)) = invalid_unit
         && let Some(first) = diagnostics.first()
     {
         // The first parser diagnostic is the primary code: it is the spec code
@@ -1775,7 +1786,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: project.standard_profile().map(|profile| {
                     // Verify the full graph-bound bundle in the durable
                     // evaluator while loading only import-reachable modules.
@@ -2003,15 +2014,24 @@ fn run_project_invocation_with_arguments(
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => {
-            let mut rejection = Diagnostic::target(
-                "E2200",
-                "durable project invocation was rejected",
-                "the project transaction failed atomically; no partial changes were committed",
-            );
-            rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
-            Err(rejection)
-        }
+        StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
+            Some(mut published) => {
+                published.detail = Some(
+                    "the project transaction failed atomically; no partial changes were committed"
+                        .into(),
+                );
+                published
+            }
+            None => {
+                let mut rejection = Diagnostic::target(
+                    "E2200",
+                    "durable project invocation was rejected",
+                    "the project transaction failed atomically; no partial changes were committed",
+                );
+                rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+                rejection
+            }
+        }),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -2090,6 +2110,21 @@ fn run_project_stream_invocation_with_project(
             "use a supported finite-list stream root",
         )),
     }
+}
+
+/// Publishes a runtime failure under its catalogued Orna code, with the
+/// catalogue title and help. Uncatalogued evaluator codes return `None` so each
+/// caller keeps its own fallback; no unpublished code is promoted.
+fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Option<Diagnostic> {
+    let documentation = diagnostic_documentation(diagnostic.code())?;
+    Some(Diagnostic {
+        code: documentation.code,
+        title: Cow::Borrowed(documentation.title),
+        help: documentation.help,
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    })
 }
 fn run_pure_invocation(
     endpoint: &Endpoint,
@@ -2190,7 +2225,11 @@ fn run_pure_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| Diagnostic::unavailable(
+            "requested invocation is not available",
+            "define a reachable zero-argument pure function with the requested name",
+        ))),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
@@ -2918,6 +2957,25 @@ fn initialize_repository(
         .map_err(|error| repository_init_diagnostic(&error))?;
     write_success_line("initialized Orna repository", color_enabled)
 }
+/// Maps a fetch failure to its documented exit status: an unavailable remote is a
+/// connection failure (3) and a malformed advertisement is a protocol failure (7);
+/// every other fetch refusal keeps the target status.
+fn fetch_failure(error: &orna_repository_v1::FetchError) -> Diagnostic {
+    let exit = match error {
+        orna_repository_v1::FetchError::RemoteUnavailable => Exit::Connection,
+        orna_repository_v1::FetchError::MalformedAdvertisement => Exit::Protocol,
+        _ => Exit::Target,
+    };
+    Diagnostic {
+        code: "E2100",
+        title: Cow::Borrowed("Git fetch failed"),
+        help: "check the configured remote and retry `fetch`",
+        exit,
+        detail: Some(error.to_string()),
+        body: None,
+    }
+}
+
 fn run_fetch(
     endpoint: &Endpoint,
     remote: &str,
@@ -2944,14 +3002,7 @@ fn run_fetch(
     )?;
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "Git fetch failed",
-                "check the configured remote and retry `fetch`",
-                error.to_string(),
-            )
-        })?;
+        .map_err(|error| fetch_failure(&error))?;
     if let Some(continuity) = report.continuity() {
         if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);
