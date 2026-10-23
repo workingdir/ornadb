@@ -17,6 +17,10 @@ section governs the conflict for the scope stated in that section. This index
 defines naming and traceability only. It does not change the existing
 source-of-truth or authority rules.
 
+Work ADRs 0001-0117 that Orna-1.1.0 supersedes or that no longer constrain code
+are kept under `archive/1.0/`; each has a row with its evidence in
+[`archive/1.0/STATUS.md`](archive/1.0/STATUS.md). Archived files are not deleted.
+
 ## Status convention
 
 The recent accepted slices below are implemented unless a deferred portion is
@@ -62,33 +66,33 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0116 | Superseded by 0117: the browser playground and its app-specific runtime path are retired. | Historical rationale only; no current product or runtime commitment remains. |
 | 0117 | D6 retires the browser playground and keeps generic native serving. | `orna serve`, Git transport, and the removable `std.devtools` frontend remain under ORNA-SERVE-001 and ORNA-SERVE-007..009; no app-specific browser or WASM path remains. |
 | 0118 | Format-3 schema expression digests hash tokens with free references replaced by their resolved declarations, under `ornadb.computed-selector.v2` and `ornadb.refinement-assertion.v2`. | Postfix unit and currency suffixes and member names keep their spelling. |
-| 0101 | OrnaDB 1.0 CLIENT VM trust boundary | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
+| 0120 | OrnaDB 1.0 CLIENT VM trust boundary (renumbered from duplicate 0101) | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
 
 ## Current work ADRs
 
-* **work ADR 0001:** [PostgreSQL Is a Private Kernel](0001-private-postgresql-kernel.md)
-* **work ADR 0002:** [Public Language Contract](0002-public-language-contract.md)
+* **work ADR 0001:** [PostgreSQL Is a Private Kernel](archive/1.0/0001-private-postgresql-kernel.md)
+* **work ADR 0002:** [Public Language Contract](archive/1.0/0002-public-language-contract.md)
 * **work ADR 0003:** [Active Source Revision Is Authoritative](0003-source-revision-authority.md)
-* **work ADR 0004:** [Private PostgreSQL Layout Uses Stable Orna Identities](0004-private-postgresql-layout.md)
-* **work ADR 0005:** [Single-Row SERVER INSERT](0005-single-row-server-insert.md)
+* **work ADR 0004:** [Private PostgreSQL Layout Uses Stable Orna Identities](archive/1.0/0004-private-postgresql-layout.md)
+* **work ADR 0005:** [Single-Row SERVER INSERT](archive/1.0/0005-single-row-server-insert.md)
 * **work ADR 0006:** [Field Renames Are Replay-Safe Identity Transitions](0006-replay-safe-field-renames.md)
-* **work ADR 0007:** [Single-Object SERVER UPDATE](0007-single-object-server-update.md)
-* **work ADR 0008:** [Single-Object SERVER DELETE](0008-single-object-server-delete.md)
-* **work ADR 0009:** [Identity-Selected SERVER SELECT](0009-identity-selected-server-select.md)
+* **work ADR 0007:** [Single-Object SERVER UPDATE](archive/1.0/0007-single-object-server-update.md)
+* **work ADR 0008:** [Single-Object SERVER DELETE](archive/1.0/0008-single-object-server-delete.md)
+* **work ADR 0009:** [Identity-Selected SERVER SELECT](archive/1.0/0009-identity-selected-server-select.md)
 * **work ADR 0010:** [Parameter-Free SERVER SELECT DISTINCT](0010-parameter-free-server-select-distinct.md)
-* **work ADR 0011:** [Direct Boolean SERVER SELECT Predicates](0011-direct-boolean-server-select-predicates.md)
+* **work ADR 0011:** [Direct Boolean SERVER SELECT Predicates](archive/1.0/0011-direct-boolean-server-select-predicates.md)
 * **work ADR 0012:** [Direct Boolean Predicates in SELECT DISTINCT](0012-direct-boolean-select-distinct-predicates.md)
 * **work ADR 0013:** [Required Unique Reference Fields](0013-required-unique-reference-fields.md)
-* **work ADR 0014:** [Host-Only Backend Shell](0014-host-only-backend-shell.md)
+* **work ADR 0014:** [Host-Only Backend Shell](archive/1.0/0014-host-only-backend-shell.md)
 * **work ADR 0015:** [The First CLIENT Function Returns a Boolean Constant](0015-boolean-constant-client-functions.md)
 * **work ADR 0016:** [Standard Scalars Are Catalogue-Backed `std` Value Types](0016-catalogue-backed-standard-types.md)
-* **work ADR 0017 (partly superseded):** [Orna Ships and Owns Its PostgreSQL Runtime](0017-bundled-postgresql-runtime.md)
+* **work ADR 0017 (partly superseded):** [Orna Ships and Owns Its PostgreSQL Runtime](archive/1.0/0017-bundled-postgresql-runtime.md)
 * **work ADR 0018:** [Source Check Is an Offline One-File Compiler Command](0018-offline-source-check.md)
-* **work ADR 0019:** [PostgreSQL Is Part of the Orna Executable](0019-embedded-postgresql-engine.md)
+* **work ADR 0019:** [PostgreSQL Is Part of the Orna Executable](archive/1.0/0019-embedded-postgresql-engine.md)
 * **work ADR 0020:**
   [Authenticated Sessions Authorise Pinned Function Execution](0020-authenticated-execute-decisions.md)
 * **work ADR 0021:**
-  [PostgreSQL Persists the Security Decision Snapshot](0021-durable-security-snapshot.md)
+  [PostgreSQL Persists the Security Decision Snapshot](archive/1.0/0021-durable-security-snapshot.md)
 * **work ADR 0022:**
   [CLIENT Evaluation Requires an Authorised Invocation](0022-client-evaluation-requires-authorisation.md)
 * **work ADR 0023:**
@@ -106,11 +110,11 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0029:**
   [Enum Types Are Ordered Catalogue Values](0029-catalogue-enum-value-types.md)
 * **work ADR 0030:**
-  [One Authenticated, Authorised, Audited SERVER SELECT](0030-authenticated-server-select.md)
+  [One Authenticated, Authorised, Audited SERVER SELECT](archive/1.0/0030-authenticated-server-select.md)
 * **work ADR 0031:**
   [Named Immutable Records Are Nominal Catalogue Values](0031-named-immutable-record-values.md)
 * **work ADR 0032:**
-  [Raw Calls Dispatch One-Column SERVER SELECTs](0032-raw-server-select-dispatch.md)
+  [Raw Calls Dispatch One-Column SERVER SELECTs](archive/1.0/0032-raw-server-select-dispatch.md)
 * **work ADR 0033:**
   [Local Raw Recovery Calls Use Stable Function Identities](0033-local-raw-recovery-client.md)
 * **work ADR 0034:**
@@ -120,7 +124,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0036:**
   [Constructed Types Use Canonical Recursive Descriptors](0036-canonical-constructed-type-descriptors.md)
 * **work ADR 0037:**
-  [PostgreSQL Uses One Private Rust Crate](0037-single-private-postgresql-crate.md)
+  [PostgreSQL Uses One Private Rust Crate](archive/1.0/0037-single-private-postgresql-crate.md)
 * **work ADR 0038:**
   [Installed Source Apply Activates One Complete File](0038-installed-source-apply.md)
 * **work ADR 0039:**
@@ -140,9 +144,9 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0046:**
   [Existing Objects Admit One Appended Nullable Executable Scalar Field](0046-appended-nullable-scalar-fields.md)
 * **work ADR 0047:**
-  [The First 1.0 Release Uses One Authenticated Debian Authority](0047-first-one-zero-release.md)
+  [The First 1.0 Release Uses One Authenticated Debian Authority](archive/1.0/0047-first-one-zero-release.md)
 * **work ADR 0048:**
-  [Raw Reference Calls Select One Projected Object Row](0048-raw-identity-selected-server-select.md)
+  [Raw Reference Calls Select One Projected Object Row](archive/1.0/0048-raw-identity-selected-server-select.md)
 * **work ADR 0049:**
   [Canonical Raw Calls Bind One Bounded Argument Pair](0049-canonical-raw-argument-pairs.md)
 * **work ADR 0050:**
@@ -165,8 +169,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [`orna.std/3` Standard Output Value Types](0058-orna-std-3-output-value-types.md)
 * **work ADR 0059:**
   [Compiler-Backed `orna.std/3` Standard Upgrade](0059-compiler-backed-v3-standard-upgrade.md)
-* **work ADR 0059 (duplicate historical number):**
-  [Offline LSP and Editor Tooling for `.orna` Source](0059-offline-lsp-editor-tooling.md)
+* **work ADR 0119 (renumbered from duplicate 0059):**
+  [Offline LSP and Editor Tooling for `.orna` Source](0119-offline-lsp-editor-tooling.md)
 * **work ADR 0060:**
   [CLIENT Capability Requirements and the Local Sandbox](0060-client-capability-requirements.md)
 * **work ADR 0061:**
@@ -174,7 +178,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0062:**
   [`std.ui.UI` Standard-Library Value Type](0062-std-ui-value-type.md)
 * **work ADR 0063:**
-  [Automatic Runtime Selection](0063-automatic-runtime-selection.md)
+  [Automatic Runtime Selection](archive/1.0/0063-automatic-runtime-selection.md)
 * **work ADR 0064:**
   [`sys.inspect` Core](0064-sys-inspect-core.md)
 * **work ADR 0065:**
@@ -248,7 +252,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0097:**
   [Normative REPL Boundary](0097-normative-repl-boundary.md)
 * **work ADR 0098:**
-  [Ring-1 Catalogue and Revision Gateway Deferral](0098-ring1-catalogue-revision-deferral.md)
+  [Ring-1 Catalogue and Revision Gateway Deferral](archive/1.0/0098-ring1-catalogue-revision-deferral.md)
 * **work ADR 0099:**
   [OrnaDB 1.0 CLIENT Capability-Grant Configuration Boundary](0099-client-capability-grant-configuration.md)
 * **work ADR 0100:**
@@ -263,8 +267,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
   [Studio Catalogue Tree and Function Search Boundary](0104-studio-catalogue-tree-search-boundary.md)
 * **work ADR 0105 (deferred):**
   [Studio Security and DBA Page Boundary](0105-studio-security-dba-page-boundary.md)
-* **work ADR 0101:**
-  [OrnaDB 1.0 CLIENT VM Trust Boundary](0101-client-vm-trust-boundary.md)
+* **work ADR 0120:**
+  [OrnaDB 1.0 CLIENT VM Trust Boundary](0120-client-vm-trust-boundary.md)
 * **work ADR 0108 (deferred):**
   [Persistent Scalar and Record Backend Parity](0108-persistent-value-backend-parity-deferral.md)
 * **work ADR 0109 (deferred):**
