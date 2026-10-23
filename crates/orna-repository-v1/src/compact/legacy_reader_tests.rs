@@ -183,9 +183,9 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&compact_schema(table).encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&compact_schema(table).encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -277,9 +277,9 @@ fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -514,9 +514,9 @@ fn compact_primitive_parquet(
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -587,9 +587,9 @@ fn compact_ovb_parquet(
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -698,29 +698,6 @@ fn compact_ovb_segment_for_schema(
         false,
     )
     .unwrap()
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let word = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        encoded.push(ALPHABET[((word >> 18) & 0x3f) as usize] as char);
-        encoded.push(ALPHABET[((word >> 12) & 0x3f) as usize] as char);
-        encoded.push(if chunk.len() > 1 {
-            ALPHABET[((word >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            ALPHABET[(word & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    encoded
 }
 
 fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
@@ -2608,8 +2585,9 @@ fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_iden
             ),
         ],
     );
-    let expected_columns = base64(&compact_columns());
-    let malformed_columns = base64(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
+    let expected_columns = orna_value_v1::base64_encode(&compact_columns());
+    let malformed_columns =
+        orna_value_v1::base64_encode(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
     let malformed_shard = String::from_utf8(shard)
         .unwrap()
         .replacen(&expected_columns, &malformed_columns, 1)
