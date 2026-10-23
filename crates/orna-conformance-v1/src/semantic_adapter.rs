@@ -9899,6 +9899,7 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 #[cfg(test)]
 mod transaction_admission_tests {
     use super::{
+        AdmissionCatalogue,
         SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
         TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
         TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
@@ -11005,6 +11006,7 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
         admitted_transaction_module, lower_relation_bindings,
@@ -12813,6 +12815,7 @@ fn checkpoint_atomicity_stream_error(error: orna_runtime_v1::StreamStepError) ->
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
         StageOutcome, admit_project_list_stream, admit_transaction_project,
         stream_handler_diagnostic, substitute_list_item, table_key,
