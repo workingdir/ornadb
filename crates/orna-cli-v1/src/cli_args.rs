@@ -109,6 +109,17 @@ pub(super) enum Command {
     },
     Diff(Vec<String>),
     Log(Vec<String>),
+    /// Git-native operation run against the backing repository: `git -C DB NAME ...`
+    /// for a local `--db` path, unchanged `git NAME ...` otherwise (ORNA-CLI-001).
+    GitPassthrough {
+        name: &'static str,
+        arguments: Vec<String>,
+    },
+    /// `restore --staged --row TABLE KEY`: restore one logical row's index entry to HEAD.
+    RestoreRow {
+        table: String,
+        key: String,
+    },
     History(Vec<String>),
     Query(Vec<String>),
     Import(Vec<String>),
@@ -234,6 +245,64 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
     }
 }
 
+/// Refusal for a Git-compatible or Orna-specific operation this build does not
+/// implement. It is decided at parse time, before any repository is opened, so a
+/// refused command never mutates anything.
+fn refused_command(name: &str) -> Diagnostic {
+    let (title, help) = match name {
+        "checkout" => (
+            "`checkout` is not available in this build",
+            "use `branch` to list branches; switching the Orna workspace is not available in this build",
+        ),
+        "switch" => (
+            "`switch` is not available in this build",
+            "use `branch` to list branches; switching the Orna workspace is not available in this build",
+        ),
+        "merge" => (
+            "`merge` is not available in this build",
+            "merging rows is not available in this build; record changes with `commit`",
+        ),
+        "reset" => (
+            "`reset` is not available in this build",
+            "use `restore --staged --row TABLE KEY_TEXT` to unstage one row",
+        ),
+        "pull" => (
+            "`pull` is not available in this build",
+            "use `fetch REMOTE BRANCH`; fetching does not merge in this build",
+        ),
+        "stash" => (
+            "`stash` is not available in this build",
+            "staged rows cannot be stashed in this build; commit them or use `restore --staged --row TABLE KEY_TEXT`",
+        ),
+        "fmt" => (
+            "`fmt` is not available in this build",
+            "source formatting is not available in this build; use `check` to validate",
+        ),
+        "verify" => (
+            "`verify` is not available in this build",
+            "use `check` to validate the project in this build",
+        ),
+        "prune" => (
+            "`prune` is not available in this build",
+            "removing unreachable data is not available in this build; nothing was deleted",
+        ),
+        "upgrade" => (
+            "`upgrade` is not available in this build",
+            "format upgrades are not available in this build; nothing was changed",
+        ),
+        "restore" => (
+            "`restore` is not available in this build",
+            "use `restore --staged --row TABLE KEY_TEXT` to unstage one row; restoring worktree files is not available in this build",
+        ),
+        _ => (
+            "command is not available in this build",
+            "use `--help` to list supported commands",
+        ),
+    };
+    Diagnostic::usage("E1002", title, help)
+}
+
+
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
@@ -346,6 +415,36 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 ));
             }
             Command::AddRow { table: table.to_owned(), key: key.to_owned() }
+        }
+        Some("restore") => {
+            if words.next() != Some("--staged") || words.next() != Some("--row") {
+                return Err(refused_command("restore"));
+            }
+            let table = words.next().ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1001",
+                    "`restore --staged --row` needs a table",
+                    "use `restore --staged --row TABLE KEY_TEXT`",
+                )
+            })?;
+            let key = words.next().ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1001",
+                    "`restore --staged --row` needs a key",
+                    "use `restore --staged --row TABLE KEY_TEXT`",
+                )
+            })?;
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unexpected trailing arguments for `restore`",
+                    "use `restore --staged --row TABLE KEY_TEXT` with exactly one table and key",
+                ));
+            }
+            Command::RestoreRow {
+                table: table.to_owned(),
+                key: key.to_owned(),
+            }
         }
         Some("status") => {
             let local_format = match words.next() {
@@ -582,6 +681,30 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Command::Diff(arguments)
         }
         Some("log") => Command::Log(words.by_ref().map(str::to_owned).collect()),
+        Some("branch") => Command::GitPassthrough {
+            name: "branch",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
+        Some("tag") => Command::GitPassthrough {
+            name: "tag",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
+        Some("show") => Command::GitPassthrough {
+            name: "show",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
+        Some("blame") => Command::GitPassthrough {
+            name: "blame",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
+        Some("remote") => Command::GitPassthrough {
+            name: "remote",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
+        Some("clone") => Command::GitPassthrough {
+            name: "clone",
+            arguments: words.by_ref().map(str::to_owned).collect(),
+        },
         Some("explain") => Command::Explain(
             words
                 .next()
@@ -636,6 +759,9 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
             None => Command::Run(Invocation::ProjectMain),
         },
+        Some(name @ ("checkout" | "switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune" | "upgrade")) => {
+            return Err(refused_command(name));
+        }
         Some(_) => {
             return Err(Diagnostic::usage(
                 "E1002",
