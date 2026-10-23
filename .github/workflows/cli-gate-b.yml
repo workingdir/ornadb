@@ -7,33 +7,28 @@ name: CLI Gate B
 # When it runs:
 # - on every push to main, once per commit (the group is keyed on the commit);
 # - on demand (workflow_dispatch);
-# - on pull requests that touch the data path it drives (listed below). An older run for
-#   the same pull request is cancelled when a new commit arrives.
+# - on a pull request that carries the `gate-b` label (add the label to a pull request
+#   that changes the data path: orna-cli-v1, evaluator, repository, runtime, storage,
+#   sys, value, syntax, project or the stdlib). A new commit cancels that pull request's
+#   older run.
 #
-# Known limit: a pull request that changes only a crate this test depends on
-# transitively and that is not listed (for example orna-application-v1 or
-# orna-semantic-v1) does not run Gate B before merge. The run on main after the merge
-# catches it. No branch protection rule requires this check today; a path-filtered
-# workflow must not become a required check, because on pull requests outside the
-# paths it never reports and the required check would stay "Expected".
+# Why not on every pull request that touches a listed path: a path list cannot name the
+# whole dependency closure (the orna-cli-v1 tests depend on 28 workspace crates; a change
+# to orna-syntax-v1 alone matched no path), and each run holds a runner for one to two
+# hours. On 2026-10-23 ten pull request runs were in progress and three queued at once,
+# which delayed every other CI job, and two pull requests merged before their Gate B run
+# finished. No branch protection rule requires this check. The run on main after each
+# merge is the evidence; a pull request author who wants it earlier adds the label.
 
 on:
   push:
     branches:
       - main
   pull_request:
-    paths:
-      - ".github/workflows/cli-gate-b.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "stdlib/**"
-      - "crates/orna-cli-v1/**"
-      - "crates/orna-evaluator-v1/**"
-      - "crates/orna-repository-v1/**"
-      - "crates/orna-runtime-v1/**"
-      - "crates/orna-storage-v1/**"
-      - "crates/orna-sys-v1/**"
-      - "crates/orna-value-v1/**"
+    types:
+      - labeled
+      - synchronize
+      - reopened
   workflow_dispatch:
 
 permissions:
@@ -43,12 +38,15 @@ env:
   CARGO_BUILD_JOBS: 2
   RUST_TEST_THREADS: 2
 
+# A pull request run that will not execute the job (no gate-b label, or another label was
+# added) gets a unique group, so it can never cancel a running labelled Gate B run.
 concurrency:
-  group: cli-gate-b-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  group: cli-gate-b-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b') && github.ref) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gate-b:
+    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
