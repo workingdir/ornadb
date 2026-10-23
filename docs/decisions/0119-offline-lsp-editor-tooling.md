@@ -1,4 +1,4 @@
-# 0059 — Offline LSP and Editor Tooling for `.orna` Source
+# 0119 — Offline LSP and Editor Tooling for `.orna` Source
 
 **Status:** accepted
 

@@ -1,6 +1,6 @@
 # ADR 0011: Direct Boolean SERVER SELECT Predicates
 
-**Status:** Accepted
+**Status:** Accepted; archived. Implemented only in the 1.0 island crate `orna-artifact` (`server_plan.rs`, `server_plan/codec.rs`), with no product consumer outside that crate's own tests; deleted with island step 7 (W07).
 
 ## Decision
 
