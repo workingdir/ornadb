@@ -10,6 +10,7 @@ been published.
   alias or shim. Build output is `target/<profile>/orna`, and the Linux package
   and release paths, CI, and the command examples in the README and docs name
   `orna`.
+- The live WebSocket handshake no longer accepts URL-alphabet or mixed-alphabet `Sec-WebSocket-Key` values; only padded standard base64 is accepted (RFC 6455).
 - `orna --help` names the command `orna`. It says that `unmount DIR` detaches
   the kernel mount, including an orphaned Orna mount, and releases its view
   record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
