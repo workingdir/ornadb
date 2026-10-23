@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-tryfrom.orna",
+  "failing_phase": "resolve",
+  "primary_diagnostic": "ORNA091-E-TRYFROM",
+  "message_contains": "use From<Source>; From may fail in Orna",
+  "status": "expected-not-executed"
+}

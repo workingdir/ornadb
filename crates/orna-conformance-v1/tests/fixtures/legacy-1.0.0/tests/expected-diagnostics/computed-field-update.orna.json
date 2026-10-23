@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/computed-field-update.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E3011",
+  "message_contains": "computed field `full_name` cannot be updated directly",
+  "status": "expected-not-executed"
+}
