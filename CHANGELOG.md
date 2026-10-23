@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Managed paths refuse any `.git` component at any depth, in any letter case,
+  including Windows-equivalent spellings (trailing dot or space, `git~1`, a
+  `:` stream suffix and HFS ignorable characters), on write and on load of a
+  committed tree. Length is no longer capped, because Git stores names of any
+  length; the checkout plan still lists user paths such as `Sub/.GIT/notes`.
 - `orna --help` names the command `orna`. It says that `unmount DIR` detaches
   the kernel mount, including an orphaned Orna mount, and releases its view
   record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
