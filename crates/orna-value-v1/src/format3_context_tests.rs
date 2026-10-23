@@ -1096,3 +1096,67 @@ fn stored_table_reference_admission_binds_database_to_containing_snapshot_contex
         Err(Error::InvalidValue)
     );
 }
+
+#[test]
+fn stored_table_reference_roundtrips_as_identity_without_snapshot() {
+    let reference = Value::table_reference([1; 16], [2; 16], Raw::Int(7.into())).unwrap();
+    let Raw::Tag(60021, payload) = reference.raw() else {
+        panic!("table reference must use tag 60021");
+    };
+    assert_eq!(
+        payload.as_ref(),
+        &Raw::Array(vec![uuid_raw([1; 16]), uuid_raw([2; 16]), Raw::Int(7.into())])
+    );
+    let bytes = reference.encode().unwrap();
+    let decoded = Value::decode(&bytes).unwrap();
+    assert_eq!(decoded, reference);
+    assert_eq!(decoded.encode().unwrap(), bytes);
+    // A fourth element would embed snapshot context; a stored table reference has none.
+    let with_snapshot = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid_raw([1; 16]),
+            uuid_raw([2; 16]),
+            Raw::Int(7.into()),
+            Raw::Null,
+        ])),
+    );
+    assert!(Value::new(with_snapshot).is_err());
+}
+
+#[test]
+fn table_reference_equality_hash_and_order_use_identity_only() {
+    use std::{
+        cmp::Ordering,
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+    fn digest(value: &Value) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let base = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    let same = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    assert_eq!(base, same);
+    assert_eq!(digest(&base), digest(&same));
+    assert_eq!(compare_primary_keys(&base, &same).unwrap(), Ordering::Equal);
+
+    let other_key = Value::table_reference([1; 16], [2; 16], Raw::Int(4.into())).unwrap();
+    let other_table = Value::table_reference([1; 16], [5; 16], Raw::Int(3.into())).unwrap();
+    let other_database = Value::table_reference([9; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    for other in [&other_key, &other_table, &other_database] {
+        assert_ne!(&base, other);
+    }
+    assert_eq!(compare_primary_keys(&base, &other_key).unwrap(), Ordering::Less);
+    assert_eq!(compare_primary_keys(&other_key, &base).unwrap(), Ordering::Greater);
+    assert_eq!(compare_primary_keys(&base, &other_table).unwrap(), Ordering::Less);
+    assert_eq!(compare_primary_keys(&base, &other_database).unwrap(), Ordering::Less);
+}
+
+#[test]
+fn table_reference_rejects_non_key_components() {
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Null).is_err());
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Map(vec![])).is_err());
+}

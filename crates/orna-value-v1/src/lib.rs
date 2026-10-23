@@ -134,7 +134,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Canonical CBOR's supported data model. `Tag` is public for schema and
 /// protocol adapters, but both construction and decoding validate the closed
 /// Orna tag registry before bytes may be emitted.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub enum Raw {
     Null,
     Bool(bool),
@@ -191,7 +191,7 @@ impl fmt::Debug for Raw {
 }
 
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct Value(Raw);
 
 impl fmt::Debug for Value {
@@ -214,6 +214,22 @@ impl Value {
     }
     pub fn raw(&self) -> &Raw {
         &self.0
+    }
+    /// Builds the stored table-reference identity `[database, table, key]`
+    /// (tag 60021, ORNA-REF-001). The key must be one primary-key value; no row
+    /// or snapshot context is embedded.
+    pub fn table_reference(database_id: [u8; 16], table_id: [u8; 16], key: Raw) -> Result<Self> {
+        if !is_primary_key_component(&key) {
+            return Err(Error::InvalidValue);
+        }
+        Self::new(Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![
+                uuid_raw(database_id),
+                uuid_raw(table_id),
+                key,
+            ])),
+        ))
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode_raw(&self.0)
