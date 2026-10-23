@@ -1485,6 +1485,18 @@ async fn core_transactions_and_assertions_work_without_std() {
 }
 
 fn captured_standard_project() -> (tempfile::TempDir, String) {
+    captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", include_str!("fixtures/captured-standard-parent.orna"))],
+    )
+}
+
+/// Pins `stdlib/std` to a snapshot holding the standard root plus `standard`, and
+/// commits the project root holding `project` beside the pinned gitlink.
+fn captured_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
     let directory = tempfile::tempdir().expect("project");
     let module_path = directory.path().join("stdlib/std");
     std::fs::create_dir_all(&module_path).expect("standard module path");
@@ -1494,19 +1506,15 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
         include_str!("fixtures/captured-standard-main.orna"),
     )
     .expect("standard database root");
-    std::fs::write(
-        module_path.join("math.orna"),
-        include_str!("fixtures/captured-standard-math.orna"),
-    )
-    .expect("standard source module");
+    for &(name, source) in standard {
+        std::fs::write(module_path.join(name), source).expect("standard source module");
+    }
     commit_directory(&module_path, "standard module snapshot");
     let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
 
-    std::fs::write(
-        directory.path().join("main.orna"),
-        include_str!("fixtures/captured-standard-parent.orna"),
-    )
-    .expect("importing project root");
+    for &(name, source) in project {
+        std::fs::write(directory.path().join(name), source).expect("importing project source");
+    }
     std::fs::write(
         directory.path().join(".gitmodules"),
         "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://github.com/workingdir/ornadb-std.git\n",
@@ -1515,7 +1523,9 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
     initialize_project(directory.path());
     git_output_at(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
     git_output_at(directory.path(), &["config", "user.name", "kierandrewett"]);
-    git_output_at(directory.path(), &["add", "main.orna", ".gitmodules", ".orna"]);
+    let mut arguments = vec!["add", ".gitmodules", ".orna"];
+    arguments.extend(project.iter().map(|&(name, _)| name));
+    git_output_at(directory.path(), &arguments);
     let link = format!("160000,{module_commit},stdlib/std");
     git_output_at(
         directory.path(),
@@ -1523,6 +1533,15 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
     );
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
     (directory, module_commit)
+}
+
+/// The pinned `std.list` closure: `list` imports `collection`, and `math` is the standard root's dependency.
+fn pinned_list_closure() -> [(&'static str, &'static str); 3] {
+    [
+        ("collection.orna", include_str!("fixtures/captured-standard-collection.orna")),
+        ("list.orna", include_str!("fixtures/captured-standard-list.orna")),
+        ("math.orna", include_str!("fixtures/captured-standard-math.orna")),
+    ]
 }
 
 #[test]
@@ -1565,6 +1584,48 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
     assert_eq!(run.stdout, b"invocation completed\n");
     assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
+    let (directory, _module_commit) = captured_standard_project();
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_evaluates_a_multi_module_project_importing_the_pinned_standard_collection() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[
+            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
+            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+        ],
+    );
+
+    let output = invoke(directory.path(), "invoke", "seed");
+
+    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_rejects_a_negative_take_count_from_the_pinned_standard_list() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[("main.orna", include_str!("fixtures/captured-standard-negative-take-main.orna"))],
+    );
+
+    let output = invoke(directory.path(), "invoke", "seed");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("error["));
 }
 
 #[test]
