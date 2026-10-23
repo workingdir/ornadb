@@ -1,6 +1,6 @@
 # ADR 0094: Reference-Defined Run Entry Contract
 
-**Status:** Accepted bounded `orna run` contract; `std.launch` metadata deferred
+**Status:** Accepted bounded `orna run` contract; `std.launch` metadata deferred. The `orna run` invocation rules (ORNA-RUN-001/002) are live (`crates/orna-cli-v1/src/cli_args.rs`); only the `std.launch` metadata part is dead.
 
 ## Decision
 

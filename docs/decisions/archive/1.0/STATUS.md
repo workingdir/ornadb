@@ -41,6 +41,7 @@ Evidence: `grep -rlF` of the ADR keyword in `reference/Orna-1.1.0` and `crates/`
 | [0046](../../0046-appended-nullable-scalar-fields.md) | ADR 0046: Existing Objects Admit One Appended Nullable Executable Scalar Field | still constrains | nullable: `crates/orna-artifact/src/server_mutation_plan.rs` |
 | [0049](../../0049-canonical-raw-argument-pairs.md) | ADR 0049: Canonical Raw Calls Bind One Bounded Argument Pair | still constrains | raw call: `crates/orna-protocol/src/frame.rs` |
 | [0050](../../0050-canonical-raw-reference-value-update.md) | ADR 0050: Canonical Raw Calls Update One Selected Object with One Value | still constrains | raw call: `crates/orna-protocol/src/frame.rs` |
+| [0051](../../0051-unique-text-fields.md) | ADR 0051: Text Fields Have Byte-Exact Uniqueness | still constrains | unique text: spec-only (Orna-1.1.0) |
 | [0052](../../0052-raw-unique-text-server-select.md) | ADR 0052: Raw Calls Select One Object by Unique Text | still constrains | raw call: `crates/orna-protocol/src/frame.rs` |
 | [0053](../../0053-sealed-sys-invoke-carriers.md) | ADR 0053: Sealed `sys.invoke` Carriers Use Three ORV5 Codecs | still constrains | sys.invoke: `crates/orna-application-v1/src/lib.rs` |
 | [0054](../../0054-sealed-sys-invoke-signature-event-stream.md) | ADR 0054: `sys.invoke` Has One Sealed Request Stream | still constrains | sys.invoke: `crates/orna-application-v1/src/lib.rs` |
@@ -82,6 +83,7 @@ Evidence: `grep -rlF` of the ADR keyword in `reference/Orna-1.1.0` and `crates/`
 | [0091](../../0091-client-vm-trust-and-sandbox.md) | Work ADR 0091: CLIENT VM Trust and Sandbox (Deferred) | still constrains | VM: `crates/orna-client/src/execution.rs` |
 | [0092](../../0092-function-backed-cli-sessions.md) | ADR 0092: Function-Backed CLI Sessions | still constrains | session: `crates/orna-application-v1/src/lib.rs` |
 | [0093](../../0093-reflective-gateway-contracts.md) | ADR 0093: Gateway and Protocol Contract Boundaries | still constrains | gateway: `crates/orna-core/src/invocation.rs` |
+| [0094](../../0094-std-launch-contract.md) | ADR 0094: Reference-Defined Run Entry Contract | still constrains | std.launch: spec-only (Orna-1.1.0) |
 | [0095](../../0095-principal-credential-delegation-scope.md) | Work ADR 0095: OrnaDB 1.0 Principal, Credential, and Delegation Scope | still constrains | principal: `crates/orna-artifact/src/client_plan.rs` |
 | [0096](../../0096-trust-policy-function-security.md) | Work ADR 0096: OrnaDB 1.0 Trust Policy and Function Security Boundary | still constrains | trust: `crates/orna-application-v1/src/lib.rs` |
 | [0097](../../0097-normative-repl-boundary.md) | Work ADR 0097: Normative REPL Boundary | still constrains | REPL: `crates/orna-application-v1/src/lib.rs` |
@@ -113,8 +115,8 @@ Evidence: `grep -rlF` of the ADR keyword in `reference/Orna-1.1.0` and `crates/`
 | [0005](0005-single-row-server-insert.md) | ADR 0005: Single-Row SERVER INSERT | archived (superseded) | SERVER INSERT (PostgreSQL SERVER DML): absent from Orna-1.1.0 and crates |
 | [0007](0007-single-object-server-update.md) | ADR 0007: Single-Object SERVER UPDATE | archived (superseded) | SERVER UPDATE: absent from Orna-1.1.0 and crates |
 | [0008](0008-single-object-server-delete.md) | ADR 0008: Single-Object SERVER DELETE | archived (superseded) | SERVER DELETE: absent from Orna-1.1.0 and crates |
-| [0009](0009-identity-selected-server-select.md) | ADR 0009: Identity-Selected SERVER SELECT | archived (superseded) | SERVER SELECT identity form: absent from Orna-1.1.0 and crates |
-| [0011](0011-direct-boolean-server-select-predicates.md) | ADR 0011: Direct Boolean SERVER SELECT Predicates | archived (superseded) | SERVER SELECT predicates: absent from Orna-1.1.0 and crates |
+| [0009](0009-identity-selected-server-select.md) | ADR 0009: Identity-Selected SERVER SELECT | archived (superseded) | Implemented only in island crate orna-artifact (server_plan.rs, codec.rs); no product consumer; to be deleted with island step 7 |
+| [0011](0011-direct-boolean-server-select-predicates.md) | ADR 0011: Direct Boolean SERVER SELECT Predicates | archived (superseded) | Implemented only in island crate orna-artifact (server_plan.rs, codec.rs); no product consumer; to be deleted with island step 7 |
 | [0014](0014-host-only-backend-shell.md) | ADR 0014: Host-Only Backend Shell | archived (superseded) | Host-only backend shell: absent from Orna-1.1.0 and crates |
 | [0017](0017-bundled-postgresql-runtime.md) | ADR 0017: Orna Ships and Owns Its PostgreSQL Runtime | archived (superseded) | Bundled PostgreSQL runtime: superseded by 1.1.0 SQLite/Turso store; no code path |
 | [0019](0019-embedded-postgresql-engine.md) | ADR 0019: PostgreSQL Is Part of the Orna Executable | archived (superseded) | Embedded PostgreSQL engine: superseded by 1.1.0 SQLite/Turso store; no code path |
@@ -124,7 +126,5 @@ Evidence: `grep -rlF` of the ADR keyword in `reference/Orna-1.1.0` and `crates/`
 | [0037](0037-single-private-postgresql-crate.md) | ADR 0037: PostgreSQL Uses One Private Rust Crate | archived (superseded) | Single private PostgreSQL crate: superseded by 1.1.0 store; no code path |
 | [0047](0047-first-one-zero-release.md) | ADR 0047: The First 1.0 Release Uses One Authenticated Debian Authority | archived (superseded) | 1.0.0 release-authority decision (Debian): 1.1.0 supersedes the release; no spec or code path |
 | [0048](0048-raw-identity-selected-server-select.md) | ADR 0048: Raw Reference Calls Select One Projected Object Row | archived (superseded) | Raw identity-selected SERVER SELECT: absent from Orna-1.1.0 and crates |
-| [0051](0051-unique-text-fields.md) | ADR 0051: Text Fields Have Byte-Exact Uniqueness | archived (superseded) | Byte-exact text uniqueness: absent from Orna-1.1.0 and crates |
-| [0063](0063-automatic-runtime-selection.md) | ADR 0063: The Client Offers the Installed Runtime and Accepts a Runtime Override | archived (superseded) | Automatic runtime selection: absent from Orna-1.1.0 and crates |
-| [0094](0094-std-launch-contract.md) | ADR 0094: Reference-Defined Run Entry Contract | archived (superseded) | std.launch run-entry contract: absent from Orna-1.1.0 and crates |
+| [0063](0063-automatic-runtime-selection.md) | ADR 0063: The Client Offers the Installed Runtime and Accepts a Runtime Override | archived (superseded) | Not implemented: wire types only in island crate orna-core (invocation.rs InvocationRuntimeOffer); no --runtime flag, no client population; to be deleted with island step 7 |
 | [0098](0098-ring1-catalogue-revision-deferral.md) | ADR 0098: Ring-1 Catalogue and Revision Gateway Deferral | archived (superseded) | Ring-1 catalogue deferral: absent from Orna-1.1.0 and crates |
