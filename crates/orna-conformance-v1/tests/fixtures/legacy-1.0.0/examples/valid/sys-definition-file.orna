@@ -1,0 +1,4 @@
+pub fn source_files(function: sys.Function) =
+    sys.catalog.definitions
+        | filter(definition => definition.reference == function.definition)
+        | map(definition => definition.file);

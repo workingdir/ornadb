@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/question-on-int.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-POSTFIX-QUESTION",
+  "message_contains": "postfix propagation `?` was removed; failures propagate automatically",
+  "status": "expected-not-executed"
+}

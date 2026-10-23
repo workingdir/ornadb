@@ -203,7 +203,7 @@ A diagnostic has a stable code, severity, safe message, source spans, optional n
 
 `sys.explain` returns a plan reference with structured nodes and dependency metadata. A `sys.Query` can refer to a plan; a plan does not invent an inverse `.query` field. An optimiser may change the plan while preserving results and observable ordering.
 
-Storage metadata distinguishes an observed profile, a future placement preference, and an explicit rewrite target. Changing a preference is not a physical rewrite. A rewrite preserves keys, logical values, ordering and canonical row meaning, so its semantic row diff is empty. [Storage profiles](#storage) define representability and format limits.
+Storage metadata describes the single ORP-1 row store, its schema/root generations and measured availability. Physical maintenance preserves logical rows. Placement preferences and editable/compact rewrites are retired, not hidden settings. [Storage](#storage) defines the current profile.
 
 **ORNA-SYS-053** Explain output MUST be structured `sys.Plan` data. Human-readable tables or trees are `Present` renderings and are not the semantic result.
 
@@ -223,7 +223,7 @@ Storage metadata distinguishes an observed profile, a future placement preferenc
 
 **ORNA-SYS-067** Physical storage rows are introspection data and MUST NOT change the logical contents, ordering, equality or serialization of table rows.
 
-**ORNA-SYS-068** A compact segment MUST identify its schema, key range, generation and content digest sufficiently to detect stale or overlapping publication.
+**ORNA-SYS-068** A stored page MUST bind schema, logical key interval, generation and native object identity sufficiently to detect stale, overlapping or mismatched publication.
 
 **ORNA-SYS-069** Missing lazily hydrated objects MUST be exposed as unavailable; a query may hydrate them according to policy but MUST NOT silently substitute incomplete results.
 
@@ -237,15 +237,15 @@ Storage metadata distinguishes an observed profile, a future placement preferenc
 
 **ORNA-SYS-076** Name resolution and history functions MUST respect visibility and source redaction even in a trusted deployment.
 
-**ORNA-SYS-115** `sys.Storage.profile` MUST describe observed placement and `sys.Storage.preference` MUST describe future automatic placement policy; implementations MUST NOT conflate the two.
+**ORNA-SYS-115** `sys.Storage.profile` MUST identify the one recorded row profile; no new-format future-placement preference is exposed.
 
-**ORNA-SYS-116** Setting storage preference MUST NOT rewrite existing logical rows or produce a semantic row change.
+**ORNA-SYS-116** New-format admission MUST reject retired storage-preference functions rather than select a hidden legacy writer.
 
-**ORNA-SYS-117** A storage rewrite MUST preserve every logical key/value, ordering and canonical row meaning, and its semantic row diff MUST be empty.
+**ORNA-SYS-117** Physical maintenance MUST preserve every logical key/value, ordering and annotated Blob meaning; semantic row diff MUST be empty.
 
-**ORNA-SYS-118** A rewrite to editable storage MUST fail before publication with `sys.storage.unrepresentable_key` when any row key cannot be represented by the canonical path codec or when the normative editable resource bounds cannot be met.
+**ORNA-SYS-118** VFS path limits MUST be handled through reversible projection or explicit view errors, not by switching a table storage mode.
 
-**ORNA-SYS-119** A rewrite collision, stale generation or concurrently changed input MUST fail with `sys.storage.rewrite_conflict` and leave the prior generation authoritative.
+**ORNA-SYS-119** A maintenance stale-generation collision MUST preserve the prior authoritative root and report sys.storage.rewrite_conflict.
 
 **ORNA-SYS-120** `sys.storage` is a grouping namespace, not a callable selector. Portable source MUST use `sys.Storage`, `sys.storage.objects` and the explicit `sys.admin` storage functions.
 
@@ -360,7 +360,7 @@ The requirements below specify implementation evidence. The package's authoring 
 
 **ORNA-SYS-125** The suite MUST prove every canonical relation row exposes the correctly typed snapshot/runtime-pinned `reference`, including natural-key references that introduce no synthetic identity.
 
-**ORNA-SYS-126** The suite MUST prove storage preference does not rewrite existing rows, storage rewrite produces an empty semantic row diff, unrepresentable editable keys fail before publication and stale generations leave the prior representation authoritative.
+**ORNA-SYS-126** The suite MUST prove one row writer, annotation-aware semantic identity, physical-rewrite neutrality and stale-generation rejection across Orna and VFS edits.
 
 **ORNA-SYS-127** The suite MUST verify [failure administration](#checkpoints), including stable delivery identity, versioned retries, skip, replay and resolve, and MUST reject system-row mutator methods.
 
@@ -371,4 +371,3 @@ The requirements below specify implementation evidence. The package's authoring 
 **ORNA-SYS-140** The suite MUST exercise erased and typed invocation/start overloads, reject a mismatched `as: T` before effects, and prove `sys.Value` is never selected by ordinary failed inference.
 
 **ORNA-SYS-141** The suite MUST validate every supporting value-type field, invariant and canonical encoding entry against `api/sys.json`.
-

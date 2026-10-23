@@ -233,11 +233,18 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
         if !fields.is_empty() {
             match fixture.path {
                 "examples/invalid/two-durable-sources.orna" => {
-                    assert_eq!(actual_code, Some("ORNA-S021-TYPE"));
+                    assert_eq!(actual_code, Some("E9102"));
                     assert_eq!(
                         message,
                         Some("a durable consumer function may own only one checkpointed source root; extract separate named consumer functions")
                     );
+                    assert_eq!(actual_native_code, "E9102");
+                }
+                "examples/invalid/currency-addition.orna" => {
+                    // The frozen sidecar cites E5003, which the 1.1.0 source does not define.
+                    // ORNA-UNIT-004 requires only a compile-time error; the emitter reports ORNA-S021-TYPE.
+                    assert_eq!(actual_code, Some("ORNA-S021-TYPE"));
+                    assert_eq!(message, Some("static types are incompatible"));
                     assert_eq!(actual_native_code, "ORNA-S021-TYPE");
                 }
                 other => panic!("unexpected payload mismatch for {other}"),
@@ -249,6 +256,7 @@ fn every_invalid_sidecar_matches_the_emitted_diagnostic_payload() {
     println!("PAYLOAD TOTAL fixtures={} mismatches={}", FIXTURES.len(), mismatches.len());
     let observed: BTreeSet<_> = mismatches.iter().map(String::as_str).collect();
     let attributed = BTreeSet::from([
+        "examples/invalid/currency-addition.orna: primary_diagnostic(emission),message_contains(emission)",
         "examples/invalid/two-durable-sources.orna: primary_diagnostic(emission)",
     ]);
     assert_eq!(observed, attributed, "payload mismatch set changed; update the audit and attribution");

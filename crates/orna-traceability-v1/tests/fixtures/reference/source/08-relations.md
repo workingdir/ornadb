@@ -137,4 +137,3 @@ The compiler/runtime maintains exact dependency edges where statically knowable 
 **ORNA-PACKAGE-002** Checking out an historical parent snapshot MUST resolve each attached database to the commit pinned by that snapshot.
 
 **ORNA-PACKAGE-003** `std` remains an ordinary optional attached Orna database/library except for mandatory core language and `sys` facilities.
-

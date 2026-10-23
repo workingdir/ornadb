@@ -14,24 +14,24 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  explain CODE",
     "Repository and maintenance commands:",
     "  init [DIRECTORY]",
-    "  mv TABLE NEW_NAME              rename a table in its existing module namespace",
+    "  mv OLD NEW                     rename a table in its existing module namespace",
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",
     "  push [REMOTE] [BRANCH]        publish the branch with its continuity refs",
     "  push exit status: 0 pushed; 1 repository, remote, or continuity conflict",
-    "  serve [--port PORT]",
+    "  serve [--port PORT] [--allow-push]  serve this clone on loopback; Git push needs --allow-push",
     "  mount DIR --cwd              editable workspace view; row saves are validated",
     "  edit PATH                     edit one projected row or Blob through transactional admission",
     "  edit --row PATH               edit a row through the same transactional admission path",
     "  mount DIR --at SELECTOR       read-only view of one resolved snapshot",
     "  mount status [--json]         report attached views",
-    "  unmount DIR                   release a view's record",
+    "  unmount DIR                   detach the kernel mount (orphaned Orna mounts too) and release its view record",
     "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
     "  log [GIT_LOG_ARGS...]",
-    "  annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]  write an annotated OVB-2 Blob",
-    "  annotate exit status: 0 OVB-2 file written; 1 file or annotation failure; 2 invalid arguments or format size limit",
+    "  annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]  write an annotated Blob file",
+    "  annotate exit status: 0 annotated Blob file written; 1 file or annotation failure; 2 invalid arguments or format size limit",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
@@ -40,8 +40,12 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
     "  migrate copy DEST --annotation-defaults N --no-persistent-consumers",
     "  prepares a journalled candidate in DEST; the format-1/2 source stays unchanged",
-    "  requires a decoded annotation count and explicit no-consumer choice; does not activate format 3",
+    "  requires a decoded annotation count and --no-persistent-consumers, which confirms that consumer checkpoints are carried, not reset",
+    "  refuses a source with live stream state; does not activate format 3",
     "  migrate copy exit status: 0 prepared/recovered; 1 migration conflict; 2 missing or invalid coordinates",
+    "  migrate abort DEST",
+    "  discards the prepared format-3 copy in DEST after verifying it; the source stays unchanged",
+    "  migrate abort exit status: 0 discarded or nothing to discard; 1 DEST is not the prepared copy of this source, the source changed before the copy was quarantined, DEST and its quarantine both exist, or the local worktree is unavailable; 2 missing or invalid arguments",
     "  publish [--message MESSAGE]                    commit the durable runtime tail as one publication commit",
     "  publish exit status: 0 published or nothing to publish; 1 repository, runtime, or publication conflict",
     "  commit -m MESSAGE                           review and publish exactly the staged candidate",
@@ -69,8 +73,11 @@ pub(super) const HELP_LINES: &[&str] = &[
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];
 
+/// Usage line printed before the help groups; the installed command is `orna`.
+const USAGE_LINE: &str = "orna [OPTIONS] [COMMAND]";
+
 pub(super) fn print_help() {
-    println!("orna-cli-v1 [OPTIONS] [COMMAND]");
+    println!("{USAGE_LINE}");
     for line in HELP_LINES {
         println!("{line}");
     }
@@ -78,7 +85,34 @@ pub(super) fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::HELP_LINES;
+    use super::{HELP_LINES, USAGE_LINE};
+
+    #[test]
+    fn help_names_orna_and_describes_current_command_effects() {
+        assert_eq!(USAGE_LINE, "orna [OPTIONS] [COMMAND]");
+        assert!(
+            !HELP_LINES.iter().any(|line| line.contains("OVB")),
+            "normal help must not name wire encodings (ORNA-UX-002)"
+        );
+        assert!(
+            HELP_LINES
+                .iter()
+                .any(|line| line.starts_with("  unmount DIR ")
+                    && line.contains("detach the kernel mount")
+                    && line.contains("release its view record"))
+        );
+        assert!(
+            HELP_LINES
+                .iter()
+                .any(|line| line.contains("--no-persistent-consumers")
+                    && line.contains("consumer checkpoints are carried, not reset"))
+        );
+        assert!(
+            !HELP_LINES
+                .iter()
+                .any(|line| line.contains("no-consumer choice"))
+        );
+    }
 
     #[test]
     fn help_groups_orna_work_and_repository_maintenance() {
@@ -105,6 +139,7 @@ mod tests {
             HELP_LINES
                 .contains(&"  migrate copy DEST --annotation-defaults N --no-persistent-consumers")
         );
+        assert!(HELP_LINES.contains(&"  migrate abort DEST"));
         assert!(HELP_LINES.contains(&"  status [--porcelain|--short|--format human|short|json]"));
     }
 

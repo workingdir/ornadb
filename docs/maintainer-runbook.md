@@ -1,18 +1,24 @@
 # OrnaDB maintainer and operator runbook
 
-This runbook describes the current Orna 1.0 implementation in the v1 crates. It
-is maintained operational guidance, not a replacement for the canonical
-publication under `reference/Orna-1.0.0/`. Historical design records remain in
+This runbook describes the current implementation in the v1 crates. The
+target is Orna 1.1.0 (publication `final-2026-10-05`, repository writer format
+3). It is maintained operational guidance, not a replacement for the canonical
+publication under `reference/Orna-1.1.0/`. Historical design records remain in
 `docs/decisions/` and are not operational inputs.
 
 ## Before you start
 
-Work from the repository root. The v1 command is the `orna-cli-v1` Cargo
-binary; run it from a checked-out repository with the locked dependency graph:
+Work from the repository root. The command is `orna`. In a checkout, Cargo
+builds it as the `orna-cli-v1` binary. The Linux package installs it as
+`/usr/bin/orna`. Run it from a checked-out repository with the locked
+dependency graph:
 
 ```text
 cargo run --locked -p orna-cli-v1 -- --help
 ```
+
+The examples below write `orna`. In a checkout, use
+`cargo run --locked -p orna-cli-v1 --` in its place.
 
 The workspace declares Rust 1.95. Git and Cargo are required for project
 initialisation and source loading. Use `--offline` only after the locked
@@ -28,40 +34,60 @@ repository layer resolves the per-worktree runtime location.
 The command syntax is:
 
 ```text
-cargo run --locked -p orna-cli-v1 -- [--db PATH] COMMAND [ARGUMENTS]
+orna [--db ENDPOINT] [--color auto|always|never] [--debug] COMMAND [ARGUMENTS]
 ```
 
-`--db PATH` must precede the command and selects a local project directory. It
-is accepted by project-loading commands; `init` takes its directory as a
-positional argument and rejects `--db`.
+Global options must precede the command. `--db PATH` selects a local Git
+worktree. `init` takes its directory as a positional argument and rejects
+`--db`. `--format human|short|json` is also accepted before `status` only.
+With no command, `orna` starts the REPL.
+
+This table lists every command that the parser in
+`crates/orna-cli-v1/src/cli_args.rs` accepts. `orna --help` shows the
+options and exit statuses of each command. The table does not claim that a
+command meets every Orna 1.1.0 requirement.
 
 | Command | Behaviour |
 | --- | --- |
-| `init [DIRECTORY]` | Initialise a local Git-backed Orna repository. The current directory is the default. |
-| `status` | Show the local Git worktree status. |
-| `status --porcelain` | Emit the machine-readable status form. |
-| `status --short` | Emit the short status form. |
-| `check` | Load reachable source modules from the local Git worktree and perform the v1 checks. |
+| `repl [EXPRESSION]` | Start an ephemeral interactive session, or evaluate one expression and exit. |
+| `run [QUALIFIED_FUNCTION]` | Run a project function. With no target, run `main.main`. |
+| `check` | Load reachable source modules from the local Git worktree and check them. |
 | `invoke TARGET` | Execute a reachable zero-argument pure function. |
-| `run` | Run the default project entry point (`main.main`). |
-| `run TARGET` | Run a named project entry point. |
-| `run seed` | Run the reference seed workflow when the loaded project provides it. |
-| `run exercise` | Run the reference exercise workflow when the loaded project provides it. |
-| `run sensors.ingest` | Run the finite sensor-ingestion workflow when the loaded project provides it. |
-| `run library.lend BOOK BORROWER` | Run the bounded lending workflow with the supplied identifiers. |
-| `repl [EXPRESSION]` | Evaluate a pure expression in an ephemeral interactive session, or evaluate one expression and exit. |
 | `explain CODE` | Print guidance for a documented Orna diagnostic code. |
-| `--help`, `help`, `--version`, `-V` | Print command help or the binary version. |
+| `init [DIRECTORY]` | Initialise a local Git-backed Orna repository. The current directory is the default. |
+| `add --row TABLE KEY` | Stage one logical row into the index. |
+| `mv OLD NEW` | Rename a table in its module namespace and keep its IDs. |
+| `status [--porcelain\|--short\|--format human\|short\|json]` | Show the worktree status. |
+| `fetch [REMOTE] [BRANCH]` | Fetch a branch. The defaults are `origin` and `main`, not the current branch. |
+| `push [REMOTE] [BRANCH]` | Push the branch with its continuity refs. The default remote is `origin`. |
+| `serve [--port PORT]` | Serve the project on loopback. The default port is 8080. |
+| `mount DIR --cwd` | Mount the committed workspace as an editable view. Row saves are validated. Linux only. |
+| `mount DIR --at SELECTOR` | Mount one resolved snapshot as a read-only view. Linux only. |
+| `mount status [--json]` | Report attached views. |
+| `edit [--row] PATH` | Edit one projected row or Blob through transactional admission. |
+| `unmount DIR` | Detach the kernel mount, including an orphaned Orna mount, and release its view record. |
+| `diff [GIT_DIFF_ARGS...]` | Run Git `diff` for the worktree. |
+| `log [GIT_LOG_ARGS...]` | Run Git `log` for the worktree. |
+| `annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]` | Write an annotated Blob file. |
+| `import BUNDLE --dry-run [OPTIONS]` | Report what an import bundle contains. |
+| `export DEST --at SELECTOR [OPTIONS]` | Write, check or restore an offline archive. |
+| `migrate copy DEST --annotation-defaults N --no-persistent-consumers` | Prepare a format-3 candidate from a format-1/2 worktree. The flag confirms that consumer checkpoints are carried, not reset. |
+| `publish [--message MESSAGE]` | Commit the durable runtime tail as one publication commit. |
+| `commit -m MESSAGE` | Review and publish exactly the staged candidate. |
+| `history RELATION KEY [OPTIONS]`, `history RELATION --diff FROM TO` | List row history, or compare two snapshots without payloads. |
+| `query RELATION [OPTIONS]` | List Blob metadata of committed rows without payloads. |
+| `semantic-legend [OPTIONS]` | Print the editor semantic-token legend. |
+| `--help`, `-h`, `help`, `--version`, `-V` | Print command help or the binary version. |
 
 Examples:
 
 ```text
-cargo run --locked -p orna-cli-v1 -- init ./example-project
-cargo run --locked -p orna-cli-v1 -- --db ./example-project check
-cargo run --locked -p orna-cli-v1 -- --db ./example-project invoke main
-cargo run --locked -p orna-cli-v1 -- --db ./example-project run main.main
-cargo run --locked -p orna-cli-v1 -- repl "1 + 2"
-cargo run --locked -p orna-cli-v1 -- explain ORNA-S010-IMPORT
+orna init ./example-project
+orna --db ./example-project check
+orna --db ./example-project invoke main
+orna --db ./example-project run main.main
+orna repl "1 + 2"
+orna explain ORNA-S010-IMPORT
 ```
 
 ### Initialising a project
@@ -91,6 +117,11 @@ The REPL can select an admitted snapshot with `:at CWD`, `:at HEAD`, or
 failed selection retains the previous session. Remote endpoints are not a
 fallback for a local project: use a local Git worktree and an explicit `--db
 PATH` when selecting a project.
+
+The REPL help text lists `:help [name]` (`REPL_HELP` in `crates/orna-cli-v1/src/repl.rs`). The
+`:watch expression` command needs a host-owned live watch source. The `orna`
+binary does not wire one, so `:watch` reports `ORNA-REPL-COMMAND` there;
+it is exercised only by the test harness in `crates/orna-cli-v1/tests/watch_command.rs`.
 
 ### Diagnostics and exit behaviour
 
@@ -122,11 +153,16 @@ fence stale owners and recovery attempts. A command that cannot acquire or
 resume the local state must fail closed; it must not silently bind a request to
 another worktree or to a newer snapshot.
 
-The local state database is not a publication format. Git repository history,
-loose row files, and compact data are managed by their respective v1 layers;
-callers use the logical table interface and do not branch on physical
-placement. Compact files and manifests must be treated as immutable published
-artifacts and verified before they become authoritative.
+The local state database is not a publication format. Format-3 rows live in the
+committed native store, which publication writes. Format-1/2 loose row files and
+compact data are read-only legacy layouts. The repository and storage readers
+verify and read them, no production path writes them, and no CLI verb reads
+them yet.
+Publication and durable runtime writes on a format-1/2 `HEAD` are refused, and
+no in-place format-3 upgrade ships yet (ornadb-5il1.184). Callers use the logical
+table interface and do not branch on physical placement. Compact files and
+manifests must be treated as immutable published artifacts and verified before
+they become authoritative.
 
 ## Linux FUSE editor drafts
 
@@ -251,13 +287,13 @@ express; the bits primitives cannot move because Orna has no bitwise operator):
    `cargo test --locked -p orna-standard` and `-p orna-evaluator-v1`, under the
    repository cargo limits, then the fixture-manifest check.
 
-## 1.0.0 requirement evidence report
+## 1.1.0 requirement evidence report
 
 From the repository root, generate the machine-readable report against the
 frozen reference bundle beside this checkout:
 
 ```text
-cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.0.0 > /tmp/orna-traceability.json
+cargo run --locked -p orna-traceability-v1 -- ../reference/Orna-1.1.0 > /tmp/orna-traceability.json
 ```
 
 The report pins the specification version and publication digests. It lists
@@ -271,8 +307,8 @@ witness for the obligation, not that a test-plan entry or source file is a
 passing implementation test. `implemented`, `optional`, or `out-of-scope` are
 not report statuses.
 
-Treat the report as traceability input, not a conformance claim. The checked-in
-`tests/requirement-evidence.json` associates requirements with evidence
+Treat the report as traceability input, not a conformance claim. The reference
+bundle's `tests/requirement-evidence.json` associates requirements with evidence
 obligations; it does not say those tests ran. Keep any implementation and test
 references tied to captured commands and actual results, and retain partial
 status when evidence covers only a bounded subset. A generated index,
@@ -280,7 +316,7 @@ fixture count, parsed example, or successful report command alone cannot
 establish execution or conformance. These limits follow ORNA-TEST-004
 (source/32-conformance.md:23), ORNA-TEST-010 (line 31), ORNA-TEST-011
 (line 33), and ORNA-EVIDENCE-001 (line 69), and ORNA-CONF-001 through
-ORNA-CONF-003 (Orna-1.0.0.md:56–60) in the frozen reference.
+ORNA-CONF-003 (Orna-1.1.0.md:65–69) in the frozen reference.
 
 Before making a conformance claim, record the claimed class and implementation
 version, the exact reference publication digest, supported optional profiles,

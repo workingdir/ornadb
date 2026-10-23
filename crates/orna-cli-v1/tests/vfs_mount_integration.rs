@@ -215,7 +215,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
         "pub table Music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let row_source = format!(
-        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
@@ -239,7 +239,9 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 4194304)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -268,7 +270,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
     let revised_row = format!(
-        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 4194304),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     std::fs::write(
         repository_directory.path().join("Music/london.orna"),
@@ -1076,8 +1078,9 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     std::fs::write(&source_file, original).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let row_source =
-        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let row_source = format!(
+        "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
+    );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
             source,
@@ -1100,7 +1103,9 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -1231,8 +1236,9 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     std::fs::write(&source_file, expected).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let row_source =
-        format!("{{\n    content: sys.blob.capture_file({root}, \"tone.mp3\", 65536),\n}}\n");
+    let row_source = format!(
+        "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
+    );
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
             source,
@@ -1255,7 +1261,9 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
-    let capture = format!("sys.blob.capture_file({root}, \"tone.mp3\", 65536)");
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\")"
+    );
     let blob_captures = [("content", capture.as_str())];
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
@@ -2258,4 +2266,389 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     assert!(!mountinfo_contains(&mountpoint));
     assert!(repository.mount_status().unwrap().is_empty());
     drop(mounted);
+}
+
+/// Deterministic bytes for Blob fixtures; distinct seeds make a wrong generation fail the comparison.
+fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut entropy = seed;
+    (0..len)
+        .map(|_| {
+            entropy = entropy
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (entropy >> 32) as u8
+        })
+        .collect()
+}
+
+/// Canonical 44-byte RIFF/WAVE header over 16-bit mono PCM `samples` at `sample_rate`.
+fn pcm_wav(sample_rate: u32, samples: &[u8]) -> Vec<u8> {
+    let data_len = u32::try_from(samples.len()).unwrap();
+    let block_align: u16 = 2;
+    let byte_rate = sample_rate * u32::from(block_align);
+    let mut wav = Vec::with_capacity(44 + samples.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(samples);
+    wav
+}
+
+/// A live `mount --cwd` over `Music/london`, whose `content` Blob was captured from the source bytes.
+struct MountedBlobRow {
+    mounted: MountedProcess,
+    repository_directory: TempDir,
+    _repository: orna_repository_v1::Repository,
+    _media_root: TempDir,
+    _mount_parent: TempDir,
+}
+
+fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
+    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .args([
+            "--db",
+            repository.to_str().expect("repository path is UTF-8"),
+            "mount",
+        ])
+        .arg(mountpoint)
+        .arg("--cwd")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    MountedProcess {
+        child,
+        mountpoint: mountpoint.to_path_buf(),
+    }
+}
+
+/// Waits for `path` in the live mount. Returns `false` when FUSE setup is optionally unavailable.
+fn wait_for_mount_path(mounted: &mut MountedProcess, path: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            if is_optional_fuse_setup_failure(&stderr) {
+                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
+                return false;
+            }
+            panic!("mount exited {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "FUSE mount did not expose {}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    true
+}
+
+/// Unmounts through `orna unmount` and requires the mount process to exit cleanly.
+fn unmount_and_reap(repository: &Path, mounted: &mut MountedProcess) {
+    run_unmount(repository, &mounted.mountpoint);
+    let status = mounted.child.wait().unwrap();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = mounted.child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(
+        status.success(),
+        "mount exits cleanly after unmount; status={status:?}; stderr={stderr}"
+    );
+}
+
+/// Captures `original` as `Music/london/content.mp3` (`audio/mpeg`) and mounts the cwd.
+/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_captured_blob(original: &[u8]) -> Option<MountedBlobRow> {
+    mount_captured_media(original, "tone.mp3", "audio/mpeg", "content.mp3").await
+}
+
+/// Captures `original` from `file_name` as a `media_type` Blob in `Music/london` and mounts the cwd.
+/// The exported filename is `mounted_name`.
+/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_captured_media(
+    original: &[u8],
+    file_name: &str,
+    media_type: &str,
+    mounted_name: &str,
+) -> Option<MountedBlobRow> {
+    if !fuse_test_available() {
+        return None;
+    }
+    // The host cap bounds the source; it must admit the whole fixture, so it matches the provider limit.
+    let capture_limit: usize = 4 << 20;
+    let media_root = TempDir::new().unwrap();
+    std::fs::write(media_root.path().join(file_name), original).unwrap();
+    let source = "pub table Music(id: Str) { content: Blob, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"{file_name}\", {capture_limit}), \"{media_type}\")"
+    );
+    let row_source = format!("{{\n    content: {capture},\n}}\n");
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            source,
+            "Music",
+            "Music/london.orna",
+            &row_source,
+        );
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(capture_limit, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let blob_captures = [("content", capture.as_str())];
+    let capture_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &blob_captures,
+        source_row: None,
+        ordinal: 0x93,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &capture_rows,
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    if !wait_for_mount_path(
+        &mut mounted,
+        &mountpoint.join("Music/london").join(mounted_name),
+    ) {
+        return None;
+    }
+    Some(MountedBlobRow {
+        mounted,
+        repository_directory,
+        _repository: repository,
+        _media_root: media_root,
+        _mount_parent: mount_parent,
+    })
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a rename-over replacement gives new opens the new generation while a handle opened earlier keeps the captured bytes.
+async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement() {
+    let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let replacement = lcg_bytes(0xfedc_ba98_7654_3210, 2_097_152 + 777);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+    let window = 64 * 1024;
+
+    let mut old_handle = File::open(&blob_path).unwrap();
+    let mut head = vec![0u8; window];
+    old_handle.read_exact(&mut head).unwrap();
+    assert_eq!(head.as_slice(), &original[..window]);
+
+    let scratch_path = blob_path.with_file_name(".content.mp3.replace");
+    std::fs::write(&scratch_path, &replacement).unwrap();
+    std::fs::rename(&scratch_path, &blob_path).unwrap();
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+
+    assert_eq!(
+        old_handle.metadata().unwrap().len(),
+        original.len() as u64,
+        "an open handle reports the size of the generation it captured"
+    );
+    let tail_start = original.len() - window;
+    old_handle.seek(SeekFrom::Start(tail_start as u64)).unwrap();
+    let mut tail = vec![0u8; window];
+    old_handle.read_exact(&mut tail).unwrap();
+    assert_eq!(tail.as_slice(), &original[tail_start..]);
+    drop(old_handle);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+#[ignore = "ornadb-5il1.293 open gap: remount after replacement; run with --ignored"]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
+async fn cwd_mount_rename_replacement_survives_remount() {
+    let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let replacement = lcg_bytes(0xfedc_ba98_7654_3210, 2_097_152 + 777);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let scratch_path = blob_path.with_file_name(".content.mp3.replace");
+    std::fs::write(&scratch_path, &replacement).unwrap();
+    std::fs::rename(&scratch_path, &blob_path).unwrap();
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &remount_point);
+    let remounted_blob = remount_point.join("Music/london/content.mp3");
+    assert!(
+        wait_for_mount_path(&mut remounted, &remounted_blob),
+        "FUSE remount must expose the committed Blob after a successful mount"
+    );
+    let restarted = std::fs::read(&remounted_blob).unwrap();
+    unmount_and_reap(row.repository_directory.path(), &mut remounted);
+    assert_eq!(
+        restarted, replacement,
+        "a restarted mount serves the acknowledged replacement"
+    );
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a WAV Blob row exports as `content.wav`, serves the seek and range reads a media decoder issues, and exports byte-for-byte.
+async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte() {
+    let samples = lcg_bytes(0x0016_0000_5eed, 640_000);
+    let original = pcm_wav(16_000, &samples);
+    let Some(mut row) =
+        mount_captured_media(&original, "tone.wav", "audio/wav", "content.wav").await
+    else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.wav");
+    let mut handle = File::open(&blob_path).unwrap();
+    assert_eq!(handle.metadata().unwrap().len(), original.len() as u64);
+
+    // Format probe: the canonical header is served before any sample is decoded.
+    let mut header = [0u8; 44];
+    handle.read_exact(&mut header).unwrap();
+    assert_eq!(header.as_slice(), &original[..44]);
+    assert_eq!(&header[0..4], b"RIFF");
+    assert_eq!(&header[8..16], b"WAVEfmt ");
+    assert_eq!(u16::from_le_bytes([header[20], header[21]]), 1, "PCM");
+    assert_eq!(u16::from_le_bytes([header[22], header[23]]), 1, "mono");
+    assert_eq!(
+        u32::from_le_bytes(header[24..28].try_into().unwrap()),
+        16_000
+    );
+    assert_eq!(
+        u16::from_le_bytes([header[34], header[35]]),
+        16,
+        "16-bit samples"
+    );
+    assert_eq!(&header[36..40], b"data");
+    assert_eq!(
+        u32::from_le_bytes(header[40..44].try_into().unwrap()),
+        640_000
+    );
+
+    // Sequential 64 KiB reads cover the whole Blob, then report EOF.
+    let window = 64 * 1024;
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut streamed = Vec::with_capacity(original.len());
+    let mut chunk = vec![0u8; window];
+    loop {
+        let read = handle.read(&mut chunk).unwrap();
+        if read == 0 {
+            break;
+        }
+        streamed.extend_from_slice(&chunk[..read]);
+        assert!(streamed.len() <= original.len(), "read past the Blob end");
+    }
+    assert_eq!(streamed, original);
+    assert_eq!(
+        handle.read(&mut chunk).unwrap(),
+        0,
+        "EOF stays at the Blob end"
+    );
+
+    // Container tail probe from the end of the file.
+    let tail_len = 4096;
+    handle.seek(SeekFrom::End(-(tail_len as i64))).unwrap();
+    let mut tail = vec![0u8; tail_len];
+    handle.read_exact(&mut tail).unwrap();
+    assert_eq!(tail.as_slice(), &original[original.len() - tail_len..]);
+
+    // Seeking decoder: deterministic random offsets, each range compared with the row bytes.
+    let mut entropy = 0x5eed_5eed_5eed_5eed_u64;
+    for _ in 0..64 {
+        entropy = entropy
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let len = 1 + ((entropy >> 48) as usize % 8_192);
+        let offset = (entropy as usize) % (original.len() - len);
+        handle.seek(SeekFrom::Start(offset as u64)).unwrap();
+        let mut range = vec![0u8; len];
+        handle.read_exact(&mut range).unwrap();
+        assert_eq!(
+            range.as_slice(),
+            &original[offset..offset + len],
+            "range at {offset} length {len}"
+        );
+    }
+
+    // Real media player: mpv opens and seeks the mounted WAV; skipped only when mpv is absent.
+    let mpv_installed = Command::new("mpv")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
+    if mpv_installed {
+        let output = Command::new("mpv")
+            .args([
+                "--no-config",
+                "--no-video",
+                "--ao=null",
+                "--no-terminal",
+                "--msg-level=all=error",
+                "--start=10",
+                "--end=11",
+            ])
+            .arg(&blob_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mpv plays the mounted WAV; status={:?}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    } else {
+        eprintln!("SKIP: mpv is not installed; the seek and range reads are the decoder leg");
+    }
+
+    // Binary export: a copy through the mount is byte-identical to the row.
+    let export_dir = TempDir::new().unwrap();
+    let export_path = export_dir.path().join("content.wav");
+    std::fs::copy(&blob_path, &export_path).unwrap();
+    assert_eq!(std::fs::read(&export_path).unwrap(), original);
+    drop(handle);
+
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
