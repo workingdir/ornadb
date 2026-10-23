@@ -20,7 +20,7 @@ env:
 # its own result for attribution.
 concurrency:
   group: cli-tests-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == "pull_request" }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cli-tests:
