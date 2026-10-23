@@ -4183,7 +4183,12 @@ impl FsBuilder {
                 .pinned_field_layout
                 .field_type(field.field_id())
                 .ok_or_else(|| "committed field has no schema type".to_owned())?;
-            if field.blob_metadata().is_some() && !stored_value_is_null(&value) {
+            // A selected Blob takes this branch even when the pinned field is a null
+            // optional, so a CWD replacement renders. A committed Blob keeps the branch for
+            // every non-null selection, so a selection that is not a Blob is still refused.
+            if selects_blob(&value)
+                || (field.blob_metadata().is_some() && !stored_value_is_null(&value))
+            {
                 // The selected value is the Blob the mount shows: the CWD value when
                 // the runtime holds the row, otherwise the pinned value. A null
                 // selection shows no Blob and takes the null branch below.
@@ -4206,10 +4211,23 @@ impl FsBuilder {
                     .read_stored_blob_value(&row, &descriptor, &row_scope);
                 let (media_type, suffix, reference) = match read {
                     Ok(stored) => {
-                        let annotation = stored.annotation();
+                        // The pinned row names this descriptor, so its reference is the
+                        // committed Blob. The media type and suffix are the selected value's:
+                        // the descriptor carries no annotation, so a CWD row may annotate the
+                        // same content differently from the pinned row. The descriptor fixes
+                        // the content identity, so the selected length and digest must agree.
+                        let identity = ContentIdentity::new(selected.length(), selected.sha256())
+                            .map_err(|error| {
+                                format!("committed Blob identity is invalid: {error:?}")
+                            })?;
+                        if stored.reference().content_identity() != identity {
+                            return Err(format!(
+                                "committed Blob field {field_name} does not match its selected identity"
+                            ));
+                        }
                         (
-                            annotation.media_type().to_owned(),
-                            annotation.suffix().or(selected.suffix()).map(str::to_owned),
+                            selected.media_type().to_owned(),
+                            selected.suffix().map(str::to_owned),
                             stored.reference().clone(),
                         )
                     }
@@ -4796,6 +4814,11 @@ fn selected_blob_payload(value: &Raw) -> &Raw {
         },
         _ => value,
     }
+}
+
+/// Whether a selected row value shows a Blob: a bare Blob or a present optional's Blob.
+fn selects_blob(value: &Raw) -> bool {
+    matches!(selected_blob_payload(value), Raw::Tag(orna_value_v1::ROV3_BLOB_TAG, _))
 }
 
 /// Admits the accepted pin that holds the selected replacement content for a descriptor the
