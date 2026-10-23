@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/module-zero-table-assertion.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA-A091-012",
+  "message_contains": "module assertions must depend on at least two distinct tables",
+  "status": "expected-not-executed"
+}

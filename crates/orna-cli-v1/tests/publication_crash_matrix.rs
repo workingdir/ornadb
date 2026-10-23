@@ -854,9 +854,31 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         let source_path = source.path().join("capture.bin");
         std::fs::write(&source_path, &payload).unwrap();
         let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
         let base = head(&repository);
+        std::fs::write(root.join("unrelated-staged.txt"), b"staged before crash\n").unwrap();
+        git(root, &["add", "--", "unrelated-staged.txt"]);
+        std::fs::write(root.join("unrelated-tracked.txt"), b"unstaged before crash\n").unwrap();
+        let staged_before = git_output(root, &["diff", "--cached", "--binary"], None);
+        let unstaged_before = git_output(root, &["diff", "--binary"], None);
+        assert!(!staged_before.is_empty(), "fixture has staged unrelated work");
+        assert!(!unstaged_before.is_empty(), "fixture has unstaged unrelated work");
         let schema_root = hex(format_context.schema_root().as_bytes());
         let store_root = hex(format_context.store_root().as_bytes());
+        // The killed publisher runs under this owner; the fence at the end takes over this exact lease.
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+        state.acquire_lease(identity.repository_id).await.unwrap();
+        let abandoned = state
+            .current_lease()
+            .await
+            .unwrap()
+            .expect("the fixture leaves a writer lease for the abandoned owner");
+        assert_eq!(abandoned.owner_id, identity.repository_id);
+        drop(state);
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
         let mut child = launch_capture_child(
@@ -878,10 +900,18 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         assert!(!status.success(), "capture child unexpectedly returned at {boundary}");
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
         std::fs::remove_file(&marker).unwrap();
+        assert_eq!(head(&repository), base, "killed capture child moved HEAD at {boundary}");
+        assert!(committed_store_rows(&repository, relation_id).is_empty(), "killed capture child published a row at {boundary}");
+        assert_eq!(git_output(root, &["diff", "--cached", "--binary"], None), staged_before, "staged work changed by kill at {boundary}");
+        assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work changed by kill at {boundary}");
 
         let resumed = cli(directory.path(), &["publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
+        assert_eq!(git_output(root, &["diff", "--cached", "--binary"], None), staged_before, "staged work lost after {boundary}");
+        assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work lost after {boundary}");
+        git_output(root, &["fsck", "--no-dangling", "--no-progress"], None);
         if boundary == "row-commit" {
             assert_ne!(once, base, "committed row was not published after {boundary}");
             let format = repository.open_format_context().unwrap();
@@ -914,11 +944,27 @@ async fn capture_and_row_commit_recover_after_process_kill() {
             assert_eq!(bytes.bytes(), std::fs::read(source.path().join("pixel.png")).unwrap());
         } else {
             assert_eq!(once, base, "uncommitted capture became published after {boundary}");
+            assert!(committed_store_rows(&repository, relation_id).is_empty(), "uncommitted capture published a row after {boundary}");
         }
         let second = cli(directory.path(), &["publish"]);
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let reopened = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap_or_else(|error| panic!("runtime reopen after {boundary}: {error:?}"));
+        assert_eq!(reopened.pending_count().await.unwrap(), 0, "pending range remains after {boundary}");
+        // Takeover runs last: it mutates the lease and may set takeover_recovery_pending.
+        let fresh = [0x5a; 16];
+        let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
+        assert_eq!(replacement.owner_id, fresh);
+        assert_eq!(replacement.epoch, abandoned.epoch + 1);
+        assert!(matches!(
+            reopened.takeover_lease(abandoned, [0x5b; 16]).await,
+            Err(orna_runtime_v1::RuntimeError::OwnerLost)
+        ), "abandoned lease took over twice after {boundary}");
+        assert!(reopened.acquire_lease(abandoned.owner_id).await.is_err(), "abandoned owner regained writer lease after {boundary}");
         println!("{boundary}: recovery_publish_exit={}, second_publish_exit={}", resumed.status.code().unwrap(), second.status.code().unwrap());
     }
 }

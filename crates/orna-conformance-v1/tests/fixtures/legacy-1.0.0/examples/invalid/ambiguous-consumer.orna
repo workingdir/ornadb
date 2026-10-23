@@ -1,0 +1,1 @@
+pub fn main() = parallel([mail.google.sync, mail.google.sync]);
