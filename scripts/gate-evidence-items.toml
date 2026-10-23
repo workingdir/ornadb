@@ -100,7 +100,10 @@ limitations = [
   "Identities live in a tracked sidecar and loose row directories that the format-3 layout forbids, and no production path issues them into a fresh store (ornadb-5il1.117).",
 ]
 
-# Gate B: actual data path.
+# Gate B: actual data path. B1-B3 are evidence from the nightly workspace-cli record
+# (nightly-gates.yml, cli shard, `run` with a 330-minute budget, no per-test skip). The
+# per-PR cli-tests job skips this test (--skip-test) and cli-gate-b.yml runs it without
+# writing an evidence record, so neither per-PR nor cli-gate-b counts toward B1-B3.
 
 [[item]]
 gate = "B"
