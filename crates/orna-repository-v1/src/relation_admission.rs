@@ -475,20 +475,32 @@ impl Repository {
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let database_id = *staged.database_id.as_bytes();
         let mut writer = NodeWriter::new(self)?;
-        let base = match staged.store_root.as_ref() {
-            Some(root) => {
-                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)?
-            }
-            None => Vec::new(),
-        };
         // An unborn branch commits no relation.
-        let committed = match staged.index.head() {
+        let committed: BTreeMap<[u8; 16], NativeOid> = match staged.index.head() {
             Some(head) => self
                 .store_entries_in(head.as_str(), database_id)?
                 .into_iter()
                 .map(|entry| (entry.relation_id, entry.schema_oid))
                 .collect(),
             None => BTreeMap::new(),
+        };
+        let base = match staged.store_root.as_ref() {
+            // `git rm --cached` leaves skip-worktree payload entries in the
+            // index, so the store tree survives while some node data does
+            // not. A committed relation whose node is absent is unstaged,
+            // not a corrupt store (ORNA-STAGE-004 refuses the candidate).
+            Some(root) => {
+                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)
+                    .map_err(|error| match (error, committed.keys().next()) {
+                        (GraphError::MissingNodeData, Some(relation_id)) => {
+                            RelationAdmissionError::CommittedRelationUnstaged {
+                                relation_id: *relation_id,
+                            }
+                        }
+                        (error, _) => error.into(),
+                    })?
+            }
+            None => Vec::new(),
         };
         let (entries, admitted) =
             admit_relations(&mut writer, base, &committed, relations, Some(identities))?;
@@ -2122,23 +2134,10 @@ mod tests {
             Err(RelationAdmissionError::OrphanRelation { relation_id }) if relation_id == music
         ));
 
-        // Payload chunks are skip-worktree; clear that bit so `rm --cached`
-        // removes the whole store index, as a user's removal would.
-        let listed = std::process::Command::new("git")
-            .current_dir(root)
-            .args(["ls-files", "-z", "--", ".orna/store"])
-            .output()
-            .unwrap();
-        assert!(listed.status.success());
-        let mut clear = std::process::Command::new("git")
-            .current_dir(root)
-            .args(["update-index", "--no-skip-worktree", "-z", "--stdin"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        std::io::Write::write_all(clear.stdin.as_mut().unwrap(), &listed.stdout).unwrap();
-        assert!(clear.wait().unwrap().success());
+        // The user's removal from the index, unmodified: skip-worktree payload
+        // entries survive it, so the index keeps a partial store.
         git(root, &["rm", "--cached", "-r", "--quiet", ".orna/store"]);
+        assert!(!git(root, &["ls-files", "--", ".orna/store"]).is_empty());
         let staged = repository.capture_staged_candidate().unwrap();
         assert!(matches!(
             repository.stage_store_admission(&staged, &edited, &identities_for(&[music])),

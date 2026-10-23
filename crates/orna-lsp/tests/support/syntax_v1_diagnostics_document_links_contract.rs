@@ -34,10 +34,7 @@ pub fn assert_diagnostics(source: &str, response: &Value, editor: &str) {
     );
 
     for (actual, expected) in diagnostics.iter().zip(expected.diagnostics) {
-        assert_eq!(
-            actual["source"], "orna-syntax-v1",
-            "{editor} diagnostic source"
-        );
+        assert_eq!(actual["source"], "orna", "{editor} diagnostic source");
         assert_eq!(actual["severity"], 1, "{editor} diagnostic severity");
         assert_eq!(
             actual["code"], expected.code,

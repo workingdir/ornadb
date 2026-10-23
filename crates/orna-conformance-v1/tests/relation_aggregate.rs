@@ -69,7 +69,7 @@ fn relation_integer_aggregate_observes_writes_but_later_failure_rolls_back() {
 
     assert!(matches!(
         outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2] {
         assert_eq!(
@@ -465,7 +465,7 @@ fn relation_decimal_sum_rolls_back_candidate_rows_after_assertion_failure() {
 
     assert!(matches!(
         &outcome,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2] {
         assert_eq!(
@@ -533,7 +533,7 @@ fn relation_decimal_min_max_roll_back_candidate_rows_after_assertion_failure() {
 
     assert!(matches!(
         &outcome,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2] {
         assert_eq!(
