@@ -187,7 +187,7 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Starts `mount --cwd` on an existing mountpoint directory without waiting for
 /// the FUSE mount to appear.
 pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_path.to_str().unwrap(),
@@ -258,7 +258,7 @@ pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedP
 
 /// Runs `orna unmount` for a mount started from `repository`.
 pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", repository.to_str().unwrap(), "unmount"])
         .arg(mountpoint)
         .output()
