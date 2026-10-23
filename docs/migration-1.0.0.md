@@ -99,14 +99,14 @@ bundled `std.math` module and the `std.collection` source surface. This is a
 pinned source bundle, not discovery of an installed or host-provided standard
 library.
 
-When a project imports a standard module, `orna-cli-v1 check` first requires
+When a project imports a standard module, `orna check` first requires
 the imported logical module to be named by the selected profile. It then
 verifies the exact source bytes of every profile module, requires the complete
 declared bundle, parses the verified sources, and derives the semantic
 catalogue from their declarations. A changed, missing, duplicate, malformed,
 or unlisted standard module is rejected before that catalogue is admitted.
 
-`orna-cli-v1 run seed` uses the same selected source bundle. After semantic
+`orna run seed` uses the same selected source bundle. After semantic
 checking, its bounded evaluator loads the verified pure module and explicitly
 invokes the requested retained function; loading alone does not execute a
 function body. This establishes executable evidence for that source-level
