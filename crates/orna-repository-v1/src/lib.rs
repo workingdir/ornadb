@@ -3926,13 +3926,21 @@ impl Repository {
         }
     }
 
+    /// `git cat-file -e` exits 0 when the object exists and 1 when it is
+    /// absent. Any other status (a fatal repository error, a corrupt object
+    /// store) is an error: reading it as "absent" would skip the pin while
+    /// the journal naming the object is still written.
     fn publication_object_present(&self, oid: &str) -> Result<bool, RepositoryError> {
         let mut exists = self.command();
         exists.args(["cat-file", "-e", oid]);
         let output = exists
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
-        Ok(output.status.success())
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
     }
 
     /// Deletes every publication pin not named in `keep`. Callers hold the
@@ -10431,6 +10439,43 @@ mod tests {
         let recovered = PublicationJournal::decode(&journal.encode().unwrap(), 40).unwrap();
         assert_eq!(recovered.runtime_intent_id(), Some([1; 16]));
         assert_eq!(recovered.logical_rekeys(), &[event]);
+    }
+
+    #[test]
+    fn publication_object_present_fails_closed_on_git_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(root.path()).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let absent = "0123456789abcdef0123456789abcdef01234567";
+        assert!(repository.publication_object_present(&present).unwrap());
+        assert!(!repository.publication_object_present(absent).unwrap());
+
+        // A corrupt HEAD makes git exit 128. The object may still exist, so
+        // the answer is an error, never "absent" (which would skip the pin).
+        fs::write(root.path().join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
     }
     #[test]
     fn managed_path_rejects_tracked_runtime_cache_path() {
