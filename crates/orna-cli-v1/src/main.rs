@@ -2229,13 +2229,9 @@ fn run_pure_invocation(
 
     let mut evaluator = BoundedEvaluator::default();
     if let Some(profile) = project.standard_profile() {
-        let runtime = project.standard_runtime_modules();
-        let sources = project
-            .standard_sources()
-            .iter()
-            .filter(|(logical_path, _)| runtime.contains(logical_path))
-            .cloned()
-            .collect::<Vec<_>>();
+        // Admission verifies the complete pinned snapshot against the profile's
+        // digests; a runtime-reachable subset is rejected as MissingModule.
+        let sources = project.standard_sources().to_vec();
         match evaluator.load_standard_sources(profile, sources) {
             StageOutcome::Passed => {}
             StageOutcome::Cancelled(diagnostic) => {
