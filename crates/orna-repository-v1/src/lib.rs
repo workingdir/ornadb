@@ -3389,6 +3389,7 @@ impl Repository {
         &self,
         treeish: &str,
     ) -> Result<BTreeMap<String, String>, RepositoryError> {
+        self.objects().check_expansion(treeish, ".orna/store")?;
         let mut list = self.command();
         list.env("GIT_NO_LAZY_FETCH", "1").args([
             "ls-tree",
@@ -5132,6 +5133,7 @@ impl Repository {
         &self,
         expected_head: &GitCommitRef,
     ) -> Result<Vec<Vec<Vec<u8>>>, RepositoryError> {
+        self.objects().check_expansion(expected_head.as_str(), "")?;
         let tracked = self.git_bytes([
             "ls-tree",
             "-r",
@@ -5850,6 +5852,9 @@ impl Repository {
         current_head: Option<&GitCommitRef>,
         target: &GitCommitRef,
     ) -> Result<CheckoutGitSubplan, RepositoryError> {
+        if current_head.is_none() {
+            self.objects().check_expansion(target.as_str(), "")?;
+        }
         let target_paths = match current_head {
             Some(current) => self.git_nul_paths(&[
                 "diff".into(),
@@ -6559,6 +6564,7 @@ impl Repository {
     ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
         const MAX_ENTRY_BYTES: usize = 4 * 1024;
 
+        self.objects().check_expansion(treeish, "")?;
         let object_id_length = self.native_object_id_length()?;
         let mut command = self.command();
         command

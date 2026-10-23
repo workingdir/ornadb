@@ -2406,6 +2406,13 @@ impl NativeGraphContext {
         let mut revisions = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
+            self.repository
+                .objects()
+                .check_expansion(&tree, "")
+                .map_err(|error| match error {
+                    crate::RepositoryError::SourceTreeLimit => GraphError::SourceTreeLimit,
+                    _ => GraphError::GitCommandFailed,
+                })?;
             let listing = self.git_output(&["ls-tree", "-r", "-t", "--full-tree", &tree])?;
             let text = std::str::from_utf8(&listing).map_err(|_| GraphError::GitObjectMalformed)?;
             // Each entry is `<mode> SP <type> SP <oid> TAB <path>`.
@@ -11601,6 +11608,7 @@ pub enum GraphError {
     InvalidDomain,
     InvalidDigestLength,
     InvalidEmptyBlob,
+    SourceTreeLimit,
     InvalidByteIndex,
     InvalidRange,
     InvalidBlobAnnotation,
@@ -11730,6 +11738,9 @@ impl fmt::Display for GraphError {
                 f.write_str("Git object bytes do not match their native ID")
             }
             Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
+            Self::SourceTreeLimit => {
+                f.write_str("committed source tree exceeds the bounded walk limit")
+            }
             Self::GitCommandFailed => f.write_str("required local Git command failed"),
             Self::CaptureReadFailed => f.write_str("authorized Blob capture input failed"),
             Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),
