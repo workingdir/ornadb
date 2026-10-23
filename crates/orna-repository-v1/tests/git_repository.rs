@@ -475,6 +475,111 @@ fn managed_staging_preserves_unrelated_index_and_worktree_changes() {
 }
 
 #[test]
+fn managed_paths_refuse_git_metadata_at_any_depth_and_in_any_case() {
+    for hostile in [
+        "sub/.git/config",
+        "sub/.git/hooks/pre-commit",
+        "a/b/.git",
+        "SUB/.GIT/config",
+        ".GIT/config",
+        "a/.Git/x",
+        "nested/.gIt",
+    ] {
+        assert!(
+            matches!(
+                ManagedPath::new(hostile),
+                Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+            ),
+            "{hostile} must be refused as git metadata"
+        );
+    }
+    assert!(ManagedPath::new("sub/.github/workflows/ci.yml").is_ok());
+    assert!(ManagedPath::new("docs/git-notes.md").is_ok());
+    assert!(ManagedPath::new("sub/.gitignore").is_ok());
+}
+
+#[test]
+fn managed_paths_refuse_overlong_bytes_and_components() {
+    let long_component = "a".repeat(256);
+    assert!(ManagedPath::new(&long_component).is_err());
+    assert!(ManagedPath::new(format!("docs/{long_component}.md")).is_err());
+    let component_at_limit = "a".repeat(255);
+    assert!(ManagedPath::new(format!("docs/{component_at_limit}")).is_ok());
+    let overlong_total = vec!["a".repeat(255); 17].join("/");
+    assert!(overlong_total.len() > 4096);
+    assert!(ManagedPath::new(&overlong_total).is_err());
+}
+
+/// Runs Git with raw bytes on stdin, for objects Git's own tree writers refuse.
+fn git_raw(directory: &Path, arguments: &[&str], input: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Encodes one raw tree object from `(mode, name, object id)` entries.
+fn raw_tree(entries: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (mode, name, object_id) in entries {
+        bytes.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+        bytes.extend(decode_oid(object_id));
+    }
+    bytes
+}
+
+#[test]
+fn committed_git_metadata_path_is_refused_on_load() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let blob = git_raw(root.path(), &["hash-object", "-w", "--stdin"], b"[core]\n");
+    let gitdir = git_raw(
+        root.path(),
+        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
+        &raw_tree(&[("100644", "config", &blob)]),
+    );
+    let sub = git_raw(
+        root.path(),
+        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
+        &raw_tree(&[("40000", ".git", &gitdir)]),
+    );
+    let tree = git_raw(
+        root.path(),
+        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
+        &raw_tree(&[("40000", "sub", &sub)]),
+    );
+    let commit_body = format!(
+        "tree {tree}\nauthor Orna <orna@example.invalid> 1 +0000\n\
+         committer Orna <orna@example.invalid> 1 +0000\n\nhostile\n"
+    );
+    let commit_id = git_raw(
+        root.path(),
+        &["hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
+        commit_body.as_bytes(),
+    );
+    git(root.path(), &["update-ref", "refs/heads/hostile", &commit_id]);
+    let commit = repo.resolve_snapshot("hostile").unwrap();
+
+    assert!(matches!(
+        repo.list_committed_source_tree(&commit),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+}
+
+#[test]
 fn managed_unstage_and_coordination_lock_preserve_unrelated_staging() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
