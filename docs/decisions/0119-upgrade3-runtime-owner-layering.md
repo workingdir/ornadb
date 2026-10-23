@@ -4,7 +4,7 @@
 
 ## Decision
 
-This ADR records three choices that the remaining UPGRADE-3 implementation
+This ADR records four choices that the remaining UPGRADE-3 implementation
 depends on. They implement UPGRADE-3 steps 3, 7 and 8 and ORNA-UPGRADE-004 and
 -005 in `reference/Orna-1.1.0/source/40-upgrade-contract.md`, which leaves the
 owning process, the crate layering and the annotation coordinate open. They
@@ -67,6 +67,27 @@ prove unchanged annotated value identity.
   Apache Parquet 2.13.0 for legacy compact-input interpretation
   (`reference/Orna-1.1.0/source/35-references.md`) and gives no record shape for
   format-2 compact rows, so no reader for them is added until one is specified.
+
+### Legacy row sources and precedence (D4)
+
+UPGRADE-3 step 3 requires exactly one authoritative legacy row per key. A
+format-1 commit can hold rows in two sources, and the decoder reads each one
+separately.
+
+* Compact rows are keyed by table UUID and encoded row key.
+  `Repository::read_legacy_authoritative_tables`
+  (`crates/orna-repository-v1/src/compact.rs`) resolves them. For each key the
+  mutation with the greatest generation wins, and a winning deletion leaves the
+  key absent. Two mutations of one key at one generation fail closed with
+  `InvalidCompactManifest`. Format-2 and format-3 commits are refused.
+* Loose rows are identified by their table directory (`table_path`) and key
+  path, not by table UUID. Two loose rows of one table that decode to the same
+  key fail closed.
+
+The two sources are not merged, and the decoder chooses nothing between them.
+`ornadb-5il1.313` (S4) decides the cross-source precedence rule from the
+specification before the copy consumes these rows. Until then, no consumer
+treats the decoded rows as the complete authoritative set.
 
 ## Rationale
 
