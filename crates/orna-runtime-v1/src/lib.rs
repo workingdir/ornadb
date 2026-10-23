@@ -19606,6 +19606,12 @@ async fn table_mutations_already_durable_tx(
         else {
             continue;
         };
+        // The retained digest must commit to the payload being replayed: an
+        // identical digest over different bytes is a reuse, not a replay.
+        let payload_digest: [u8; 32] = Sha256::digest(&mutation.payload).into();
+        if payload_digest != mutation.digest {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         let digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
@@ -19655,20 +19661,10 @@ async fn append_mutations_with_catalogue_tx(
         .checked_add(1)
         .ok_or(RuntimeError::RecoveryInvalid)?;
     for mutation in mutations {
-        connection
-            .execute(
-                "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
-                params![
-                    mutation.id.to_vec(),
-                    mutation.payload.clone(),
-                    mutation.digest.to_vec()
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
         // A retained identity reaching this point is id reuse: an exact replay
         // was already short-circuited above, so a retained id here is a caller
-        // error, not a storage failure (ORNA-VFS-008).
+        // error, not a storage failure (ORNA-VFS-008). The check runs before any
+        // write so a rejected batch leaves no pending row behind.
         let mut retained_rows = connection
             .query(
                 "SELECT 1 FROM admitted_mutation WHERE mutation_id = ?1",
@@ -19684,6 +19680,17 @@ async fn append_mutations_with_catalogue_tx(
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
+        connection
+            .execute(
+                "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
+                params![
+                    mutation.id.to_vec(),
+                    mutation.payload.clone(),
+                    mutation.digest.to_vec()
+                ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
         connection
             .execute(
                 "INSERT INTO admitted_mutation (mutation_id, digest) VALUES (?1, ?2)",
@@ -22036,10 +22043,12 @@ mod tests {
     }
 
     /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
-    /// replay of an already-accepted candidate after publication must still
-    /// not append a second mutation or checkpoint.
+    /// replay of an already-accepted candidate after publication must not
+    /// advance the durable generation or re-admit the mutation. This asserts
+    /// durable state only; the replay outcome shape is the open gap covered by
+    /// the ignored test below (SPEC-QUESTIONS Q2).
     #[tokio::test]
-    async fn replaying_a_published_vfs_save_does_not_commit_twice() {
+    async fn replaying_a_published_vfs_save_keeps_the_durable_generation() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let object_id = TableObjectId::new(id(11));
@@ -22153,6 +22162,250 @@ mod tests {
             Some(accepted_row.as_slice()),
             "the replay leaves the accepted row in place"
         );
+    }
+
+    /// ORNA-VFS-008 outcome shape (open): a post-publication replay must report
+    /// the already-durable generation, not a second acceptance.
+    /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
+    /// replay of an already-accepted candidate after publication must still
+    /// not append a second mutation or checkpoint.
+    #[ignore = "ornadb-5il1.354: ORNA-VFS-008 outcome shape (SPEC-QUESTIONS Q2)"]
+    #[tokio::test]
+    async fn replaying_a_published_vfs_save_reports_the_idempotent_outcome() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = b"saved".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &accepted_row).await.unwrap();
+        let applied = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // Publication consumes the pending mutation record of the accepted save.
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+        assert!(state.pending().await.unwrap().is_empty());
+
+        // The replay of the identical candidate arrives after publication.
+        let replay_draft = target.open_draft(1 << 20).await;
+        replay_draft.truncate(0).await.unwrap();
+        replay_draft.write_at(0, &accepted_row).await.unwrap();
+        let replayed = target
+            .commit_durable_document_save(
+                &replay_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                replayed,
+                vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+            ),
+            "a post-publication replay reports the already-durable generation (ORNA-VFS-008)"
+        );
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the acknowledged save keeps its checkpoint")
+                .generation,
+            1,
+            "a post-publication replay must not advance the durable generation"
+        );
+        assert!(
+            state.pending().await.unwrap().is_empty(),
+            "a post-publication replay must not re-admit the mutation"
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "the replay leaves the accepted row in place"
+        );
+    }
+
+    /// The durable-replay check binds the payload to the digest: the same id
+    /// and digest over different bytes is id reuse, not a replay.
+    #[tokio::test]
+    async fn replayed_table_mutation_with_different_payload_is_invalid() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let payload = b"generic-payload-a".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let stored = Mutation {
+            id: id(31),
+            payload: payload.clone(),
+            digest,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(&transaction, context.capture(), &[stored], digest, &NoFault)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let exact = Mutation {
+            id: id(31),
+            payload: payload.clone(),
+            digest,
+        };
+        assert!(
+            table_mutations_already_durable_tx(&transaction, &[exact])
+                .await
+                .unwrap(),
+            "identical id, digest and payload is an exact replay"
+        );
+        let reused_bytes = Mutation {
+            id: id(31),
+            payload: b"generic-payload-b".to_vec(),
+            digest,
+        };
+        assert_eq!(
+            table_mutations_already_durable_tx(&transaction, &[reused_bytes])
+                .await
+                .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+    }
+
+    /// The append path rejects a retained identity from any caller, not only
+    /// table commits, and leaves no pending row from the rejected batch.
+    #[tokio::test]
+    async fn append_path_rejects_retained_id_without_pending_write() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let payload = b"generic-append".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mutation = Mutation {
+            id: id(41),
+            payload,
+            digest,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(
+            &transaction,
+            context.capture(),
+            std::slice::from_ref(&mutation),
+            digest,
+            &NoFault,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let pending_before = pending_count(&transaction).await;
+        assert_eq!(
+            append_mutations_tx(
+                &transaction,
+                context.capture(),
+                std::slice::from_ref(&mutation),
+                digest,
+                &NoFault,
+            )
+            .await
+            .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+        assert_eq!(
+            pending_count(&transaction).await,
+            pending_before,
+            "a rejected retained id must not write a pending row first"
+        );
+    }
+
+    async fn pending_count(connection: &Connection) -> i64 {
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM pending_mutation", ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
     }
 
     /// Reusing a retained mutation identity after publication with different
