@@ -401,12 +401,14 @@ impl Namespace {
     }
 }
 
-/// Compiler-local identity for a nominal declaration.
+/// Compiler-local identity for a nominal or table declaration.
 ///
 /// This is intentionally a qualified semantic key, not the durable object
 /// identity assigned by the catalogue/revision layer. It keeps source-level
 /// names from unrelated modules distinct while preserving the existing public
-/// `Type::Named` representation.
+/// `Type::Named` representation. For a table it is also the qualified name
+/// under which the committed identity manifest records the table's ObjectId,
+/// so two `Item` tables in different modules never share a row type.
 fn nominal_identity(namespace: &Namespace, name: &str) -> String {
     let prefix = namespace.display();
     if prefix.is_empty() {
@@ -2766,14 +2768,17 @@ fn collect_header(
         let Some((name, kind, mut ty)) = declared_symbol(item) else {
             continue;
         };
-        // Nominal types and units carry their declaring module so imports
-        // keep their identity rather than a bare spelling.
+        // Nominal types, tables and units carry their module-qualified identity, so
+        // rows of `a.Item` and `b.Item` are never the same row type (08-relations:
+        // row values compare table ObjectId; ORNA-ROW-001), and imports keep their
+        // declaring module rather than a bare spelling.
         if matches!(
             &item.declaration,
             Declaration::Type {
                 representation: TypeRepresentation::Nominal { .. },
                 ..
-            } | Declaration::Unit { .. }
+            } | Declaration::Table { .. }
+            | Declaration::Unit { .. }
         ) {
             ty = Type::Named(nominal_identity(namespace, &name));
         }
@@ -3434,6 +3439,12 @@ fn is_nominal_symbol(symbol: &Symbol) -> bool {
     symbol.kind == SymbolKind::Type && symbol.table_schema.is_some()
 }
 
+/// Declarations whose source spellings canonicalise to a module-qualified
+/// identity: nominal record types and tables.
+fn has_qualified_identity(symbol: &Symbol) -> bool {
+    is_nominal_symbol(symbol) || symbol.kind == SymbolKind::Table
+}
+
 fn canonical_nominal_name(name: &str, scope: &Scope) -> String {
     scope
         .nominal_identities
@@ -3444,22 +3455,24 @@ fn canonical_nominal_name(name: &str, scope: &Scope) -> String {
 
 fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &SyntaxTree) {
     for item in &tree.items {
-        if let Declaration::Type {
-            name,
-            representation: TypeRepresentation::Nominal { .. },
-            ..
-        } = &item.declaration
-        {
-            scope
-                .nominal_identities
-                .insert(name.clone(), nominal_identity(namespace, name));
-        }
+        let name = match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            }
+            | Declaration::Table { name, .. } => name,
+            _ => continue,
+        };
+        scope
+            .nominal_identities
+            .insert(name.clone(), nominal_identity(namespace, name));
     }
     let named_symbols = scope
         .names
         .iter()
         .filter_map(|(name, symbol)| {
-            (is_nominal_symbol(symbol))
+            (has_qualified_identity(symbol))
                 .then(|| match &symbol.ty {
                     Type::Named(identity) => Some((name.clone(), identity.clone())),
                     _ => None,
@@ -3477,7 +3490,7 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
             module
                 .exports
                 .iter()
-                .filter(|(_, symbol)| is_nominal_symbol(symbol))
+                .filter(|(_, symbol)| has_qualified_identity(symbol))
                 .map(|(name, _)| {
                     (
                         module_namespace.clone(),
@@ -3514,7 +3527,7 @@ fn populate_nominal_identities(scope: &mut Scope, namespace: &Namespace, tree: &
                     module.exports.iter().filter_map({
                         let alias = alias.clone();
                         move |(name, symbol)| {
-                            is_nominal_symbol(symbol).then(|| {
+                            has_qualified_identity(symbol).then(|| {
                                 let mut path = vec![alias.clone()];
                                 path.extend(suffix.iter().cloned());
                                 path.push(name.clone());
@@ -3887,11 +3900,15 @@ fn resolve_imports_with_dependencies(
         modules: BTreeMap::new(),
         available_modules: modules.clone(),
         historical_modules: historical_modules.clone(),
+        // Row shapes and automatic-key tables are keyed by the same qualified
+        // identity that table symbols carry, never by the bare declared name.
         table_rows: tree
             .items
             .iter()
             .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, .. } => Some((name.clone(), table_row_type(item))),
+                Declaration::Table { name, .. } => {
+                    Some((nominal_identity(namespace, name), table_row_type(item)))
+                }
                 _ => None,
             })
             .collect(),
@@ -3899,7 +3916,9 @@ fn resolve_imports_with_dependencies(
             .items
             .iter()
             .filter_map(|item| match &item.declaration {
-                Declaration::Table { name, keys, .. } if keys.is_empty() => Some(name.clone()),
+                Declaration::Table { name, keys, .. } if keys.is_empty() => {
+                    Some(nominal_identity(namespace, name))
+                }
                 _ => None,
             })
             .collect(),
@@ -4020,8 +4039,7 @@ fn resolve_imports_with_dependencies(
                 .or_insert_with(|| Type::Record(row.clone()));
         }
     }
-    for (namespace, module) in modules {
-        let prefix = namespace.display();
+    for (module_namespace, module) in modules {
         for (name, symbol) in &module.exports {
             if symbol.kind != SymbolKind::Table {
                 continue;
@@ -4029,14 +4047,13 @@ fn resolve_imports_with_dependencies(
             let Some(row) = symbol.table_fields() else {
                 continue;
             };
-            let table_name = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}.{name}")
+            let identity = match &symbol.ty {
+                Type::Named(identity) => identity.clone(),
+                _ => nominal_identity(module_namespace, name),
             };
             scope
                 .table_rows
-                .entry(table_name)
+                .entry(identity)
                 .or_insert_with(|| Type::Record(row.clone()));
         }
         for (name, symbol) in &module.exports {
@@ -4274,6 +4291,22 @@ fn resolve_imports_with_dependencies(
                 .function_dependencies
                 .borrow_mut()
                 .insert(format!("{alias}.{name}"), dependencies.clone());
+        }
+    }
+    // A helper reached through its module's full namespace path
+    // (`mail.google.sync`) keeps the same provenance; an explicit binding of
+    // the same spelling inserted above takes precedence.
+    for (target, summaries) in dependency_summaries {
+        if target.0.is_empty() {
+            continue;
+        }
+        let prefix = target.display();
+        for (name, dependencies) in summaries {
+            scope
+                .function_dependencies
+                .borrow_mut()
+                .entry(format!("{prefix}.{name}"))
+                .or_insert_with(|| dependencies.clone());
         }
     }
     for item in &tree.items {
@@ -4793,7 +4826,7 @@ fn check_item(
                 }
             }
             let row = table_row_type(item);
-            let target = Type::Named(name.clone());
+            let target = Type::Named(canonical_nominal_name(name, scope));
             let mut row_locals = match &row {
                 Type::Record(fields) => fields
                     .iter()
@@ -6426,22 +6459,7 @@ fn resolved_callable_symbol<'a>(
     if path.len() < 2 || local.contains_key(path[0]) {
         return None;
     }
-    let root = scope.modules.get(path[0])?;
-    let namespace = Namespace(
-        root.0
-            .iter()
-            .cloned()
-            .chain(
-                path[1..path.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
-            .collect(),
-    );
-    scope
-        .available_modules
-        .get(&namespace)
-        .and_then(|module| module.exports.get(path[path.len() - 1]))
+    qualified_module_symbol(&path, scope)
 }
 
 fn call_may_write(callee: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>) -> bool {
@@ -6922,20 +6940,14 @@ fn annotation_type_name_is_declared(
         return true;
     }
 
-    let Some(root) = scope.modules.get(&path[0]) else {
+    // Annotation names resolve only through an explicit `use` binding of the
+    // first segment (ORNA-IMPORT-001, ORNA-IMPORT-002). Full namespace paths
+    // stay expression-only, so an unimported `vault.Box` remains unresolved.
+    if !scope.modules.contains_key(&path[0]) {
         return false;
-    };
-    let namespace = Namespace(
-        root.0
-            .iter()
-            .cloned()
-            .chain(path[1..path.len() - 1].iter().cloned())
-            .collect(),
-    );
-    scope
-        .available_modules
-        .get(&namespace)
-        .and_then(|module| module.exports.get(last))
+    }
+    let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+    qualified_module_symbol(&parts, scope)
         .is_some_and(|symbol| {
             matches!(
                 symbol.kind,
@@ -7577,14 +7589,7 @@ fn resolved_generic_parameters(
     if path.len() < 2 || local.contains_key(path[0]) {
         return None;
     }
-    let root = scope.modules.get(path[0])?;
-    let namespace = Namespace(
-        root.0
-            .iter()
-            .cloned()
-            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
-            .collect(),
-    );
+    let namespace = module_member_namespace(&path, scope)?;
     scope
         .available_modules
         .get(&namespace)
@@ -9011,8 +9016,8 @@ fn infer_node(
                 return variant;
             }
             if let Some(path) = qualified_path(expr)
-                && scope.modules.contains_key(path[0])
                 && !local.contains_key(path[0])
+                && module_member_namespace(&path, scope).is_some()
             {
                 if let Some(table) = table_symbol(expr, scope, local) {
                     return Inferred {
@@ -17558,49 +17563,71 @@ fn table_symbol<'a>(
             if local.contains_key(path[0]) {
                 return None;
             }
-            let root = scope.modules.get(path[0])?;
-            let namespace = Namespace(
-                root.0
-                    .iter()
-                    .cloned()
-                    .chain(
-                        path[1..path.len() - 1]
-                            .iter()
-                            .map(|part| (*part).to_owned()),
-                    )
-                    .collect(),
-            );
-            scope
-                .available_modules
-                .get(&namespace)
-                .and_then(|module| module.exports.get(path[path.len() - 1]))
+            qualified_module_symbol(&path, scope)
                 .filter(|symbol| symbol.kind == SymbolKind::Table)
         }
         _ => None,
     }
 }
 
-fn qualified_module_symbol<'a>(path: &[&str], scope: &'a Scope) -> Option<&'a Symbol> {
-    let last = path.last()?;
-    if path.len() < 2 {
+/// The qualified identity of the table a source expression names: the key of
+/// `Scope::table_rows` and of every table dependency, never its spelling.
+fn table_identity(
+    expr: &Expr,
+    scope: &Scope,
+    local: &BTreeMap<String, Symbol>,
+) -> Option<String> {
+    match &table_symbol(expr, scope, local)?.ty {
+        Type::Named(identity) => Some(identity.clone()),
+        _ => None,
+    }
+}
+
+/// Names the module that owns the member `path.last()` of a qualified source
+/// path, or `None` when the path does not start at a module.
+///
+/// A `use` binding of the first segment takes precedence (ORNA-IMPORT-001,
+/// ORNA-IMPORT-002); its remaining segments before the member name nested
+/// namespaces, so the result may name an absent module. Otherwise, when the
+/// first segment is not a declared or imported name (ORNA-IMPORT-007), the
+/// segments before the member must spell a reachable module's full namespace
+/// path (ORNA-NS-001, ORNA-NS-002; grammar `qualified_name`):
+/// `mail.google.sync` names `sync` in `mail/google.orna` with or without
+/// `use mail.google;`. The reserved roots keep their dedicated resolution.
+fn module_member_namespace(path: &[&str], scope: &Scope) -> Option<Namespace> {
+    let (first, rest) = path.split_first()?;
+    let (_, intermediate) = rest.split_last()?;
+    if let Some(root) = scope.modules.get(*first) {
+        let mut namespace = root.clone();
+        namespace
+            .0
+            .extend(intermediate.iter().map(|part| (*part).to_owned()));
+        return Some(namespace);
+    }
+    if matches!(*first, "std" | "sys")
+        || scope.names.contains_key(*first)
+        || scope.ambiguous.contains(*first)
+    {
         return None;
     }
-    let root = scope.modules.get(path[0])?;
     let namespace = Namespace(
-        root.0
+        path[..path.len() - 1]
             .iter()
-            .cloned()
-            .chain(
-                path[1..path.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
+            .map(|part| (*part).to_owned())
             .collect(),
     );
     scope
         .available_modules
+        .contains_key(&namespace)
+        .then_some(namespace)
+}
+
+fn qualified_module_symbol<'a>(path: &[&str], scope: &'a Scope) -> Option<&'a Symbol> {
+    let namespace = module_member_namespace(path, scope)?;
+    scope
+        .available_modules
         .get(&namespace)
-        .and_then(|module| module.exports.get(*last))
+        .and_then(|module| module.exports.get(*path.last()?))
 }
 
 fn infer_table_projection(
@@ -17627,31 +17654,16 @@ fn infer_table_projection(
     })
 }
 
-/// Resolves a member through one explicitly imported module root. A root may
-/// name a nested catalogue namespace (`core.json.encode`); intermediate path
-/// segments are namespaces, not values, so arbitrary nominal/record values
-/// remain governed by ordinary field inference.
+/// Resolves a member through an explicitly imported module root or a
+/// reachable module's full namespace path (see `module_member_namespace`).
+/// Intermediate path segments are namespaces, not values, so arbitrary
+/// nominal/record values remain governed by ordinary field inference.
 fn resolve_qualified_module_member(
     path: &[&str],
     scope: &Scope,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
-    let root = scope.modules.get(path[0]).expect("checked imported root");
-    let namespace = Namespace(
-        root.0
-            .iter()
-            .cloned()
-            .chain(
-                path[1..path.len() - 1]
-                    .iter()
-                    .map(|part| (*part).to_owned()),
-            )
-            .collect(),
-    );
-    let symbol = scope
-        .available_modules
-        .get(&namespace)
-        .and_then(|module| module.exports.get(path[path.len() - 1]));
+    let symbol = qualified_module_symbol(path, scope);
     match symbol {
         Some(symbol) => Inferred {
             ty: symbol.ty.clone(),
@@ -17662,7 +17674,7 @@ fn resolve_qualified_module_member(
                 diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
                     SafeText::new(format!(
                         "{UNRESOLVED_MEMBER_NOTE}{}.{}",
-                        namespace.display(),
+                        path[..path.len() - 1].join("."),
                         path[path.len() - 1]
                     ))
                     .expect("identifier text is safe"),
@@ -25762,13 +25774,9 @@ fn infer_module_relation(
     if !matches!(text.as_str(), "every" | "exists") || arguments.len() != 2 {
         return infer(value, scope, local, diagnostics);
     }
-    let Expr::Name { text: table, .. } = &arguments[0].value else {
-        return Inferred {
-            ty: Type::Error,
-            effects: EffectSummary::default(),
-        };
-    };
-    let Some(row) = table_rows.get(table) else {
+    let Some(row) = table_identity(&arguments[0].value, scope, local)
+        .and_then(|identity| table_rows.get(&identity))
+    else {
         return Inferred {
             ty: Type::Error,
             effects: EffectSummary::default(),
@@ -26135,13 +26143,12 @@ fn scope_named_symbol<'a>(name: &str, scope: &'a Scope) -> Option<&'a Symbol> {
     if let Some(symbol) = scope.names.get(name) {
         return Some(symbol);
     }
-    if let Some((module_alias, member)) = name.split_once('.')
-        && let Some(namespace) = scope.modules.get(module_alias)
-    {
+    let path = name.split('.').collect::<Vec<_>>();
+    if let Some(namespace) = module_member_namespace(&path, scope) {
         return scope
             .available_modules
-            .get(namespace)
-            .and_then(|module| module.symbols.get(member));
+            .get(&namespace)
+            .and_then(|module| module.symbols.get(*path.last()?));
     }
     let mut matches = scope
         .names
@@ -26489,16 +26496,7 @@ fn resolved_helper_summary_key(
             .filter(|symbol| symbol.kind == SymbolKind::Function)
             .map(|_| first.to_owned());
     }
-    let root = scope.modules.get(first)?;
-    let namespace = Namespace(
-        root.0
-            .iter()
-            .cloned()
-            .chain(path[1..path.len() - 1].iter().map(|part| (*part).to_owned()))
-            .collect(),
-    );
-    let module = scope.available_modules.get(&namespace)?;
-    let function = module.exports.get(*path.last()?)?;
+    let function = qualified_module_symbol(path, scope)?;
     (function.kind == SymbolKind::Function).then(|| path.join("."))
 }
 
@@ -26520,7 +26518,19 @@ fn tables_referenced(
         // Dependency extraction follows resolved table identities and also
         // expands summaries for called pure helpers. The latter keeps
         // assertion planning tied to the resolver rather than source spelling.
-        if let Some(path) = qualified_path(e).map(|path| path.join(".")) {
+        // A table reached through a module binding, a full namespace path or
+        // an import contributes its qualified identity, so same-named tables
+        // in different modules stay distinct dependencies.
+        if let Some(path) = qualified_path(e) {
+            if let Some(scope) = scope
+                && !local_names.contains(path[0])
+                && let Some(identity) = table_identity(e, scope, &BTreeMap::new())
+                && resolved_tables.is_none_or(|tables| tables.contains_key(&identity))
+            {
+                names.insert(identity);
+                return;
+            }
+            let path = path.join(".");
             if resolved_tables.is_some_and(|tables| tables.contains_key(&path)) {
                 names.insert(path);
                 return;

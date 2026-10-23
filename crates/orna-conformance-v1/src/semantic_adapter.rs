@@ -4528,9 +4528,10 @@ fn candidate_table_fields_in_stable_id_order(
             let Declaration::Table { name, .. } = item.declaration else {
                 continue;
             };
+            let table = qualified_table_identity(&Namespace(identity.namespace().to_vec()), &name);
             let fields = ordered_fields
-                .get_mut(&name)
-                .ok_or_else(|| format!("candidate table {name} has no admitted fields"))?;
+                .get_mut(&table)
+                .ok_or_else(|| format!("candidate table {table} has no admitted fields"))?;
             let schema = loaded
                 .source_table_schema(identities, &schema_namespace, &name)
                 .map_err(|_| format!("candidate table {name} has no stable schema"))?;
@@ -6364,11 +6365,11 @@ fn admit_transaction_source_inner(
     if let Err(error) = limits.check_items(parsed.value.items.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
+    // The single-source seam admits one standalone program, so it is the root
+    // module: its tables keep bare identities, matching the keys below and
+    // the assertion dependencies semantic analysis plans for them.
     let analysis = analyze_with_providers(
-        &[ModuleInput::new(
-            unit.source_id.clone(),
-            unit.source.clone(),
-        )],
+        &[ModuleInput::new("main.orna", unit.source.clone())],
         &Catalogue::authoritative_fixture(),
         SystemProviders::Production,
     );
@@ -6514,6 +6515,7 @@ fn admit_transaction_project(
     let mut table_fields = TableFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
+    let graph = ProjectGraph::new(project);
     let mut nominal_definitions = NominalDefinitions::new();
     for unit in &project.modules {
         if let Err(error) = limits.check_source(&unit.source) {
@@ -6529,21 +6531,14 @@ fn admit_transaction_project(
         }
         let namespace = project_transaction_namespace(project, unit)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-        let AdmittedTransaction {
-            functions: module_functions,
-            key_fields: module_keys,
-            float_fields: module_float_fields,
-            table_fields: module_table_fields,
-            table_assertions: mut module_assertions_by_table,
-            module_assertions: mut module_assertions_only,
-            nominal_definitions: module_nominal_definitions,
-        } = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
-            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
             Box::new(StageOutcome::Skipped {
                 reason: "project transaction module has no semantic namespace".into(),
             })
         })?;
+        let mut module =
+            admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
+                .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if !is_standard_source(unit) {
             let plans = analysis
                 .assertions
@@ -6554,12 +6549,23 @@ fn admit_transaction_project(
                     })
                 })?;
             attach_assertion_dependencies(
-                &mut module_assertions_by_table,
-                &mut module_assertions_only,
+                &mut module.table_assertions,
+                &mut module.module_assertions,
                 plans,
             )
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+            ModuleReferences::new(&semantic_namespace, &parsed.value.items, &graph)
+                .resolve(&mut module);
         }
+        let AdmittedTransaction {
+            functions: module_functions,
+            key_fields: module_keys,
+            float_fields: module_float_fields,
+            table_fields: module_table_fields,
+            table_assertions: module_assertions_by_table,
+            module_assertions: module_assertions_only,
+            nominal_definitions: module_nominal_definitions,
+        } = module;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -6573,7 +6579,7 @@ fn admit_transaction_project(
         }
         if module_keys.keys().any(|name| key_fields.contains_key(name)) {
             return Err(Box::new(StageOutcome::Skipped {
-                reason: "project transaction modules declare a duplicate table name".into(),
+                reason: "project transaction modules declare a duplicate table identity".into(),
             }));
         }
         functions.extend(module_functions);
@@ -6711,7 +6717,475 @@ fn project_transaction_namespace(
     if stem.is_empty() || stem.split('/').any(str::is_empty) {
         return Err("project transaction modules need a non-empty logical namespace".into());
     }
+    // `x/main.orna` defines namespace `x` (ORNA-NS-001); only the root
+    // `main.orna` keeps the `main` prefix that root functions are run by.
+    let stem = stem.strip_suffix("/main").unwrap_or(stem);
     Ok(stem.replace('/', "."))
+}
+
+/// The qualified table identity the runtime keys rows by: the module's
+/// namespace path plus the declared name, as recorded by the committed
+/// identity manifest (root-module tables keep their bare name).
+fn qualified_table_identity(namespace: &Namespace, name: &str) -> String {
+    if namespace.0.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{}.{name}", namespace.0.join("."))
+    }
+}
+
+/// Public tables and functions of every admitted application module, keyed by
+/// semantic namespace, with the prefix of that module's retained function keys.
+struct ProjectGraph {
+    modules: BTreeMap<Namespace, GraphModule>,
+}
+
+struct GraphModule {
+    function_prefix: String,
+    tables: BTreeSet<String>,
+    functions: BTreeSet<String>,
+}
+
+impl ProjectGraph {
+    fn new(project: &ProjectUnit) -> Self {
+        let mut modules = BTreeMap::new();
+        for unit in project.modules.iter().filter(|unit| !is_standard_source(unit)) {
+            let (Some(namespace), Ok(function_prefix)) = (
+                project_semantic_namespace(project, unit),
+                project_transaction_namespace(project, unit),
+            ) else {
+                continue;
+            };
+            let mut tables = BTreeSet::new();
+            let mut functions = BTreeSet::new();
+            for item in parse_module(&unit.source).value.items {
+                if !matches!(item.visibility, orna_syntax_v1::Visibility::Public { .. }) {
+                    continue;
+                }
+                match item.declaration {
+                    Declaration::Table { name, .. } => {
+                        tables.insert(name);
+                    }
+                    Declaration::Function { signature, .. } => {
+                        functions.insert(signature.name);
+                    }
+                    _ => {}
+                }
+            }
+            modules.insert(
+                namespace,
+                GraphModule {
+                    function_prefix,
+                    tables,
+                    functions,
+                },
+            );
+        }
+        Self { modules }
+    }
+}
+
+/// How one module's source spellings reach project tables and functions,
+/// resolved once at admission so the retained evaluator and the table effect
+/// handler only ever see stable identities. Local declarations win, then
+/// explicit imports, then unambiguous wildcard imports (ORNA-IMPORT-003,
+/// ORNA-IMPORT-004, ORNA-IMPORT-007). A qualified path starts at a `use`
+/// binding (ORNA-IMPORT-001, ORNA-IMPORT-002) or spells a module's full
+/// namespace path (ORNA-NS-001, ORNA-NS-002), with or without `use`.
+struct ModuleReferences<'a> {
+    graph: &'a ProjectGraph,
+    namespace: Namespace,
+    local_tables: BTreeSet<String>,
+    tables: BTreeMap<String, String>,
+    functions: BTreeMap<String, String>,
+    modules: BTreeMap<String, Namespace>,
+    declared: BTreeSet<String>,
+}
+
+impl<'a> ModuleReferences<'a> {
+    fn new(namespace: &Namespace, items: &[orna_syntax_v1::Item], graph: &'a ProjectGraph) -> Self {
+        let mut declared = BTreeSet::new();
+        let mut local_tables = BTreeSet::new();
+        let mut tables = BTreeMap::new();
+        for item in items {
+            match &item.declaration {
+                Declaration::Table { name, .. } => {
+                    local_tables.insert(name.clone());
+                    tables.insert(name.clone(), qualified_table_identity(namespace, name));
+                    declared.insert(name.clone());
+                }
+                Declaration::Function { signature, .. } => {
+                    declared.insert(signature.name.clone());
+                }
+                Declaration::Type { name, .. }
+                | Declaration::Enum { name, .. }
+                | Declaration::Protocol { name, .. }
+                | Declaration::Dimension { name, .. }
+                | Declaration::Unit { name, .. } => {
+                    declared.insert(name.clone());
+                }
+                Declaration::Let { pattern, .. } => declared.extend(relation_pattern_names(pattern)),
+                _ => {}
+            }
+        }
+        let mut functions = BTreeMap::new();
+        let mut modules = BTreeMap::new();
+        let mut glob_tables = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut glob_functions = BTreeMap::<String, BTreeSet<String>>::new();
+        for item in items {
+            let Declaration::Use { path, tail } = &item.declaration else {
+                continue;
+            };
+            let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+            let module = graph.modules.get(&target);
+            match tail {
+                orna_syntax_v1::UseTail::None => {
+                    if let Some(last) = target.0.last() {
+                        modules.insert(last.clone(), target.clone());
+                    }
+                }
+                orna_syntax_v1::UseTail::Alias { name, .. } if name != "_" => {
+                    modules.insert(name.clone(), target.clone());
+                }
+                orna_syntax_v1::UseTail::Alias { .. } => {}
+                orna_syntax_v1::UseTail::Names(names) => {
+                    let Some(module) = module else { continue };
+                    for import in names {
+                        if module.tables.contains(&import.name) {
+                            tables
+                                .entry(import.name.clone())
+                                .or_insert_with(|| qualified_table_identity(&target, &import.name));
+                        }
+                        if module.functions.contains(&import.name) && !declared.contains(&import.name) {
+                            functions
+                                .entry(import.name.clone())
+                                .or_insert_with(|| format!("{}.{}", module.function_prefix, import.name));
+                        }
+                    }
+                }
+                orna_syntax_v1::UseTail::Glob { .. } => {
+                    let Some(module) = module else { continue };
+                    for name in &module.tables {
+                        glob_tables
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(qualified_table_identity(&target, name));
+                    }
+                    for name in &module.functions {
+                        glob_functions
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(format!("{}.{name}", module.function_prefix));
+                    }
+                }
+            }
+        }
+        for (name, identities) in glob_tables {
+            if identities.len() == 1 && !declared.contains(&name) {
+                let identity = identities.into_iter().next().expect("one identity");
+                tables.entry(name).or_insert(identity);
+            }
+        }
+        for (name, keys) in glob_functions {
+            if keys.len() == 1 && !declared.contains(&name) {
+                let key = keys.into_iter().next().expect("one function key");
+                functions.entry(name).or_insert(key);
+            }
+        }
+        Self {
+            graph,
+            namespace: namespace.clone(),
+            local_tables,
+            tables,
+            functions,
+            modules,
+            declared,
+        }
+    }
+
+    /// Keys this module's table surfaces by qualified identity and rewrites
+    /// every table and function reference in its bodies and assertions.
+    fn resolve(&self, admitted: &mut AdmittedTransaction) {
+        for table in &self.local_tables {
+            let identity = qualified_table_identity(&self.namespace, table);
+            if &identity == table {
+                continue;
+            }
+            if let Some(mut key) = admitted.key_fields.remove(table) {
+                key.table.clone_from(&identity);
+                admitted.key_fields.insert(identity.clone(), key);
+            }
+            if let Some(fields) = admitted.table_fields.remove(table) {
+                admitted.table_fields.insert(identity.clone(), fields);
+            }
+            if let Some(fields) = admitted.float_fields.floats.remove(table) {
+                admitted.float_fields.floats.insert(identity.clone(), fields);
+            }
+            if let Some(fields) = admitted.float_fields.decimals.remove(table) {
+                admitted.float_fields.decimals.insert(identity.clone(), fields);
+            }
+            if let Some(mut assertions) = admitted.table_assertions.remove(table) {
+                for assertion in &mut assertions {
+                    assertion.owner_name.clone_from(&identity);
+                    assertion.dependencies.remove(table);
+                    assertion.dependencies.insert(identity.clone());
+                }
+                admitted.table_assertions.insert(identity.clone(), assertions);
+            }
+        }
+        for function in admitted.functions.values_mut() {
+            let mut shadowed = BTreeSet::new();
+            for parameter in &function.parameters {
+                shadowed.extend(relation_pattern_names(&parameter.pattern));
+            }
+            self.expression(&mut function.body, &shadowed);
+        }
+        for assertion in admitted
+            .table_assertions
+            .values_mut()
+            .flatten()
+            .chain(admitted.module_assertions.iter_mut())
+        {
+            self.expression(&mut assertion.expression, &BTreeSet::new());
+        }
+    }
+
+    /// The namespace owning `path.last()`, through a `use` binding or a full
+    /// namespace path; declared names take precedence over namespace paths.
+    fn member_namespace(&self, path: &[&str]) -> Option<Namespace> {
+        let (first, rest) = path.split_first()?;
+        let (_, intermediate) = rest.split_last()?;
+        if let Some(root) = self.modules.get(*first) {
+            let mut namespace = root.clone();
+            namespace
+                .0
+                .extend(intermediate.iter().map(|part| (*part).to_owned()));
+            return Some(namespace);
+        }
+        if matches!(*first, "std" | "sys")
+            || self.declared.contains(*first)
+            || self.tables.contains_key(*first)
+            || self.functions.contains_key(*first)
+        {
+            return None;
+        }
+        Some(Namespace(
+            path[..path.len() - 1]
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect(),
+        ))
+    }
+
+    fn table_path(&self, path: &[&str]) -> Option<String> {
+        let namespace = self.member_namespace(path)?;
+        let name = *path.last()?;
+        self.graph
+            .modules
+            .get(&namespace)
+            .is_some_and(|module| module.tables.contains(name))
+            .then(|| qualified_table_identity(&namespace, name))
+    }
+
+    fn function_path(&self, path: &[&str]) -> Option<String> {
+        let namespace = self.member_namespace(path)?;
+        let name = *path.last()?;
+        let module = self.graph.modules.get(&namespace)?;
+        module
+            .functions
+            .contains(name)
+            .then(|| format!("{}.{name}", module.function_prefix))
+    }
+
+    fn callee(&self, callee: &mut Expr, shadowed: &BTreeSet<String>) {
+        let resolved = match &*callee {
+            Expr::Name { text, .. } if !shadowed.contains(text) => self.functions.get(text).cloned(),
+            Expr::Field { .. } => reference_path(callee)
+                .filter(|path| !shadowed.contains(path[0]))
+                .and_then(|path| {
+                    self.function_path(&path)
+                        .filter(|key| *key != path.join("."))
+                }),
+            _ => None,
+        };
+        match resolved {
+            Some(key) => {
+                let span = callee.span();
+                *callee = Expr::Name { text: key, span };
+            }
+            None => self.expression(callee, shadowed),
+        }
+    }
+
+    fn expression(&self, expression: &mut Expr, shadowed: &BTreeSet<String>) {
+        if let Some(path) = reference_path(expression)
+            && !shadowed.contains(path[0])
+        {
+            let identity = match &*expression {
+                Expr::Name { text, .. } => self.tables.get(text.as_str()).cloned(),
+                _ => self.table_path(&path),
+            };
+            if let Some(identity) = identity {
+                let span = expression.span();
+                *expression = Expr::Name {
+                    text: identity,
+                    span,
+                };
+                return;
+            }
+        }
+        match expression {
+            Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let orna_syntax_v1::StringSegment::Expression { value, .. } = segment {
+                        self.expression(value, shadowed);
+                    }
+                }
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+                self.expression(rhs, shadowed);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expression(lhs, shadowed);
+                self.expression(rhs, shadowed);
+            }
+            Expr::Range { lower, upper, .. } => {
+                for endpoint in [lower, upper].into_iter().flatten() {
+                    self.expression(endpoint, shadowed);
+                }
+            }
+            Expr::Call {
+                callee, arguments, ..
+            }
+            | Expr::GenericCall {
+                callee, arguments, ..
+            } => {
+                self.callee(callee, shadowed);
+                for argument in arguments {
+                    self.expression(&mut argument.value, shadowed);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.expression(base, shadowed);
+                self.expression(index, shadowed);
+            }
+            Expr::Field { base, .. } => self.expression(base, shadowed),
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for element in elements {
+                    self.expression(element, shadowed);
+                }
+            }
+            Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+                for field in fields {
+                    self.expression(&mut field.value, shadowed);
+                }
+            }
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                let mut shadowed = shadowed.clone();
+                for parameter in parameters.iter() {
+                    shadowed.extend(relation_pattern_names(&parameter.pattern));
+                }
+                self.expression(body, &shadowed);
+            }
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                let mut shadowed = shadowed.clone();
+                for statement in statements {
+                    self.statement(statement, &mut shadowed);
+                }
+                if let Some(tail) = tail {
+                    self.expression(tail, &shadowed);
+                }
+            }
+            Expr::Control {
+                binding,
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    self.expression(condition, shadowed);
+                }
+                if let Some(body) = body {
+                    let mut shadowed = shadowed.clone();
+                    if let Some(binding) = binding {
+                        shadowed.extend(relation_pattern_names(binding));
+                    }
+                    self.expression(body, &shadowed);
+                }
+                for arm in arms {
+                    let mut shadowed = shadowed.clone();
+                    shadowed.extend(relation_pattern_names(&arm.pattern));
+                    if let Some(guard) = &mut arm.guard {
+                        self.expression(guard, &shadowed);
+                    }
+                    self.expression(&mut arm.body, &shadowed);
+                }
+                if let Some(alternate) = alternate {
+                    self.expression(alternate, shadowed);
+                }
+            }
+        }
+    }
+
+    fn statement(&self, statement: &mut orna_syntax_v1::Statement, shadowed: &mut BTreeSet<String>) {
+        use orna_syntax_v1::Statement;
+        match statement {
+            Statement::Let { pattern, value, .. } => {
+                self.expression(value, shadowed);
+                shadowed.extend(relation_pattern_names(pattern));
+            }
+            Statement::Assert { value, .. }
+            | Statement::Expression { value, .. }
+            | Statement::Control { value, .. } => self.expression(value, shadowed),
+            Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                if let Some(value) = value {
+                    self.expression(value, shadowed);
+                }
+            }
+            Statement::Assignment { target, value, .. } => {
+                self.assignment_target(target, shadowed);
+                self.expression(value, shadowed);
+            }
+            Statement::Continue { .. } => {}
+        }
+    }
+
+    fn assignment_target(
+        &self,
+        target: &mut orna_syntax_v1::AssignmentTarget,
+        shadowed: &BTreeSet<String>,
+    ) {
+        match target {
+            orna_syntax_v1::AssignmentTarget::Name { .. } => {}
+            orna_syntax_v1::AssignmentTarget::Field { base, .. } => {
+                self.assignment_target(base, shadowed);
+            }
+            orna_syntax_v1::AssignmentTarget::Index { base, index, .. } => {
+                self.assignment_target(base, shadowed);
+                self.expression(index, shadowed);
+            }
+        }
+    }
+}
+
+/// The dotted source path of a name or field chain (`a.b.Item`).
+fn reference_path(expression: &Expr) -> Option<Vec<&str>> {
+    match expression {
+        Expr::Name { text, .. } => Some(vec![text.as_str()]),
+        Expr::Field { base, name, .. } => {
+            let mut path = reference_path(base)?;
+            path.push(name.as_str());
+            Some(path)
+        }
+        _ => None,
+    }
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {

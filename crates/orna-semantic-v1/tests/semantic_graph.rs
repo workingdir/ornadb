@@ -2339,7 +2339,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
         .expect("module assertion plan");
     assert_eq!(
         plan.dependencies,
-        std::collections::BTreeSet::from(["Account".into(), "User".into()])
+        std::collections::BTreeSet::from(["transitive-helper.Account".into(), "transitive-helper.User".into()])
     );
     assert_eq!(plan.effects, helper.effects);
 }
@@ -2359,7 +2359,7 @@ fn module_assertion_dependencies_count_resolved_tables_not_uppercase_values() {
         .expect("module assertion plan");
     assert_eq!(
         plans[0].dependencies,
-        std::collections::BTreeSet::from(["User".into()])
+        std::collections::BTreeSet::from(["one-table-optional.User".into()])
     );
 }
 
@@ -2378,7 +2378,7 @@ fn module_assertion_dependencies_follow_resolved_lowercase_table_names() {
         .expect("module assertion plan");
     assert_eq!(
         plans[0].dependencies,
-        std::collections::BTreeSet::from(["accounts".into(), "users".into()])
+        std::collections::BTreeSet::from(["lowercase-tables.accounts".into(), "lowercase-tables.users".into()])
     );
 }
 
@@ -2512,7 +2512,7 @@ fn relation_windows_admit_the_standard_size_and_step_contract() {
             &module.symbols[name].ty,
             Type::Function { result, .. }
                 if result.as_ref()
-                    == &Type::Relation(Box::new(Type::List(Box::new(Type::Named("Note".into())))))
+                    == &Type::Relation(Box::new(Type::List(Box::new(Type::Named("windows.Note".into())))))
         ));
     }
 
@@ -16605,7 +16605,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
     assert!(matches!(
         &readings.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("relation-distinct.Reading".into())))
     ));
     assert!(readings.effects.effects.contains("database read"));
     assert!(readings.effects.may_fail);
@@ -16613,7 +16613,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
     assert!(matches!(
         &direct.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("relation-distinct.Reading".into())))
     ));
     assert!(direct.effects.effects.contains("database read"));
     assert!(direct.effects.may_fail);
@@ -16772,7 +16772,7 @@ fn finite_list_filter_rejects_wrong_callback_shape_without_affecting_relations()
     assert!(matches!(
         &module.symbols["recent"].ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
+            if result.as_ref() == &Type::Relation(Box::new(Type::Named("relation.Reading".into())))
     ));
 }
 
@@ -17006,7 +17006,7 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
         Type::Function {
             parameters: Vec::new(),
             parameter_names: Some(Vec::new()),
-            result: Box::new(Type::Optional(Box::new(Type::Named("Reading".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named("relation-first.Reading".into())))),
             default_parameters: Default::default(),
         }
     );
@@ -17015,7 +17015,7 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
         Type::Function {
             parameters: Vec::new(),
             parameter_names: Some(Vec::new()),
-            result: Box::new(Type::Optional(Box::new(Type::Named("Reading".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named("relation-first.Reading".into())))),
             default_parameters: Default::default(),
         }
     );
@@ -17161,7 +17161,7 @@ fn finite_list_one_rejects_invalid_signatures_and_keeps_relation_one_behavior() 
         assert!(
             matches!(
                 &module.symbols[name].ty,
-                Type::Function { result, .. } if result.as_ref() == &Type::Named("Reading".into())
+                Type::Function { result, .. } if result.as_ref() == &Type::Named("relation-one.Reading".into())
             ),
             "{name}: {:?}",
             module.symbols[name].ty
@@ -18564,7 +18564,7 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     assert_eq!(
         stages.get("window"),
         Some(&Type::Relation(Box::new(Type::List(Box::new(Type::Named(
-            "WindowRow".into(),
+            "historical-paired-sparse-compaction-fold-chain.WindowRow".into(),
         )))))),
         "the fold result preserves the concrete relation-window shape"
     );
