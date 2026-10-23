@@ -2198,30 +2198,45 @@ impl RuntimePaths {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ManagedPath(PathBuf);
 
+/// Longest repository-relative managed path, in bytes (POSIX `PATH_MAX`).
+const MAX_MANAGED_PATH_BYTES: usize = 4096;
+
+/// Longest single managed-path component, in bytes (POSIX `NAME_MAX`).
+const MAX_MANAGED_PATH_COMPONENT_BYTES: usize = 255;
+
 impl ManagedPath {
     /// Creates a normalized, repository-relative path.
     ///
-    /// Absolute paths, `.git` administration paths, tracked `.orna/cache.db`, and
-    /// parent traversal or empty paths are rejected before they reach Git.
+    /// Absolute paths, `.git` administration components at any depth or letter
+    /// case, tracked `.orna/cache.db`, parent traversal, empty paths, and paths
+    /// beyond the byte or per-component limits are rejected before they reach Git.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, RepositoryError> {
         let path = path.as_ref();
-        if path.as_os_str().is_empty() || path.is_absolute() {
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.as_os_str().as_encoded_bytes().len() > MAX_MANAGED_PATH_BYTES
+        {
             return Err(RepositoryError::UnsafeManagedPath);
         }
         let mut normalized = PathBuf::new();
         for component in path.components() {
             match component {
-                Component::Normal(value) => normalized.push(value),
+                Component::Normal(value) => {
+                    let bytes = value.as_encoded_bytes();
+                    if bytes.len() > MAX_MANAGED_PATH_COMPONENT_BYTES
+                        || orna_foundation_v1::is_git_metadata_component(bytes)
+                    {
+                        return Err(RepositoryError::UnsafeManagedPath);
+                    }
+                    normalized.push(value);
+                }
                 Component::CurDir => {}
                 Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                     return Err(RepositoryError::UnsafeManagedPath);
                 }
             }
         }
-        if normalized.components().next().is_none()
-            || normalized.components().next() == Some(Component::Normal(".git".as_ref()))
-            || normalized == Path::new(".orna/cache.db")
-        {
+        if normalized.components().next().is_none() || normalized == Path::new(".orna/cache.db") {
             return Err(RepositoryError::UnsafeManagedPath);
         }
         Ok(Self(normalized))

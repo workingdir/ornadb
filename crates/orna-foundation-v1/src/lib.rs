@@ -210,6 +210,14 @@ pub use object_reference::{
     validate_object_reference_for_id,
 };
 
+/// Git's metadata directory, or a linked worktree's `.git` file, is never an
+/// ordinary repository path at any depth. Every letter case is refused because
+/// case-insensitive filesystems and Git's own name checks treat them as one name.
+#[must_use]
+pub fn is_git_metadata_component(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b".git")
+}
+
 /// Checks only that a row reference is pinned to the supplied CWD context,
 /// then attaches a noninterchangeable marker. It intentionally does not
 /// validate a relation identity: physical relation identities and row keys
