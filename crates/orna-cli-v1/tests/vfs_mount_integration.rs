@@ -2496,7 +2496,6 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
 }
 
 #[tokio::test]
-#[ignore = "ornadb-5il1.293 open gap: remount after replacement; run with --ignored"]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
 async fn cwd_mount_rename_replacement_survives_remount() {
     let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
