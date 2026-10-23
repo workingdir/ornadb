@@ -1,6 +1,6 @@
 {
   "source": "orna-syntax-v1",
-  "languageVersion": "1.0.0",
+  "languageVersion": "1.1.0",
   "emitters": [
     "TextMate grammar and VSCode extension",
     "Tree-sitter grammar and package metadata",
