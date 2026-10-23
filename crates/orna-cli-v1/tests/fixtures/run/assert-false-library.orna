@@ -1,0 +1,4 @@
+pub fn answer(): Int {
+    assert false;
+    1
+}
