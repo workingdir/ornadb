@@ -1,0 +1,57 @@
+name: CLI Gate B
+
+# Gate B: a 10 GiB network payload streamed into a Blob with bounded RSS and zero
+# metadata reads. The test takes about an hour, so it does not run inside the
+# per-PR cli-tests job. It runs on every push to main, on demand, and on pull
+# requests that touch the code it exercises (capture, runtime, repository, storage,
+# value, evaluator bindings, the test itself, the dependency lock, or this file).
+# The nightly gate run (nightly-gates.yml, when present) also covers it.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - ".github/workflows/cli-gate-b.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "stdlib/**"
+      - "crates/orna-cli-v1/tests/media_import_query.rs"
+      - "crates/orna-cli-v1/tests/fixtures/**"
+      - "crates/orna-cli-v1/src/cli_import*.rs"
+      - "crates/orna-cli-v1/src/media*.rs"
+      - "crates/orna-evaluator-v1/**"
+      - "crates/orna-repository-v1/**"
+      - "crates/orna-runtime-v1/**"
+      - "crates/orna-storage-v1/**"
+      - "crates/orna-sys-v1/**"
+      - "crates/orna-value-v1/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+concurrency:
+  group: cli-gate-b-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Gate B large network payload
+        run: cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact
