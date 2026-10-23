@@ -20,7 +20,7 @@ fn status_hyperlinks_are_emitted_only_for_supported_terminal_stdout() {
         git_init.stderr
     );
 
-    let cli = env!("CARGO_BIN_EXE_orna-cli-v1");
+    let cli = env!("CARGO_BIN_EXE_orna");
     let plain = Command::new(cli)
         .args(["--color", "never", "status"])
         .current_dir(repository.path())
