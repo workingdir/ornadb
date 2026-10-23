@@ -210,12 +210,43 @@ pub use object_reference::{
     validate_object_reference_for_id,
 };
 
-/// Git's metadata directory, or a linked worktree's `.git` file, is never an
-/// ordinary repository path at any depth. Every letter case is refused because
-/// case-insensitive filesystems and Git's own name checks treat them as one name.
+/// Reports whether one path component names Git's administration entry: the
+/// `.git` directory or a linked worktree's `.git` file. It matches the spellings
+/// Git refuses in a tree on every platform, so a repository stays portable:
+/// any letter case; trailing dots or spaces (NTFS strips them); the 8.3 alias
+/// `git~1`; an NTFS stream suffix after `:`; and HFS+ ignorable code points
+/// (U+200C..U+200F, U+202A..U+202E, U+206A..U+206F, U+FEFF) anywhere in the
+/// name. Ordinary names such as `.gitignore`, `.github`, `foo.git`, and
+/// `git-notes.md` do not match. This is a refusal predicate for Git metadata
+/// names only, not a complete Windows or macOS path validator.
 #[must_use]
 pub fn is_git_metadata_component(name: &[u8]) -> bool {
-    name.eq_ignore_ascii_case(b".git")
+    let folded: Vec<u8> = match std::str::from_utf8(name) {
+        Ok(text) => text
+            .chars()
+            .filter(|character| !is_hfs_ignorable(*character))
+            .collect::<String>()
+            .into_bytes(),
+        Err(_) => name.to_vec(),
+    };
+    let stem = folded.split(|byte| *byte == b':').next().unwrap_or_default();
+    let mut end = stem.len();
+    while end > 0 && matches!(stem[end - 1], b'.' | b' ') {
+        end -= 1;
+    }
+    let base = &stem[..end];
+    base.eq_ignore_ascii_case(b".git") || base.eq_ignore_ascii_case(b"git~1")
+}
+
+/// Code points that macOS HFS+ ignores when comparing names.
+fn is_hfs_ignorable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200C}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{206A}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Checks only that a row reference is pinned to the supplied CWD context,
@@ -2234,5 +2265,67 @@ mod tests {
         // The audit representation admits arbitrary precision coordinates as
         // decimal text; tag-60011 remains independently verified above.
         assert!(serde_json::to_vec(&diagnostic).unwrap().starts_with(b"{"));
+    }
+}
+
+#[cfg(test)]
+mod git_metadata_component_tests {
+    use super::is_git_metadata_component;
+
+    #[test]
+    fn refuses_git_administration_names_in_every_spelling() {
+        for refused in [
+            ".git",
+            ".GIT",
+            ".Git",
+            ".gIt",
+            ".git.",
+            ".git..",
+            ".git ",
+            ".GIT. ",
+            "git~1",
+            "GIT~1",
+            "git~1.",
+            ".git:",
+            ".git::$INDEX_ALLOCATION",
+            ".g\u{200C}it",
+            ".\u{FEFF}git",
+            ".gi\u{202E}t",
+            ".git\u{206F}",
+        ] {
+            assert!(
+                is_git_metadata_component(refused.as_bytes()),
+                "{refused:?} must be refused as git metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_names_that_only_resemble_git_metadata() {
+        for accepted in [
+            ".gitignore",
+            ".github",
+            "foo.git",
+            "git-notes.md",
+            "git",
+            "git~2",
+            "digit",
+            "..",
+            ".",
+            "",
+            "gitx.",
+            "a.git.b",
+        ] {
+            assert!(
+                !is_git_metadata_component(accepted.as_bytes()),
+                "{accepted:?} must stay an ordinary name"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_names_compare_bytes_only() {
+        assert!(is_git_metadata_component(b".GIT"));
+        assert!(!is_git_metadata_component(b".git\xFF"));
     }
 }

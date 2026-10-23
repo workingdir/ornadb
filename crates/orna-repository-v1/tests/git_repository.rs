@@ -484,6 +484,9 @@ fn managed_paths_refuse_git_metadata_at_any_depth_and_in_any_case() {
         ".GIT/config",
         "a/.Git/x",
         "nested/.gIt",
+        "sub/.git./config",
+        "sub/.git /config",
+        "sub/git~1/config",
     ] {
         assert!(
             matches!(
@@ -496,18 +499,14 @@ fn managed_paths_refuse_git_metadata_at_any_depth_and_in_any_case() {
     assert!(ManagedPath::new("sub/.github/workflows/ci.yml").is_ok());
     assert!(ManagedPath::new("docs/git-notes.md").is_ok());
     assert!(ManagedPath::new("sub/.gitignore").is_ok());
+    assert!(ManagedPath::new("sub/foo.git/config").is_ok());
 }
 
 #[test]
-fn managed_paths_refuse_overlong_bytes_and_components() {
-    let long_component = "a".repeat(256);
-    assert!(ManagedPath::new(&long_component).is_err());
-    assert!(ManagedPath::new(format!("docs/{long_component}.md")).is_err());
-    let component_at_limit = "a".repeat(255);
-    assert!(ManagedPath::new(format!("docs/{component_at_limit}")).is_ok());
-    let overlong_total = vec!["a".repeat(255); 17].join("/");
-    assert!(overlong_total.len() > 4096);
-    assert!(ManagedPath::new(&overlong_total).is_err());
+fn managed_paths_do_not_cap_length_because_git_stores_any_length() {
+    let long_component = "a".repeat(300);
+    assert!(ManagedPath::new(&long_component).is_ok());
+    assert!(ManagedPath::new(format!("docs/{long_component}.md")).is_ok());
 }
 
 /// Runs Git with raw bytes on stdin, for objects Git's own tree writers refuse.
@@ -541,42 +540,110 @@ fn raw_tree(entries: &[(&str, &str, &str)]) -> Vec<u8> {
     bytes
 }
 
+/// Writes one raw tree object from `(mode, name, object id)` entries.
+fn raw_tree_object(root: &Path, entries: &[(&str, &str, &str)]) -> String {
+    git_raw(
+        root,
+        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
+        &raw_tree(entries),
+    )
+}
+
+/// Publishes a commit whose root tree is `tree` on `refs/heads/<branch>`.
+fn publish_raw_commit(root: &Path, tree: &str, branch: &str) {
+    let commit_body = format!(
+        "tree {tree}\nauthor Orna <orna@example.invalid> 1 +0000\n\
+         committer Orna <orna@example.invalid> 1 +0000\n\nraw\n"
+    );
+    let commit_id = git_raw(
+        root,
+        &["hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
+        commit_body.as_bytes(),
+    );
+    git(root, &["update-ref", &format!("refs/heads/{branch}"), &commit_id]);
+}
+
+/// Builds a root tree holding `sub/.git/config`, which Git's own writers refuse.
+fn hostile_nested_tree(root: &Path) -> String {
+    let blob = git_raw(root, &["hash-object", "-w", "--stdin"], b"[core]\n");
+    let gitdir = raw_tree_object(root, &[("100644", "config", &blob)]);
+    let sub = raw_tree_object(root, &[("40000", ".git", &gitdir)]);
+    raw_tree_object(root, &[("40000", "sub", &sub)])
+}
+
 #[test]
 fn committed_git_metadata_path_is_refused_on_load() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
-    let blob = git_raw(root.path(), &["hash-object", "-w", "--stdin"], b"[core]\n");
-    let gitdir = git_raw(
-        root.path(),
-        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
-        &raw_tree(&[("100644", "config", &blob)]),
-    );
-    let sub = git_raw(
-        root.path(),
-        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
-        &raw_tree(&[("40000", ".git", &gitdir)]),
-    );
-    let tree = git_raw(
-        root.path(),
-        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
-        &raw_tree(&[("40000", "sub", &sub)]),
-    );
-    let commit_body = format!(
-        "tree {tree}\nauthor Orna <orna@example.invalid> 1 +0000\n\
-         committer Orna <orna@example.invalid> 1 +0000\n\nhostile\n"
-    );
-    let commit_id = git_raw(
-        root.path(),
-        &["hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
-        commit_body.as_bytes(),
-    );
-    git(root.path(), &["update-ref", "refs/heads/hostile", &commit_id]);
+    publish_raw_commit(root.path(), &hostile_nested_tree(root.path()), "hostile");
     let commit = repo.resolve_snapshot("hostile").unwrap();
 
     assert!(matches!(
         repo.list_committed_source_tree(&commit),
         Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
     ));
+}
+
+#[test]
+fn committed_git_metadata_path_is_refused_on_ls_tree_listing() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    publish_raw_commit(root.path(), &hostile_nested_tree(root.path()), "hostile");
+    let commit = repo.resolve_snapshot("hostile").unwrap();
+
+    assert!(matches!(
+        repo.list_committed_tree(&commit, 100),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+}
+
+#[test]
+fn committed_overlong_entries_list_without_a_path_limit() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let blob = git_raw(root.path(), &["hash-object", "-w", "--stdin"], b"long\n");
+    // 300 bytes exceeds NAME_MAX; 4200 bytes exceeds the old 4096-byte cap.
+    let long_component = format!("{}.md", "a".repeat(300));
+    let long_name = "b".repeat(4200);
+    let docs = raw_tree_object(root.path(), &[("100644", &long_component, &blob)]);
+    let tree = raw_tree_object(
+        root.path(),
+        &[("100644", &long_name, &blob), ("40000", "docs", &docs)],
+    );
+    publish_raw_commit(root.path(), &tree, "overlong");
+    let commit = repo.resolve_snapshot("overlong").unwrap();
+
+    let listed = repo.list_committed_source_tree(&commit).unwrap();
+    let paths = listed
+        .iter()
+        .map(|entry| entry.path().as_path().to_path_buf())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&PathBuf::from(&long_name)));
+    assert!(paths.contains(&PathBuf::from("docs").join(&long_component)));
+    assert!(repo.list_committed_tree(&commit, 100).is_ok());
+}
+
+#[test]
+fn checkout_plan_accepts_user_directories_named_like_git_metadata() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "user data\n").unwrap();
+    fs::create_dir_all(root.path().join(".GIT")).unwrap();
+    fs::write(root.path().join(".GIT/a"), "user data\n").unwrap();
+
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(25))
+        .unwrap();
+    assert!(plan.git().conflicting_paths().is_empty());
+    let affected = plan
+        .git()
+        .affected_paths()
+        .iter()
+        .map(|path| path.as_path().to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(affected, [".GIT/a", "Sub/.GIT/notes"]);
 }
 
 #[test]

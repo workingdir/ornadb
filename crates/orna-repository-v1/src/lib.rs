@@ -2198,33 +2198,37 @@ impl RuntimePaths {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ManagedPath(PathBuf);
 
-/// Longest repository-relative managed path, in bytes (POSIX `PATH_MAX`).
-const MAX_MANAGED_PATH_BYTES: usize = 4096;
-
-/// Longest single managed-path component, in bytes (POSIX `NAME_MAX`).
-const MAX_MANAGED_PATH_COMPONENT_BYTES: usize = 255;
-
 impl ManagedPath {
-    /// Creates a normalized, repository-relative path.
+    /// Creates a normalized, repository-relative path for a write, a stage, or
+    /// a committed-tree entry.
     ///
-    /// Absolute paths, `.git` administration components at any depth or letter
-    /// case, tracked `.orna/cache.db`, parent traversal, empty paths, and paths
-    /// beyond the byte or per-component limits are rejected before they reach Git.
+    /// Absolute paths, `.git` administration components at any depth, tracked
+    /// `.orna/cache.db`, parent traversal, and empty paths are rejected before
+    /// they reach Git. No length limit applies here: Git stores committed names
+    /// of any length, so an overlong committed entry must still list. The
+    /// filesystem reports an overlong name when Orna creates it.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, RepositoryError> {
-        let path = path.as_ref();
-        if path.as_os_str().is_empty()
-            || path.is_absolute()
-            || path.as_os_str().as_encoded_bytes().len() > MAX_MANAGED_PATH_BYTES
-        {
+        Self::normalize(path.as_ref(), true).map(Self)
+    }
+
+    /// Wraps a path Git reports for the local worktree (untracked, ignored, or
+    /// changed). A user-created directory such as `Sub/.GIT/` is ordinary local
+    /// data that Git lists, so this keeps the structural checks but not the Git
+    /// metadata refusal. It only feeds conflict classification, never a write.
+    fn from_worktree_listing(path: &str) -> Result<Self, RepositoryError> {
+        Self::normalize(Path::new(path), false).map(Self)
+    }
+
+    fn normalize(path: &Path, refuse_git_metadata: bool) -> Result<PathBuf, RepositoryError> {
+        if path.as_os_str().is_empty() || path.is_absolute() {
             return Err(RepositoryError::UnsafeManagedPath);
         }
         let mut normalized = PathBuf::new();
         for component in path.components() {
             match component {
                 Component::Normal(value) => {
-                    let bytes = value.as_encoded_bytes();
-                    if bytes.len() > MAX_MANAGED_PATH_COMPONENT_BYTES
-                        || orna_foundation_v1::is_git_metadata_component(bytes)
+                    if refuse_git_metadata
+                        && orna_foundation_v1::is_git_metadata_component(value.as_encoded_bytes())
                     {
                         return Err(RepositoryError::UnsafeManagedPath);
                     }
@@ -2239,7 +2243,7 @@ impl ManagedPath {
         if normalized.components().next().is_none() || normalized == Path::new(".orna/cache.db") {
             return Err(RepositoryError::UnsafeManagedPath);
         }
-        Ok(Self(normalized))
+        Ok(normalized)
     }
 
     pub fn as_path(&self) -> &Path {
@@ -5914,7 +5918,7 @@ impl Repository {
                 "--".into(),
             ],
         ] {
-            local_paths.extend(self.git_nul_paths(&arguments)?);
+            local_paths.extend(self.git_worktree_nul_paths(&arguments)?);
         }
         let affected_paths = target_paths
             .union(&local_paths)
@@ -7660,7 +7664,27 @@ impl Repository {
         command.args(args);
         Ok(self.run(command)?.stdout)
     }
+    /// Parses paths Git reports for a committed tree or diff. Each is a
+    /// committed name, so it passes [`ManagedPath::new`] in full.
     fn git_nul_paths(&self, args: &[String]) -> Result<HashSet<ManagedPath>, RepositoryError> {
+        self.git_nul_paths_with(args, |path| ManagedPath::new(path))
+    }
+
+    /// Parses paths Git reports for the local worktree, which include untracked
+    /// user directories such as `Sub/.GIT/`. Those are ordinary local data, so
+    /// they take only the structural check.
+    fn git_worktree_nul_paths(
+        &self,
+        args: &[String],
+    ) -> Result<HashSet<ManagedPath>, RepositoryError> {
+        self.git_nul_paths_with(args, ManagedPath::from_worktree_listing)
+    }
+
+    fn git_nul_paths_with(
+        &self,
+        args: &[String],
+        parse: impl Fn(&str) -> Result<ManagedPath, RepositoryError>,
+    ) -> Result<HashSet<ManagedPath>, RepositoryError> {
         let mut command = self.command();
         command.args(args);
         self.run(command)?
@@ -7668,9 +7692,9 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
             .map(|path| {
-                let path = String::from_utf8(path.to_vec())
+                let path = std::str::from_utf8(path)
                     .map_err(|_| RepositoryError::UnsafeManagedPath)?;
-                ManagedPath::new(path)
+                parse(path)
             })
             .collect()
     }
