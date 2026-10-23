@@ -1962,7 +1962,7 @@ impl TransactionalEvaluator {
         match scenario.id.as_str() {
             "TXN-001" => match evaluator.execute_source(&unit) {
                 StageOutcome::Failed(diagnostic)
-                    if diagnostic.code() == "ORNA-EVAL-ASSERT"
+                    if diagnostic.code() == "ORNA-A091-008"
                         && evaluator
                             .committed_row("Note", &Value::int(7.into()))
                             .is_none() =>
