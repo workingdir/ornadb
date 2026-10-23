@@ -8,6 +8,8 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CitationBaseline {
     pub max_uncited: usize,
+    /// Crate directory names under `crates/` whose Rust sources are scanned. Crates absent here cannot supply citations.
+    pub scanned_crates: BTreeSet<String>,
     pub cited_ids: BTreeSet<String>,
 }
 
@@ -45,8 +47,8 @@ impl std::fmt::Display for RatchetFailure {
 }
 impl std::error::Error for RatchetFailure {}
 
-/// Count requirement-ID citations in Rust test code. This measures citations, not proof of conformance.
-pub fn cite_requirements(catalogue: &Path, crates_root: &Path) -> Result<CitationReport, String> {
+/// Count requirement-ID citations in Rust test code of the scanned crates. This measures citations, not proof of conformance.
+pub fn cite_requirements(catalogue: &Path, workspace_root: &Path, scanned_crates: &BTreeSet<String>) -> Result<CitationReport, String> {
     let requirements: Vec<Requirement> = serde_json::from_slice(&fs::read(catalogue).map_err(|e| format!("read {}: {e}", catalogue.display()))?)
         .map_err(|e| format!("parse {}: {e}", catalogue.display()))?;
     let mut all = BTreeMap::new();
@@ -57,9 +59,16 @@ pub fn cite_requirements(catalogue: &Path, crates_root: &Path) -> Result<Citatio
     }
     let mut cited = BTreeSet::new();
     let mut locations = BTreeMap::<String, BTreeSet<CitationLocation>>::new();
-    for file in rust_files(crates_root)? {
+    let mut files = Vec::new();
+    for name in scanned_crates {
+        let crate_root = workspace_root.join("crates").join(name);
+        if !crate_root.is_dir() { return Err(format!("scanned crate {} is not a directory", crate_root.display())); }
+        files.extend(rust_files(&crate_root)?);
+    }
+    files.sort();
+    for file in files {
         let source = fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        let relative_file = file.strip_prefix(crates_root).unwrap_or(&file).to_string_lossy().into_owned();
+        let relative_file = file.strip_prefix(workspace_root).unwrap_or(&file).to_string_lossy().into_owned();
         for code in test_code(&file, &source) {
             let bytes = code.as_bytes();
             let mut cursor = 0;
@@ -854,6 +863,9 @@ mod tests {
     fn report(cited: &[&str], uncited: &[&str]) -> CitationReport {
         CitationReport { cited_ids: cited.iter().map(|s| (*s).to_owned()).collect(), uncited_ids: uncited.iter().map(|s| (*s).to_owned()).collect(), chapters: BTreeMap::new(), locations: BTreeMap::new() }
     }
+    fn scanned_a() -> BTreeSet<String> {
+        ["a".to_owned()].into()
+    }
     #[test]
     fn counts_catalogue_citations_by_chapter_and_only_in_test_code() {
         let tmp = Temp::new();
@@ -865,10 +877,22 @@ mod tests {
         fs::write(root.join("crates/a/src/lib.rs"), "const PROD: &str = \"REQ-002\"; #[cfg(test)] mod tests { fn actual_test() { let _ = REQ-001; } }").unwrap();
         fs::write(root.join("crates/a/tests/a.rs"), "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = REQ-003; }").unwrap();
         fs::write(root.join("crates/a/tests/fixtures/ignored.rs"), "// REQ-002").unwrap();
-        let result = cite_requirements(&catalogue, root).unwrap();
+        let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
         assert_eq!(result.cited_ids, ["REQ-001", "REQ-003"].into_iter().map(str::to_owned).collect());
         assert_eq!(result.chapters["one"], ChapterCounts { cited: 1, uncited: 1 });
         assert_eq!(result.chapters["two"], ChapterCounts { cited: 1, uncited: 0 });
+    }
+    #[test]
+    fn ignores_citations_in_crates_outside_the_scanned_set() {
+        let tmp = Temp::new();
+        let root = &tmp.0;
+        fs::create_dir_all(root.join("crates/a/tests")).unwrap();
+        fs::create_dir_all(root.join("crates/dead/tests")).unwrap();
+        let catalogue = root.join("requirements.json");
+        fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"}]"#).unwrap();
+        fs::write(root.join("crates/dead/tests/a.rs"), "#[test] fn dead_test() { assert_eq!(1, \"REQ-001\"); }").unwrap();
+        assert!(cite_requirements(&catalogue, root, &scanned_a()).unwrap().cited_ids.is_empty());
+        assert!(cite_requirements(&catalogue, root, &BTreeSet::from(["missing".to_owned()])).is_err());
     }
     #[test]
     fn reports_locations_for_all_restored_requirement_ids() {
@@ -890,7 +914,7 @@ mod tests {
         source.push_str("}\n");
         fs::write(root.join("crates/a/tests/restored.rs"), source).unwrap();
 
-        let result = cite_requirements(&catalogue, root).unwrap();
+        let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
         assert_eq!(result.cited_ids, ids.into_iter().map(str::to_owned).collect());
         for id in ids {
             let locations = result.locations.get(id).unwrap_or_else(|| panic!("missing locations for {id}"));
@@ -911,7 +935,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = cite_requirements(&catalogue, root).unwrap();
+        let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
         assert_eq!(result.cited_ids, ["REQ-001"].into_iter().map(str::to_owned).collect());
     }
 
@@ -941,7 +965,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = cite_requirements(&catalogue, root).unwrap();
+        let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
         assert_eq!(
             result.cited_ids,
             ["REQ-001", "REQ-002"].into_iter().map(str::to_owned).collect()
@@ -1079,19 +1103,19 @@ mod tests {
 
     #[test]
     fn fails_when_uncited_count_rises() {
-        let baseline = CitationBaseline { max_uncited: 1, cited_ids: ["REQ-1".to_owned()].into() };
+        let baseline = CitationBaseline { max_uncited: 1, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
         assert!(check_ratchet(&report(&["REQ-1"], &["A", "B"]), &baseline).is_err());
     }
 
     #[test]
     fn fails_when_previously_cited_id_drops_even_if_count_does_not_rise() {
-        let baseline = CitationBaseline { max_uncited: 2, cited_ids: ["REQ-1".to_owned()].into() };
+        let baseline = CitationBaseline { max_uncited: 2, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
         assert!(check_ratchet(&report(&[], &["REQ-1"]), &baseline).unwrap_err().dropped_ids.contains("REQ-1"));
     }
 
     #[test]
     fn permits_lowering_uncited_baseline_without_dropping_citations() {
-        let baseline = CitationBaseline { max_uncited: 1, cited_ids: ["REQ-1".to_owned()].into() };
+        let baseline = CitationBaseline { max_uncited: 1, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
         assert!(check_ratchet(&report(&["REQ-1"], &[]), &baseline).is_ok());
     }
 }
