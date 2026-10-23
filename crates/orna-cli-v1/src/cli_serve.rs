@@ -2,12 +2,23 @@
 //!
 //! The host keeps Git-backed pages server-rendered and exposes authenticated
 //! runtime evaluation through the live presentation transport.
+//!
+//! Every accepted connection runs on its own thread. Live session state is
+//! shared behind one lock that is held for a single transport step at a time:
+//! one HTTP session request, one WebSocket handshake phase, or the admission
+//! or completion of one frame. It is never held across socket I/O or
+//! evaluation, so an open WebSocket cannot stall other sockets or session
+//! requests. Ending a session is the exception: DELETE and the expiry sweep
+//! cancel the session's application work and keep the lock until that work
+//! has stopped, because the transport drains a session in one step. The
+//! session's socket workers are joined after the lock is released.
 
 use super::*;
 use orna_application_v1::ApplicationLiveAdapter;
 use orna_live_v1::{
-    HttpConnection, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata,
-    SystemCredentialIssuer, TransportLimits, WireRequest,
+    LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata, SystemCredentialIssuer,
+    TransportLimits, WebSocketApplicationPreparation, WebSocketOutput, WebSocketState,
+    WebSocketUpgrade, WireRequest, WireResponse, encode_websocket_output,
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{
@@ -19,12 +30,16 @@ use orna_security_v1::{
 };
 use orna_serving_v1::Serving;
 use std::{
+    collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
-    time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -33,19 +48,334 @@ const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
 const SERVE_MODULE_PATH: &str = "main.orna";
 const SERVE_ENTRY: &str = "serve";
+/// Wall-clock bound for one request line and its headers. A peer that
+/// trickles bytes cannot hold a connection thread past it.
+const REQUEST_HEAD_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+const WEBSOCKET_READ_CHUNK_BYTES: usize = 8 * 1024;
+/// RFC 6455 close code sent to a peer that stayed silent past the keepalive
+/// bound (1001, going away).
+const CLOSE_IDLE: u16 = 1001;
+/// RFC 6455 close code sent when the session retired this socket's
+/// attachment, for example because a resume replaced it (1008, policy
+/// violation).
+const CLOSE_RETIRED: u16 = 1008;
+/// Interval at which the owner sweep looks for sessions whose lease has
+/// elapsed.
+const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
+/// Bound on how long DELETE waits for the socket workers it cancelled to
+/// exit before it reports orderly termination. A cancelled worker finishes
+/// its in-flight step, sends a Close frame and exits.
+const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+/// Default for [`ServeOptions::max_connections`].
+const MAX_CONNECTIONS: usize = 64;
+
+/// Operator choices for one `orna serve` process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ServeOptions {
+    /// Smart-HTTP push (`git-receive-pack`) changes refs in the served clone,
+    /// so it is refused unless the operator passes `serve --allow-push`.
+    allow_push: bool,
+    keepalive: WebSocketKeepalive,
+    /// Lifetime of a live session, which is also its reconnection lease. The
+    /// owner sweep terminates a session once it has elapsed.
+    session_lease_ms: u64,
+    /// Bound on concurrent connections, each served by its own thread. The
+    /// accept loop answers a connection beyond it with 503 without reading
+    /// its request.
+    max_connections: usize,
+    /// Bound on receiving one HTTP request body and on sending one response.
+    transfer: TransferBudget,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            allow_push: false,
+            keepalive: WebSocketKeepalive::default(),
+            session_lease_ms: SESSION_LEASE_MS,
+            max_connections: MAX_CONNECTIONS,
+            transfer: TransferBudget::default(),
+        }
+    }
+}
+
+/// Wall-clock budget for one HTTP transfer, a request body or a response: a
+/// fixed allowance plus the time the transfer takes at a minimum rate. It
+/// covers the whole transfer, so a peer that trickles a body, or reads a
+/// response a few bytes at a time, cannot hold a connection thread past it,
+/// while a 512 MiB Git push at the minimum rate still fits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TransferBudget {
+    /// Allowance for any transfer, however small.
+    base: StdDuration,
+    /// The slowest transfer rate the budget allows for, in bytes per second.
+    min_bytes_per_second: u64,
+}
+
+impl Default for TransferBudget {
+    fn default() -> Self {
+        Self {
+            base: StdDuration::from_secs(15),
+            min_bytes_per_second: 64 * 1024,
+        }
+    }
+}
+
+impl TransferBudget {
+    /// The deadline for moving `bytes`, starting now.
+    fn deadline(self, bytes: usize) -> Instant {
+        let bytes = u128::from(u64::try_from(bytes).unwrap_or(u64::MAX));
+        let millis = bytes * 1000 / u128::from(self.min_bytes_per_second.max(1));
+        let allowance = self.base.saturating_add(StdDuration::from_millis(
+            u64::try_from(millis).unwrap_or(u64::MAX),
+        ));
+        let now = Instant::now();
+        // An allowance beyond the clock's range fails closed.
+        now.checked_add(allowance).unwrap_or(now)
+    }
+}
+
+/// Liveness bounds for one attached WebSocket.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WebSocketKeepalive {
+    /// Inbound silence after which the host sends a Ping.
+    ping_after: StdDuration,
+    /// Inbound silence after which the peer is treated as gone. Its
+    /// attachment is closed, which starts the session's reconnection lease.
+    idle_timeout: StdDuration,
+    /// Bound on one blocked write to a stalled peer.
+    write_timeout: StdDuration,
+}
+
+impl Default for WebSocketKeepalive {
+    fn default() -> Self {
+        Self {
+            ping_after: StdDuration::from_secs(15),
+            idle_timeout: StdDuration::from_secs(30),
+            write_timeout: StdDuration::from_secs(30),
+        }
+    }
+}
+
+/// The names under which a loopback listener is its own origin: the IPv4 and
+/// IPv6 loopback literals and `localhost`, each with the bound port. Any other
+/// Host is a name that the peer resolved to this listener by itself, for
+/// example through DNS rebinding, and is refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LoopbackAuthority {
+    port: u16,
+}
+
+impl LoopbackAuthority {
+    const HOSTS: [&'static str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+    fn authorities(self) -> impl Iterator<Item = String> {
+        Self::HOSTS.into_iter().flat_map(move |host| {
+            // Host and Origin omit the scheme's default port (RFC 9110).
+            let implicit_port = (self.port == 80).then(|| host.to_owned());
+            std::iter::once(format!("{host}:{}", self.port)).chain(implicit_port)
+        })
+    }
+
+    fn permits_host(self, host: &str) -> bool {
+        self.authorities()
+            .any(|authority| authority.eq_ignore_ascii_case(host))
+    }
+
+    fn origins(self) -> Result<Vec<Origin>, orna_security_v1::BoundaryError> {
+        self.authorities()
+            .map(|authority| Origin::parse(format!("http://{authority}")))
+            .collect()
+    }
+
+    /// Refuses a request that names another authority in Host, and a
+    /// state-changing request whose Origin is not the request's own origin.
+    /// Browsers send Origin with every cross-origin write and with every
+    /// WebSocket handshake. Git's HTTP client sends none, so Git requests
+    /// without an Origin are admitted while other writes must carry one.
+    fn refusal(self, request: &Request) -> Option<Response> {
+        let host = request_header(request, "host").unwrap_or_default();
+        if !self.permits_host(host) {
+            return Some(forbidden_response(request, "host_denied"));
+        }
+        if request.method == "GET" && !is_websocket_route(request) {
+            return None;
+        }
+        let admitted = match request_header(request, "origin") {
+            Some(origin) => is_same_origin(origin, host),
+            None => request.path.starts_with("/git/"),
+        };
+        (!admitted).then(|| forbidden_response(request, "origin_denied"))
+    }
+}
+
+fn is_same_origin(origin: &str, host: &str) -> bool {
+    match (
+        Origin::parse(origin),
+        Origin::parse(format!("http://{host}")),
+    ) {
+        (Ok(origin), Ok(own)) => origin == own,
+        _ => false,
+    }
+}
 
 struct ServeState {
     root: PathBuf,
     identity: RuntimeIdentity,
+    loopback: LoopbackAuthority,
+    options: ServeOptions,
+    transport_limits: TransportLimits,
+    /// The live transport and its HTTP session adapters, locked for one
+    /// transport step at a time (see [`ServeState::with_sessions`]).
+    sessions: Mutex<SessionState>,
+    /// The evaluator. It has its own lock so evaluation never blocks session
+    /// requests or other sockets' frame admission.
+    application: Mutex<ApplicationLiveAdapter>,
+    workers: WebSocketWorkers,
+    /// Connections being served, bounded by [`ServeOptions::max_connections`]
+    /// (see [`ConnectionSlot`]).
+    connections: AtomicUsize,
+}
+
+struct SessionState {
     live: LiveTransport,
     authority: LocalSessionAuthority,
     issuer: SystemCredentialIssuer,
     deletion: LocalSessionDeletion,
-    application: ApplicationLiveAdapter,
+}
+
+impl ServeState {
+    /// Runs one transport step under the session lock, then hands each
+    /// attachment the transport retired (by resume, replacement, close,
+    /// deletion, expiry or an abandoned handshake) to the socket worker that
+    /// owns it for cancellation. A retirement whose worker has already exited
+    /// is acknowledged here. A running worker acknowledges its own retirement
+    /// as its last step, so the transport keeps the session fenced until no
+    /// worker can act for the retired attachment.
+    fn with_sessions<T>(&self, step: impl FnOnce(&mut SessionState) -> T) -> io::Result<T> {
+        self.with_sessions_retiring(step).map(|(result, _)| result)
+    }
+
+    /// [`Self::with_sessions`], also returning the attachments whose running
+    /// workers the step cancelled, so that the caller can wait for them to
+    /// exit (see [`WebSocketWorkers::join`]).
+    fn with_sessions_retiring<T>(
+        &self,
+        step: impl FnOnce(&mut SessionState) -> T,
+    ) -> io::Result<(T, Vec<[u8; 16]>)> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| io::Error::other("live session state is unavailable"))?;
+        let result = step(&mut sessions);
+        let mut cancelled = Vec::new();
+        for attachment in sessions.live.take_retired_attachments() {
+            if self.workers.cancel(attachment) {
+                cancelled.push(attachment);
+            } else {
+                sessions.live.acknowledge_retired_attachment(attachment);
+            }
+        }
+        Ok((result, cancelled))
+    }
+}
+
+/// Socket workers that own attached or attaching WebSockets, keyed by
+/// attachment identity, so the transport's retirements reach them.
+#[derive(Default)]
+struct WebSocketWorkers {
+    workers: Mutex<BTreeMap<[u8; 16], RegisteredWorker>>,
+    /// Signalled each time a worker exits, for requests that wait for the
+    /// workers they cancelled.
+    exited: Condvar,
+}
+
+struct RegisteredWorker {
+    /// A second handle on the worker's socket. Shutting down its read half
+    /// wakes a worker that is blocked reading from the peer.
+    socket: TcpStream,
+    cancelled: Arc<AtomicBool>,
+    /// The transport handed this attachment over for retirement while the
+    /// worker was running; the worker acknowledges it when it exits.
+    retired: bool,
+}
+
+impl WebSocketWorkers {
+    fn register(&self, attachment: [u8; 16], socket: &TcpStream) -> io::Result<Arc<AtomicBool>> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker = RegisteredWorker {
+            socket: socket.try_clone()?,
+            cancelled: Arc::clone(&cancelled),
+            retired: false,
+        };
+        let mut workers = self.lock();
+        if workers.contains_key(&attachment) {
+            return Err(io::Error::other("socket identity is already in use"));
+        }
+        workers.insert(attachment, worker);
+        Ok(cancelled)
+    }
+
+    /// Cancels the worker that owns a retired attachment: it stops reading
+    /// new frames, finishes the work it has in flight (a resume replaces the
+    /// attachment, not its owned tasks) and exits. Returns `false` when no
+    /// worker owns the attachment any more, so the caller acknowledges the
+    /// retirement itself.
+    fn cancel(&self, attachment: [u8; 16]) -> bool {
+        let mut workers = self.lock();
+        let Some(worker) = workers.get_mut(&attachment) else {
+            return false;
+        };
+        worker.retired = true;
+        worker.cancelled.store(true, Ordering::Release);
+        let _ = worker.socket.shutdown(Shutdown::Read);
+        true
+    }
+
+    /// Removes an exiting worker and reports whether it still owes the
+    /// transport an acknowledgement for its retirement.
+    fn finish(&self, attachment: [u8; 16]) -> bool {
+        let retired = self
+            .lock()
+            .remove(&attachment)
+            .is_some_and(|worker| worker.retired);
+        self.exited.notify_all();
+        retired
+    }
+
+    /// Waits until no worker owns any of `attachments`, or until `deadline`.
+    /// Returns whether they have all exited.
+    fn join(&self, attachments: &[[u8; 16]], deadline: Instant) -> bool {
+        let mut workers = self.lock();
+        loop {
+            if !attachments
+                .iter()
+                .any(|attachment| workers.contains_key(attachment))
+            {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            workers = self
+                .exited
+                .wait_timeout(workers, remaining)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<[u8; 16], RegisteredWorker>> {
+        // Each critical section is one map operation, so a panic elsewhere
+        // cannot leave the registry half-updated.
+        self.workers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 struct LocalSessionAuthority {
     identity: RuntimeIdentity,
+    lease_ms: u64,
 }
 
 impl LiveSessionAuthority for LocalSessionAuthority {
@@ -80,7 +410,7 @@ impl LiveSessionAuthority for LocalSessionAuthority {
             session,
             database,
             runtime: self.identity.repository_id,
-            expires_at: now.saturating_add(SESSION_LEASE_MS),
+            expires_at: now.saturating_add(self.lease_ms),
             subscribe: subscription,
         })
     }
@@ -125,7 +455,7 @@ impl Response {
     }
 }
 
-pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
+pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<(), Diagnostic> {
     let root = local_project_path(endpoint)?;
     let repository = Repository::discover(&root).map_err(|_| {
         Diagnostic::target(
@@ -149,18 +479,23 @@ pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
         )
     })?;
     let address = listener.status().address;
-    let state = new_serve_state_with_project(
+    let state = new_serve_state(
         repository.worktree().to_path_buf(),
         identity,
         address,
         catalogue,
         Some(project),
+        ServeOptions {
+            allow_push,
+            ..ServeOptions::default()
+        },
     )?;
     writeln!(
         io::stdout().lock(),
-        "Serving {} at http://{} (loopback)",
+        "Serving {} at http://{} (loopback{})",
         state.root.display(),
-        address
+        address,
+        if allow_push { "; Git push enabled" } else { "" }
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -170,7 +505,7 @@ pub(super) fn run(endpoint: &Endpoint, port: u16) -> Result<(), Diagnostic> {
         )
     })?;
 
-    serve_listener(listener.listener(), state).map_err(|_| {
+    serve_listener(listener.listener(), &Arc::new(state)).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "the serving listener stopped",
@@ -184,25 +519,20 @@ fn new_serve_state(
     identity: RuntimeIdentity,
     listener_address: SocketAddr,
     catalogue: orna_semantic_v1::Catalogue,
-) -> Result<ServeState, Diagnostic> {
-    new_serve_state_with_project(root, identity, listener_address, catalogue, None)
-}
-
-fn new_serve_state_with_project(
-    root: PathBuf,
-    identity: RuntimeIdentity,
-    listener_address: SocketAddr,
-    catalogue: orna_semantic_v1::Catalogue,
     project: Option<orna_project_v1::LoadedProject>,
+    options: ServeOptions,
 ) -> Result<ServeState, Diagnostic> {
-    let origin = Origin::parse(&format!("http://{listener_address}")).map_err(|_| {
+    let loopback = LoopbackAuthority {
+        port: listener_address.port(),
+    };
+    let origins = loopback.origins().map_err(|_| {
         Diagnostic::target(
             "E2100",
             "the loopback serving origin is invalid",
             "retry `serve` with a supported local listener",
         )
     })?;
-    let boundary = SessionBoundary::new(OriginPolicy::new([origin], []), SESSION_LEASE_MS);
+    let boundary = SessionBoundary::new(OriginPolicy::new(origins, []), options.session_lease_ms);
     let host = LiveHost::new(
         orna_live_v1::Limits::default(),
         boundary,
@@ -221,141 +551,256 @@ fn new_serve_state_with_project(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let live = LiveTransport::new(host, TransportLimits::default()).map_err(|_| {
+    let transport_limits = TransportLimits::default();
+    let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
             "E2100",
             "the live transport could not be initialized",
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let mut application =
-        ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
-            .with_runtime_identity(identity.database_id, identity.repository_id)
-            .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
+    let std_snapshot = project
+        .as_ref()
+        .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
+    let sys_host_context =
+        sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot);
+    let mut application = ApplicationLiveAdapter::new(
+        ApplicationAuthority::new(catalogue, Limits::default())
+            .with_sys_host_context(sys_host_context),
+    )
+    .with_runtime_identity(identity.database_id, identity.repository_id)
+    .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
     if let Some(project) = project {
         application = application.with_loaded_project(project);
     }
     Ok(ServeState {
         root,
         identity,
-        live,
-        authority: LocalSessionAuthority { identity },
-        issuer: SystemCredentialIssuer::default(),
-        deletion: LocalSessionDeletion,
-        application,
+        loopback,
+        options,
+        transport_limits,
+        sessions: Mutex::new(SessionState {
+            live,
+            authority: LocalSessionAuthority {
+                identity,
+                lease_ms: options.session_lease_ms,
+            },
+            issuer: SystemCredentialIssuer::default(),
+            deletion: LocalSessionDeletion,
+        }),
+        application: Mutex::new(application),
+        workers: WebSocketWorkers::default(),
+        connections: AtomicUsize::new(0),
     })
 }
 
-fn serve_listener(listener: &TcpListener, state: ServeState) -> io::Result<()> {
-    let root = state.root.clone();
-    let identity = state.identity;
-    let state = Arc::new(Mutex::new(state));
+fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
+    start_session_sweep(state)?;
     for accepted in listener.incoming() {
-        let stream = accepted?;
-        let connection_state = Arc::clone(&state);
-        let connection_root = root.clone();
-        std::thread::Builder::new()
+        let stream = match accepted {
+            Ok(stream) => stream,
+            // A peer that resets before accept, or a process that briefly runs
+            // out of descriptors, must not end the listener for every client.
+            Err(error) if is_transient_accept_error(&error) => {
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(slot) = ConnectionSlot::claim(state, &stream) else {
+            refuse_connection(stream);
+            continue;
+        };
+        // A failed spawn drops the closure, which releases the slot and
+        // shuts the connection; the listener keeps serving other clients.
+        let _ = std::thread::Builder::new()
             .name("orna-serve-connection".into())
             .spawn(move || {
-                let _ =
-                    serve_shared_connection(stream, &connection_state, &connection_root, identity);
-            })?;
+                let _ = serve_connection(stream, &slot.state);
+                drop(slot);
+            });
     }
     Ok(())
 }
 
-fn serve_connection(mut stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
-    stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
-    if peek_websocket_request(&stream) {
-        return serve_websocket_connection(stream, state);
-    }
+/// How long the accept loop pauses after a transient accept failure before
+/// trying again, so a descriptor shortage does not spin the loop.
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 
-    let mut reader = BufReader::new(stream);
-    let request = match read_request(&mut reader) {
-        Ok(request) => request,
-        Err(_) => {
-            let mut stream = reader.into_inner();
-            write_response(
-                &mut stream,
-                Response::new(
-                    400,
-                    "application/json",
-                    br#"{"error":"bad_request"}"#.to_vec(),
-                ),
-            )?;
-            return Ok(());
-        }
-    };
-    stream = reader.into_inner();
-    if request.path.starts_with("/orna/session") {
-        return serve_session_http_request(stream, request, state);
-    }
-    let response = host_route(&state.root, state.identity, &request);
-    write_response(&mut stream, response)
+/// Whether an accept failure only concerns one attempt or a temporary
+/// resource shortage, so the listener should retry rather than stop.
+/// The errno values are Linux's: EMFILE 24, ENFILE 23, ENOMEM 12, ENOBUFS 105.
+fn is_transient_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+    ) || matches!(error.raw_os_error(), Some(12 | 23 | 24 | 105))
 }
 
-fn serve_shared_connection(
-    mut stream: TcpStream,
-    state: &Mutex<ServeState>,
-    root: &Path,
-    identity: RuntimeIdentity,
-) -> io::Result<()> {
-    stream.set_read_timeout(Some(StdDuration::from_secs(15)))?;
-    if peek_websocket_request(&stream) {
-        stream.set_read_timeout(None)?;
-        let mut state = state
-            .lock()
-            .map_err(|_| io::Error::other("live session state is unavailable"))?;
-        return serve_websocket_connection(stream, &mut state);
-    }
-
-    let mut reader = BufReader::new(stream);
-    let request = match read_request(&mut reader) {
-        Ok(request) => request,
-        Err(_) => {
-            let mut stream = reader.into_inner();
-            write_response(
-                &mut stream,
-                Response::new(
-                    400,
-                    "application/json",
-                    br#"{"error":"bad_request"}"#.to_vec(),
-                ),
-            )?;
-            return Ok(());
-        }
-    };
-    stream = reader.into_inner();
-    if request.path.starts_with("/orna/session") {
-        let mut state = state
-            .lock()
-            .map_err(|_| io::Error::other("live session state is unavailable"))?;
-        return serve_session_http_request(stream, request, &mut state);
-    }
-    write_response(&mut stream, host_route(root, identity, &request))
+/// One accepted connection's claim on [`ServeOptions::max_connections`],
+/// held by the thread that serves it. Dropping it releases the claim before
+/// it ends the connection, so a peer that has seen its connection end can
+/// connect again at once.
+struct ConnectionSlot {
+    state: Arc<ServeState>,
+    /// A second handle on the connection's socket, which keeps the socket
+    /// open until the claim has been released.
+    socket: TcpStream,
 }
 
-fn serve_websocket_connection(stream: TcpStream, state: &mut ServeState) -> io::Result<()> {
-    stream.set_read_timeout(None)?;
-    let mut attachment = [0; 16];
-    getrandom::fill(&mut attachment)
-        .map_err(|_| io::Error::other("socket identity unavailable"))?;
-    let mut connection = HttpConnection::new(TransportLimits::default());
-    let mut clock = now_ms;
-    let _ = state.live.serve_accepted_websocket_socket(
-        stream,
-        &mut connection,
-        attachment,
-        &mut clock,
-        &mut state.application,
+impl ConnectionSlot {
+    /// Claims a slot for `stream`, or returns `None` when every slot is
+    /// taken.
+    fn claim(state: &Arc<ServeState>, stream: &TcpStream) -> Option<Self> {
+        let limit = state.options.max_connections;
+        state
+            .connections
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < limit).then_some(active + 1)
+            })
+            .ok()?;
+        match stream.try_clone() {
+            Ok(socket) => Some(Self {
+                state: Arc::clone(state),
+                socket,
+            }),
+            Err(_) => {
+                state.connections.fetch_sub(1, Ordering::AcqRel);
+                None
+            }
+        }
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.state.connections.fetch_sub(1, Ordering::AcqRel);
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
+}
+
+/// Answers a connection beyond [`ServeOptions::max_connections`] from the
+/// accept loop itself: a 503 written without waiting, which fits in the new
+/// socket's empty send buffer, then the end of the connection. Its request
+/// is never read, so the peer cannot hold up the accept loop.
+fn refuse_connection(mut stream: TcpStream) {
+    let response = unavailable_response();
+    let mut bytes = response_head(&response);
+    bytes.extend_from_slice(&response.body);
+    if stream.set_nonblocking(true).is_ok() {
+        let _ = stream.write_all(&bytes);
+    }
+    let _ = stream.shutdown(Shutdown::Write);
+}
+
+/// Maps a live WebSocket failure to the RFC 6455 close code the socket is
+/// closed with: 1009 when a message exceeds its size bound, 1002 for any
+/// other protocol violation (30-protocol close codes).
+fn close_code_for_failure(error: orna_live_v1::Error) -> u16 {
+    match error {
+        orna_live_v1::Error::Limit => 1009,
+        _ => 1002,
+    }
+}
+
+/// Starts the owner sweep (30-protocol, Session creation and ownership:
+/// expiry terminates the owner and cancels its children). Every
+/// [`SESSION_SWEEP_INTERVAL`] it ends each session whose lease has elapsed
+/// through the same child-aware drain as DELETE, together with abandoned
+/// handshakes, and [`ServeState::with_sessions`] cancels their socket
+/// workers. The sweep stops once the serving state has been dropped.
+fn start_session_sweep(state: &Arc<ServeState>) -> io::Result<()> {
+    let state = Arc::downgrade(state);
+    let executor = current_thread_executor()?;
+    std::thread::Builder::new()
+        .name("orna-serve-session-sweep".into())
+        .spawn(move || sweep_sessions(&state, &executor))
+        .map(drop)
+}
+
+fn sweep_sessions(state: &Weak<ServeState>, executor: &tokio::runtime::Runtime) {
+    loop {
+        std::thread::sleep(SESSION_SWEEP_INTERVAL);
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        // A session whose drain fails stays in place, and the next pass
+        // retries it.
+        let _ = state.with_sessions(|sessions| {
+            let SessionState { live, deletion, .. } = sessions;
+            let mut children = live.application_work_supervisor();
+            executor.block_on(live.expire_sessions_with_children(now_ms(), deletion, &mut children))
+        });
+    }
+}
+
+fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
+    let transfer = state.options.transfer;
+    let mut reader = BufReader::new(stream);
+    let mut orna_route = false;
+    let Ok((mut request, body_length)) = read_request_head(
+        &mut reader,
+        Instant::now() + REQUEST_HEAD_TIMEOUT,
+        &mut orna_route,
+    ) else {
+        let response = if orna_route {
+            live_error_response(400, "wire.invalid_message", "malformed request")
+        } else {
+            bad_request_response()
+        };
+        return write_response(reader.get_mut(), response, transfer);
+    };
+    if body_length > request_body_limit(&request.path) {
+        let response = if request.path.starts_with("/orna/") {
+            live_error_response(413, "wire.limit", "request body exceeds its limit")
+        } else {
+            bad_request_response()
+        };
+        return write_response(reader.get_mut(), response, transfer);
+    }
+    // Refuse from the head alone, before the body is read or allocated, so a
+    // foreign or cross-origin request cannot make this host wait for or
+    // buffer up to the route's body limit.
+    if let Some(refusal) = state.loopback.refusal(&request) {
+        return write_response(reader.get_mut(), refusal, transfer);
+    }
+    let Ok(body) = read_request_body(&mut reader, body_length, transfer.deadline(body_length))
+    else {
+        return write_response(reader.get_mut(), bad_request_response(), transfer);
+    };
+    request.body = body;
+    if is_websocket_route(&request) {
+        // Bytes the peer sent after its handshake belong to the WebSocket.
+        let initial = reader.buffer().to_vec();
+        let stream = reader.into_inner();
+        return serve_websocket(state, &stream, request, initial);
+    }
+    let mut stream = reader.into_inner();
+    if request.path.starts_with("/orna/session") {
+        return serve_session_http_request(&mut stream, request, state);
+    }
+    let response = host_route(
+        &state.root,
+        state.identity,
+        state.options.allow_push,
+        &request,
     );
-    Ok(())
+    write_response(&mut stream, response, transfer)
 }
 
+/// Answers one `/orna/session` request through the transport's child-aware
+/// entry, so DELETE cancels and joins the session's application work
+/// through the work supervisor. DELETE answers 204 only once the socket
+/// workers it cancelled have exited too (30-protocol, Session creation and
+/// ownership: 204 after orderly termination).
 fn serve_session_http_request(
-    mut stream: TcpStream,
+    stream: &mut TcpStream,
     request: Request,
-    state: &mut ServeState,
+    state: &ServeState,
 ) -> io::Result<()> {
     let wire = WireRequest {
         method: request.method,
@@ -363,26 +808,352 @@ fn serve_session_http_request(
         headers: request.headers,
         body: request.body,
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let executor = current_thread_executor()?;
+    let (mut response, cancelled) = state.with_sessions_retiring(|sessions| {
+        let SessionState {
+            live,
+            authority,
+            issuer,
+            deletion,
+        } = sessions;
+        let mut children = live.application_work_supervisor();
+        executor.block_on(live.handle_with_children(
+            wire,
+            now_ms(),
+            authority,
+            issuer,
+            deletion,
+            &mut children,
+        ))
+    })?;
+    if response.status == 204
+        && !state
+            .workers
+            .join(&cancelled, Instant::now() + SESSION_TERMINATION_TIMEOUT)
+    {
+        // The session is gone, but a socket worker of it is still running,
+        // so termination is not yet orderly.
+        response = WireResponse {
+            status: 503,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: br#"{"code":"live.unavailable","message":"request rejected"}"#.to_vec(),
+        };
+    }
+    let encoded = encode_http_response(&response, state.transport_limits)?;
+    write_before(
+        stream,
+        &[&encoded],
+        state.options.transfer.deadline(encoded.len()),
+    )
+}
+
+fn current_thread_executor() -> io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
         .build()
-        .map_err(|_| io::Error::other("live request executor unavailable"))?;
-    let response = runtime.block_on(state.live.handle(
-        wire,
-        now_ms(),
-        &mut state.authority,
-        &mut state.issuer,
-        &mut state.deletion,
-    ));
-    let bytes = response
-        .encode_http(TransportLimits::default())
-        .map_err(|_| io::Error::other("live response could not be encoded"))?;
-    stream.write_all(&bytes)
+        .map_err(|_| io::Error::other("live request executor unavailable"))
+}
+
+fn encode_http_response(response: &WireResponse, limits: TransportLimits) -> io::Result<Vec<u8>> {
+    response
+        .encode_http(limits)
+        .map_err(|_| io::Error::other("live response could not be encoded"))
+}
+
+fn is_websocket_route(request: &Request) -> bool {
+    request.method == "GET" && request.path.starts_with("/orna/live/")
+}
+
+fn serve_websocket(
+    state: &ServeState,
+    stream: &TcpStream,
+    request: Request,
+    initial: Vec<u8>,
+) -> io::Result<()> {
+    let executor = current_thread_executor()?;
+    let mut attachment = [0; 16];
+    getrandom::fill(&mut attachment)
+        .map_err(|_| io::Error::other("socket identity unavailable"))?;
+    stream.set_write_timeout(Some(state.options.keepalive.write_timeout))?;
+    let worker = WebSocketWorker {
+        state,
+        executor: &executor,
+        stream,
+        attachment,
+        cancelled: state.workers.register(attachment, stream)?,
+    };
+    let request = WireRequest {
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        body: request.body,
+    };
+    if worker.attach(&request)? {
+        worker.serve_frames(initial)?;
+    }
+    Ok(())
+}
+
+/// The worker thread for one WebSocket. It drives the transport's actor path
+/// one step at a time: a frame is admitted under the session lock,
+/// application work runs under the application lock only, and output is
+/// written with neither lock held. Dropping the worker ends its connection,
+/// unregisters it, closes its attachment (which starts the session's
+/// reconnection lease) and acknowledges a retirement the transport handed
+/// it while it ran.
+struct WebSocketWorker<'a> {
+    state: &'a ServeState,
+    executor: &'a tokio::runtime::Runtime,
+    stream: &'a TcpStream,
+    attachment: [u8; 16],
+    cancelled: Arc<AtomicBool>,
+}
+
+enum Handshake {
+    Refused(Vec<u8>),
+    Deliver(WebSocketUpgrade, Vec<u8>),
+}
+
+impl WebSocketWorker<'_> {
+    /// Completes the RFC 6455 handshake and commits the attachment. Returns
+    /// `false` once a refusal has been written.
+    fn attach(&self, request: &WireRequest) -> io::Result<bool> {
+        let limits = self.state.transport_limits;
+        let now = now_ms();
+        let handshake = self.state.with_sessions(|sessions| {
+            let live = &mut sessions.live;
+            let upgrade = match live.begin_websocket_upgrade(request, self.attachment, now) {
+                Ok(upgrade) => upgrade,
+                Err(refusal) => {
+                    return encode_http_response(&refusal, limits).map(Handshake::Refused);
+                }
+            };
+            // The reservation stays held while the 101 is written, so resume,
+            // deletion and expiry cannot consume it before the commit.
+            match encode_http_response(upgrade.response(), limits) {
+                Ok(response)
+                    if upgrade.response().status == 101
+                        && live.begin_websocket_upgrade_delivery(&upgrade, now) =>
+                {
+                    Ok(Handshake::Deliver(upgrade, response))
+                }
+                _ => {
+                    live.abort_websocket_upgrade(&upgrade);
+                    Err(io::Error::other(
+                        "the WebSocket handshake could not be delivered",
+                    ))
+                }
+            }
+        })??;
+        let mut stream = self.stream;
+        let (upgrade, response) = match handshake {
+            Handshake::Refused(refusal) => {
+                stream.write_all(&refusal)?;
+                stream.flush()?;
+                return Ok(false);
+            }
+            Handshake::Deliver(upgrade, response) => (upgrade, response),
+        };
+        if let Err(error) = stream.write_all(&response).and_then(|()| stream.flush()) {
+            self.state
+                .with_sessions(|sessions| sessions.live.abort_websocket_upgrade(&upgrade))?;
+            return Err(error);
+        }
+        self.state.with_sessions(|sessions| {
+            let live = &mut sessions.live;
+            if !live.finish_websocket_upgrade_delivery(&upgrade) {
+                live.abort_websocket_upgrade(&upgrade);
+                return Err(io::Error::other(
+                    "the WebSocket handoff was retired before its commit",
+                ));
+            }
+            self.executor
+                .block_on(live.commit_websocket_upgrade(upgrade, now_ms()))
+                .map(drop)
+                .map_err(|_| io::Error::other("the WebSocket attachment was refused"))
+        })??;
+        Ok(true)
+    }
+
+    /// Serves frames until the peer closes, the transport retires this
+    /// attachment, or the peer stays silent past the keepalive bound. The
+    /// last two end with a best-effort Close frame.
+    /// Silence is measured from the peer's last bytes or the end of the last
+    /// step served for it, whichever is later: time spent evaluating its own
+    /// requests, while nothing is read from it, is not silence.
+    fn serve_frames(&self, initial: Vec<u8>) -> io::Result<()> {
+        let keepalive = self.state.options.keepalive;
+        let mut socket = WebSocketState::new(self.attachment);
+        let mut stream = self.stream;
+        let mut chunk = [0; WEBSOCKET_READ_CHUNK_BYTES];
+        let mut input = initial;
+        let mut last_activity = Instant::now();
+        let mut pinged = false;
+        loop {
+            if !input.is_empty() {
+                let bytes = std::mem::take(&mut input);
+                if !self.serve_input(&mut socket, &bytes)? {
+                    return Ok(());
+                }
+                last_activity = Instant::now();
+            }
+            if self.cancelled.load(Ordering::Acquire) {
+                self.close(CLOSE_RETIRED);
+                return Ok(());
+            }
+            let silent = last_activity.elapsed();
+            if silent >= keepalive.idle_timeout {
+                self.close(CLOSE_IDLE);
+                return Ok(());
+            }
+            if !pinged && silent >= keepalive.ping_after {
+                self.write(&WebSocketOutput::Ping(Vec::new()))?;
+                pinged = true;
+            }
+            let wake = if pinged {
+                keepalive.idle_timeout
+            } else {
+                keepalive.ping_after
+            };
+            stream.set_read_timeout(Some(
+                wake.saturating_sub(silent).max(StdDuration::from_millis(1)),
+            ))?;
+            match stream.read(&mut chunk) {
+                // Cancellation shuts down this socket's read half, which also
+                // reads as end of stream; the loop then sends its Close frame.
+                Ok(0) if self.cancelled.load(Ordering::Acquire) => {}
+                Ok(0) => return Ok(()),
+                Ok(read) => {
+                    input.extend_from_slice(&chunk[..read]);
+                    last_activity = Instant::now();
+                    pinged = false;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Sends a Close frame before the worker drops its socket. It is bounded
+    /// by the socket's write timeout, and a failed write is ignored because
+    /// the connection is ending anyway.
+    fn close(&self, code: u16) {
+        let _ = self.write(&WebSocketOutput::Close {
+            code: Some(code),
+            reason: Vec::new(),
+        });
+    }
+
+    /// Admits each complete frame in `bytes` and any frames already buffered
+    /// behind it, one transport step per frame, and writes each output.
+    /// Returns `false` once the socket has closed.
+    fn serve_input(&self, socket: &mut WebSocketState, bytes: &[u8]) -> io::Result<bool> {
+        let limits = self.state.transport_limits;
+        let mut bytes = bytes;
+        loop {
+            let prepared = self.state.with_sessions(|sessions| {
+                self.executor
+                    .block_on(
+                        sessions
+                            .live
+                            .prepare_websocket_application(socket, now_ms(), bytes),
+                    )
+            })?;
+            bytes = &[];
+            let output = match prepared {
+                Ok(WebSocketApplicationPreparation::Pending) => None,
+                Ok(WebSocketApplicationPreparation::Output(output)) => Some(output),
+                Ok(WebSocketApplicationPreparation::Work(ticket)) => {
+                    // Evaluation holds only the application lock, so other
+                    // sockets and session requests proceed meanwhile.
+                    let completion = match self.state.application.lock() {
+                        Ok(mut application) => {
+                            self.executor.block_on(ticket.execute(&mut *application))
+                        }
+                        Err(_) => ticket.reject(orna_live_v1::Error::RuntimeUnavailable),
+                    };
+                    let completed = self.state.with_sessions(|sessions| {
+                        self.executor
+                            .block_on(sessions.live.complete_application(completion))
+                    })?;
+                    match completed {
+                        Ok(output) => Some(output),
+                        Err(error) => {
+                            self.close(close_code_for_failure(error));
+                            return Ok(false);
+                        }
+                    }
+                }
+                // A framing or attachment failure closes this socket with the
+                // code the WebSocket protocol assigns to it; dropping the
+                // worker then releases its attachment.
+                Err(error) => {
+                    self.close(close_code_for_failure(error));
+                    return Ok(false);
+                }
+            };
+            if let Some(output) = output {
+                self.write(&output)?;
+                if matches!(output, WebSocketOutput::Close { .. }) {
+                    return Ok(false);
+                }
+            }
+            let buffered = socket
+                .has_complete_frame(limits.max_frame_bytes)
+                .map_err(|_| io::Error::other("buffered WebSocket input is unavailable"))?;
+            if !buffered {
+                return Ok(true);
+            }
+        }
+    }
+
+    fn write(&self, output: &WebSocketOutput) -> io::Result<()> {
+        let frame = encode_websocket_output(output, self.state.transport_limits)
+            .map_err(|_| io::Error::other("WebSocket output exceeds the outgoing bound"))?;
+        if let Some(frame) = frame {
+            let mut stream = self.stream;
+            stream.write_all(&frame)?;
+            stream.flush()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WebSocketWorker<'_> {
+    fn drop(&mut self) {
+        // The peer sees the connection end before anyone waiting for this
+        // worker to exit, such as a DELETE of its session, is released.
+        let _ = self.stream.shutdown(Shutdown::Both);
+        let retired = self.state.workers.finish(self.attachment);
+        let _ = self.state.with_sessions(|sessions| {
+            // A retired, refused or never-committed attachment is already
+            // closed; the transport answers `Closed`, which needs no action.
+            let _ = self
+                .executor
+                .block_on(sessions.live.close_attachment(self.attachment, now_ms()));
+            if retired {
+                sessions
+                    .live
+                    .acknowledge_retired_attachment(self.attachment);
+            }
+        });
+    }
 }
 
 // The project root is selected once by `orna serve`; requests never supply a
 // repository path. Browsing is based on immutable Git commits and trees.
-fn host_route(root: &Path, identity: RuntimeIdentity, request: &Request) -> Response {
-    if let Some(response) = git_transport_route(root, request) {
+fn host_route(
+    root: &Path,
+    identity: RuntimeIdentity,
+    allow_push: bool,
+    request: &Request,
+) -> Response {
+    if let Some(response) = git_transport_route(root, allow_push, request) {
         return response;
     }
     if let Some(response) = git_listing_route(root, request) {
@@ -924,7 +1695,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn git_transport_route(root: &Path, request: &Request) -> Option<Response> {
+fn git_transport_route(root: &Path, allow_push: bool, request: &Request) -> Option<Response> {
     let (suffix, service) = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/git/info/refs") => {
             let service = match request.query.as_str() {
@@ -953,6 +1724,16 @@ fn git_transport_route(root: &Path, request: &Request) -> Option<Response> {
         (_, path) if path.starts_with("/git/") => return Some(not_found_response()),
         _ => return None,
     };
+    // Push changes refs in the served clone. Refusing it here, rather than
+    // through Git configuration, keeps the operator's `serve --allow-push`
+    // choice authoritative over any `http.receivepack` setting.
+    if service == "git-receive-pack" && !allow_push {
+        return Some(Response::new(
+            403,
+            "application/json",
+            br#"{"error":"push_disabled"}"#.to_vec(),
+        ));
+    }
     Some(
         run_git_http_backend(root, request, suffix, service)
             .unwrap_or_else(|_| unavailable_response()),
@@ -1005,9 +1786,9 @@ fn run_git_http_backend(
             command.env("GIT_PROTOCOL", protocol);
         }
     }
-    // The listener is loopback-only and this profile trusts local OS users.
-    // Keep Git's ordinary receive-pack checks (including checked-out-branch
-    // protection), while making the standard smart-HTTP push service usable.
+    // Only reached after the operator enabled push with `serve --allow-push`.
+    // Git's ordinary receive-pack checks (including checked-out-branch
+    // protection) still apply.
     if service == "git-receive-pack" {
         command
             .env("GIT_CONFIG_COUNT", "1")
@@ -1154,11 +1935,21 @@ fn clone_report(root: &Path, identity: RuntimeIdentity) -> io::Result<Vec<u8>> {
     Ok(report.into_bytes())
 }
 
-fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
-    let mut header_bytes = 0usize;
+/// Reads one request line and its headers, which together must arrive
+/// within `deadline` and [`MAX_HEADER_BYTES`]. Every route, including the
+/// WebSocket upgrade, is chosen from this one parse. Returns the request with
+/// an empty body and the declared body length; the caller checks that length
+/// against the route's body limit. `orna_route` is set as soon as the request
+/// line is read, so a malformed head still answers in the live error shape.
+fn read_request_head(
+    reader: &mut BufReader<TcpStream>,
+    deadline: Instant,
+    orna_route: &mut bool,
+) -> io::Result<(Request, usize)> {
+    let mut budget = MAX_HEADER_BYTES;
     let mut line = Vec::new();
-    reader.read_until(b'\n', &mut line)?;
-    header_bytes = header_bytes.saturating_add(line.len());
+    read_head_line(reader, &mut line, &mut budget, deadline)?;
+    *orna_route = is_orna_request_line(&line);
     let request_line = std::str::from_utf8(&line)
         .map_err(|_| io::Error::other("invalid request line"))?
         .trim_end_matches(['\r', '\n'])
@@ -1190,14 +1981,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
     let mut headers = Vec::new();
     let mut content_length = None;
     loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            return Err(io::Error::other("incomplete request"));
-        }
-        header_bytes = header_bytes.saturating_add(line.len());
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(io::Error::other("request header limit"));
-        }
+        read_head_line(reader, &mut line, &mut budget, deadline)?;
         if line == b"\r\n" || line == b"\n" {
             break;
         }
@@ -1241,52 +2025,161 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Request> {
         return Err(io::Error::other("missing Host header"));
     }
     let body_length = content_length.unwrap_or(0);
-    let body_limit = if path.starts_with("/git/") {
-        MAX_GIT_REQUEST_BODY_BYTES
-    } else {
-        MAX_REQUEST_BODY_BYTES
-    };
-    if body_length > body_limit {
-        return Err(io::Error::other("request body limit"));
-    }
-    let mut body = vec![0; body_length];
-    reader.read_exact(&mut body)?;
-    Ok(Request {
-        method,
-        path: path.to_owned(),
-        query: query.to_owned(),
-        headers,
-        body,
-    })
+    Ok((
+        Request {
+            method,
+            path: path.to_owned(),
+            query: query.to_owned(),
+            headers,
+            body: Vec::new(),
+        },
+        body_length,
+    ))
 }
 
-fn peek_websocket_request(stream: &TcpStream) -> bool {
-    let mut bytes = [0; MAX_HEADER_BYTES];
+/// Reads one `\n`-terminated head line into `line`, charging it to the
+/// shared header `budget`. Every read is bounded by what is left before
+/// `deadline`, so neither a line without a newline nor a peer that trickles
+/// bytes can hold the connection past the head's byte and time bounds.
+fn read_head_line(
+    reader: &mut BufReader<TcpStream>,
+    line: &mut Vec<u8>,
+    budget: &mut usize,
+    deadline: Instant,
+) -> io::Result<()> {
+    line.clear();
+    let deadline_elapsed =
+        || io::Error::new(io::ErrorKind::TimedOut, "request head deadline elapsed");
     loop {
-        let Ok(count) = stream.peek(&mut bytes) else {
-            return false;
-        };
-        if count == 0 || count == bytes.len() {
-            return false;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(deadline_elapsed());
         }
-        let Ok(text) = std::str::from_utf8(&bytes[..count]) else {
-            return false;
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(deadline_elapsed());
+            }
+            Err(error) => return Err(error),
         };
-        let Some(end) = text.find('\n') else {
-            // TCP may split even the request line. Peek again without
-            // consuming it so the protocol driver receives the full upgrade.
-            std::thread::sleep(StdDuration::from_millis(2));
-            continue;
-        };
-        let mut fields = text[..end].trim_end_matches('\r').split(' ');
-        return fields.next() == Some("GET")
-            && fields
-                .next()
-                .is_some_and(|path| path.starts_with("/orna/live/"));
+        if available.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete request",
+            ));
+        }
+        let (length, complete) = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or((available.len(), false), |end| (end + 1, true));
+        if length > *budget {
+            return Err(io::Error::other("request header limit"));
+        }
+        line.extend_from_slice(&available[..length]);
+        reader.consume(length);
+        *budget -= length;
+        if complete {
+            return Ok(());
+        }
     }
 }
 
-fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> {
+/// Reads a request body of `length` bytes, which must have arrived in full
+/// by `deadline`. Every read is bounded by the time left, so a peer that
+/// trickles the body cannot hold the connection past the deadline.
+fn read_request_body(
+    reader: &mut BufReader<TcpStream>,
+    length: usize,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    let mut body = vec![0; length];
+    let mut filled = 0;
+    while filled < length {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request body deadline elapsed",
+            ));
+        }
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        match reader.read(&mut body[filled..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete request body",
+                ));
+            }
+            Ok(read) => filled += read,
+            // A timed-out read is judged against the deadline above.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(body)
+}
+
+/// Writes `response`, all of it within `budget`.
+fn write_response(
+    stream: &mut TcpStream,
+    response: Response,
+    budget: TransferBudget,
+) -> io::Result<()> {
+    let head = response_head(&response);
+    let deadline = budget.deadline(head.len().saturating_add(response.body.len()));
+    write_before(stream, &[&head, &response.body], deadline)
+}
+
+/// Writes `parts` in order, all of them by `deadline`. Every blocked write
+/// is bounded by the time left, so a peer that stops reading, or reads a few
+/// bytes at a time, cannot hold the connection past the deadline.
+fn write_before(stream: &mut TcpStream, parts: &[&[u8]], deadline: Instant) -> io::Result<()> {
+    for part in parts {
+        let mut unsent = *part;
+        while !unsent.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "response deadline elapsed",
+                ));
+            }
+            stream.set_write_timeout(Some(remaining))?;
+            match stream.write(unsent) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(written) => unsent = &unsent[written..],
+                // A timed-out write is judged against the deadline above.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The status line and headers of `response`, through the blank line that
+/// ends them.
+fn response_head(response: &Response) -> Vec<u8> {
+    use std::fmt::Write as _;
     let reason = match response.status {
         200 => "OK",
         201 => "Created",
@@ -1302,20 +2195,19 @@ fn write_response(stream: &mut TcpStream, response: Response) -> io::Result<()> 
         503 => "Service Unavailable",
         _ => "Response",
     };
-    write!(stream, "HTTP/1.1 {} {reason}\r\n", response.status)?;
+    let mut head = format!("HTTP/1.1 {} {reason}\r\n", response.status);
     if !response.content_type.is_empty() {
-        write!(stream, "Content-Type: {}\r\n", response.content_type)?;
+        let _ = write!(head, "Content-Type: {}\r\n", response.content_type);
     }
     for (name, value) in &response.headers {
-        write!(stream, "{name}: {value}\r\n")?;
+        let _ = write!(head, "{name}: {value}\r\n");
     }
-    write!(
-        stream,
+    let _ = write!(
+        head,
         "Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.body.len()
-    )?;
-    stream.write_all(&response.body)?;
-    stream.flush()
+    );
+    head.into_bytes()
 }
 
 fn json_string(value: &str) -> String {
@@ -1369,11 +2261,52 @@ fn not_found_response() -> Response {
     )
 }
 
+/// A perimeter refusal. Live session routes answer with the protocol's
+/// `{ "code", "message" }` error shape; the other routes keep this host's
+/// `{ "error" }` shape.
+fn forbidden_response(request: &Request, reason: &str) -> Response {
+    let body = if request.path.starts_with("/orna/") {
+        format!(r#"{{"code":"live.{reason}","message":"request rejected"}}"#)
+    } else {
+        format!(r#"{{"error":"{reason}"}}"#)
+    };
+    Response::new(403, "application/json", body)
+}
+
 fn bad_request_response() -> Response {
     Response::new(
         400,
         "application/json",
         br#"{"error":"bad_request"}"#.to_vec(),
+    )
+}
+
+/// Whether a request line targets the live `/orna/` surface, so its errors
+/// use the `{ "code", "message" }` shape (30-protocol, Creation/resume errors).
+fn is_orna_request_line(line: &[u8]) -> bool {
+    line.starts_with(b"GET /orna/")
+        || line.starts_with(b"POST /orna/")
+        || line.starts_with(b"DELETE /orna/")
+}
+
+/// The body limit for a route, which the head's declared length must not
+/// exceed before the body is read.
+fn request_body_limit(path: &str) -> usize {
+    if path.starts_with("/git/") {
+        MAX_GIT_REQUEST_BODY_BYTES
+    } else {
+        MAX_REQUEST_BODY_BYTES
+    }
+}
+
+/// A live error in the protocol's `{ "code", "message" }` JSON. The code and
+/// message are fixed constants with no characters needing JSON escapes, and
+/// they carry no credentials or host paths.
+fn live_error_response(status: u16, code: &str, message: &str) -> Response {
+    Response::new(
+        status,
+        "application/json",
+        format!(r#"{{"code":"{code}","message":"{message}"}}"#).into_bytes(),
     )
 }
 
@@ -1390,6 +2323,87 @@ mod tests {
     use super::*;
     use orna_live_v1::LiveApplication;
     use std::process::Command;
+
+    #[test]
+    fn websocket_failures_close_with_size_or_protocol_code() {
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::Limit),
+            1009,
+            "an oversized message closes with 1009"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidFrame),
+            1002,
+            "a malformed frame closes with 1002"
+        );
+        assert_eq!(
+            close_code_for_failure(orna_live_v1::Error::InvalidMessage),
+            1002,
+            "a malformed message closes with 1002"
+        );
+    }
+
+    #[test]
+    fn accept_retries_transient_failures_and_stops_on_fatal_ones() {
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::ConnectionAborted
+        )));
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::Interrupted
+        )));
+        assert!(
+            is_transient_accept_error(&io::Error::from_raw_os_error(24)),
+            "EMFILE retries after descriptors are released"
+        );
+        assert!(is_transient_accept_error(&io::Error::from_raw_os_error(23)));
+        assert!(!is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_transient_accept_error(&io::Error::from_raw_os_error(22)));
+    }
+
+    /// Writes `request` from a client socket and returns the server side of
+    /// the connection, buffered the way `serve_connection` reads it.
+    fn buffered_request(request: &[u8]) -> BufReader<TcpStream> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.write_all(request).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        BufReader::new(server)
+    }
+
+    #[test]
+    fn malformed_orna_head_is_answered_in_the_live_error_shape() {
+        let mut reader = buffered_request(b"GET /orna/session HTTP/1.1\r\nno-colon\r\n\r\n");
+        let mut orna_route = false;
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        assert!(read_request_head(&mut reader, deadline, &mut orna_route).is_err());
+        assert!(orna_route, "the request line already chose the live route");
+        assert_eq!(
+            live_error_response(400, "wire.invalid_message", "malformed request").body,
+            br#"{"code":"wire.invalid_message","message":"malformed request"}"#.to_vec()
+        );
+    }
+
+    #[test]
+    fn oversized_orna_body_is_refused_by_its_declared_length() {
+        let declared = MAX_REQUEST_BODY_BYTES + 1;
+        let head = format!(
+            "POST /orna/session HTTP/1.1\r\nHost: x\r\nContent-Length: {declared}\r\n\r\n"
+        );
+        let mut reader = buffered_request(head.as_bytes());
+        let mut orna_route = false;
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        let (request, body_length) = read_request_head(&mut reader, deadline, &mut orna_route)
+            .expect("a well-formed head parses");
+        assert!(orna_route);
+        assert_eq!(body_length, declared);
+        assert!(body_length > request_body_limit(&request.path));
+        assert_eq!(
+            live_error_response(413, "wire.limit", "request body exceeds its limit").status,
+            413
+        );
+    }
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
     const SERVE_ENTRY_FIXTURE: &str = include_str!("../tests/fixtures/serve-entry.orna");
@@ -1417,6 +2431,8 @@ mod tests {
             },
             "127.0.0.1:9000".parse().expect("loopback address"),
             orna_semantic_v1::Catalogue::authoritative_core(),
+            None,
+            ServeOptions::default(),
         )
         .expect("serve state");
         let request = [4; 16];
@@ -1439,6 +2455,8 @@ mod tests {
 
         let response = state
             .application
+            .get_mut()
+            .expect("live application")
             .eval([3; 16], request, &message)
             .expect("selected serve source evaluates");
         assert_eq!(response.request, Some(request));
@@ -1468,6 +2486,7 @@ mod tests {
                 database_id: [1; 16],
                 repository_id: [2; 16],
             },
+            false,
             &Request {
                 method: "GET".into(),
                 path: path.into(),
@@ -1506,6 +2525,7 @@ mod tests {
         let home = host_route(
             directory.path(),
             identity,
+            false,
             &Request {
                 method: "GET".into(),
                 path: "/".into(),
@@ -1520,6 +2540,7 @@ mod tests {
         let query = host_route(
             directory.path(),
             identity,
+            false,
             &Request {
                 method: "POST".into(),
                 path: "/api/query".into(),
@@ -1793,16 +2814,19 @@ mod tests {
         assert!(!right_report.contains(left_head.trim()));
     }
 
+    /// A13-live-serving-24: the request head is parsed once, so a request
+    /// line split across TCP segments still reaches the WebSocket route.
     #[test]
-    fn websocket_route_detection_accepts_a_fragmented_request_line() {
+    fn request_head_reader_accepts_a_fragmented_request_line() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("listener");
         let address = listener.local_addr().expect("listener address");
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accepted socket");
-            stream
-                .set_read_timeout(Some(StdDuration::from_secs(2)))
-                .expect("read timeout");
-            peek_websocket_request(&stream)
+            read_request_head(
+                &mut BufReader::new(stream),
+                Instant::now() + StdDuration::from_secs(5),
+                &mut false,
+            )
         });
         let mut client = TcpStream::connect(address).expect("loopback connection");
         client
@@ -1810,9 +2834,80 @@ mod tests {
             .expect("first fragment");
         std::thread::sleep(StdDuration::from_millis(10));
         client
-            .write_all(b"session HTTP/1.1\r\n")
+            .write_all(b"session HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .expect("request line remainder");
-        assert!(server.join().expect("route detection thread"));
+        let (request, body_length) = server
+            .join()
+            .expect("request head thread")
+            .expect("complete request head");
+        assert_eq!(request.path, "/orna/live/session");
+        assert_eq!(body_length, 0);
+        assert!(is_websocket_route(&request));
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-24: a peer that never ends its request
+    /// line is refused at the header byte bound instead of being buffered or
+    /// polled until it stops.
+    #[test]
+    fn request_head_reader_refuses_an_unterminated_line_at_the_byte_bound() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepted socket");
+            let started = Instant::now();
+            let result = read_request_head(
+                &mut BufReader::new(stream),
+                Instant::now() + StdDuration::from_secs(30),
+                &mut false,
+            );
+            (result.err(), started.elapsed())
+        });
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        client
+            .write_all(&vec![b'a'; MAX_HEADER_BYTES + 1])
+            .expect("unterminated request line");
+        let (error, elapsed) = server.join().expect("request head thread");
+        let error = error.expect("an unterminated line is refused");
+        assert_ne!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < StdDuration::from_secs(10),
+            "the byte bound applies before the deadline: {elapsed:?}"
+        );
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-24: a peer that trickles bytes without
+    /// ending its request line is cut off at the head deadline.
+    #[test]
+    fn request_head_reader_stops_a_trickling_peer_at_its_deadline() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accepted socket");
+            let started = Instant::now();
+            let result = read_request_head(
+                &mut BufReader::new(stream),
+                Instant::now() + StdDuration::from_millis(300),
+                &mut false,
+            );
+            (result.err(), started.elapsed())
+        });
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if client.write_all(b"G").is_err() {
+                    break;
+                }
+                std::thread::sleep(StdDuration::from_millis(20));
+            }
+        });
+        let (error, elapsed) = server.join().expect("request head thread");
+        let error = error.expect("a trickling peer is refused");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            elapsed >= StdDuration::from_millis(300) && elapsed < StdDuration::from_secs(2),
+            "the head deadline bounds the whole request line: {elapsed:?}"
+        );
+        trickle.join().expect("trickling client");
     }
 
     /// ORNA-TRUST-002: `orna serve` binds to loopback by default. Remote deployment SHOULD use normal SSH, Tailscale, or a trusted authenticated reverse proxy/TLS boundary.
@@ -1838,14 +2933,16 @@ mod tests {
         let root = directory.path().to_path_buf();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.listener().accept().expect("accepted request");
-            let mut state = new_serve_state(
+            let state = new_serve_state(
                 root,
                 identity,
                 status.address,
                 orna_semantic_v1::Catalogue::authoritative_core(),
+                None,
+                ServeOptions::default(),
             )
             .expect("serve host");
-            serve_connection(stream, &mut state).expect("served clone route");
+            serve_connection(stream, &state).expect("served clone route");
         });
 
         let mut client = TcpStream::connect(status.address).expect("loopback connection");
@@ -1932,38 +3029,14 @@ mod tests {
                 database_id: [index + 10; 16],
                 repository_id: [index + 20; 16],
             };
-            let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
-            let address = listener.status().address;
-            let root = source.path().to_path_buf();
-            let (stop_server, server_stopped) = std::sync::mpsc::channel();
-            let server = std::thread::spawn(move || {
-                let mut state = new_serve_state(
-                    root,
-                    identity,
-                    address,
-                    orna_semantic_v1::Catalogue::authoritative_core(),
-                )
-                .expect("serve host");
-                listener
-                    .listener()
-                    .set_nonblocking(true)
-                    .expect("non-blocking accept");
-                loop {
-                    match server_stopped.try_recv() {
-                        Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                    }
-                    match listener.listener().accept() {
-                        Ok((stream, _)) => {
-                            serve_connection(stream, &mut state).expect("served Git request");
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(StdDuration::from_millis(2));
-                        }
-                        Err(error) => panic!("listener accept failed: {error}"),
-                    }
-                }
-            });
+            let address = start_live_server(
+                source.path(),
+                identity,
+                ServeOptions {
+                    allow_push: true,
+                    ..ServeOptions::default()
+                },
+            );
 
             let destination = tempfile::tempdir().expect("client clone parent");
             let clone_path = destination.path().join("checkout");
@@ -2017,21 +3090,999 @@ mod tests {
                 expected_head
             );
 
-            let mut client = TcpStream::connect(address).expect("clone report connection");
-            client
-                .write_all(format!("GET /api/clone HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
-                .expect("clone report request");
-            let mut response = Vec::new();
-            client
-                .read_to_end(&mut response)
-                .expect("clone report response");
-            let response = String::from_utf8(response).expect("clone report UTF-8");
-            assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-            assert!(response.contains(&format!("\"HEAD\":\"{expected_head}\"")));
-            assert!(response.contains(&format!("\"branch\":\"{branch}\"")));
-            assert!(response.contains(&format!("\"worktree_clean\":{}", !dirty)));
-            stop_server.send(()).expect("stop Git server");
-            server.join().expect("Git server thread");
+            let report = exchange(
+                address,
+                &format!("GET /api/clone HTTP/1.1\r\nHost: {address}\r\n\r\n"),
+            );
+            assert_eq!(report.status, 200);
+            assert!(
+                report
+                    .body
+                    .contains(&format!("\"HEAD\":\"{expected_head}\""))
+            );
+            assert!(report.body.contains(&format!("\"branch\":\"{branch}\"")));
+            assert!(
+                report
+                    .body
+                    .contains(&format!("\"worktree_clean\":{}", !dirty))
+            );
         }
+    }
+
+    /// ORNA-TRUST-003, A13-live-serving-09: smart-HTTP push changes refs in
+    /// the served clone, so it is refused unless the operator enables it.
+    /// Fetch stays available.
+    #[test]
+    fn smart_http_push_is_refused_unless_enabled() {
+        let source = tempfile::tempdir().expect("source clone");
+        std::fs::write(source.path().join("main.orna"), SERVE_FIXTURE)
+            .expect("vendored project source");
+        git_succeeds(
+            source.path(),
+            &["init", "--quiet", "--initial-branch=push-off"],
+        );
+        git_succeeds(source.path(), &["add", "main.orna"]);
+        git_succeeds(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Orna test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ],
+        );
+        let address = start_live_server(source.path(), TEST_IDENTITY, ServeOptions::default());
+        let remote = format!("http://{address}/git");
+        let destination = tempfile::tempdir().expect("client clone parent");
+        let clone_path = destination.path().join("checkout");
+        let cloned = Command::new("git")
+            .args(["-c", "http.proxy=", "clone", "--quiet", &remote])
+            .arg(&clone_path)
+            .output()
+            .expect("git clone");
+        assert!(
+            cloned.status.success(),
+            "fetch stays available: {}",
+            String::from_utf8_lossy(&cloned.stderr)
+        );
+        let pushed = Command::new("git")
+            .args([
+                "-c",
+                "http.proxy=",
+                "-C",
+                clone_path.to_str().expect("clone path UTF-8"),
+                "push",
+                "--quiet",
+                &remote,
+                "HEAD:refs/heads/refused",
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git push");
+        assert!(
+            !pushed.status.success(),
+            "push succeeded without `serve --allow-push`"
+        );
+        let created = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/refused"])
+            .current_dir(source.path())
+            .output()
+            .expect("refused ref lookup");
+        assert!(!created.status.success(), "a refused push created a ref");
+        let advertisement = exchange(
+            address,
+            &format!(
+                "GET /git/info/refs?service=git-receive-pack HTTP/1.1\r\nHost: {address}\r\n\r\n"
+            ),
+        );
+        assert_eq!(advertisement.status, 403);
+        assert_eq!(advertisement.body, r#"{"error":"push_disabled"}"#);
+    }
+
+    /// ORNA-WIRE-011, ORNA-TRUST-003, A13-live-serving-09: normal same-origin
+    /// checks. Only this listener's loopback names are served, so a rebound
+    /// DNS name cannot reach it as a same-origin peer, and writes must come
+    /// from the request's own origin.
+    #[test]
+    fn requests_must_name_this_listener_and_writes_must_be_same_origin() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=hosts"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let port = address.port();
+        let own = address.to_string();
+        let rebound = format!("rebound.example:{port}");
+        let home =
+            |host: &str| exchange(address, &format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n"));
+        for host in [
+            own.clone(),
+            format!("localhost:{port}"),
+            format!("LOCALHOST:{port}"),
+            format!("[::1]:{port}"),
+        ] {
+            assert_eq!(home(&host).status, 200, "{host} names this listener");
+        }
+        for host in [
+            rebound.clone(),
+            format!("127.0.0.1:{}", port.wrapping_add(1)),
+            "127.0.0.1".to_owned(),
+            "localhost".to_owned(),
+        ] {
+            let refused = home(&host);
+            assert_eq!(refused.status, 403, "{host} does not name this listener");
+            assert_eq!(refused.body, r#"{"error":"host_denied"}"#);
+        }
+
+        let refused = create_session_as(address, &rebound, Some(&format!("http://{rebound}")));
+        assert_eq!(refused.status, 403);
+        assert!(
+            refused.body.contains(r#""code":"live.host_denied""#),
+            "{}",
+            refused.body
+        );
+        for origin in [
+            None,
+            Some("null".to_owned()),
+            Some("http://rebound.example".to_owned()),
+            Some(format!("http://localhost:{port}")),
+        ] {
+            let refused = create_session_as(address, &own, origin.as_deref());
+            assert_eq!(
+                refused.status, 403,
+                "{origin:?} is not this request's origin"
+            );
+            assert!(
+                refused.body.contains(r#""code":"live.origin_denied""#),
+                "{}",
+                refused.body
+            );
+        }
+        // Each loopback name of this listener is its own origin.
+        for host in [own.clone(), format!("localhost:{port}")] {
+            let created = create_session_as(address, &host, Some(&format!("http://{host}")));
+            assert_eq!(created.status, 201, "{host}: {}", created.body);
+        }
+
+        // Git's own client sends no Origin; a page from another origin cannot
+        // drive Git's POST endpoints.
+        let upload = exchange(
+            address,
+            &format!(
+                "POST /git/git-upload-pack HTTP/1.1\r\nHost: {own}\r\nOrigin: http://rebound.example\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert_eq!(upload.status, 403);
+        assert_eq!(upload.body, r#"{"error":"origin_denied"}"#);
+
+        // The refusal is decided from the request head alone: a cross-origin
+        // request that declares a large body and never sends it is answered at
+        // once, without the host waiting for or buffering that body.
+        let started = Instant::now();
+        let declared = exchange(
+            address,
+            &format!(
+                "POST /git/git-upload-pack HTTP/1.1\r\nHost: {own}\r\nOrigin: http://rebound.example\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: 1000000\r\n\r\n"
+            ),
+        );
+        assert_eq!(declared.status, 403);
+        assert_eq!(declared.body, r#"{"error":"origin_denied"}"#);
+        assert!(
+            started.elapsed() < StdDuration::from_secs(5),
+            "the refusal does not wait for the declared body: {:?}",
+            started.elapsed()
+        );
+
+        // A WebSocket handshake through a rebound name never reaches the
+        // session layer.
+        let session = create_session(address);
+        let upgrade = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {rebound}\r\nOrigin: http://{rebound}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={}\r\n\r\n",
+                session.id, session.token
+            ),
+        );
+        assert_eq!(upgrade.status, 403);
+        assert!(upgrade.body.contains(r#""code":"live.host_denied""#));
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-01: an attached WebSocket waiting on
+    /// its peer must not hold the shared session state. Before per-step
+    /// locking, the first socket's thread held it until that socket closed,
+    /// so the session request and the second socket below never completed.
+    #[test]
+    fn an_open_websocket_leaves_session_requests_and_other_sockets_available() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=live"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let first = create_session(address);
+        let mut first_socket = open_websocket(address, &first);
+
+        let second = create_session(address);
+        let mut second_socket = open_websocket(address, &second);
+        assert_serve_entry_result(&eval_over_socket(&mut second_socket, &second, [41; 16]));
+        assert_serve_entry_result(&eval_over_socket(&mut first_socket, &first, [42; 16]));
+    }
+
+    /// 30-protocol §Session creation and ownership, A13-live-serving-01: a
+    /// successful resume replaces the old attachment. The replaced socket's
+    /// worker is cancelled and acknowledges its retirement when it exits, so
+    /// the session is not left fenced against deletion.
+    #[test]
+    fn resume_replaces_the_attached_socket_and_releases_its_worker() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=resume"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut replaced = open_websocket(address, &session);
+
+        let resumed = resume_session(address, &session);
+        assert_eq!(resumed.id, session.id);
+        assert_ne!(resumed.token, session.token);
+        // The cancelled worker sends its closing handshake, then disconnects.
+        expect_server_close(&mut replaced, CLOSE_RETIRED);
+
+        let mut current = open_websocket(address, &resumed);
+        send_frame(&mut current, 8, &1000_u16.to_be_bytes());
+        let (opcode, payload) = read_frame(&mut current).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        assert_eq!(payload, 1000_u16.to_be_bytes());
+        assert_eq!(delete_session_once_released(address, &resumed), 204);
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-01: a half-open peer cannot hold its
+    /// attachment forever. An idle socket is pinged; a peer that answers
+    /// stays attached past the idle bound, and one that falls silent is
+    /// disconnected and its attachment released.
+    #[test]
+    fn idle_websockets_are_pinged_and_silent_peers_are_released() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=keepalive"],
+        );
+        // The idle bound leaves each ping more than two seconds for its
+        // answer, so a test thread descheduled for a second on a loaded CI
+        // runner is not mistaken for a silent peer.
+        let keepalive = WebSocketKeepalive {
+            ping_after: StdDuration::from_millis(100),
+            idle_timeout: StdDuration::from_millis(2_500),
+            write_timeout: StdDuration::from_secs(5),
+        };
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                keepalive,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+
+        let answering = Instant::now();
+        let mut pings = 0;
+        while answering.elapsed() < keepalive.idle_timeout + keepalive.idle_timeout / 2 {
+            let (opcode, payload) = read_frame(&mut socket).expect("keepalive ping");
+            assert_eq!(opcode, 9, "an idle socket is pinged");
+            send_frame(&mut socket, 10, &payload);
+            pings += 1;
+        }
+        assert!(pings > 1, "a peer that answers pings stays attached");
+
+        let (opcode, _) = read_frame(&mut socket).expect("final keepalive ping");
+        assert_eq!(opcode, 9);
+        // A silent peer is told the host is going away, then disconnected.
+        expect_server_close(&mut socket, CLOSE_IDLE);
+        assert_eq!(delete_session_once_released(address, &session), 204);
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-01: the keepalive judges the peer, not
+    /// the host. An evaluation that outlasts the idle bound (here, waiting on
+    /// the application lock) delivers its result and leaves the socket
+    /// attached for the next request.
+    #[test]
+    fn evaluation_time_is_not_counted_as_peer_silence() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=busy"],
+        );
+        // The idle bound leaves the client two seconds to send its next
+        // request, so a test thread descheduled for a second is not mistaken
+        // for a silent peer. The evaluation below is held for longer than it.
+        let keepalive = WebSocketKeepalive {
+            ping_after: StdDuration::from_millis(100),
+            idle_timeout: StdDuration::from_secs(2),
+            write_timeout: StdDuration::from_secs(5),
+        };
+        let (address, state) = start_shared_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                keepalive,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+
+        let busy = state.application.lock().expect("live application");
+        let waiting = std::thread::spawn(move || {
+            let result = eval_over_socket(&mut socket, &session, [51; 16]);
+            (socket, session, result)
+        });
+        std::thread::sleep(keepalive.idle_timeout + StdDuration::from_secs(1));
+        drop(busy);
+        let (mut socket, session, result) = waiting.join().expect("Eval client");
+        assert_serve_entry_result(&result);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [52; 16]));
+    }
+
+    /// 30-protocol §Session creation and ownership, A13-live-serving-15:
+    /// DELETE ends a session whose socket is still attached and which owns
+    /// application work. It cancels the socket's worker, which sends its
+    /// closing handshake and disconnects, and answers 204 only after that
+    /// worker has exited. Before, DELETE answered 503 while a socket was
+    /// attached and 400 once the session had run an evaluation.
+    #[test]
+    fn delete_ends_an_attached_session_after_its_socket_worker_exits() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=delete"],
+        );
+        let (address, state) =
+            start_shared_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        // The result also shows that the attachment has been committed.
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [61; 16]));
+
+        let deleted = delete_session(address, &session);
+        assert_eq!(deleted.status, 204, "{}", deleted.body);
+        assert!(
+            state.workers.lock().is_empty(),
+            "the socket's worker exits before the 204 is written"
+        );
+        expect_server_close(&mut socket, CLOSE_RETIRED);
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
+    /// 30-protocol §Session creation and ownership, W20-04: a session that
+    /// has run an evaluation can be deleted once its socket has gone. DELETE
+    /// joins its finished application work and answers 204; before, it
+    /// answered 400 `live.malformed_request`.
+    #[test]
+    fn delete_ends_a_detached_session_that_has_evaluated() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=detached"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [81; 16]));
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        assert!(closed_by_server(&mut socket));
+
+        assert_eq!(delete_session_once_released(address, &session), 204);
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
+    /// 30-protocol §Session creation and ownership, A13-live-serving-15:
+    /// expiry terminates the owner and cancels its children. Once a session's
+    /// lease elapses, the owner sweep ends it without any client request, so
+    /// its attached socket is closed and its token can no longer resume it.
+    #[test]
+    fn expired_sessions_are_ended_by_the_owner_sweep() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=expiry"],
+        );
+        // Keepalive pings start only after 15 s and the client waits at most
+        // LIVE_TEST_TIMEOUT for the Close frame. The reconnection lease starts
+        // when the socket detaches (30-protocol), so the session is ended only
+        // after the client closes; the lease leaves the evaluation four seconds.
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                session_lease_ms: 4_000,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [71; 16]));
+        // Closing the socket detaches it, starting the reconnection lease.
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let reply = resume_reply(address, &session);
+            if reply.status == 410 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the owner sweep ends the detached session"
+            );
+            std::thread::sleep(StdDuration::from_millis(50));
+        }
+        assert_eq!(resume_reply(address, &session).status, 410);
+    }
+
+    /// ORNA-WIRE-005, A13-live-serving-13: the connections being served,
+    /// each on its own thread, are bounded. Beyond the cap the accept loop
+    /// answers 503 at once without reading the request, and a connection's
+    /// slot is free again once it has ended.
+    #[test]
+    fn connections_beyond_the_cap_are_refused_until_one_ends() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=cap"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let home = || {
+            exchange(
+                address,
+                &format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n"),
+            )
+        };
+        // A request's slot is released before its peer sees the response end,
+        // so the handshake that follows on a new connection is admitted.
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+
+        let refused = home();
+        assert_eq!(refused.status, 503);
+        assert_eq!(refused.body, r#"{"error":"temporarily_unavailable"}"#);
+
+        send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
+        let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
+        assert_eq!(opcode, 8);
+        assert!(closed_by_server(&mut socket));
+        // The socket's worker ends the connection just before its thread
+        // releases the slot.
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let reply = home();
+            if reply.status != 503 {
+                assert_eq!(reply.status, 200, "{}", reply.body);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the ended connection's slot is released"
+            );
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+    }
+
+    /// ORNA-WIRE-005: a request body must arrive within one transfer budget
+    /// measured over the whole body. A peer that trickles a declared body a
+    /// byte at a time is answered 400 at the deadline, instead of keeping its
+    /// connection thread for as long as it keeps sending.
+    #[test]
+    fn a_trickled_request_body_is_cut_off_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=trickle"],
+        );
+        let transfer = TransferBudget {
+            base: StdDuration::from_millis(500),
+            min_bytes_per_second: u64::MAX,
+        };
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                transfer,
+                ..ServeOptions::default()
+            },
+        );
+        let started = Instant::now();
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        client
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        write!(
+            client,
+            "POST /orna/session HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n"
+        )
+        .expect("request head");
+        // At one byte every 100 ms the body would take ten seconds.
+        let mut trickle = client.try_clone().expect("second client handle");
+        let trickler = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if trickle.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(StdDuration::from_millis(100));
+            }
+        });
+        let response = read_until_closed(&mut client);
+        let elapsed = started.elapsed();
+        assert!(
+            response.starts_with(b"HTTP/1.1 400 "),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(
+            elapsed >= transfer.base && elapsed < StdDuration::from_secs(5),
+            "the deadline bounds the whole body: {elapsed:?}"
+        );
+        trickler.join().expect("trickling client");
+    }
+
+    /// ORNA-WIRE-005: a response must be taken within one transfer budget
+    /// measured over the whole response. A client that stops reading a large
+    /// page cannot keep its connection thread: the server gives up at the
+    /// deadline, and the client later finds the page cut short.
+    #[test]
+    fn a_response_the_client_stops_reading_is_abandoned_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=stalled"],
+        );
+        // Each quote renders as the six bytes of `&quot;`, so the page is
+        // about 12 MB, more than the loopback socket buffers hold.
+        std::fs::write(directory.path().join("quotes.txt"), vec![b'"'; 2_000_000])
+            .expect("large text file");
+        git_succeeds(directory.path(), &["add", "--", "quotes.txt"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=Orna test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "large page",
+            ],
+        );
+        let commit = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(directory.path())
+            .output()
+            .expect("HEAD")
+            .stdout;
+        let commit = String::from_utf8(commit).expect("HEAD UTF-8");
+        let transfer = TransferBudget {
+            base: StdDuration::from_millis(500),
+            min_bytes_per_second: u64::MAX,
+        };
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                transfer,
+                ..ServeOptions::default()
+            },
+        );
+        let mut client = TcpStream::connect(address).expect("loopback connection");
+        client
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        write!(
+            client,
+            "GET /blob/{}/quotes.txt HTTP/1.1\r\nHost: {address}\r\n\r\n",
+            commit.trim()
+        )
+        .expect("request");
+        // Read the head only, then stop reading until well past the deadline.
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            client.read_exact(&mut byte).expect("response head");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("UTF-8 response head");
+        assert!(head.starts_with("HTTP/1.1 200 "), "{head}");
+        let declared: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .and_then(|length| length.parse().ok())
+            .expect("declared body length");
+        assert!(
+            declared > 10_000_000,
+            "the page outgrows the socket buffers"
+        );
+        std::thread::sleep(transfer.base * 4);
+        let body = read_until_closed(&mut client);
+        assert!(
+            body.len() < declared,
+            "the server stops writing at its deadline: {} of {declared} bytes",
+            body.len()
+        );
+    }
+
+    const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+    const TEST_IDENTITY: RuntimeIdentity = RuntimeIdentity {
+        database_id: [31; 16],
+        repository_id: [32; 16],
+    };
+
+    /// Starts the production accept loop on its own thread, exactly as
+    /// `orna serve` runs it. The thread lives until the test process exits.
+    fn start_live_server(
+        root: &Path,
+        identity: RuntimeIdentity,
+        options: ServeOptions,
+    ) -> SocketAddr {
+        start_shared_live_server(root, identity, options).0
+    }
+
+    /// [`start_live_server`], also returning the state the listener shares
+    /// with its connection threads.
+    fn start_shared_live_server(
+        root: &Path,
+        identity: RuntimeIdentity,
+        options: ServeOptions,
+    ) -> (SocketAddr, Arc<ServeState>) {
+        let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
+        let address = listener.status().address;
+        let state = Arc::new(
+            new_serve_state(
+                root.to_path_buf(),
+                identity,
+                address,
+                orna_semantic_v1::Catalogue::authoritative_core(),
+                None,
+                options,
+            )
+            .expect("serve host"),
+        );
+        let shared = Arc::clone(&state);
+        std::thread::spawn(move || serve_listener(listener.listener(), &shared));
+        (address, state)
+    }
+
+    struct Reply {
+        status: u16,
+        body: String,
+    }
+
+    fn exchange(address: SocketAddr, request: &str) -> Reply {
+        let mut stream = TcpStream::connect(address).expect("loopback connection");
+        stream
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        stream.write_all(request.as_bytes()).expect("request bytes");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("the server answers before the client timeout");
+        let response = String::from_utf8(response).expect("UTF-8 response");
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .expect("complete response head");
+        let status = head
+            .split(' ')
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .expect("response status");
+        Reply {
+            status,
+            body: body.to_owned(),
+        }
+    }
+
+    struct LiveSession {
+        id: String,
+        token: String,
+    }
+
+    fn post_json(
+        address: SocketAddr,
+        host: &str,
+        origin: Option<&str>,
+        path: &str,
+        body: &str,
+    ) -> Reply {
+        let origin = origin
+            .map(|origin| format!("Origin: {origin}\r\n"))
+            .unwrap_or_default();
+        exchange(
+            address,
+            &format!(
+                "POST {path} HTTP/1.1\r\nHost: {host}\r\n{origin}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    fn create_session_as(address: SocketAddr, host: &str, origin: Option<&str>) -> Reply {
+        post_json(
+            address,
+            host,
+            origin,
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                format_uuid(TEST_IDENTITY.database_id)
+            ),
+        )
+    }
+
+    fn live_session(reply: &Reply) -> LiveSession {
+        let body: serde_json::Value = serde_json::from_str(&reply.body).expect("session JSON");
+        LiveSession {
+            id: body["session"].as_str().expect("session id").to_owned(),
+            token: body["resume_token"]
+                .as_str()
+                .expect("resume token")
+                .to_owned(),
+        }
+    }
+
+    fn create_session(address: SocketAddr) -> LiveSession {
+        let host = address.to_string();
+        let reply = create_session_as(address, &host, Some(&format!("http://{host}")));
+        assert_eq!(reply.status, 201, "{}", reply.body);
+        live_session(&reply)
+    }
+
+    fn resume_reply(address: SocketAddr, session: &LiveSession) -> Reply {
+        let host = address.to_string();
+        post_json(
+            address,
+            &host,
+            Some(&format!("http://{host}")),
+            &format!("/orna/session/{}/resume", session.id),
+            &format!(
+                r#"{{"resume_token":"{}","protocol":"orna.present.v1"}}"#,
+                session.token
+            ),
+        )
+    }
+
+    fn resume_session(address: SocketAddr, session: &LiveSession) -> LiveSession {
+        let reply = resume_reply(address, session);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        live_session(&reply)
+    }
+
+    fn delete_session(address: SocketAddr, session: &LiveSession) -> Reply {
+        let host = address.to_string();
+        exchange(
+            address,
+            &format!(
+                "DELETE /orna/session/{} HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nAuthorization: Bearer {}\r\n\r\n",
+                session.id, session.token
+            ),
+        )
+    }
+
+    /// Deletion answers 503 while a retired socket worker of the session has
+    /// not yet acknowledged its retirement, so retry until it settles.
+    fn delete_session_once_released(address: SocketAddr, session: &LiveSession) -> u16 {
+        let deadline = Instant::now() + LIVE_TEST_TIMEOUT;
+        loop {
+            let status = delete_session(address, session).status;
+            if status != 503 || Instant::now() >= deadline {
+                return status;
+            }
+            std::thread::sleep(StdDuration::from_millis(20));
+        }
+    }
+
+    fn open_websocket(address: SocketAddr, session: &LiveSession) -> TcpStream {
+        let mut stream = TcpStream::connect(address).expect("loopback connection");
+        stream
+            .set_read_timeout(Some(LIVE_TEST_TIMEOUT))
+            .expect("client read timeout");
+        write!(
+            stream,
+            "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: orna.present.v1\r\nCookie: orna_session={}\r\n\r\n",
+            session.id, session.token
+        )
+        .expect("upgrade request");
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream
+                .read_exact(&mut byte)
+                .expect("upgrade response before the client timeout");
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).expect("UTF-8 upgrade response");
+        assert!(head.starts_with("HTTP/1.1 101 "), "upgrade refused: {head}");
+        stream
+    }
+
+    fn send_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) {
+        let mask = [0x11, 0x22, 0x33, 0x44];
+        let mut frame = vec![0x80 | opcode];
+        if let Ok(length) = u8::try_from(payload.len())
+            && length < 126
+        {
+            frame.push(0x80 | length);
+        } else if let Ok(length) = u16::try_from(payload.len()) {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&length.to_be_bytes());
+        } else {
+            frame.push(0x80 | 127);
+            let length = u64::try_from(payload.len()).expect("frame length");
+            frame.extend_from_slice(&length.to_be_bytes());
+        }
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
+        stream.write_all(&frame).expect("client frame");
+    }
+
+    fn read_frame(stream: &mut TcpStream) -> io::Result<(u8, Vec<u8>)> {
+        let mut head = [0; 2];
+        stream.read_exact(&mut head)?;
+        let length = match head[1] & 0x7f {
+            126 => {
+                let mut length = [0; 2];
+                stream.read_exact(&mut length)?;
+                usize::from(u16::from_be_bytes(length))
+            }
+            127 => {
+                let mut length = [0; 8];
+                stream.read_exact(&mut length)?;
+                usize::try_from(u64::from_be_bytes(length)).expect("frame length")
+            }
+            length => usize::from(length),
+        };
+        let mut payload = vec![0; length];
+        stream.read_exact(&mut payload)?;
+        Ok((head[0] & 0x0f, payload))
+    }
+
+    /// Whether the server has closed the socket: end of stream or a reset,
+    /// but not a client read timeout.
+    fn closed_by_server(stream: &mut TcpStream) -> bool {
+        let mut byte = [0; 1];
+        match stream.read(&mut byte) {
+            Ok(read) => read == 0,
+            Err(error) => matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ),
+        }
+    }
+
+    /// Reads until the server ends the connection, by end of stream or reset.
+    fn read_until_closed(stream: &mut TcpStream) -> Vec<u8> {
+        let mut received = Vec::new();
+        let mut chunk = [0; 64 * 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => return received,
+                Ok(read) => received.extend_from_slice(&chunk[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
+                    return received;
+                }
+                Err(error) => panic!("the server ends the connection in time: {error}"),
+            }
+        }
+    }
+
+    /// Reads the server's closing handshake: one Close frame carrying `code`,
+    /// then the end of the connection.
+    fn expect_server_close(stream: &mut TcpStream, code: u16) {
+        let (opcode, payload) = read_frame(stream).expect("server Close frame");
+        assert_eq!(opcode, 8, "the server sends a Close frame");
+        assert_eq!(payload, code.to_be_bytes());
+        assert!(
+            closed_by_server(stream),
+            "the server disconnects after its Close frame"
+        );
+    }
+
+    fn uuid_bytes(text: &str) -> [u8; 16] {
+        let digits = text.replace('-', "");
+        let mut bytes = [0; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&digits[index * 2..index * 2 + 2], 16).expect("UUID hex");
+        }
+        bytes
+    }
+
+    fn eval_over_socket(
+        stream: &mut TcpStream,
+        session: &LiveSession,
+        request: [u8; 16],
+    ) -> Envelope {
+        let limits = ProtocolLimits::default();
+        let mut envelope = Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Eval {
+                source: SERVE_ENTRY_FIXTURE.to_owned(),
+                database: orna_protocol_v1::DatabaseContext {
+                    database: TEST_IDENTITY.database_id,
+                    snapshot: None,
+                },
+                presentation: PresentationContext {
+                    locale: "en".into(),
+                    timezone: None,
+                    width: None,
+                    theme: "terminal/default".into(),
+                    supported_kinds: vec!["text".into(), "group".into()],
+                },
+                fingerprint: [0; 32],
+            },
+            extensions: BTreeMap::new(),
+        };
+        let fingerprint = orna_protocol_v1::canonical_request_fingerprint(
+            uuid_bytes(&session.id),
+            &envelope,
+            limits,
+        )
+        .expect("request fingerprint");
+        if let Message::Eval {
+            fingerprint: sent, ..
+        } = &mut envelope.message
+        {
+            *sent = fingerprint;
+        }
+        send_frame(stream, 2, &envelope.encode(limits).expect("canonical Eval"));
+        loop {
+            let (opcode, payload) =
+                read_frame(stream).expect("Eval result before the client timeout");
+            // A conforming client answers keepalive pings while it waits.
+            if opcode == 9 {
+                send_frame(stream, 10, &payload);
+                continue;
+            }
+            assert_eq!(opcode, 2, "the Eval result is one binary message");
+            return Envelope::decode(&payload, limits).expect("canonical Eval result");
+        }
+    }
+
+    fn assert_serve_entry_result(response: &Envelope) {
+        let Message::Result { status, value, .. } = &response.message else {
+            panic!("Eval answers with a Result");
+        };
+        assert_eq!(*status, orna_protocol_v1::ResultStatus::Success);
+        assert_eq!(
+            value.as_ref().expect("typed Run result").raw(),
+            &orna_foundation_v1::OvbRaw::Int(42.into())
+        );
     }
 }

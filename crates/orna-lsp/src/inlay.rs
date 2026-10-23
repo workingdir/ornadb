@@ -1,392 +1,292 @@
-//! Inlay hints derived from syntax-v1 declarations and expression structure.
+//! Inlay hints: parameter names at call sites, and `let` types that are
+//! certain without inference.
+//!
+//! A type hint is shown only when the type follows from the source alone:
+//! a literal other than `null` (which is an optional value of a type the
+//! literal does not name), a comparison or logical operator, or a call to a
+//! function whose declared result type is written in its signature. No type
+//! is guessed from arithmetic or from function bodies.
 
-use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintTooltip, Position, Range};
+use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, Position, Range};
 use orna_syntax_v1::{
-    Argument, ControlKind, Declaration, Expr, FunctionSignature, LiteralKind, Pattern, Statement,
-    SyntaxSpan, SyntaxTree, TypeExpr,
+    Argument, Declaration, Expr, LiteralKind, Pattern, Statement, StringSegment, SyntaxSpan,
 };
 
-use crate::{analysis, documents::PositionMapper, locals};
+use crate::analysis;
+use crate::documents::PositionMapper;
+use crate::names::control_arms;
+use crate::workspace::{FileAnalysis, Target, Workspace};
 
-/// Returns in-range type and parameter-name hints for one parsed document.
-pub fn inlay_hints(
-    parse: &analysis::EditorParse,
-    text: &str,
-    mapper: &PositionMapper<'_>,
-    range: &Range,
-) -> Vec<InlayHint> {
-    let tree = &parse.value;
-    let mut hints = Vec::new();
-    for item in &tree.items {
-        match &item.declaration {
-            Declaration::Function { body, .. } => {
-                collect_expression_hints(body, tree, text, mapper, range, &mut hints);
-            }
-            Declaration::Let {
-                pattern,
-                annotation,
-                value,
-            } => {
-                if annotation.is_none() {
-                    if let Pattern::Name(_, name_span) = pattern {
-                        add_inferred_type_hint(
-                            name_span, value, tree, text, mapper, range, &mut hints,
-                        );
-                    }
-                }
-                collect_expression_hints(value, tree, text, mapper, range, &mut hints);
-            }
-            Declaration::Assertion { value } => {
-                collect_expression_hints(value, tree, text, mapper, range, &mut hints);
-            }
-            _ => {}
+/// Returns in-range type and parameter-name hints for one module.
+pub(crate) fn inlay_hints(workspace: &Workspace, module: usize, range: &Range) -> Vec<InlayHint> {
+    let file = workspace.file(module);
+    let mut collector = Collector {
+        workspace,
+        module,
+        file,
+        mapper: PositionMapper::new(file.text()),
+        range,
+        hints: Vec::new(),
+    };
+    for item in &file.parse.value.items {
+        if let Declaration::Let {
+            pattern: Pattern::Name(_, name),
+            annotation: None,
+            value,
+        } = &item.declaration
+        {
+            collector.type_hint(name, value);
+        }
+        for body in analysis::item_bodies(item) {
+            collector.expression(body);
         }
     }
+    let mut hints = collector.hints;
     hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
     hints
 }
 
-fn add_inferred_type_hint(
-    name_span: &SyntaxSpan,
-    value: &Expr,
-    tree: &SyntaxTree,
-    text: &str,
-    mapper: &PositionMapper<'_>,
-    range: &Range,
-    hints: &mut Vec<InlayHint>,
-) {
-    let Some(inferred) = infer_type(value, tree, text) else {
-        return;
-    };
-    let position = mapper.position(name_span.end);
-    if !contains(range, position) {
-        return;
-    }
-    hints.push(InlayHint {
-        position,
-        label: InlayHintLabel::String(format!(": {inferred}")),
-        kind: Some(InlayHintKind::TYPE),
-        text_edits: None,
-        tooltip: Some(InlayHintTooltip::String(
-            "Inferred from the initializer expression.".to_owned(),
-        )),
-        padding_left: Some(true),
-        padding_right: None,
-        data: None,
-    });
+struct Collector<'a> {
+    workspace: &'a Workspace,
+    module: usize,
+    file: &'a FileAnalysis,
+    mapper: PositionMapper<'a>,
+    range: &'a Range,
+    hints: Vec<InlayHint>,
 }
 
-fn collect_expression_hints(
-    expression: &Expr,
-    tree: &SyntaxTree,
-    text: &str,
-    mapper: &PositionMapper<'_>,
-    range: &Range,
-    hints: &mut Vec<InlayHint>,
-) {
-    match expression {
-        Expr::Call {
-            callee, arguments, ..
-        }
-        | Expr::GenericCall {
-            callee, arguments, ..
-        } => {
-            add_parameter_hints(callee, arguments, tree, mapper, range, hints);
-            collect_expression_hints(callee, tree, text, mapper, range, hints);
-            for argument in arguments {
-                collect_expression_hints(&argument.value, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::InterpolatedString { segments, .. } => {
-            for segment in segments {
-                if let orna_syntax_v1::StringSegment::Expression { value, .. } = segment {
-                    collect_expression_hints(value, tree, text, mapper, range, hints);
-                }
-            }
-        }
-        Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
-            collect_expression_hints(rhs, tree, text, mapper, range, hints);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_expression_hints(lhs, tree, text, mapper, range, hints);
-            collect_expression_hints(rhs, tree, text, mapper, range, hints);
-        }
-        Expr::Range { lower, upper, .. } => {
-            if let Some(value) = lower {
-                collect_expression_hints(value, tree, text, mapper, range, hints);
-            }
-            if let Some(value) = upper {
-                collect_expression_hints(value, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::Index { base, index, .. } => {
-            collect_expression_hints(base, tree, text, mapper, range, hints);
-            collect_expression_hints(index, tree, text, mapper, range, hints);
-        }
-        Expr::Field { base, .. } => {
-            collect_expression_hints(base, tree, text, mapper, range, hints);
-        }
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-            for value in elements {
-                collect_expression_hints(value, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
-            for field in fields {
-                collect_expression_hints(&field.value, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::Lambda { body, .. } => {
-            collect_expression_hints(body, tree, text, mapper, range, hints);
-        }
-        Expr::Block {
-            statements, tail, ..
-        } => {
-            for statement in statements {
-                match statement {
-                    Statement::Let {
-                        pattern,
-                        annotation,
-                        value,
-                        ..
-                    } => {
-                        if annotation.is_none() {
-                            if let Pattern::Name(_, name_span) = pattern {
-                                add_inferred_type_hint(
-                                    name_span, value, tree, text, mapper, range, hints,
-                                );
-                            }
-                        }
-                        collect_expression_hints(value, tree, text, mapper, range, hints);
-                    }
-                    Statement::Assert { value, .. }
-                    | Statement::Expression { value, .. }
-                    | Statement::Control { value, .. } => {
-                        collect_expression_hints(value, tree, text, mapper, range, hints);
-                    }
-                    Statement::Return { value, .. } | Statement::Break { value, .. } => {
-                        if let Some(value) = value {
-                            collect_expression_hints(value, tree, text, mapper, range, hints);
-                        }
-                    }
-                    Statement::Assignment { value, .. } => {
-                        collect_expression_hints(value, tree, text, mapper, range, hints);
-                    }
-                    Statement::Continue { .. } => {}
-                }
-            }
-            if let Some(tail) = tail {
-                collect_expression_hints(tail, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::Control {
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => {
-            if let Some(condition) = condition {
-                collect_expression_hints(condition, tree, text, mapper, range, hints);
-            }
-            if let Some(body) = body {
-                collect_expression_hints(body, tree, text, mapper, range, hints);
-            }
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    collect_expression_hints(guard, tree, text, mapper, range, hints);
-                }
-                collect_expression_hints(&arm.body, tree, text, mapper, range, hints);
-            }
-            if let Some(alternate) = alternate {
-                collect_expression_hints(alternate, tree, text, mapper, range, hints);
-            }
-        }
-        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
-    }
-}
-
-fn add_parameter_hints(
-    callee: &Expr,
-    arguments: &[Argument],
-    tree: &SyntaxTree,
-    mapper: &PositionMapper<'_>,
-    range: &Range,
-    hints: &mut Vec<InlayHint>,
-) {
-    let parameter_names = match callee {
-        Expr::Name {
-            text: callee_name,
-            span: callee_span,
-        } => {
-            if locals::binding_at(tree, callee_name, callee_span).is_some() {
-                return;
-            }
-            if let Some(signature) = function_signature(tree, callee_name) {
-                signature
-                    .parameters
-                    .iter()
-                    .map(|parameter| match &parameter.pattern {
-                        Pattern::Name(name, _) => Some(name.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                let Some(name) = analysis::expression_name(callee) else {
-                    return;
-                };
-                let Some(parameters) =
-                    analysis::standard_parameter_names_for_call(tree, &name, callee)
-                else {
-                    return;
-                };
-                parameters
-            }
-        }
-        _ => {
-            let Some(name) = analysis::expression_name(callee) else {
-                return;
-            };
-            let Some(parameters) = analysis::standard_parameter_names_for_call(tree, &name, callee)
-            else {
-                return;
-            };
-            parameters
-        }
-    };
-    for (argument, parameter_name) in arguments.iter().zip(&parameter_names) {
-        if argument.name.is_some() {
-            continue;
-        }
-        let Some(name) = parameter_name else {
-            continue;
+impl Collector<'_> {
+    fn type_hint(&mut self, name: &SyntaxSpan, value: &Expr) {
+        let Some(ty) = self.certain_type(value) else {
+            return;
         };
-        let position = mapper.position(argument.value.span().start);
-        if !contains(range, position) {
-            continue;
+        let position = self.mapper.position(name.end);
+        if !contains(self.range, position) {
+            return;
         }
-        hints.push(InlayHint {
+        self.hints.push(InlayHint {
             position,
-            label: InlayHintLabel::String(format!("{name}: ")),
-            kind: Some(InlayHintKind::PARAMETER),
+            label: InlayHintLabel::String(format!(": {ty}")),
+            kind: Some(InlayHintKind::TYPE),
             text_edits: None,
             tooltip: None,
-            padding_left: None,
-            padding_right: Some(true),
+            padding_left: Some(true),
+            padding_right: None,
             data: None,
         });
     }
-}
 
-fn function_signature<'a>(tree: &'a SyntaxTree, name: &str) -> Option<&'a FunctionSignature> {
-    let key = analysis::normalized_identifier(name);
-    let mut found = tree.items.iter().filter_map(|item| {
-        let Declaration::Function { signature, .. } = &item.declaration else {
-            return None;
-        };
-        (analysis::normalized_identifier(&signature.name) == key).then_some(signature)
-    });
-    let signature = found.next()?;
-    found.next().is_none().then_some(signature)
-}
-
-fn infer_type(expression: &Expr, tree: &SyntaxTree, text: &str) -> Option<String> {
-    match expression {
-        Expr::Literal { kind, .. } => Some(
-            match kind {
-                LiteralKind::Integer => "Int",
-                LiteralKind::Decimal => "Decimal",
-                LiteralKind::Float => "Float",
-                LiteralKind::Date => "Date",
-                LiteralKind::Instant => "Instant",
-                LiteralKind::String => "Str",
-                LiteralKind::Boolean => "Bool",
-                LiteralKind::Null => "Null",
-            }
-            .to_owned(),
-        ),
-        Expr::InterpolatedString { .. } => Some("Str".to_owned()),
-        Expr::Group { inner, .. } => infer_type(inner, tree, text),
-        Expr::Unary { op, rhs, .. } if op == "not" => Some("Bool".to_owned()),
-        Expr::Unary { rhs, .. } => infer_type(rhs, tree, text),
-        Expr::Binary { op, .. }
-            if matches!(
-                op.as_str(),
-                "==" | "!=" | "<" | ">" | "<=" | ">=" | "and" | "or"
-            ) =>
-        {
-            Some("Bool".to_owned())
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            let left = infer_type(lhs, tree, text)?;
-            let right = infer_type(rhs, tree, text)?;
-            (left == right).then_some(left)
-        }
-        Expr::Call { callee, .. } | Expr::GenericCall { callee, .. } => {
-            if let Expr::Name { text: name, .. } = callee.as_ref()
-                && let Some(signature) = function_signature(tree, name)
+    /// The type of `value` when the source states it, otherwise `None`.
+    fn certain_type(&self, value: &Expr) -> Option<String> {
+        match value {
+            Expr::Literal { kind, .. } => Some(
+                match kind {
+                    LiteralKind::Integer => "Int",
+                    LiteralKind::Decimal => "Decimal",
+                    LiteralKind::Float => "Float",
+                    LiteralKind::Date => "Date",
+                    LiteralKind::Instant => "Instant",
+                    LiteralKind::String => "Str",
+                    LiteralKind::Boolean => "Bool",
+                    // `null` is an optional value; its type is not written.
+                    LiteralKind::Null => return None,
+                }
+                .to_owned(),
+            ),
+            Expr::InterpolatedString { .. } => Some("Str".to_owned()),
+            Expr::Group { inner, .. } => self.certain_type(inner),
+            Expr::Unary { op, .. } if op == "!" => Some("Bool".to_owned()),
+            Expr::Binary { op, .. }
+                if matches!(
+                    op.as_str(),
+                    "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+                ) =>
             {
-                return signature
-                    .result
-                    .as_ref()
-                    .and_then(|ty| source_type(text, ty))
-                    .or_else(|| infer_type_from_body(tree, signature, text));
+                Some("Bool".to_owned())
             }
-            let name = analysis::expression_name(callee)?;
-            analysis::standard_result_type_for_call(tree, &name, callee)
+            Expr::Call { callee, .. } | Expr::GenericCall { callee, .. } => {
+                self.declared_result(callee)
+            }
+            _ => None,
         }
-        Expr::Control {
-            kind: ControlKind::If,
-            body: Some(body),
-            alternate: Some(alternate),
-            ..
-        } => {
-            let body = infer_type(body, tree, text)?;
-            let alternate = infer_type(alternate, tree, text)?;
-            (body == alternate).then_some(body)
-        }
-        Expr::Block {
-            tail: Some(tail), ..
-        } => infer_type(tail, tree, text),
-        _ => None,
     }
-}
 
-fn infer_type_from_body(
-    tree: &SyntaxTree,
-    signature: &FunctionSignature,
-    text: &str,
-) -> Option<String> {
-    let item = tree.items.iter().find(|item| {
-        matches!(
-            &item.declaration,
-            Declaration::Function { signature: candidate, .. }
-                if std::ptr::eq(candidate, signature)
-        )
-    })?;
-    let Declaration::Function { body, .. } = &item.declaration else {
-        return None;
-    };
-    infer_type(body, tree, text)
-}
+    /// The result type written in the signature of the called function.
+    fn declared_result(&self, callee: &Expr) -> Option<String> {
+        match self.callee_target(callee)? {
+            Target::Declared { module, index } => {
+                let declared = self.workspace.declaration(module, index);
+                let symbol = analysis::declared_symbol(
+                    &self.workspace.file(module).symbols,
+                    &declared.selection,
+                )?;
+                symbol.result_type.clone()
+            }
+            Target::Standard { module, name } => {
+                self.workspace.standard.function_result(&module, &name)
+            }
+            Target::Local { .. } | Target::Module(_) => None,
+        }
+    }
 
-fn source_type(text: &str, ty: &TypeExpr) -> Option<String> {
-    let span = type_span(ty);
-    text.get(span.start..span.end)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
+    fn callee_target(&self, callee: &Expr) -> Option<Target> {
+        let name = analysis::callee_name_span(self.file, callee)?;
+        let occurrence = self.file.names.occurrence(&name)?;
+        self.workspace.resolve(self.module, occurrence).target()
+    }
 
-fn type_span(ty: &TypeExpr) -> &SyntaxSpan {
-    match ty {
-        TypeExpr::Name { span, .. }
-        | TypeExpr::Optional { span, .. }
-        | TypeExpr::Product { span, .. }
-        | TypeExpr::List { span, .. }
-        | TypeExpr::Record { span, .. }
-        | TypeExpr::Tuple { span, .. }
-        | TypeExpr::Function { span, .. } => span,
+    fn parameter_hints(&mut self, callee: &Expr, arguments: &[Argument]) {
+        let names = match self.callee_target(callee) {
+            Some(Target::Declared { module, index }) => {
+                let declared = self.workspace.declaration(module, index);
+                match analysis::declared_symbol(
+                    &self.workspace.file(module).symbols,
+                    &declared.selection,
+                ) {
+                    Some(symbol) => symbol.parameter_names.clone(),
+                    None => return,
+                }
+            }
+            Some(Target::Standard { module, name }) => {
+                match self.workspace.standard.function_parameters(&module, &name) {
+                    Some(names) => names,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        for (argument, parameter) in arguments.iter().zip(&names) {
+            if argument.name.is_some() {
+                continue;
+            }
+            let Some(name) = parameter else {
+                continue;
+            };
+            let position = self.mapper.position(argument.value.span().start);
+            if !contains(self.range, position) {
+                continue;
+            }
+            self.hints.push(InlayHint {
+                position,
+                label: InlayHintLabel::String(format!("{name}: ")),
+                kind: Some(InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    }
+
+    fn expression(&mut self, expression: &Expr) {
+        match expression {
+            Expr::Call {
+                callee, arguments, ..
+            }
+            | Expr::GenericCall {
+                callee, arguments, ..
+            } => {
+                self.parameter_hints(callee, arguments);
+                self.expression(callee);
+                for argument in arguments {
+                    self.expression(&argument.value);
+                }
+            }
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let StringSegment::Expression { value, .. } = segment {
+                        self.expression(value);
+                    }
+                }
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => self.expression(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expression(lhs);
+                self.expression(rhs);
+            }
+            Expr::Range { lower, upper, .. } => {
+                for value in [lower, upper].into_iter().flatten() {
+                    self.expression(value);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.expression(base);
+                self.expression(index);
+            }
+            Expr::Field { base, .. } => self.expression(base),
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for value in elements {
+                    self.expression(value);
+                }
+            }
+            Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+                for field in fields {
+                    self.expression(&field.value);
+                }
+            }
+            Expr::Lambda { body, .. } => self.expression(body),
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                for statement in statements {
+                    self.statement(statement);
+                }
+                if let Some(tail) = tail {
+                    self.expression(tail);
+                }
+            }
+            Expr::Control {
+                kind,
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                for value in [condition, body].into_iter().flatten() {
+                    self.expression(value);
+                }
+                for arm in control_arms(*kind, arms) {
+                    if let Some(guard) = &arm.guard {
+                        self.expression(guard);
+                    }
+                    self.expression(&arm.body);
+                }
+                if let Some(alternate) = alternate {
+                    self.expression(alternate);
+                }
+            }
+            Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+        }
+    }
+
+    fn statement(&mut self, statement: &Statement) {
+        match statement {
+            Statement::Let {
+                pattern,
+                annotation,
+                value,
+                ..
+            } => {
+                if annotation.is_none()
+                    && let Pattern::Name(_, name) = pattern
+                {
+                    self.type_hint(name, value);
+                }
+                self.expression(value);
+            }
+            Statement::Assert { value, .. }
+            | Statement::Expression { value, .. }
+            | Statement::Control { value, .. }
+            | Statement::Assignment { value, .. } => self.expression(value),
+            Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                if let Some(value) = value {
+                    self.expression(value);
+                }
+            }
+            Statement::Continue { .. } => {}
+        }
     }
 }
 
@@ -396,48 +296,66 @@ fn contains(range: &Range, position: Position) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use orna_syntax_v1::parse_module_with_file;
+    use crate::documents::Document;
 
-    const SOURCE: &str = include_str!("../tests/fixtures/editor-lsp-hints.orna");
-
-    fn full_range(mapper: &PositionMapper<'_>) -> Range {
-        Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: mapper.position(SOURCE.len()),
-        }
+    fn hints(source: &str) -> Vec<String> {
+        let workspace = Workspace::detached(vec![Arc::new(FileAnalysis::new(Document::new(
+            "file:///w/hints.orna".parse().unwrap(),
+            source.to_owned(),
+            1,
+        )))]);
+        let mapper = PositionMapper::new(source);
+        let range = Range {
+            start: Position::default(),
+            end: mapper.position(source.len()),
+        };
+        inlay_hints(&workspace, 0, &range)
+            .into_iter()
+            .map(|hint| {
+                let InlayHintLabel::String(label) = hint.label else {
+                    panic!("string labels only");
+                };
+                format!("{label}@{}:{}", hint.position.line, hint.position.character)
+            })
+            .collect()
     }
 
     #[test]
-    fn local_types_and_parameter_names_are_inferred_from_syntax() {
-        let parse = parse_module_with_file(SOURCE, "<fixture>");
-        assert!(parse.is_ok(), "{:?}", parse.diagnostics);
-        let mapper = PositionMapper::new(SOURCE);
-        let hints = inlay_hints(&parse, SOURCE, &mapper, &full_range(&mapper));
-        let labels = hints
-            .iter()
-            .filter_map(|hint| match &hint.label {
-                InlayHintLabel::String(label) => Some(label.as_str()),
-                InlayHintLabel::LabelParts(_) => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(labels.contains(&": Int"), "{labels:?}");
-        assert!(labels.contains(&"left: "), "{labels:?}");
-        assert!(labels.contains(&"right: "), "{labels:?}");
+    fn local_types_and_parameter_names_follow_the_source() {
+        const SOURCE: &str = include_str!("../tests/fixtures/editor-lsp-hints.orna");
+        let labels = hints(SOURCE);
+        assert!(labels.iter().any(|label| label.starts_with(": Int@")), "{labels:?}");
+        assert!(labels.iter().any(|label| label.starts_with("left: @")), "{labels:?}");
+        assert!(labels.iter().any(|label| label.starts_with("right: @")), "{labels:?}");
+    }
 
-        let one_line = Range {
-            start: Position {
-                line: 4,
-                character: 0,
-            },
-            end: Position {
-                line: 4,
-                character: 3,
-            },
-        };
-        assert!(inlay_hints(&parse, SOURCE, &mapper, &one_line).is_empty());
+    #[test]
+    fn null_arithmetic_and_bodies_never_invent_a_type() {
+        let source = "pub fn add(left: Int, right: Int): Int = left + right;\n\
+            pub fn untyped(value: Int) = value;\n\
+            pub fn demo(): Int {\n    let nothing = null;\n    let sum = 1 + 2;\n    \
+            let flag = !true;\n    let same = 1 == 2;\n    let typed = add(1, 2);\n    \
+            let guessed = untyped(1);\n    typed\n}\n";
+        let labels = hints(source)
+            .into_iter()
+            .filter(|label| label.starts_with(": "))
+            .collect::<Vec<_>>();
+        assert_eq!(labels, [": Bool@5:12", ": Bool@6:12", ": Int@7:13"], "{labels:?}");
+    }
+
+    #[test]
+    fn for_loop_bodies_are_hinted_once() {
+        let source = "pub fn add(left: Int, right: Int): Int = left + right;\n\
+            pub fn total(values: [Int]): Int {\n    let sum = 0;\n    \
+            for value in values {\n        sum = add(sum, value);\n    }\n    sum\n}\n";
+        let labels = hints(source);
+        let parameters = labels
+            .iter()
+            .filter(|label| !label.starts_with(": "))
+            .collect::<Vec<_>>();
+        assert_eq!(parameters, ["left: @4:18", "right: @4:23"], "{labels:?}");
     }
 }

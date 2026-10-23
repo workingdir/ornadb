@@ -16,6 +16,7 @@ use orna_repository_v1::{
     ContentIdentity, GraphError, NativeObjectId, OrpBlobBinding, ProtectedContentTransfer,
     RepositoryCaptureCapability,
 };
+use orna_value_v1::{MimeRegistry, Raw, Value as OvbValue};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -1442,6 +1443,8 @@ pub const VFS_ENOENT: i32 = 2;
 pub const VFS_EPERM: i32 = 1;
 /// `EOPNOTSUPP`: a VFS-1 unsupported operation (VFS-014).
 pub const VFS_EOPNOTSUPP: i32 = 95;
+/// `EIO`: corrupt or unavailable backing data.
+pub const VFS_EIO: i32 = 5;
 
 /// Why a projected name, a resolved path, or a candidate document was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1463,6 +1466,10 @@ pub enum VfsPathError {
     Unsupported,
     /// The write baseline no longer matches the accepted row (VFS-011).
     StaleBaseline,
+    /// A stored Blob annotation the MIME-1 registry refuses. Stored annotations
+    /// are validated when captured, so this is corrupt backing metadata and no
+    /// host name is guessed for it (EIO).
+    CorruptAnnotation,
 }
 
 impl VfsPathError {
@@ -1475,11 +1482,13 @@ impl VfsPathError {
             Self::UnknownRow => VFS_ENOENT,
             Self::Unsupported => VFS_EOPNOTSUPP,
             Self::StaleBaseline => VFS_EAGAIN,
+            Self::CorruptAnnotation => VFS_EIO,
         }
     }
 
     /// The stable Orna cause code kept alongside the host `errno`. Unknown
-    /// rows report `ENOENT` with no Orna failure code of their own.
+    /// rows report `ENOENT` and corrupt stored metadata reports `EIO`, neither
+    /// with an Orna failure code of its own.
     pub const fn failure_code(self) -> Option<&'static str> {
         match self {
             Self::OutsideProjection | Self::Unsupported => Some("sys.vfs.unsupported"),
@@ -1488,7 +1497,7 @@ impl VfsPathError {
             }
             Self::NameCollision => Some("sys.vfs.name_collision"),
             Self::StaleBaseline => Some("sys.vfs.stale_edit"),
-            Self::UnknownRow => None,
+            Self::UnknownRow | Self::CorruptAnnotation => None,
         }
     }
 }
@@ -1524,44 +1533,52 @@ impl VfsNameNamespace {
     }
 }
 
-/// Projects one canonical typed key component to its host component, escaping
-/// every byte outside `[A-Za-z0-9._-]` as uppercase `%HH` and escaping the
-/// reserved names, trailing dots and DOS device basenames that would otherwise
-/// alias. Names over the component bound become a deterministic `~key-` digest
-/// alias instead of being dropped or merged (VFS-016).
+/// Projects one Str key component (or a Str-named table or namespace) to its
+/// host component, escaping every byte outside `[A-Za-z0-9._-]` as uppercase
+/// `%HH` and escaping the reserved names, trailing dots and DOS device
+/// basenames that would otherwise alias. A name over the component bound
+/// becomes the deterministic `~key-` alias of its canonical OVB-1 encoding
+/// instead of being dropped or merged (VFS-016).
 pub fn project_component(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Key)
+    project_namespaced(text, VfsNameNamespace::Key, || str_component_digest(text))
+}
+
+/// Projects one typed key component from its canonical key text and its
+/// canonical OVB-1 encoding (for a row key, `TypedKey::canonical_bytes`). The
+/// text decides the spelling; a component over the bound becomes the `~key-`
+/// alias of the encoding's SHA-256, because VFS-1 digests the canonical typed
+/// key component, so the text `1` and the integer 1 never share an alias
+/// (VFS-016).
+pub fn project_key_component(text: &str, canonical_encoding: &[u8]) -> String {
+    project_namespaced(text, VfsNameNamespace::Key, || {
+        Sha256::digest(canonical_encoding).into()
+    })
 }
 
 /// Projects one stored field name to its host component. Field components use
 /// the `~field-` alias prefix for names over the byte bound, so the same long
 /// text in a key and in a field never lands on one host name (VFS-016).
 pub fn project_field_name(text: &str) -> String {
-    project_namespaced(text, VfsNameNamespace::Field)
+    project_namespaced(text, VfsNameNamespace::Field, || field_name_digest(text))
 }
 
-fn project_namespaced(text: &str, namespace: VfsNameNamespace) -> String {
+fn project_namespaced(
+    text: &str,
+    namespace: VfsNameNamespace,
+    component_digest: impl FnOnce() -> [u8; 32],
+) -> String {
     if text.is_empty() {
         return "~empty".to_owned();
     }
+    // Every byte outside `[A-Za-z0-9._-]` is escaped, `~` and `%` included, so a
+    // spelling under the bound can never claim the alias namespace and always
+    // stays an exact, reversible `%HH` encoding of the canonical text.
     let out = escape_component_bytes(text.bytes().enumerate(), is_reserved_component(text));
-    // A canonical name under the bound that already spells an alias prefix
-    // (`~`, or any `%` spelling) is respelled, because the alias namespace is
-    // reserved for names over the bound. The respelling is still an exact
-    // `%HH` encoding of the same canonical text, so the name stays reversible
-    // (VFS-016). Over the bound the digest alias is unreachable for a literal
-    // `~key-` name only when the digest input is the canonical text itself.
-    if out.len() <= VFS_MAX_COMPONENT_BYTES && !out.starts_with('~') {
-        return out;
-    }
     if out.len() > VFS_MAX_COMPONENT_BYTES {
-        return long_alias(text, namespace);
+        long_alias(namespace, &component_digest())
+    } else {
+        out
     }
-    // A canonical name under the bound whose own spelling starts with the
-    // alias prefix is respelled by escaping its first byte, so it never claims
-    // the alias namespace. The respelling is an exact `%HH` encoding of the
-    // same canonical text and stays reversible (VFS-016).
-    escape_component_bytes(text.bytes().enumerate(), true)
 }
 
 /// Escapes one canonical component's bytes: every byte outside
@@ -1620,29 +1637,35 @@ fn is_reserved_component(text: &str) -> bool {
 }
 
 /// `~key-<64 hex SHA-256 of the canonical typed key component>` for keys and
-/// `~field-<same digest>` for stored field names, per the VFS-1 long-name
-/// rule. One derivation serves projection and verification, so a digest can
-/// never name a component it did not come from (VFS-016).
-fn long_alias(text: &str, namespace: VfsNameNamespace) -> String {
-    format!(
-        "{}{}",
-        namespace.alias_prefix(),
-        hex_digest(component_digest_input(text).as_bytes())
-    )
+/// `~field-<the same digest form>` for stored field names (VFS-1, "Row/key
+/// directory mapping"). The digest names the component's canonical OVB-1
+/// encoding, never its host spelling or raw UTF-8 bytes, so one derivation
+/// serves projection and verification and a digest can never name a
+/// component it did not come from (VFS-016).
+fn long_alias(namespace: VfsNameNamespace, digest: &[u8; 32]) -> String {
+    let mut alias = String::with_capacity(namespace.alias_prefix().len() + 64);
+    alias.push_str(namespace.alias_prefix());
+    for byte in digest {
+        alias.push_str(&format!("{byte:02x}"));
+    }
+    alias
 }
 
-/// The digest input for one long alias: the canonical typed component text
-/// itself. Key and field namespaces stay distinct through the alias prefix, so
-/// the same canonical text in a key and in a field never shares a host name.
-fn component_digest_input(text: &str) -> &str {
-    text
+/// The SHA-256 of one Str component's canonical OVB-1 encoding: the typed
+/// component a long key or field alias names.
+fn str_component_digest(text: &str) -> [u8; 32] {
+    let encoding = OvbValue::new(Raw::Text(text.to_owned()))
+        .and_then(|value| value.encode())
+        .expect("every Str has a canonical OVB-1 encoding");
+    Sha256::digest(encoding).into()
 }
 
-/// The digest bound into a `~field-` alias for one canonical field name. The
-/// snapshot-bound long-name index re-derives it from the full retained name,
-/// so a colliding digest is detected instead of merged (VFS-016).
+/// The digest bound into a `~field-` alias for one stored field name: the
+/// SHA-256 of the name's canonical OVB-1 Str encoding. The snapshot-bound
+/// long-name index re-derives it from the full retained name, so a colliding
+/// digest is detected instead of merged (VFS-016).
 pub fn field_name_digest(field: &str) -> [u8; 32] {
-    Sha256::digest(component_digest_input(field).as_bytes()).into()
+    str_component_digest(field)
 }
 
 /// Resolves one `~field-` alias digest against a retained candidate field
@@ -1662,23 +1685,22 @@ pub fn resolve_field_alias(digest: &[u8; 32], candidates: &[&str]) -> Result<Str
     resolved.map(str::to_owned).ok_or(VfsPathError::UnknownRow)
 }
 
-fn hex_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
 /// Projects one stored Blob field name to its sibling content-file name:
 /// escaped field name plus the MIME-1 selected suffix. A field that would spell
 /// the reserved row document keeps its own distinct name (VFS-016).
-pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
-    let selected = match suffix {
-        Some(hint) => hint.to_owned(),
-        None => media_suffixes(media_type),
-    };
+///
+/// Stored annotations are canonical MIME-1, so a pair the registry refuses is
+/// corrupt backing metadata. It is reported as `CorruptAnnotation` (EIO)
+/// instead of being projected under a guessed `bin` name (W08-09).
+pub fn project_content_name(
+    field: &str,
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<String, VfsPathError> {
+    let annotation = MimeRegistry::mime1()
+        .canonical_annotation(media_type, suffix)
+        .map_err(|_| VfsPathError::CorruptAnnotation)?;
+    let selected = annotation.selected_suffix();
     // The suffix is part of the projected component, so VFS-016's component
     // bound covers the whole `field + "." + suffix` spelling rather than the
     // escaped field base alone. A base that leaves no room for the suffix takes
@@ -1686,80 +1708,26 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     // is derived from the stored field name, so the full name is still
     // re-derivable and verified by the long-name index (VFS-016).
     if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
-        return format!(
+        return Ok(format!(
             "{}.{}",
-            long_alias(field, VfsNameNamespace::Field),
+            long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
             selected
-        );
+        ));
     }
     let mut name = project_field_name(field);
     name.push('.');
-    name.push_str(&selected);
+    name.push_str(selected);
     if name == VFS_ROW_DOCUMENT {
         name.replace_range(..1, &format!("%{:02X}", b'd'));
     }
-    name
+    Ok(name)
 }
 
-/// The MIME-1 suffix table: `(essence, preferred, compatible)`. One table
-/// serves both projection and validation, so a hint can never be accepted that
-/// the projection would not produce.
-const MIME1_SUFFIXES: &[(&str, &str, &[&str])] = &[
-    ("application/gzip", "gz", &["gz", "tar.gz", "tgz"]),
-    ("application/json", "json", &["json"]),
-    ("application/octet-stream", "bin", &["bin"]),
-    ("application/pdf", "pdf", &["pdf"]),
-    ("application/wasm", "wasm", &["wasm"]),
-    ("application/zip", "zip", &["zip"]),
-    ("audio/flac", "flac", &["flac"]),
-    ("audio/mp4", "m4a", &["m4a", "m4b", "mp4", "mpg4"]),
-    ("audio/mpeg", "mp3", &["mp1", "mp2", "mp3"]),
-    ("audio/ogg", "ogg", &["oga", "ogg", "opus"]),
-    ("audio/wav", "wav", &["wav"]),
-    ("image/gif", "gif", &["gif"]),
-    ("image/jpeg", "jpg", &["jpe", "jpeg", "jpg"]),
-    ("image/png", "png", &["png"]),
-    ("image/svg+xml", "svg", &["svg"]),
-    ("image/webp", "webp", &["webp"]),
-    ("text/css", "css", &["css"]),
-    ("text/javascript", "js", &["js", "mjs"]),
-    ("text/plain", "txt", &["text", "txt"]),
-    ("video/mp4", "mp4", &["m4v", "mp4"]),
-    ("video/webm", "webm", &["webm"]),
-];
-
-/// The MIME-1 essence of a media type, lowercased and stripped of parameters.
-fn media_essence(media_type: &str) -> String {
-    media_type
-        .split(';')
-        .next()
-        .unwrap_or(media_type)
-        .trim()
-        .to_ascii_lowercase()
-}
-
-/// The MIME-1 entry for an essence. An unknown essence keeps the profile's
-/// `bin` hint instead of guessing from the media type text.
-fn mime1_entry(media_type: &str) -> (&'static str, &'static [&'static str]) {
-    let essence = media_essence(media_type);
-    MIME1_SUFFIXES
-        .iter()
-        .find(|(name, _, _)| *name == essence)
-        .map(|(_, preferred, compatible)| (*preferred, *compatible))
-        .unwrap_or(("bin", &["bin"]))
-}
-
-/// The preferred MIME-1 suffix for an essence. Unknown essences keep the
-/// profile's `bin` hint instead of guessing from the media type text.
-fn media_suffixes(media_type: &str) -> String {
-    mime1_entry(media_type).0.to_owned()
-}
-
-/// Whether `suffix` is a MIME-1 compatible hint for this media type. Only a
-/// compatible spelling may be selected for a field (MIME-1, VFS-012).
+/// Whether `suffix` is a hint MIME-1 admits for this media type: a compatible
+/// suffix of a registered type, or any safe suffix for octet-stream and
+/// unregistered types (MIME-1, VFS-012).
 pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
-    let suffix = suffix.trim().to_ascii_lowercase();
-    mime1_entry(media_type).1.contains(&suffix.as_str())
+    classify_content_suffix(media_type, Some(suffix)).is_ok()
 }
 
 /// The canonical stored hint for an editor-selected suffix (MIME-1, VFS-012).
@@ -1767,28 +1735,25 @@ pub fn content_suffix_is_compatible(media_type: &str, suffix: &str) -> bool {
 /// `selected` is the suffix the sibling file now spells; `None` means the
 /// projected preferred suffix. The result is the hint to record, or `None` when
 /// the selection is the field's preferred suffix, which the profile stores as
-/// an absent hint rather than a redundant one.
+/// an absent hint rather than a redundant one. The registry's hint rules
+/// decide: a registered type takes only a compatible suffix, while
+/// octet-stream and unregistered types take any safe suffix.
 ///
 /// A rename changes only this hint: it never transcodes the stored bytes,
-/// renames a column, or rekeys the row, and an incompatible suffix is refused
-/// as a malformed candidate. The caller applies the result through the normal
-/// CAS/activation boundary.
+/// renames a column, or rekeys the row, and a refused suffix is a malformed
+/// candidate. The caller applies the result through the normal CAS/activation
+/// boundary.
 pub fn classify_content_suffix(
     media_type: &str,
     selected: Option<&str>,
 ) -> Result<Option<String>, VfsPathError> {
-    let preferred = mime1_entry(media_type).0;
     let Some(selected) = selected else {
         return Ok(None);
     };
-    let selected = selected.trim().to_ascii_lowercase();
-    if !content_suffix_is_compatible(media_type, &selected) {
-        return Err(VfsPathError::InvalidDocument);
-    }
-    if selected == preferred {
-        return Ok(None);
-    }
-    Ok(Some(selected))
+    MimeRegistry::mime1()
+        .canonical_annotation(media_type, Some(selected))
+        .map(|annotation| annotation.suffix().map(str::to_owned))
+        .map_err(|_| VfsPathError::InvalidDocument)
 }
 
 /// Splits one mount-relative path and refuses absolute paths, empty
@@ -2124,7 +2089,7 @@ impl<S> VfsRowProjection<S> {
                     required,
                     captured,
                 } => {
-                    let name = project_content_name(&field.name, media_type, suffix.as_deref());
+                    let name = project_content_name(&field.name, media_type, suffix.as_deref())?;
                     // Two stored values that claim one host name are refused
                     // rather than merged into one directory entry (VFS-016).
                     if names.contains(&name) {
@@ -3401,8 +3366,8 @@ mod tests {
         )
         .expect("row projection");
 
-        let content = project_content_name("content", "audio/mpeg", None);
-        let cover = project_content_name("cover", "image/jpeg", None);
+        let content = project_content_name("content", "audio/mpeg", None).unwrap();
+        let cover = project_content_name("cover", "image/jpeg", None).unwrap();
         assert_eq!(content, "content.mp3");
         assert_eq!(cover, "cover.jpg");
 
@@ -3482,24 +3447,79 @@ mod tests {
             classify_content_suffix("image/jpeg", Some("png")),
             Err(VfsPathError::InvalidDocument)
         );
-        // An unknown essence keeps only the profile's `bin` hint.
+        // Octet-stream and unregistered essences admit any safe hint and store
+        // `bin` as no hint (MIME-1 `unknown_policy` and the normative model's
+        // `annotation()`), but never an unsafe spelling.
         assert_eq!(
             classify_content_suffix("application/x-unknown", Some("gz")),
-            Err(VfsPathError::InvalidDocument)
+            Ok(Some("gz".to_owned()))
         );
         assert_eq!(
             classify_content_suffix("application/x-unknown", Some("bin")),
             Ok(None)
         );
+        assert_eq!(
+            classify_content_suffix("application/octet-stream", Some("dat")),
+            Ok(Some("dat".to_owned()))
+        );
+        for unsafe_suffix in ["", ".dat", "a..b", "a/b", "dat "] {
+            assert_eq!(
+                classify_content_suffix("application/octet-stream", Some(unsafe_suffix)),
+                Err(VfsPathError::InvalidDocument),
+                "{unsafe_suffix:?}"
+            );
+            assert!(!content_suffix_is_compatible(
+                "application/x-unknown",
+                unsafe_suffix
+            ));
+        }
+        assert!(content_suffix_is_compatible("application/x-unknown", "xyz"));
+        assert!(!content_suffix_is_compatible("image/jpeg", "png"));
+        assert_eq!(
+            project_content_name("content", "application/x-unknown", None),
+            Ok("content.bin".to_owned())
+        );
+        assert_eq!(
+            project_content_name("content", "application/x-unknown", Some("xyz")),
+            Ok("content.xyz".to_owned())
+        );
+        // Projection reads the registry's selected suffix, so an alias spelling
+        // projects as its canonical essence. A stored hint the registry refuses
+        // is corrupt metadata: it is reported (EIO), never spelled into the host
+        // name and never renamed to the octet-stream `bin` fallback (W08-09).
+        assert_eq!(
+            project_content_name("content", "Audio/X-WAV", None),
+            Ok("content.wav".to_owned())
+        );
+        assert_eq!(
+            project_content_name("content", "audio/mpeg", Some("../mp3")),
+            Err(VfsPathError::CorruptAnnotation)
+        );
+        assert_eq!(VfsPathError::CorruptAnnotation.errno(), VFS_EIO);
+        assert_eq!(VfsPathError::CorruptAnnotation.failure_code(), None);
+        assert_eq!(
+            VfsRowProjection::project(
+                SnapshotPin::capture(Arc::new(7_u64)),
+                &[VfsStoredField::content(
+                    "content",
+                    "audio/mpeg",
+                    Some("../mp3".to_owned()),
+                    4
+                )],
+            )
+            .err(),
+            Some(VfsPathError::CorruptAnnotation),
+            "a row whose stored annotation is refused is not projected"
+        );
 
         // The suffix rename never changes the stored content identity: the same
         // descriptor size projects under the selected hint, and the row's bytes
         // are untouched.
-        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1")).unwrap();
         assert_eq!(renamed, "content.mp1");
         assert_eq!(
             project_content_name("content", "audio/mpeg", None),
-            "content.mp3"
+            Ok("content.mp3".to_owned())
         );
     }
 
@@ -3528,7 +3548,7 @@ mod tests {
     #[test]
     fn content_file_projection_uses_field_namespace_and_exact_entry_identity() {
         let long_field = "content_".repeat(40);
-        let projected = project_content_name(&long_field, "audio/mpeg", None);
+        let projected = project_content_name(&long_field, "audio/mpeg", None).unwrap();
         assert!(projected.starts_with("~field-"));
         assert!(projected.ends_with(".mp3"));
 
@@ -3631,19 +3651,26 @@ mod tests {
         // room for its suffix takes the `~field-` digest alias instead of
         // overflowing the bound (VFS-016).
         let field = "f".repeat(200);
-        let name = project_content_name(&field, "audio/mpeg", None);
+        let name = project_content_name(&field, "audio/mpeg", None).unwrap();
         assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
         assert!(name.starts_with("~field-"));
         assert!(name.ends_with(".mp3"));
-        // The alias is the field namespace digest of the stored name, so the
+        // The alias digests the stored name's canonical OVB-1 Str encoding (a
+        // 200-byte Str is the CBOR text head `78 c8` then its bytes), so the
         // snapshot-bound long-name index re-derives and verifies the full name
-        // rather than trusting the truncated spelling (VFS-016).
-        assert_eq!(name, format!("~field-{}.mp3", hex_digest(field.as_bytes())));
+        // rather than trusting the truncated spelling (VFS-1, VFS-016).
+        let encoding = [&[0x78, 0xc8][..], field.as_bytes()].concat();
+        let digest = Sha256::digest(&encoding)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(name, format!("~field-{digest}.mp3"));
+        assert_eq!(field_name_digest(&field)[..], Sha256::digest(&encoding)[..]);
 
         // A base with room for the suffix still spells the escaped name
         // directly; only the over-bound spelling changes.
         let field = "f".repeat(196);
-        let name = project_content_name(&field, "audio/mpeg", None);
+        let name = project_content_name(&field, "audio/mpeg", None).unwrap();
         assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
         assert!(!name.starts_with("~field-"));
         assert!(name.ends_with(".mp3"));

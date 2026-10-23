@@ -5,15 +5,26 @@
 //! an admitted native store root and schema.  Until then the boundary remains
 //! an explicit value and no raw row path is an admission API.
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt, ops::Range, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    fmt,
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 use sha2::{Digest, Sha256};
 
-use orna_value_v1::{BlobMetadata, MediaAnnotation};
+use orna_value_v1::{
+    BlobMetadata, Decimal, MediaAnnotation, Raw, Value, canonical_uuid_text, compare_primary_keys,
+    decode_typed,
+};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
-    NativeObjectId, NativeObjectKind, RepositoryReadScope, MAX_REFS, NODE_DATA_LIMIT,
+    CborValue, GraphError, MAX_REFS, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId,
+    NativeObjectKind, RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor,
+    row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
@@ -578,11 +589,15 @@ impl RowMapBoundary {
     }
 }
 
-/// The bounded set of logical key values used by the row-map seam.  Ordering
-/// is logical type/value ordering, never filename, encoded-byte, or hash
-/// order.  The enum intentionally excludes floating point and opaque storage
-/// OIDs from primary keys.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+/// The logical key values of the row-map seam. Ordering is the language's
+/// logical key order, never filename, encoded-byte or hash order, and the
+/// enum excludes floating point and opaque storage OIDs from primary keys.
+///
+/// `Int` and `UInt` are two spellings of one Orna `Int`: they compare, hash
+/// and encode identically, and decoding yields `UInt` for a non-negative value
+/// and `Int` for a negative one. Equality, ordering and hashing all follow the
+/// logical value, so `Int(5) == UInt(5)`.
+#[derive(Clone, Debug)]
 pub enum TypedKey {
     Null,
     Bool(bool),
@@ -591,26 +606,24 @@ pub enum TypedKey {
     Text(String),
     Bytes(Vec<u8>),
     Tuple(Vec<TypedKey>),
+    /// A permitted key component without a variant above: a Uuid, Decimal,
+    /// Date, Instant, payload-free enum variant, stored table reference or
+    /// tuple value, or an Int beyond the 64-bit range.
+    Value(KeyValue),
 }
 
 impl TypedKey {
+    /// The row-map key for one canonical Orna key value, using the shorthand
+    /// variant where one exists.
+    pub fn from_value(value: &Value) -> Result<Self, RowStoreError> {
+        let bytes = value
+            .encode()
+            .map_err(|_| RowStoreError::InvalidCanonicalKey)?;
+        Self::decode_canonical(&bytes)
+    }
+
     fn same_key_type(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Null, Self::Null)
-            | (Self::Bool(_), Self::Bool(_))
-            | (Self::Int(_), Self::Int(_))
-            | (Self::UInt(_), Self::UInt(_))
-            | (Self::Text(_), Self::Text(_))
-            | (Self::Bytes(_), Self::Bytes(_)) => true,
-            (Self::Tuple(left), Self::Tuple(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .zip(right)
-                        .all(|(left, right)| left.same_key_type(right))
-            }
-            _ => false,
-        }
+        self.type_cmp(other).is_eq()
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
@@ -635,18 +648,15 @@ impl TypedKey {
         Ok(key)
     }
 
-
     fn from_cbor(value: CborValue) -> Result<Self, RowStoreError> {
         match value {
             CborValue::Null => Ok(Self::Null),
             CborValue::Bool(value) => Ok(Self::Bool(value)),
             CborValue::Unsigned(value) => Ok(Self::UInt(value)),
-            CborValue::Negative(magnitude) => {
-                let value = -1i128 - i128::from(magnitude);
-                Ok(Self::Int(
-                    i64::try_from(value).map_err(|_| RowStoreError::InvalidCanonicalKey)?,
-                ))
-            }
+            CborValue::Negative(magnitude) => match i64::try_from(magnitude) {
+                Ok(magnitude) => Ok(Self::Int(-1 - magnitude)),
+                Err(_) => KeyValue::from_cbor(&CborValue::Negative(magnitude)).map(Self::Value),
+            },
             CborValue::Text(value) => Ok(Self::Text(value)),
             CborValue::Bytes(value) => Ok(Self::Bytes(value)),
             CborValue::Array(values) => Ok(Self::Tuple(
@@ -655,37 +665,137 @@ impl TypedKey {
                     .map(Self::from_cbor)
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            CborValue::Map(_) | CborValue::Tag(_, _) | CborValue::Float64(_) => {
-                Err(RowStoreError::InvalidCanonicalKey)
-            }
+            tagged @ CborValue::Tag(..) => KeyValue::from_cbor(&tagged).map(Self::Value),
+            CborValue::Map(_) | CborValue::Float64(_) => Err(RowStoreError::InvalidCanonicalKey),
         }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Null => 0,
+            Self::Bool(_) => 1,
+            Self::Int(_) | Self::UInt(_) => 2,
+            Self::Text(_) => 3,
+            Self::Bytes(_) => 4,
+            Self::Value(value) => raw_key_rank(value.value.raw()),
+            Self::Tuple(_) => TUPLE_KEY_RANK,
+        }
+    }
+
+    /// Orders key types: the rank of each component, then component counts.
+    /// All keys of one table share a type and compare equal here.
+    fn type_cmp(&self, other: &Self) -> Ordering {
+        self.rank()
+            .cmp(&other.rank())
+            .then_with(|| match (self, other) {
+                (Self::Tuple(left), Self::Tuple(right)) => left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.type_cmp(right))
+                    .find(|ordering| ordering.is_ne())
+                    .unwrap_or_else(|| left.len().cmp(&right.len())),
+                (Self::Value(left), Self::Value(right)) => {
+                    raw_key_type_cmp(left.value.raw(), right.value.raw())
+                }
+                _ => Ordering::Equal,
+            })
+    }
+
+    /// Orders two keys of one type by logical value. Tagged components use
+    /// `orna_value_v1::compare_primary_keys`, the language's key comparison.
+    fn value_cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
+            (Self::Text(left), Self::Text(right)) => left.as_bytes().cmp(right.as_bytes()),
+            (Self::Bytes(left), Self::Bytes(right)) => left.cmp(right),
+            (Self::Tuple(left), Self::Tuple(right)) => left
+                .iter()
+                .zip(right)
+                .map(|(left, right)| left.value_cmp(right))
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or_else(|| left.len().cmp(&right.len())),
+            // Admitted components of one type always compare; the byte order
+            // only keeps the order total should that ever fail.
+            (Self::Value(left), Self::Value(right)) => {
+                compare_primary_keys(&left.value, &right.value)
+                    .unwrap_or_else(|_| left.canonical.cmp(&right.canonical))
+            }
+            _ => match (self.narrow_int(), other.narrow_int()) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => other.wide_int_order().reverse(),
+                (None, Some(_)) => self.wide_int_order(),
+                (None, None) => Ordering::Equal,
+            },
+        }
+    }
+
+    fn narrow_int(&self) -> Option<i128> {
+        match self {
+            Self::Int(value) => Some(i128::from(*value)),
+            Self::UInt(value) => Some(i128::from(*value)),
+            _ => None,
+        }
+    }
+
+    /// Where an Int beyond the 64-bit spellings sits relative to all of them.
+    fn wide_int_order(&self) -> Ordering {
+        match self {
+            Self::Value(value) if wide_int_negative(&value.canonical) == Some(true) => {
+                Ordering::Less
+            }
+            _ => Ordering::Greater,
+        }
+    }
+
+    /// Feeds the canonical key encoding to `state` without building it, so
+    /// equal keys, including the two spellings of one Int, hash equally.
+    fn hash_canonical<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Null => state.write_u8(0xf6),
+            Self::Bool(value) => state.write_u8(if *value { 0xf5 } else { 0xf4 }),
+            Self::Int(value) => hash_head(state, int_head(i128::from(*value))),
+            Self::UInt(value) => hash_head(state, int_head(i128::from(*value))),
+            Self::Text(value) => {
+                hash_head(state, (3, value.len() as u64));
+                state.write(value.as_bytes());
+            }
+            Self::Bytes(value) => {
+                hash_head(state, (2, value.len() as u64));
+                state.write(value);
+            }
+            Self::Tuple(values) => {
+                hash_head(state, (4, values.len() as u64));
+                for value in values {
+                    value.hash_canonical(state);
+                }
+            }
+            Self::Value(value) => state.write(&value.canonical),
+        }
+    }
+}
+
+impl PartialEq for TypedKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            // One logical value has one canonical encoding.
+            (Self::Value(left), Self::Value(right)) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => left == right,
+            _ => self.cmp(other).is_eq(),
+        }
+    }
+}
+
+impl Eq for TypedKey {}
+
+impl Hash for TypedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash_canonical(state);
     }
 }
 
 impl Ord for TypedKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        use TypedKey::*;
-        let rank = |key: &TypedKey| match key {
-            Null => 0,
-            Bool(_) => 1,
-            Int(_) => 2,
-            UInt(_) => 3,
-            Text(_) => 4,
-            Bytes(_) => 5,
-            Tuple(_) => 6,
-        };
-        rank(self)
-            .cmp(&rank(other))
-            .then_with(|| match (self, other) {
-                (Null, Null) => Ordering::Equal,
-                (Bool(left), Bool(right)) => left.cmp(right),
-                (Int(left), Int(right)) => left.cmp(right),
-                (UInt(left), UInt(right)) => left.cmp(right),
-                (Text(left), Text(right)) => left.as_bytes().cmp(right.as_bytes()),
-                (Bytes(left), Bytes(right)) => left.cmp(right),
-                (Tuple(left), Tuple(right)) => left.cmp(right),
-                _ => Ordering::Equal,
-            })
+        self.type_cmp(other).then_with(|| self.value_cmp(other))
     }
 }
 
@@ -693,6 +803,164 @@ impl PartialOrd for TypedKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// One tagged primary-key component, held as its validated canonical value.
+///
+/// Admission comes from `orna_value_v1`: the bytes decode as a registered
+/// canonical value, and `compare_primary_keys` accepts it as a key component.
+/// A Float, Blob, payload-carrying enum variant or Option is never a key.
+#[derive(Clone, Debug)]
+pub struct KeyValue {
+    value: Value,
+    canonical: Vec<u8>,
+}
+
+impl KeyValue {
+    fn from_cbor(value: &CborValue) -> Result<Self, RowStoreError> {
+        let canonical = canonical_value_bytes(value);
+        let value = Value::decode(&canonical).map_err(|_| RowStoreError::InvalidCanonicalKey)?;
+        let admitted = match value.raw() {
+            // Ints inside the 64-bit heads are spelled `Int` or `UInt`.
+            Raw::Int(_) => wide_int_negative(&canonical).is_some(),
+            Raw::Tag(tag, _) => matches!(
+                *tag,
+                37 | 60_000 | 60_001 | 60_002 | 60_008 | 60_015 | 60_021
+            ),
+            _ => false,
+        };
+        if !admitted || compare_primary_keys(&value, &value).is_err() {
+            return Err(RowStoreError::InvalidCanonicalKey);
+        }
+        Ok(Self { value, canonical })
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+
+    /// The language's canonical key text where it needs no schema: lowercase
+    /// hyphenated Uuid, canonical Date, exact canonical Decimal and shortest
+    /// decimal Int. Instants, enum variants, references and tuples are spelled
+    /// under their schema, so they have none here.
+    pub fn canonical_text(&self) -> Option<String> {
+        match self.value.raw() {
+            Raw::Int(value) => Some(value.to_string()),
+            Raw::Tag(37, payload) => match payload.as_ref() {
+                Raw::Bytes(bytes) => Some(canonical_uuid_text(bytes.as_slice().try_into().ok()?)),
+                _ => None,
+            },
+            Raw::Tag(60_000, _) => decode_typed::<Decimal>(&self.canonical)
+                .ok()
+                .map(|decimal| decimal.canonical_text()),
+            Raw::Tag(60_001, payload) => match payload.as_ref() {
+                Raw::Text(date) => Some(date.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for KeyValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical == other.canonical
+    }
+}
+
+impl Eq for KeyValue {}
+
+impl Hash for KeyValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&self.canonical);
+    }
+}
+
+const TUPLE_KEY_RANK: u8 = 12;
+
+/// Rank of each logical key type in the total key order. A table's keys share
+/// one type, so the order across types only has to be total and stable; the
+/// shorthand variants keep their earlier relative order.
+fn raw_key_rank(raw: &Raw) -> u8 {
+    match raw {
+        Raw::Null => 0,
+        Raw::Bool(_) => 1,
+        Raw::Int(_) => 2,
+        Raw::Text(_) => 3,
+        Raw::Bytes(_) => 4,
+        Raw::Tag(37, _) => 5,
+        Raw::Tag(60_000, _) => 6,
+        Raw::Tag(60_001, _) => 7,
+        Raw::Tag(60_002, _) => 8,
+        Raw::Tag(60_008, _) => 9,
+        Raw::Tag(60_015, _) => 10,
+        Raw::Tag(60_021, _) => 11,
+        Raw::Array(_) => TUPLE_KEY_RANK,
+        _ => TUPLE_KEY_RANK + 1,
+    }
+}
+
+/// Orders the types of two tagged components: rank, then the component types
+/// of a tuple value or of the key a table reference names.
+fn raw_key_type_cmp(left: &Raw, right: &Raw) -> Ordering {
+    raw_key_rank(left)
+        .cmp(&raw_key_rank(right))
+        .then_with(|| match (left, right) {
+            (Raw::Tag(60_015, left), Raw::Tag(60_015, right)) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Raw::Array(left), Raw::Array(right)) => left
+                        .iter()
+                        .zip(right)
+                        .map(|(left, right)| raw_key_type_cmp(left, right))
+                        .find(|ordering| ordering.is_ne())
+                        .unwrap_or_else(|| left.len().cmp(&right.len())),
+                    _ => Ordering::Equal,
+                }
+            }
+            (Raw::Tag(60_021, left), Raw::Tag(60_021, right)) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Raw::Array(left), Raw::Array(right)) => match (left.get(2), right.get(2)) {
+                        (Some(left), Some(right)) => raw_key_type_cmp(left, right),
+                        _ => Ordering::Equal,
+                    },
+                    _ => Ordering::Equal,
+                }
+            }
+            _ => Ordering::Equal,
+        })
+}
+
+/// The sign of an Int beyond the 64-bit `Int`/`UInt` spellings, read from its
+/// canonical encoding: a tag 2 or 3 bignum, or a negative head below
+/// `i64::MIN`. `None` for every other encoding.
+fn wide_int_negative(canonical: &[u8]) -> Option<bool> {
+    match canonical {
+        [0xc2, ..] => Some(false),
+        [0xc3, ..] => Some(true),
+        [0x3b, magnitude @ ..] => {
+            let magnitude: [u8; 8] = magnitude.try_into().ok()?;
+            (u64::from_be_bytes(magnitude) > i64::MAX as u64).then_some(true)
+        }
+        _ => None,
+    }
+}
+
+/// The CBOR major type and argument spelling one 64-bit Int.
+fn int_head(value: i128) -> (u8, u64) {
+    if value >= 0 {
+        (0, value as u64)
+    } else {
+        (1, (-1 - value) as u64)
+    }
+}
+
+fn hash_head<H: Hasher>(state: &mut H, (major, value): (u8, u64)) {
+    let (head, length) = cbor_head_bytes(major, value);
+    state.write(&head[..length]);
 }
 
 /// A direct stored-value dependency.  Blob payloads are references and never
@@ -1453,17 +1721,13 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
         Bool(false) => output.push(0xf4),
         Bool(true) => output.push(0xf5),
         Int(value) => {
-            if *value >= 0 {
-                cbor_head(output, 0, *value as u64);
-            } else {
-                let magnitude = value
-                    .checked_neg()
-                    .map(|value| value as u64)
-                    .unwrap_or(i64::MAX as u64 + 1);
-                cbor_head(output, 1, magnitude - 1);
-            }
+            let (major, argument) = int_head(i128::from(*value));
+            cbor_head(output, major, argument);
         }
-        UInt(value) => cbor_head(output, 0, *value),
+        UInt(value) => {
+            let (major, argument) = int_head(i128::from(*value));
+            cbor_head(output, major, argument);
+        }
         Text(value) => {
             cbor_head(output, 3, value.len() as u64);
             output.extend_from_slice(value.as_bytes());
@@ -1481,6 +1745,7 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
                 encode_key(value, output)?;
             }
         }
+        Value(value) => output.extend_from_slice(&value.canonical),
     }
     if output.len() > KEY_CANONICAL_LIMIT {
         return Err(RowStoreError::KeyTooLarge(output.len()));
@@ -1578,26 +1843,41 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
 }
 
 fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
+    let (head, length) = cbor_head_bytes(major, value);
+    output.extend_from_slice(&head[..length]);
+}
+
+/// The shortest definite CBOR head for `major` and `value`, and its length.
+fn cbor_head_bytes(major: u8, value: u64) -> ([u8; 9], usize) {
     let base = major << 5;
-    match value {
-        0..=23 => output.push(base | value as u8),
+    let mut head = [0; 9];
+    let length = match value {
+        0..=23 => {
+            head[0] = base | value as u8;
+            1
+        }
         24..=255 => {
-            output.push(base | 24);
-            output.push(value as u8);
+            head[0] = base | 24;
+            head[1] = value as u8;
+            2
         }
         256..=65_535 => {
-            output.push(base | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
+            head[0] = base | 25;
+            head[1..3].copy_from_slice(&(value as u16).to_be_bytes());
+            3
         }
         65_536..=4_294_967_295 => {
-            output.push(base | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
+            head[0] = base | 26;
+            head[1..5].copy_from_slice(&(value as u32).to_be_bytes());
+            5
         }
         _ => {
-            output.push(base | 27);
-            output.extend_from_slice(&value.to_be_bytes());
+            head[0] = base | 27;
+            head[1..].copy_from_slice(&value.to_be_bytes());
+            9
         }
-    }
+    };
+    (head, length)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1836,26 +2116,323 @@ mod tests {
         assert!(rows.iter().all(|row| row.version() == &version));
     }
 
+    fn key_of(raw: Raw) -> TypedKey {
+        TypedKey::from_value(&Value::new(raw).expect("registered canonical value"))
+            .expect("permitted key value")
+    }
+
+    fn uuid_key_raw(byte: u8) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
+    }
+
+    fn hash_of(key: &TypedKey) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Asserts `keys` ascend strictly, survive their canonical encoding
+    /// unchanged, and sort back into place from reverse order.
+    fn assert_logical_order(keys: &[TypedKey]) {
+        for pair in keys.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{:?} sorts before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for key in keys {
+            let bytes = key.canonical_bytes().expect("canonical key bytes");
+            let decoded = TypedKey::decode_canonical(&bytes).expect("decode the canonical key");
+            assert_eq!(&decoded, key);
+            assert_eq!(decoded.canonical_bytes().unwrap(), bytes);
+            assert_eq!(hash_of(&decoded), hash_of(key));
+        }
+        let mut sorted = keys.iter().rev().cloned().collect::<Vec<_>>();
+        sorted.sort();
+        assert_eq!(sorted, keys);
+    }
+
+    /// ORNA-ROW-002: `Int` and `UInt` spell one key type, so a range may mix
+    /// them; bounds of different key types still fail.
     #[test]
-    fn key_range_rejects_bounds_from_different_typed_key_domains() {
+    fn key_range_spans_one_int_type_and_rejects_other_key_types() {
+        let range = KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1)
+            .expect("Int and UInt bounds share the Int key type");
+        assert_eq!(range.upper_exclusive(), Some(&TypedKey::Int(2)));
         assert!(matches!(
-            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1),
+            KeyRange::new(Some(TypedKey::UInt(2)), Some(TypedKey::Int(2)), 1),
             Err(RowStoreError::InvalidKeyRange)
         ));
         assert!(matches!(
+            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::Text("2".into())), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+        let composite = |id: TypedKey| TypedKey::Tuple(vec![TypedKey::Text("id".into()), id]);
+        KeyRange::new(
+            Some(composite(TypedKey::Int(1))),
+            Some(composite(TypedKey::UInt(2))),
+            1,
+        )
+        .expect("composite Int components share one key type");
+        assert!(matches!(
             KeyRange::new(
-                Some(TypedKey::Tuple(vec![
-                    TypedKey::Text("id".into()),
-                    TypedKey::Int(1)
-                ])),
-                Some(TypedKey::Tuple(vec![
-                    TypedKey::Text("id".into()),
-                    TypedKey::UInt(2)
-                ])),
+                Some(composite(TypedKey::Int(1))),
+                Some(composite(TypedKey::Text("2".into()))),
                 1,
             ),
             Err(RowStoreError::InvalidKeyRange)
         ));
+        let date = |text: &str| key_of(Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned()))));
+        KeyRange::new(Some(date("2026-01-01")), Some(date("2026-02-01")), 1)
+            .expect("Date bounds share one key type");
+        assert!(matches!(
+            KeyRange::new(Some(date("2026-01-01")), Some(key_of(uuid_key_raw(1))), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+    }
+
+    /// A07-storage-rows-20: one Int is one key whichever 64-bit variant spells
+    /// it: equal, hashed alike, encoded alike and ordered by value.
+    #[test]
+    fn int_and_uint_spellings_are_one_key() {
+        assert_eq!(TypedKey::Int(5), TypedKey::UInt(5));
+        assert_eq!(hash_of(&TypedKey::Int(5)), hash_of(&TypedKey::UInt(5)));
+        assert_eq!(TypedKey::Int(5).cmp(&TypedKey::UInt(5)), Ordering::Equal);
+        assert_eq!(
+            TypedKey::Int(5).canonical_bytes().unwrap(),
+            TypedKey::UInt(5).canonical_bytes().unwrap()
+        );
+        assert!(TypedKey::Int(5) > TypedKey::UInt(3));
+        assert!(TypedKey::Int(-1) < TypedKey::UInt(0));
+        assert!(TypedKey::UInt(u64::MAX) > TypedKey::Int(i64::MAX));
+
+        let composite = |id: TypedKey| TypedKey::Tuple(vec![TypedKey::Text("id".into()), id]);
+        assert_eq!(composite(TypedKey::Int(7)), composite(TypedKey::UInt(7)));
+        assert_eq!(
+            hash_of(&composite(TypedKey::Int(7))),
+            hash_of(&composite(TypedKey::UInt(7)))
+        );
+        let mut keys = std::collections::HashSet::new();
+        keys.insert(TypedKey::UInt(3));
+        assert!(keys.contains(&TypedKey::Int(3)));
+
+        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        let mut builder = RowMapBuilder::new(boundary.clone());
+        for key in [
+            TypedKey::UInt(3),
+            TypedKey::Int(-2),
+            TypedKey::Int(5),
+            TypedKey::UInt(4),
+        ] {
+            builder
+                .insert(key, value.clone())
+                .expect("distinct Int keys");
+        }
+        assert!(matches!(
+            builder.insert(TypedKey::Int(3), value),
+            Err(RowStoreError::DuplicateKey)
+        ));
+        let map = builder.build().expect("build an Int-keyed map");
+        assert_eq!(
+            map.entries()
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect::<Vec<_>>(),
+            [
+                TypedKey::Int(-2),
+                TypedKey::Int(3),
+                TypedKey::Int(4),
+                TypedKey::Int(5)
+            ]
+        );
+        assert!(
+            map.lookup(&boundary, &TypedKey::Int(4))
+                .expect("matching boundary")
+                .is_some()
+        );
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-002: every permitted tagged key decodes
+    /// from its canonical encoding and orders by logical value through
+    /// `compare_primary_keys`, not by CBOR bytes.
+    #[test]
+    fn tagged_keys_round_trip_and_order_by_logical_value() {
+        use num_bigint::BigInt;
+
+        let pair = |tag: u64, first: Raw, second: Raw| {
+            Raw::Tag(tag, Box::new(Raw::Array(vec![first, second])))
+        };
+        let decimal = |coefficient: i64, exponent: i64| {
+            key_of(pair(
+                60_000,
+                Raw::Int(coefficient.into()),
+                Raw::Int(exponent.into()),
+            ))
+        };
+        let decimals = [
+            decimal(-1, 1),
+            decimal(-2, 0),
+            decimal(0, 0),
+            decimal(5, -1),
+            decimal(2, 0),
+            decimal(1, 1),
+        ];
+        assert_logical_order(&decimals);
+        // 2 sorts before 10 although the encoding of 10 sorts first.
+        assert!(decimals[4].canonical_bytes().unwrap() > decimals[5].canonical_bytes().unwrap());
+
+        let instant = |seconds: i64, nanos: u32| {
+            key_of(pair(
+                60_002,
+                Raw::Int(seconds.into()),
+                Raw::Int(nanos.into()),
+            ))
+        };
+        assert_logical_order(&[
+            instant(-5, 0),
+            instant(-1, 999_999_999),
+            instant(0, 0),
+            instant(3, 1),
+        ]);
+        let date = |text: &str| key_of(Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned()))));
+        assert_logical_order(&[date("1999-12-31"), date("2026-01-02"), date("2026-10-20")]);
+        assert_logical_order(&[
+            key_of(uuid_key_raw(0x01)),
+            key_of(uuid_key_raw(0x7f)),
+            key_of(uuid_key_raw(0xff)),
+        ]);
+        let variant = |enum_type: u8, variant: u8| {
+            key_of(Raw::Tag(
+                60_008,
+                Box::new(Raw::Array(vec![
+                    uuid_key_raw(enum_type),
+                    uuid_key_raw(variant),
+                    Raw::Null,
+                ])),
+            ))
+        };
+        assert_logical_order(&[variant(1, 1), variant(1, 2), variant(2, 1)]);
+        let tuple = |number: i64, text: &str| {
+            key_of(pair(
+                60_015,
+                Raw::Int(number.into()),
+                Raw::Text(text.to_owned()),
+            ))
+        };
+        assert_logical_order(&[tuple(-2, "z"), tuple(1, "a"), tuple(1, "b"), tuple(10, "a")]);
+        let reference = |number: i64| {
+            key_of(Raw::Tag(
+                60_021,
+                Box::new(Raw::Array(vec![
+                    uuid_key_raw(3),
+                    uuid_key_raw(4),
+                    Raw::Int(number.into()),
+                ])),
+            ))
+        };
+        assert_logical_order(&[reference(-1), reference(2)]);
+
+        // Ints beyond the 64-bit spellings order with them by value.
+        let wide = |value: BigInt| key_of(Raw::Int(value));
+        let ints = [
+            wide(-BigInt::from(u64::MAX) - 2),
+            wide(BigInt::from(i64::MIN) - 1),
+            TypedKey::Int(i64::MIN),
+            TypedKey::Int(-1),
+            TypedKey::UInt(0),
+            TypedKey::UInt(u64::MAX),
+            wide(BigInt::from(u64::MAX) + 1),
+        ];
+        for index in [0, 1, 6] {
+            assert!(matches!(&ints[index], TypedKey::Value(_)));
+        }
+        assert_eq!(
+            key_of(Raw::Int(BigInt::from(i64::MIN))),
+            TypedKey::Int(i64::MIN)
+        );
+        assert_logical_order(&ints);
+
+        let text = |key: &TypedKey| match key {
+            TypedKey::Value(value) => value.canonical_text(),
+            _ => panic!("a tagged key"),
+        };
+        assert_eq!(
+            text(&key_of(uuid_key_raw(0xab))).as_deref(),
+            Some("abababab-abab-abab-abab-abababababab")
+        );
+        assert_eq!(text(&date("2026-10-20")).as_deref(), Some("2026-10-20"));
+        assert_eq!(text(&decimal(15, -1)).as_deref(), Some("15e-1.decimal"));
+        assert_eq!(text(&ints[6]).as_deref(), Some("18446744073709551616"));
+        assert_eq!(text(&instant(0, 0)), None);
+    }
+
+    /// Values outside the permitted key types fail key admission explicitly,
+    /// as do unregistered tags and noncanonical bignums.
+    #[test]
+    fn non_key_values_are_rejected_as_keys() {
+        let encoded = |raw: Raw| {
+            Value::new(raw)
+                .expect("registered canonical value")
+                .encode()
+                .expect("canonical value bytes")
+        };
+        let payload = Raw::Tag(
+            60_009,
+            Box::new(Raw::Array(vec![Raw::Null, Raw::Array(Vec::new())])),
+        );
+        for raw in [
+            Raw::Float(1.5f64.to_bits()),
+            Raw::Map(vec![(Raw::Text("k".to_owned()), Raw::Int(1.into()))]),
+            // Duration and Option are stored values but never keys.
+            Raw::Tag(
+                60_005,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+            ),
+            Raw::Tag(60_013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+            // An enum variant carrying a payload record.
+            Raw::Tag(
+                60_008,
+                Box::new(Raw::Array(vec![uuid_key_raw(1), uuid_key_raw(2), payload])),
+            ),
+            // A tuple with a Float component.
+            Raw::Tag(
+                60_015,
+                Box::new(Raw::Array(vec![Raw::Float(0.5f64.to_bits())])),
+            ),
+        ] {
+            assert!(matches!(
+                TypedKey::decode_canonical(&encoded(raw)),
+                Err(RowStoreError::InvalidCanonicalKey)
+            ));
+        }
+
+        let tagged = |tag: u64, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            cbor_head(&mut bytes, 6, tag);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        let mut overflow = vec![0x81, 0x54];
+        overflow.extend_from_slice(&[0x77; 20]);
+        assert!(matches!(
+            TypedKey::decode_canonical(&tagged(60_113, &overflow)),
+            Err(RowStoreError::InvalidCanonicalKey)
+        ));
+        let mut narrow = vec![0x48];
+        narrow.extend_from_slice(&[0xff; 8]);
+        for bytes in [
+            tagged(60_026, &[0x80]),
+            tagged(1, &[0x00]),
+            tagged(2, &narrow),
+        ] {
+            assert!(matches!(
+                TypedKey::decode_canonical(&bytes),
+                Err(RowStoreError::Native(GraphError::NonCanonicalData))
+            ));
+        }
     }
 
     #[test]

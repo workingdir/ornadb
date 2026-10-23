@@ -1,0 +1,1 @@
+pub view daily = Reading | count();

@@ -2,42 +2,26 @@
 mod test_support;
 
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-use ed25519_dalek::{Signer, SigningKey};
 use fs2::FileExt;
-use orna_foundation_v1::{CanonicalValue, GitHash, OvbRaw, SchemaDescriptor};
+use orna_foundation_v1::{GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
     CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
-    CompactRuntimeReceipt, CompactSegment, CompactSegmentRole, GitDeclaredObjectSetState,
-    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
-    ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
-    MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
-    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
-    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
-    WorktreeState,
+    GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
+    LegacyAnnotationCandidate, ManagedFileChange, ManagedPath, MigrationAnnotationDefaults,
+    MigrationContinuityRecord, MountError, MountView, NativeObjectId, OrnaInternalRef,
+    PublicationJournal, PublicationJournalEntry, PublicationJournalStage, RemoteContinuity,
+    Repository, RepositoryError, RequiredInternalRef, RuntimeGeneration,
+    StreamCheckpointIdentityPredecessor, WorktreeState,
 };
 
-use parquet::{
-    basic::{Compression, Encoding, PageType},
-    column::reader::ColumnReader,
-    data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
-    file::{
-        metadata::{KeyValue, ParquetMetaDataWriter},
-        properties::{WriterProperties, WriterVersion},
-        reader::{FileReader, SerializedFileReader},
-        writer::SerializedFileWriter,
-    },
-    schema::parser::parse_message_type,
-};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -102,7 +86,7 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -138,7 +122,7 @@ fn repository_with_v1_module_fixture() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(temp.path(), &["add", "."]);
     git(
         temp.path(),
@@ -235,214 +219,12 @@ fn with_partial_clone(root: &Path) {
     );
 }
 
-fn compact_segment(table: Uuid, ordinal: u64, bytes: Vec<u8>) -> CompactSegment {
-    compact_segment_with_manifest_columns(table, ordinal, bytes, compact_columns())
-}
-
-fn compact_segment_with_manifest_columns(
-    table: Uuid,
-    ordinal: u64,
-    payload: Vec<u8>,
-    columns: Vec<u8>,
-) -> CompactSegment {
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
-    let path = ManagedPath::new(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ))
-    .unwrap();
-    let physical_columns = compact_columns();
-    let bytes = compact_parquet(table, ordinal, &physical_columns, payload);
-    let key = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    CompactSegment::new(
-        segment_id,
-        CompactSegmentRole::Data,
-        compact_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
-        bytes,
-        key.clone(),
-        key,
-        1,
-        columns,
-        true,
-        false,
-    )
-    .unwrap()
-}
-
-fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) -> Vec<u8> {
-    let schema = Arc::new(
-        parse_message_type(&format!(
-            "message schema {{ REQUIRED INT64 f_{}; }}",
-            compact_field_id().simple()
-        ))
-        .unwrap(),
-    );
-    let metadata = vec![
-        KeyValue::new(
-            "orna.profile".to_owned(),
-            Some("compact-storage-v1".to_owned()),
-        ),
-        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
-        KeyValue::new(
-            "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&compact_schema_fingerprint(table))),
-        ),
-        KeyValue::new(
-            "orna.schema.ovb".to_owned(),
-            Some(base64(&compact_schema(table).encode().unwrap())),
-        ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
-        KeyValue::new(
-            "orna.encoder".to_owned(),
-            Some("test-encoder-v1".to_owned()),
-        ),
-        KeyValue::new(
-            "orna.test.payload".to_owned(),
-            Some(String::from_utf8_lossy(&payload).into_owned()),
-        ),
-    ];
-    let properties = Arc::new(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
-            .set_encoding(Encoding::PLAIN)
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_key_value_metadata(Some(metadata))
-            .build(),
-    );
-    let mut bytes = Vec::new();
-    let mut writer = SerializedFileWriter::new(&mut bytes, schema, properties).unwrap();
-    let mut row_group = writer.next_row_group().unwrap();
-    let mut column = row_group.next_column().unwrap().unwrap();
-    column
-        .typed::<Int64Type>()
-        .write_batch(&[i64::try_from(ordinal).unwrap()], None, None)
-        .unwrap();
-    column.close().unwrap();
-    row_group.close().unwrap();
-    writer.close().unwrap();
-
-    // parquet-rs uses its writer-version setting for FileMetaData.version.
-    // The Orna profile requires V2 pages while retaining FileMetaData.version 1.
-    let footer_length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let footer = bytes.len() - 8 - footer_length;
-    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
-    bytes[footer + 1] = 0x02;
-    with_page_checksums(bytes)
-}
-
-fn date_segment(table: Uuid, ordinal: u64, days: &[i32]) -> CompactSegment {
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
-    let path = ManagedPath::new(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ))
-    .unwrap();
-    let schema = date_schema(table);
-    let columns = date_columns();
-    let bytes = date_parquet(table, &schema, &columns, days);
-    let bound = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    CompactSegment::new(
-        segment_id,
-        CompactSegmentRole::Data,
-        date_schema_fingerprint(table),
-        "test-encoder-v1",
-        path,
-        bytes,
-        bound.clone(),
-        bound,
-        u64::try_from(days.len()).unwrap(),
-        columns,
-        true,
-        false,
-    )
-    .unwrap()
-}
-
-fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[i32]) -> Vec<u8> {
-    let schema_descriptor = Arc::new(
-        parse_message_type(&format!(
-            "message schema {{ REQUIRED INT32 f_{} (DATE); }}",
-            date_field_id().simple()
-        ))
-        .unwrap(),
-    );
-    let metadata = vec![
-        KeyValue::new(
-            "orna.profile".to_owned(),
-            Some("compact-storage-v1".to_owned()),
-        ),
-        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
-        KeyValue::new(
-            "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
-        ),
-        KeyValue::new(
-            "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
-        ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
-        KeyValue::new(
-            "orna.encoder".to_owned(),
-            Some("test-encoder-v1".to_owned()),
-        ),
-    ];
-    let properties = Arc::new(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
-            .set_encoding(Encoding::PLAIN)
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_key_value_metadata(Some(metadata))
-            .build(),
-    );
-    let mut bytes = Vec::new();
-    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
-    let mut row_group = writer.next_row_group().unwrap();
-    let mut column = row_group.next_column().unwrap().unwrap();
-    column
-        .typed::<Int32Type>()
-        .write_batch(days, None, None)
-        .unwrap();
-    column.close().unwrap();
-    row_group.close().unwrap();
-    writer.close().unwrap();
-
-    let footer_length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let footer = bytes.len() - 8 - footer_length;
-    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
-    bytes[footer + 1] = 0x02;
-    with_page_checksums(bytes)
-}
-
-fn compact_columns() -> Vec<u8> {
-    compact_columns_for_field(compact_field_id())
-}
-
 fn compact_field_id() -> Uuid {
     Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001)
 }
 
-fn date_field_id() -> Uuid {
-    Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0002)
-}
-
 fn compact_schema(table: Uuid) -> SchemaDescriptor {
     compact_schema_for_type(table, compact_field_id(), "Int")
-}
-
-fn date_schema(table: Uuid) -> SchemaDescriptor {
-    compact_schema_for_type(table, date_field_id(), "Date")
 }
 
 fn compact_schema_for_type(table: Uuid, field: Uuid, type_name: &str) -> SchemaDescriptor {
@@ -481,643 +263,11 @@ fn compact_schema_fingerprint(table: Uuid) -> [u8; 32] {
     schema_fingerprint(&compact_schema(table))
 }
 
-fn date_schema_fingerprint(table: Uuid) -> [u8; 32] {
-    schema_fingerprint(&date_schema(table))
-}
-
 fn schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"orna.schema.v1\0");
     digest.update(schema.encode().unwrap());
     digest.finalize().into()
-}
-
-fn compact_columns_for_field(field_id: Uuid) -> Vec<u8> {
-    compact_columns_for_mapping(field_id, "Int", "int64")
-}
-
-fn date_columns() -> Vec<u8> {
-    compact_columns_for_mapping(date_field_id(), "Date", "date")
-}
-
-fn compact_columns_for_mapping(field_id: Uuid, type_name: &str, encoding: &str) -> Vec<u8> {
-    let parameters = if encoding == "ovb" {
-        vec![OvbRaw::Int(1.into())]
-    } else {
-        Vec::new()
-    };
-    compact_columns_for_mapping_with_parameters(field_id, type_name, encoding, parameters)
-}
-
-fn compact_columns_for_mapping_with_parameters(
-    field_id: Uuid,
-    type_name: &str,
-    encoding: &str,
-    parameters: Vec<OvbRaw>,
-) -> Vec<u8> {
-    CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
-        OvbRaw::Array(vec![OvbRaw::Tag(
-            37,
-            Box::new(OvbRaw::Bytes(field_id.as_bytes().to_vec())),
-        )]),
-        OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field_id.simple()))]),
-        OvbRaw::Array(vec![
-            OvbRaw::Int(0.into()),
-            OvbRaw::Text(type_name.to_owned()),
-        ]),
-        OvbRaw::Text(encoding.to_owned()),
-        OvbRaw::Array(parameters),
-    ])]))
-    .unwrap()
-    .encode()
-    .unwrap()
-}
-
-fn compact_schema_with_roles(table: Uuid, fields: &[(Uuid, &str, u8)]) -> SchemaDescriptor {
-    compact_schema_with_roles_type(table, fields, "Int")
-}
-
-fn compact_schema_with_roles_type(
-    table: Uuid,
-    fields: &[(Uuid, &str, u8)],
-    type_name: &str,
-) -> SchemaDescriptor {
-    let mut fields = fields.to_vec();
-    fields.sort_by_key(|(field, _, _)| *field);
-    SchemaDescriptor::new(OvbRaw::Map(vec![
-        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
-        (
-            OvbRaw::Int(1.into()),
-            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
-        ),
-        (
-            OvbRaw::Int(2.into()),
-            OvbRaw::Array(
-                fields
-                    .iter()
-                    .filter(|(_, _, role)| *role == 0)
-                    .map(|(field, _, _)| {
-                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())))
-                    })
-                    .collect(),
-            ),
-        ),
-        (
-            OvbRaw::Int(3.into()),
-            OvbRaw::Array(
-                fields
-                    .into_iter()
-                    .map(|(field, name, role)| {
-                        OvbRaw::Array(vec![
-                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
-                            OvbRaw::Text(name.to_owned()),
-                            OvbRaw::Array(vec![
-                                OvbRaw::Int(0.into()),
-                                OvbRaw::Text(type_name.to_owned()),
-                            ]),
-                            OvbRaw::Int(role.into()),
-                            if role == 2 {
-                                OvbRaw::Array(vec![
-                                    OvbRaw::Int(2.into()),
-                                    OvbRaw::Bytes(vec![0; 32]),
-                                ])
-                            } else {
-                                OvbRaw::Array(vec![OvbRaw::Int(0.into())])
-                            },
-                        ])
-                    })
-                    .collect(),
-            ),
-        ),
-        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
-    ]))
-    .unwrap()
-}
-
-fn compact_primitive_parquet(
-    table: Uuid,
-    schema: &SchemaDescriptor,
-    physical_field: Uuid,
-    type_name: &str,
-    columns: &[u8],
-) -> Vec<u8> {
-    let (physical_type, write_value) = match type_name {
-        "Int" => ("INT64", false),
-        "Bool" => ("BOOLEAN", true),
-        _ => panic!("test fixture supports only Int and Bool"),
-    };
-    let schema_descriptor = Arc::new(
-        parse_message_type(&format!(
-            "message schema {{ REQUIRED {physical_type} f_{}; }}",
-            physical_field.simple()
-        ))
-        .unwrap(),
-    );
-    let metadata = vec![
-        KeyValue::new(
-            "orna.profile".to_owned(),
-            Some("compact-storage-v1".to_owned()),
-        ),
-        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
-        KeyValue::new(
-            "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
-        ),
-        KeyValue::new(
-            "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
-        ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
-        KeyValue::new(
-            "orna.encoder".to_owned(),
-            Some("test-encoder-v1".to_owned()),
-        ),
-    ];
-    let properties = Arc::new(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
-            .set_encoding(Encoding::PLAIN)
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_key_value_metadata(Some(metadata))
-            .build(),
-    );
-    let mut bytes = Vec::new();
-    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
-    let mut row_group = writer.next_row_group().unwrap();
-    let mut column = row_group.next_column().unwrap().unwrap();
-    if write_value {
-        column
-            .typed::<BoolType>()
-            .write_batch(&[true], None, None)
-            .unwrap();
-    } else {
-        column
-            .typed::<Int64Type>()
-            .write_batch(&[1], None, None)
-            .unwrap();
-    }
-    column.close().unwrap();
-    row_group.close().unwrap();
-    writer.close().unwrap();
-
-    let footer_length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let footer = bytes.len() - 8 - footer_length;
-    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
-    bytes[footer + 1] = 0x02;
-    with_page_checksums(bytes)
-}
-
-fn compact_ovb_parquet(
-    table: Uuid,
-    schema: &SchemaDescriptor,
-    physical_field: Uuid,
-    columns: &[u8],
-    values: &[Vec<u8>],
-    annotation: Option<&str>,
-) -> Vec<u8> {
-    let annotation = annotation.unwrap_or_default();
-    let schema_descriptor = Arc::new(
-        parse_message_type(&format!(
-            "message schema {{ REQUIRED BYTE_ARRAY f_{}{}; }}",
-            physical_field.simple(),
-            annotation
-        ))
-        .unwrap(),
-    );
-    let metadata = vec![
-        KeyValue::new(
-            "orna.profile".to_owned(),
-            Some("compact-storage-v1".to_owned()),
-        ),
-        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
-        KeyValue::new(
-            "orna.schema.sha256".to_owned(),
-            Some(hex_digest(&schema_fingerprint(schema))),
-        ),
-        KeyValue::new(
-            "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
-        ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
-        KeyValue::new(
-            "orna.encoder".to_owned(),
-            Some("test-encoder-v1".to_owned()),
-        ),
-    ];
-    let properties = Arc::new(
-        WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_dictionary_enabled(false)
-            .set_encoding(Encoding::PLAIN)
-            .set_writer_version(WriterVersion::PARQUET_2_0)
-            .set_key_value_metadata(Some(metadata))
-            .build(),
-    );
-    let mut bytes = Vec::new();
-    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
-    let mut row_group = writer.next_row_group().unwrap();
-    let mut column = row_group.next_column().unwrap().unwrap();
-    let values = values
-        .iter()
-        .map(|value| ByteArray::from(value.as_slice()))
-        .collect::<Vec<_>>();
-    column
-        .typed::<ByteArrayType>()
-        .write_batch(&values, None, None)
-        .unwrap();
-    column.close().unwrap();
-    row_group.close().unwrap();
-    writer.close().unwrap();
-
-    let footer_length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    let footer = bytes.len() - 8 - footer_length;
-    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
-    bytes[footer + 1] = 0x02;
-    with_page_checksums(bytes)
-}
-
-fn compact_segment_for_schema(
-    table: Uuid,
-    ordinal: u64,
-    role: CompactSegmentRole,
-    schema: &SchemaDescriptor,
-    physical_field: Uuid,
-    type_name: &str,
-    columns: Vec<u8>,
-) -> CompactSegment {
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
-    let path = ManagedPath::new(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ))
-    .unwrap();
-    let key = CanonicalValue::new(OvbRaw::Int(ordinal.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    CompactSegment::new(
-        segment_id,
-        role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_primitive_parquet(table, schema, physical_field, type_name, &columns),
-        key.clone(),
-        key,
-        1,
-        columns,
-        true,
-        false,
-    )
-    .unwrap()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compact_ovb_segment_for_schema(
-    table: Uuid,
-    ordinal: u64,
-    role: CompactSegmentRole,
-    schema: &SchemaDescriptor,
-    physical_field: Uuid,
-    columns: Vec<u8>,
-    values: &[Vec<u8>],
-    min_key: Vec<u8>,
-    max_key: Vec<u8>,
-    annotation: Option<&str>,
-) -> CompactSegment {
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
-    let path = ManagedPath::new(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ))
-    .unwrap();
-    CompactSegment::new(
-        segment_id,
-        role,
-        schema_fingerprint(schema),
-        "test-encoder-v1",
-        path,
-        compact_ovb_parquet(table, schema, physical_field, &columns, values, annotation),
-        min_key,
-        max_key,
-        u64::try_from(values.len()).unwrap(),
-        columns,
-        true,
-        false,
-    )
-    .unwrap()
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let word = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        encoded.push(ALPHABET[((word >> 18) & 0x3f) as usize] as char);
-        encoded.push(ALPHABET[((word >> 12) & 0x3f) as usize] as char);
-        encoded.push(if chunk.len() > 1 {
-            ALPHABET[((word >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            ALPHABET[(word & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    encoded
-}
-
-fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
-    let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.clone())).unwrap();
-    let metadata = reader.metadata().clone();
-    assert_eq!(metadata.num_row_groups(), 1);
-    assert_eq!(metadata.row_group(0).num_columns(), 1);
-    let column = metadata.row_group(0).column(0);
-    let start = usize::try_from(column.data_page_offset()).unwrap();
-    let length = usize::try_from(column.compressed_size()).unwrap();
-    let header = compact_page_header(&bytes[start..start + length]);
-    assert!(!header.has_checksum);
-    let body_start = start + header.encoded_len;
-    let body_end = body_start + header.compressed_len;
-    let checksum = crc32(&bytes[body_start..body_end]) as i32;
-    let checksum_bytes = compact_crc_field(header.checksum_predecessor, checksum);
-
-    let mut data = bytes[..footer_start(&bytes)].to_vec();
-    let insertion = start + header.next_field_offset.unwrap_or(header.stop_offset);
-    let checksum_len = checksum_bytes.len();
-    data.splice(insertion..insertion, checksum_bytes);
-    if let Some(next) = header.next_field_offset {
-        let position = start + next + checksum_len;
-        let delta = header.next_field_id.unwrap().checked_sub(4).unwrap();
-        assert!((1..=15).contains(&delta));
-        data[position] = (data[position] & 0x0f) | (delta << 4);
-    }
-
-    let mut metadata = metadata.into_builder();
-    let mut row_groups = metadata.take_row_groups();
-    let row_group = row_groups.pop().unwrap();
-    let mut row_group = row_group.into_builder();
-    let mut columns = row_group.take_columns();
-    let column = columns.pop().unwrap();
-    let compressed_size = column.compressed_size();
-    columns.push(
-        column
-            .into_builder()
-            .set_total_compressed_size(
-                compressed_size + i64::try_from(data.len() - footer_start(&bytes)).unwrap(),
-            )
-            .build()
-            .unwrap(),
-    );
-    let row_group = row_group.set_column_metadata(columns).build().unwrap();
-    let metadata = metadata.add_row_group(row_group).build();
-    let mut footer = Vec::new();
-    ParquetMetaDataWriter::new(&mut footer, &metadata)
-        .finish()
-        .unwrap();
-    data.extend(footer);
-    let reader = SerializedFileReader::new(bytes::Bytes::from(data.clone())).unwrap();
-    assert_eq!(reader.metadata().file_metadata().version(), 1);
-    let group = reader.get_row_group(0).unwrap();
-    let mut pages = group.get_column_page_reader(0).unwrap();
-    let page = pages.next().unwrap().unwrap();
-    assert!(page.is_data_page());
-    assert_eq!(page.page_type(), PageType::DATA_PAGE_V2);
-    assert!(pages.next().is_none());
-    data
-}
-
-fn footer_start(bytes: &[u8]) -> usize {
-    let footer_length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
-    bytes.len() - 8 - footer_length
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut value = !0_u32;
-    for byte in bytes {
-        value ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(value & 1);
-            value = (value >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !value
-}
-
-struct CompactPageHeaderFixture {
-    encoded_len: usize,
-    compressed_len: usize,
-    checksum_predecessor: u8,
-    next_field_offset: Option<usize>,
-    next_field_id: Option<u8>,
-    stop_offset: usize,
-    has_checksum: bool,
-}
-
-fn compact_page_header(bytes: &[u8]) -> CompactPageHeaderFixture {
-    let mut cursor = 0;
-    let mut previous = 0_u8;
-    let mut compressed_len = None;
-    let mut next_field_offset = None;
-    let mut next_field_id = None;
-    let mut checksum_predecessor = None;
-    let mut has_checksum = false;
-    loop {
-        let field_offset = cursor;
-        let tag = compact_byte(bytes, &mut cursor);
-        let kind = tag & 0x0f;
-        if kind == 0 {
-            return CompactPageHeaderFixture {
-                encoded_len: cursor,
-                compressed_len: compressed_len.unwrap(),
-                checksum_predecessor: checksum_predecessor.unwrap_or(previous),
-                next_field_offset,
-                next_field_id,
-                stop_offset: field_offset,
-                has_checksum,
-            };
-        }
-        let delta = tag >> 4;
-        let field = if delta == 0 {
-            compact_i16(bytes, &mut cursor) as u8
-        } else {
-            previous.checked_add(delta).unwrap()
-        };
-        if field > 4 && next_field_offset.is_none() {
-            next_field_offset = Some(field_offset);
-            next_field_id = Some(field);
-            checksum_predecessor = Some(previous);
-        }
-        if field == 3 && kind == 5 {
-            compressed_len = Some(usize::try_from(compact_i32(bytes, &mut cursor)).unwrap());
-        } else {
-            if field == 4 && kind == 5 {
-                has_checksum = true;
-            }
-            compact_skip(bytes, &mut cursor, kind);
-        }
-        previous = field;
-    }
-}
-
-fn compact_crc_field(previous_field: u8, checksum: i32) -> Vec<u8> {
-    assert_eq!(previous_field, 3);
-    let mut bytes = vec![0x15];
-    compact_varint(
-        ((i64::from(checksum) << 1) ^ (i64::from(checksum) >> 31)) as u64,
-        &mut bytes,
-    );
-    bytes
-}
-
-fn compact_byte(bytes: &[u8], cursor: &mut usize) -> u8 {
-    let value = bytes[*cursor];
-    *cursor += 1;
-    value
-}
-
-fn compact_varint(mut value: u64, output: &mut Vec<u8>) {
-    while value >= 0x80 {
-        output.push((value as u8 & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    output.push(value as u8);
-}
-
-fn compact_read_varint(bytes: &[u8], cursor: &mut usize) -> u64 {
-    let mut value = 0_u64;
-    for shift in (0..64).step_by(7) {
-        let byte = compact_byte(bytes, cursor);
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return value;
-        }
-    }
-    panic!("invalid compact fixture varint");
-}
-
-fn compact_i16(bytes: &[u8], cursor: &mut usize) -> i16 {
-    let value = compact_read_varint(bytes, cursor) as i64;
-    ((value >> 1) ^ -(value & 1)).try_into().unwrap()
-}
-
-fn compact_i32(bytes: &[u8], cursor: &mut usize) -> i32 {
-    let value = compact_read_varint(bytes, cursor) as i64;
-    ((value >> 1) ^ -(value & 1)).try_into().unwrap()
-}
-
-fn compact_skip(bytes: &[u8], cursor: &mut usize, kind: u8) {
-    match kind {
-        1 | 2 => {}
-        3 => *cursor += 1,
-        4..=6 => {
-            let _ = compact_read_varint(bytes, cursor);
-        }
-        7 => *cursor += 8,
-        8 => {
-            let length = usize::try_from(compact_read_varint(bytes, cursor)).unwrap();
-            *cursor += length;
-        }
-        9 | 10 => {
-            let size_and_kind = compact_byte(bytes, cursor);
-            let size = if size_and_kind >> 4 == 15 {
-                usize::try_from(compact_read_varint(bytes, cursor)).unwrap()
-            } else {
-                usize::from(size_and_kind >> 4)
-            };
-            for _ in 0..size {
-                compact_skip(bytes, cursor, size_and_kind & 0x0f);
-            }
-        }
-        12 => loop {
-            let tag = compact_byte(bytes, cursor);
-            if tag & 0x0f == 0 {
-                break;
-            }
-            if tag >> 4 == 0 {
-                let _ = compact_i16(bytes, cursor);
-            }
-            compact_skip(bytes, cursor, tag & 0x0f);
-        },
-        _ => panic!("unsupported compact fixture field"),
-    }
-}
-
-fn compact_plan(
-    repository: &Repository,
-    table: Uuid,
-    intent: [u8; 16],
-    segments: &[CompactSegment],
-) -> orna_repository_v1::CompactPublicationPlan {
-    let head = repository.head().unwrap().unwrap();
-    let base = repository
-        .read_compact_manifest(&head, table)
-        .unwrap()
-        .unwrap_or_else(|| CompactManifest::empty(table, compact_schema_fingerprint(table)));
-    repository
-        .prepare_compact_publication(
-            &head,
-            repository.index_generation().unwrap(),
-            base,
-            intent,
-            [intent[0]; 32],
-            segments,
-            "orna: publish compact runtime data",
-        )
-        .unwrap()
-}
-
-fn publish_compact_repository_boundary(
-    repository: &Repository,
-    plan: orna_repository_v1::CompactPublicationPlan,
-) -> Result<IndexGeneration, orna_repository_v1::RepositoryError> {
-    repository
-        .publish_compact_repository_boundary(plan)
-        .map(|pending| pending.index().clone())
-}
-
-fn compact_receipt_signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x5a; 32])
-}
-
-fn provision_compact_receipt_trust_root(repository: &Repository, key: &SigningKey) {
-    repository.runtime_paths().ensure_exists().unwrap();
-    fs::write(
-        repository
-            .runtime_paths()
-            .compact_runtime_receipt_public_key(),
-        key.verifying_key().to_bytes(),
-    )
-    .unwrap();
-}
-
-fn compact_runtime_receipt(
-    pending: &orna_repository_v1::CompactPublicationPending,
-    key: &SigningKey,
-) -> CompactRuntimeReceipt {
-    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
-        pending.runtime_intent_id(),
-        pending.cleanup_watermark(),
-        pending.commit(),
-        pending.journal_verifier(),
-    )
-    .unwrap();
-    CompactRuntimeReceipt::new(
-        pending.runtime_intent_id(),
-        pending.cleanup_watermark(),
-        pending.commit().clone(),
-        pending.journal_verifier(),
-        key.sign(&signing_bytes).to_bytes(),
-    )
-    .unwrap()
 }
 
 /// Builds a real filtered clone when the installed Git supports file-protocol
@@ -1172,197 +322,6 @@ fn filtered_clone() -> Option<(TempDir, PathBuf, String)> {
         return None;
     }
     Some((fixture, clone, promised))
-}
-
-struct FilteredCompactClone {
-    _fixture: TempDir,
-    clone: PathBuf,
-    materialized_table: Uuid,
-    materialized_object: String,
-    promised_table: Uuid,
-    promised_object: String,
-    unrelated_promised_object: String,
-}
-
-/// Builds a compact snapshot in a real file-protocol filtered clone. Metadata
-/// and one segment are intentionally materialized before the promisor endpoint
-/// is disabled; the other segment and an unrelated blob must remain promised.
-fn filtered_compact_clone() -> Option<FilteredCompactClone> {
-    let fixture = TempDir::new().ok()?;
-    let origin = fixture.path().join("origin.git");
-    let seed = fixture.path().join("seed");
-    let clone = fixture.path().join("partial");
-    git(fixture.path(), &["init", "--bare", "origin.git"]);
-    git(fixture.path(), &["init", "-b", "main", "seed"]);
-    test_support::configure_fixture_git_identity(&seed);
-    git(&seed, &["config", "commit.gpgsign", "false"]);
-    fs::write(seed.join("main.orna"), "module main;\n").ok()?;
-    fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
-    fs::create_dir_all(seed.join(".orna")).ok()?;
-    fs::write(seed.join(".orna/format.orna"), "format 1\n").ok()?;
-    git(&seed, &["add", "."]);
-    git(&seed, &["commit", "-m", "initial"]);
-
-    let repository = Repository::discover(&seed).ok()?;
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repository, &signing_key);
-    let materialized_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0610);
-    let materialized_pending = repository
-        .publish_compact_repository_boundary(compact_plan(
-            &repository,
-            materialized_table,
-            [70; 16],
-            &[compact_segment(
-                materialized_table,
-                70,
-                b"materialized inventory segment".to_vec(),
-            )],
-        ))
-        .ok()?;
-    repository
-        .finish_compact_with_receipt(&compact_runtime_receipt(
-            &materialized_pending,
-            &signing_key,
-        ))
-        .ok()?;
-
-    let promised_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0611);
-    let promised_pending = repository
-        .publish_compact_repository_boundary(compact_plan(
-            &repository,
-            promised_table,
-            [71; 16],
-            &[compact_segment(
-                promised_table,
-                71,
-                b"promised inventory segment".to_vec(),
-            )],
-        ))
-        .ok()?;
-    repository
-        .finish_compact_with_receipt(&compact_runtime_receipt(&promised_pending, &signing_key))
-        .ok()?;
-
-    let head = repository.head().ok()??;
-    let materialized_manifest = repository
-        .read_compact_manifest(&head, materialized_table)
-        .ok()??;
-    let promised_manifest = repository
-        .read_compact_manifest(&head, promised_table)
-        .ok()??;
-    let materialized_object = materialized_manifest
-        .entries()
-        .first()?
-        .git_object_id()
-        .to_owned();
-    let promised_object = promised_manifest
-        .entries()
-        .first()?
-        .git_object_id()
-        .to_owned();
-    fs::write(seed.join("unrelated-promised.txt"), "unrelated promised\n").ok()?;
-    git(&seed, &["add", "unrelated-promised.txt"]);
-    git(&seed, &["commit", "-m", "add unrelated promised blob"]);
-    let unrelated_promised_object = git(&seed, &["rev-parse", "HEAD:unrelated-promised.txt"]);
-
-    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
-    let origin_url = format!("file://{}", origin.display());
-    git(&seed, &["remote", "add", "origin", &origin_url]);
-    git(&seed, &["push", "origin", "HEAD:refs/heads/main"]);
-    git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    let output = Command::new("git")
-        .current_dir(fixture.path())
-        .args([
-            "-c",
-            "protocol.file.allow=always",
-            "clone",
-            "--filter=blob:none",
-            "--no-checkout",
-            &origin_url,
-            "partial",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success()
-        || git(
-            &clone,
-            &["config", "--local", "--get", "remote.origin.promisor"],
-        ) != "true"
-    {
-        return None;
-    }
-
-    for path in [
-        format!(".orna/storage/{materialized_table}/manifest.orna"),
-        format!(".orna/storage/{materialized_table}/shards/00000000.orna"),
-        materialized_manifest
-            .entries()
-            .first()?
-            .relative_path()
-            .as_path()
-            .display()
-            .to_string(),
-        format!(".orna/storage/{promised_table}/manifest.orna"),
-        format!(".orna/storage/{promised_table}/shards/00000000.orna"),
-    ] {
-        let selector = format!("HEAD:{path}");
-        let output = Command::new("git")
-            .current_dir(&clone)
-            .args(["cat-file", "blob", &selector])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-    }
-
-    for object in [&promised_object, &unrelated_promised_object] {
-        let output = Command::new("git")
-            .current_dir(&clone)
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["cat-file", "-e", object])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            return None;
-        }
-    }
-    git(
-        &clone,
-        &[
-            "config",
-            "remote.origin.url",
-            "file:///nonexistent-disabled-promisor",
-        ],
-    );
-    Some(FilteredCompactClone {
-        _fixture: fixture,
-        clone,
-        materialized_table,
-        materialized_object,
-        promised_table,
-        promised_object,
-        unrelated_promised_object,
-    })
-}
-
-fn no_lazy_object_inventory(root: &Path) -> String {
-    let output = Command::new("git")
-        .current_dir(root)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .args(["rev-list", "--objects", "--missing=print", "--all"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "no-lazy object inventory: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    format!(
-        "{}{}",
-        String::from_utf8(output.stdout).unwrap(),
-        git(root, &["count-objects", "-v"])
-    )
 }
 
 #[test]
@@ -1489,7 +448,7 @@ fn managed_staging_preserves_unrelated_index_and_worktree_changes() {
     let repo = Repository::discover(root.path()).unwrap();
     fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
     git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join(".orna/format.orna"), "format 2\n").unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n").unwrap();
     fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
     let before = repo.index_generation().unwrap();
     let after = repo
@@ -1533,7 +492,7 @@ fn managed_unstage_and_coordination_lock_preserve_unrelated_staging() {
     );
     assert_eq!(
         git(root.path(), &["show", ":.orna/format.orna"]),
-        "format 1"
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}"
     );
 
     repo.runtime_paths().ensure_exists().unwrap();
@@ -3138,7 +2097,7 @@ fn ordinary_git_add_interleavings_make_stage_and_unstage_stale() {
     );
     assert_eq!(
         git(root.path(), &["show", ":.orna/format.orna"]),
-        "format 1"
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}"
     );
 
     let expected_unstage = repo.index_generation().unwrap();
@@ -3192,7 +2151,7 @@ fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
     git(root.path(), &["init", "-b", "main"]);
 
     fs::create_dir_all(root.path().join(".orna")).unwrap();
-    fs::write(root.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     fs::write(root.path().join("ordinary.txt"), "untracked\n").unwrap();
     git(root.path(), &["add", ".orna/format.orna"]);
 
@@ -3691,78 +2650,6 @@ fn empty_compact_manifest_is_a_valid_committed_snapshot() {
 }
 
 #[test]
-fn compact_manifest_inventory_discovers_every_table_without_mutating_repository_or_runtime_state() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let first_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0604);
-    let first = compact_plan(
-        &repo,
-        first_table,
-        [60; 16],
-        &[compact_segment(
-            first_table,
-            60,
-            b"first compact table".to_vec(),
-        )],
-    );
-    let first_pending = repo.publish_compact_repository_boundary(first).unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&first_pending, &signing_key))
-        .unwrap();
-
-    let second_table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0605);
-    let second = compact_plan(
-        &repo,
-        second_table,
-        [61; 16],
-        &[compact_segment(
-            second_table,
-            61,
-            b"second compact table".to_vec(),
-        )],
-    );
-    let second_pending = repo.publish_compact_repository_boundary(second).unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&second_pending, &signing_key))
-        .unwrap();
-
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let before = git_state(&repo, root.path());
-    let index_before = fs::read(root.path().join(".git/index")).unwrap();
-    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-    let runtime = RuntimeGeneration::new(604);
-    let runtime_before = repo.cwd_generation(runtime).unwrap();
-    let journal_before = repo.read_publication_journal().unwrap();
-
-    let inventory = repo.read_compact_manifest_inventory(&head).unwrap();
-
-    assert_eq!(inventory.len(), 2);
-    assert_eq!(inventory[&first_table].table(), first_table);
-    assert_eq!(inventory[&first_table].entries().len(), 1);
-    assert_eq!(inventory[&second_table].table(), second_table);
-    assert_eq!(inventory[&second_table].entries().len(), 1);
-    assert_eq!(git_state(&repo, root.path()), before);
-    assert_eq!(
-        fs::read(root.path().join(".git/index")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        fs::read(root.path().join("main.orna")).unwrap(),
-        worktree_before
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-    assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
-    assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
-}
-
-#[test]
 fn compact_manifest_inventory_ignores_policy_only_table_roots() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3796,977 +2683,6 @@ fn compact_manifest_inventory_ignores_policy_only_table_roots() {
             .unwrap()
             .is_empty()
     );
-}
-
-#[test]
-fn compact_manifest_inventory_hydration_plans_all_tables_without_fetching_promised_segments() {
-    let fixture = filtered_compact_clone()
-        .expect("compact planner evidence requires a real filtered clone with promised blobs");
-    let repo = Repository::discover(&fixture.clone).unwrap();
-    let head = repo.head().unwrap().unwrap();
-
-    assert!(matches!(
-        repo.observe_git_object(&fixture.materialized_object)
-            .unwrap(),
-        GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        }
-    ));
-    assert_eq!(
-        repo.observe_git_object(&fixture.promised_object).unwrap(),
-        GitObjectState::Promised
-    );
-    assert_eq!(
-        repo.observe_git_object(&fixture.unrelated_promised_object)
-            .unwrap(),
-        GitObjectState::Promised
-    );
-
-    fs::write(fixture.clone.join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(&fixture.clone, &["add", "ordinary.txt"]);
-    fs::write(fixture.clone.join("main.orna"), "unstaged ordinary\n").unwrap();
-    let fetch_head = fixture.clone.join(git(
-        &fixture.clone,
-        &["rev-parse", "--git-path", "FETCH_HEAD"],
-    ));
-    fs::write(&fetch_head, b"inventory-planner-sentinel\n").unwrap();
-    let before = git_state(&repo, &fixture.clone);
-    let objects_before = no_lazy_object_inventory(&fixture.clone);
-    let index_before = fs::read(fixture.clone.join(".git/index")).unwrap();
-    let worktree_before = fs::read(fixture.clone.join("main.orna")).unwrap();
-    let runtime = RuntimeGeneration::new(610);
-    let runtime_before = repo.cwd_generation(runtime).unwrap();
-    let journal_before = repo.read_publication_journal().unwrap();
-    let fetch_head_before = fs::read(&fetch_head).unwrap();
-
-    let plan = repo
-        .plan_compact_manifest_inventory_hydration(&head)
-        .unwrap();
-
-    assert_eq!(plan.len(), 2);
-    assert!(matches!(
-        plan[&fixture.materialized_table].get(&fixture.materialized_object),
-        Some(GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        })
-    ));
-    assert_eq!(
-        plan[&fixture.promised_table].get(&fixture.promised_object),
-        Some(&GitObjectState::Promised)
-    );
-    for object in [&fixture.promised_object, &fixture.unrelated_promised_object] {
-        assert!(
-            !Command::new("git")
-                .current_dir(&fixture.clone)
-                .env("GIT_NO_LAZY_FETCH", "1")
-                .args(["cat-file", "-e", object])
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "planner fetched a promised object despite the disabled promisor"
-        );
-    }
-    assert_eq!(
-        repo.observe_git_object(&fixture.promised_object).unwrap(),
-        GitObjectState::Promised
-    );
-    assert_eq!(
-        repo.observe_git_object(&fixture.unrelated_promised_object)
-            .unwrap(),
-        GitObjectState::Promised
-    );
-    assert_eq!(no_lazy_object_inventory(&fixture.clone), objects_before);
-    assert_eq!(git_state(&repo, &fixture.clone), before);
-    assert_eq!(
-        fs::read(fixture.clone.join(".git/index")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        fs::read(fixture.clone.join("main.orna")).unwrap(),
-        worktree_before
-    );
-    assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
-    assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
-    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
-}
-
-#[test]
-fn compact_manifest_inventory_hydration_rejects_missing_malformed_and_orphan_closure_without_mutation()
- {
-    for failure in ["missing-segment", "malformed-shard", "orphan"] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let plan = compact_plan(
-            &repo,
-            table,
-            [72; 16],
-            &[compact_segment(
-                table,
-                72,
-                b"inventory closure witness".to_vec(),
-            )],
-        );
-        let manifest = repo
-            .read_compact_manifest(plan.candidate_commit(), table)
-            .unwrap()
-            .unwrap();
-        let manifest_path =
-            ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-        let shard_path =
-            ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
-        let segment_path = manifest.entries()[0].relative_path().clone();
-        let manifest_bytes = git_bytes(
-            root.path(),
-            &[
-                "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    manifest_path.as_path().display()
-                ),
-            ],
-        );
-        let shard_bytes = git_bytes(
-            root.path(),
-            &[
-                "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    shard_path.as_path().display()
-                ),
-            ],
-        );
-        let segment_bytes = git_bytes(
-            root.path(),
-            &[
-                "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    segment_path.as_path().display()
-                ),
-            ],
-        );
-        let changes = match failure {
-            "missing-segment" => vec![
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
-                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
-            ],
-            "malformed-shard" => vec![
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
-                orna_repository_v1::ManagedFileChange::new(
-                    shard_path,
-                    Some(b"not a compact manifest shard\n".to_vec()),
-                ),
-                orna_repository_v1::ManagedFileChange::new(segment_path, Some(segment_bytes)),
-            ],
-            "orphan" => vec![
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
-                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
-                orna_repository_v1::ManagedFileChange::new(segment_path, Some(segment_bytes)),
-                orna_repository_v1::ManagedFileChange::new(
-                    ManagedPath::new(format!(
-                        ".orna/storage/{table}/data/01/{}.parquet",
-                        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0612)
-                    ))
-                    .unwrap(),
-                    Some(b"orphan inventory segment".to_vec()),
-                ),
-            ],
-            _ => unreachable!(),
-        };
-        let head = repo.head().unwrap().unwrap();
-        let candidate = repo
-            .build_private_commit(&head, &changes, "test: malformed inventory planner closure")
-            .unwrap();
-        repo.advance_current_ref(&head, &candidate).unwrap();
-
-        fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-        git(root.path(), &["add", "ordinary.txt"]);
-        fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-        let before = git_state(&repo, root.path());
-        let objects_before = no_lazy_object_inventory(root.path());
-        let index_before = fs::read(root.path().join(".git/index")).unwrap();
-        let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-        let runtime = RuntimeGeneration::new(611);
-        let runtime_before = repo.cwd_generation(runtime).unwrap();
-        let journal_before = repo.read_publication_journal().unwrap();
-
-        assert!(matches!(
-            repo.plan_compact_manifest_inventory_hydration(candidate.commit()),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-        assert_eq!(git_state(&repo, root.path()), before);
-        assert_eq!(no_lazy_object_inventory(root.path()), objects_before);
-        assert_eq!(
-            fs::read(root.path().join(".git/index")).unwrap(),
-            index_before
-        );
-        assert_eq!(
-            fs::read(root.path().join("main.orna")).unwrap(),
-            worktree_before
-        );
-        assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
-        assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
-    }
-}
-
-#[test]
-fn compact_manifest_inventory_hydration_rejects_later_invalid_table_without_partial_result_or_mutation()
- {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let first = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0613);
-    let pending = repo
-        .publish_compact_repository_boundary(compact_plan(
-            &repo,
-            first,
-            [73; 16],
-            &[compact_segment(
-                first,
-                73,
-                b"first inventory table".to_vec(),
-            )],
-        ))
-        .unwrap();
-    repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-        .unwrap();
-
-    let second = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0614);
-    let plan = compact_plan(
-        &repo,
-        second,
-        [74; 16],
-        &[compact_segment(
-            second,
-            74,
-            b"missing second inventory segment".to_vec(),
-        )],
-    );
-    let manifest_path = ManagedPath::new(format!(".orna/storage/{second}/manifest.orna")).unwrap();
-    let shard_path =
-        ManagedPath::new(format!(".orna/storage/{second}/shards/00000000.orna")).unwrap();
-    let manifest_bytes = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                manifest_path.as_path().display()
-            ),
-        ],
-    );
-    let shard_bytes = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                shard_path.as_path().display()
-            ),
-        ],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let candidate = repo
-        .build_private_commit(
-            &head,
-            &[
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(manifest_bytes)),
-                orna_repository_v1::ManagedFileChange::new(shard_path, Some(shard_bytes)),
-            ],
-            "test: commit later invalid compact inventory table",
-        )
-        .unwrap();
-    repo.advance_current_ref(&head, &candidate).unwrap();
-
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    let before = git_state(&repo, root.path());
-    let objects_before = no_lazy_object_inventory(root.path());
-
-    assert!(matches!(
-        repo.plan_compact_manifest_inventory_hydration(candidate.commit()),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert_eq!(git_state(&repo, root.path()), before);
-    assert_eq!(no_lazy_object_inventory(root.path()), objects_before);
-}
-
-#[test]
-fn compact_manifest_inventory_rejects_unreferenced_shard_or_segment_artifacts() {
-    for artifact in [
-        "shards/00000001.orna".to_owned(),
-        format!(
-            "data/01/{}.parquet",
-            Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0609)
-        ),
-    ] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let signing_key = compact_receipt_signing_key();
-        provision_compact_receipt_trust_root(&repo, &signing_key);
-        let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0608);
-        let plan = compact_plan(
-            &repo,
-            table,
-            [64; 16],
-            &[compact_segment(
-                table,
-                64,
-                b"declared compact segment".to_vec(),
-            )],
-        );
-        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-            .unwrap();
-        let head = repo.head().unwrap().unwrap();
-        let orphan = repo
-            .build_private_commit(
-                &head,
-                &[orna_repository_v1::ManagedFileChange::new(
-                    ManagedPath::new(format!(".orna/storage/{table}/{artifact}")).unwrap(),
-                    Some(b"unreferenced compact artifact".to_vec()),
-                )],
-                "test: commit orphan compact inventory artifact",
-            )
-            .unwrap();
-        repo.advance_current_ref(&head, &orphan).unwrap();
-
-        assert!(matches!(
-            repo.read_compact_manifest_inventory(orphan.commit()),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-    }
-}
-
-#[test]
-fn compact_manifest_inventory_rejects_symlinked_manifest_shard_and_segment_entries() {
-    for entry in ["manifest", "shard", "segment"] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let signing_key = compact_receipt_signing_key();
-        provision_compact_receipt_trust_root(&repo, &signing_key);
-        let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0607);
-        let plan = compact_plan(
-            &repo,
-            table,
-            [63; 16],
-            &[compact_segment(table, 63, b"symlink witness".to_vec())],
-        );
-        let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-        repo.finish_compact_with_receipt(&compact_runtime_receipt(&pending, &signing_key))
-            .unwrap();
-        let head = repo.head().unwrap().unwrap();
-        let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-        let path = match entry {
-            "manifest" => format!(".orna/storage/{table}/manifest.orna"),
-            "shard" => format!(".orna/storage/{table}/shards/00000000.orna"),
-            "segment" => manifest
-                .entries()
-                .first()
-                .unwrap()
-                .relative_path()
-                .as_path()
-                .to_str()
-                .unwrap()
-                .to_owned(),
-            _ => unreachable!(),
-        };
-        let symlink_source = root.path().join("compact-inventory-symlink-source");
-        fs::write(&symlink_source, "not-a-compact-file").unwrap();
-        let object = git(
-            root.path(),
-            &[
-                "hash-object",
-                "-w",
-                "--",
-                symlink_source.file_name().unwrap().to_str().unwrap(),
-            ],
-        );
-        git(root.path(), &["read-tree", head.as_str()]);
-        let cacheinfo = format!("120000,{object},{path}");
-        git(
-            root.path(),
-            &["update-index", "--add", "--cacheinfo", &cacheinfo],
-        );
-        let tree = git(root.path(), &["write-tree"]);
-        let commit = git(
-            root.path(),
-            &[
-                "commit-tree",
-                &tree,
-                "-p",
-                head.as_str(),
-                "-m",
-                "test: symlink compact inventory entry",
-            ],
-        );
-        git(
-            root.path(),
-            &["update-ref", "refs/heads/main", &commit, head.as_str()],
-        );
-        let corrupted = repo.head().unwrap().unwrap();
-
-        assert!(matches!(
-            repo.read_compact_manifest_inventory(&corrupted),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-        assert!(matches!(
-            repo.plan_compact_manifest_inventory_hydration(&corrupted),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-    }
-}
-
-#[test]
-fn compact_manifest_inventory_rejects_missing_or_malformed_manifest_closure_without_mutation() {
-    for missing_manifest in [true, false] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let plan = compact_plan(
-            &repo,
-            table,
-            [62; 16],
-            &[compact_segment(table, 62, b"closure witness".to_vec())],
-        );
-        let manifest = repo
-            .read_compact_manifest(plan.candidate_commit(), table)
-            .unwrap()
-            .unwrap();
-        let segment = manifest.entries().first().unwrap();
-        let segment_bytes = git_bytes(
-            root.path(),
-            &[
-                "show",
-                &format!(
-                    "{}:{}",
-                    plan.candidate_commit(),
-                    segment.relative_path().as_path().display()
-                ),
-            ],
-        );
-        let head = repo.head().unwrap().unwrap();
-        let mut changes = vec![orna_repository_v1::ManagedFileChange::new(
-            segment.relative_path().clone(),
-            Some(segment_bytes),
-        )];
-        if !missing_manifest {
-            let manifest_path =
-                ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-            let manifest_bytes = git_bytes(
-                root.path(),
-                &[
-                    "show",
-                    &format!(
-                        "{}:{}",
-                        plan.candidate_commit(),
-                        manifest_path.as_path().display()
-                    ),
-                ],
-            );
-            changes.push(orna_repository_v1::ManagedFileChange::new(
-                manifest_path,
-                Some(manifest_bytes),
-            ));
-        }
-        let malformed = repo
-            .build_private_commit(&head, &changes, "test: commit incomplete compact closure")
-            .unwrap();
-        repo.advance_current_ref(&head, &malformed).unwrap();
-
-        fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-        git(root.path(), &["add", "ordinary.txt"]);
-        fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-        let before = git_state(&repo, root.path());
-        let index_before = fs::read(root.path().join(".git/index")).unwrap();
-        let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-        let runtime = RuntimeGeneration::new(605);
-        let runtime_before = repo.cwd_generation(runtime).unwrap();
-        let journal_before = repo.read_publication_journal().unwrap();
-
-        assert!(matches!(
-            repo.read_compact_manifest_inventory(malformed.commit()),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-        assert_eq!(git_state(&repo, root.path()), before);
-        assert_eq!(
-            fs::read(root.path().join(".git/index")).unwrap(),
-            index_before
-        );
-        assert_eq!(
-            fs::read(root.path().join("main.orna")).unwrap(),
-            worktree_before
-        );
-        assert_eq!(repo.cwd_generation(runtime).unwrap(), runtime_before);
-        assert_eq!(repo.read_publication_journal().unwrap(), journal_before);
-    }
-}
-
-#[test]
-fn compact_publication_accepts_a_valid_date_parquet_fixture() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u128(4);
-    let days = [-1_i32, 0, 1];
-    let schema = date_schema(table);
-    let schema_digest = date_schema_fingerprint(table);
-    let segment = date_segment(table, 1, &days);
-    let head = repo.head().unwrap().unwrap();
-    let plan = repo
-        .prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_digest),
-            [68; 16],
-            [69; 32],
-            &[segment],
-            "test: publish date compact segment",
-        )
-        .unwrap();
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let manifest = repo
-        .read_compact_manifest(pending.commit(), table)
-        .unwrap()
-        .unwrap();
-    assert_eq!(manifest.schema(), schema_digest);
-    assert_eq!(manifest.entries().len(), 1);
-
-    let verified = repo
-        .read_verified_compact_segment(pending.commit(), table, &manifest.entries()[0])
-        .unwrap();
-    let reader = SerializedFileReader::new(bytes::Bytes::from(verified)).unwrap();
-    assert_eq!(reader.metadata().file_metadata().version(), 1);
-    let column = reader.metadata().row_group(0).column(0);
-    let schema_column = reader.metadata().file_metadata().schema_descr().column(0);
-    assert_eq!(schema_column.physical_type(), parquet::basic::Type::INT32);
-    assert_eq!(
-        schema_column.logical_type_ref(),
-        Some(&parquet::basic::LogicalType::Date)
-    );
-    assert!(
-        column
-            .encodings()
-            .any(|encoding| encoding == Encoding::PLAIN)
-    );
-    assert!(matches!(column.compression(), Compression::ZSTD(_)));
-
-    let group = reader.get_row_group(0).unwrap();
-    let ColumnReader::Int32ColumnReader(mut date_reader) = group.get_column_reader(0).unwrap()
-    else {
-        panic!("verified Date segment did not reach an Int32 decoder");
-    };
-    let mut values = Vec::new();
-    let (records, values_read, levels_read) = date_reader
-        .read_records(days.len(), None, None, &mut values)
-        .unwrap();
-    assert_eq!(
-        (records, values_read, levels_read),
-        (days.len(), days.len(), days.len())
-    );
-    assert_eq!(values, days);
-    assert_eq!(schema_digest, schema_fingerprint(&schema));
-}
-
-#[test]
-fn compact_manifest_observation_uses_the_committed_manifest_segment_set() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0042);
-    let plan = compact_plan(
-        &repo,
-        table,
-        [42; 16],
-        &[compact_segment(table, 42, b"manifest-backed".to_vec())],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let before = git_state(&repo, root.path());
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let object = manifest.entries()[0].git_object_id().to_owned();
-
-    assert_eq!(
-        repo.observe_compact_manifest_segment_blobs(&head, table)
-            .unwrap(),
-        GitDeclaredObjectSetState::Complete
-    );
-    let hydration = repo.plan_compact_manifest_hydration(&head, table).unwrap();
-    assert_eq!(hydration.len(), 1);
-    assert!(matches!(
-        hydration.get(&object),
-        Some(GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        })
-    ));
-    assert_eq!(git_state(&repo, root.path()), before);
-}
-
-#[test]
-fn compact_manifest_observation_keeps_a_declared_promised_segment_unhydrated() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0043);
-    let plan = compact_plan(
-        &repo,
-        table,
-        [43; 16],
-        &[compact_segment(
-            table,
-            43,
-            b"promised-manifest-segment".to_vec(),
-        )],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let object = manifest.entries()[0].git_object_id().to_owned();
-    let object_path = root
-        .path()
-        .join(".git/objects")
-        .join(&object[..2])
-        .join(&object[2..]);
-    assert!(object_path.is_file());
-    with_partial_clone(root.path());
-    fs::remove_file(&object_path).unwrap();
-    let head_before = repo.head().unwrap();
-    let refs_before = git(
-        root.path(),
-        &["for-each-ref", "--format=%(refname) %(objectname)"],
-    );
-    let index_before = fs::read(root.path().join(".git/index")).unwrap();
-    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-
-    assert_eq!(
-        repo.observe_compact_manifest_segment_blobs(&head, table)
-            .unwrap(),
-        GitDeclaredObjectSetState::Complete
-    );
-    let hydration = repo.plan_compact_manifest_hydration(&head, table).unwrap();
-    assert_eq!(
-        hydration,
-        BTreeMap::from([(object.clone(), GitObjectState::Promised)])
-    );
-    assert!(!object_path.exists(), "planner hydrated a promised segment");
-    assert_eq!(repo.head().unwrap(), head_before);
-    assert_eq!(
-        git(
-            root.path(),
-            &["for-each-ref", "--format=%(refname) %(objectname)"],
-        ),
-        refs_before
-    );
-    assert_eq!(
-        fs::read(root.path().join(".git/index")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        fs::read(root.path().join("main.orna")).unwrap(),
-        worktree_before
-    );
-}
-
-#[test]
-fn compact_manifest_hydration_range_selects_only_overlapping_segments() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0045);
-    let plan = compact_plan(
-        &repo,
-        table,
-        [45; 16],
-        &[
-            compact_segment(table, 45, b"range-before".to_vec()),
-            compact_segment(table, 46, b"range-selected".to_vec()),
-        ],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let lower = CanonicalValue::new(OvbRaw::Int(46.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    let upper = lower.clone();
-    let invalid_upper = CanonicalValue::new(OvbRaw::Int(45.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    let selected = manifest
-        .entries()
-        .iter()
-        .find(|entry| entry.min_key() == lower.as_slice())
-        .unwrap();
-    let unselected = manifest
-        .entries()
-        .iter()
-        .find(|entry| entry.min_key() != lower.as_slice())
-        .unwrap();
-    let unselected_object = unselected.git_object_id().to_owned();
-    let unselected_path = root
-        .path()
-        .join(".git/objects")
-        .join(&unselected_object[..2])
-        .join(&unselected_object[2..]);
-    let selected_object = selected.git_object_id().to_owned();
-
-    let fetch_head = root
-        .path()
-        .join(git(root.path(), &["rev-parse", "--git-path", "FETCH_HEAD"]));
-    with_partial_clone(root.path());
-    let before = git_state(&repo, root.path());
-    let index_before = fs::read(root.path().join(".git/index")).unwrap();
-    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-    fs::remove_file(&unselected_path).unwrap();
-    fs::write(&fetch_head, b"range-sentinel\n").unwrap();
-    let fetch_head_before = fs::read(&fetch_head).unwrap();
-
-    let hydration = repo
-        .plan_compact_manifest_hydration_for_key_range(&head, table, &lower, &upper)
-        .unwrap();
-    assert_eq!(hydration.len(), 1);
-    assert!(matches!(
-        hydration.get(&selected_object),
-        Some(GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        })
-    ));
-    assert!(!hydration.contains_key(&unselected_object));
-    assert_eq!(
-        repo.observe_git_object(&unselected_object).unwrap(),
-        GitObjectState::Promised
-    );
-    assert!(!unselected_path.exists());
-    assert!(matches!(
-        repo.plan_compact_manifest_hydration_for_key_range(&head, table, &lower, &invalid_upper),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert!(matches!(
-        repo.plan_compact_manifest_hydration_for_key_range(&head, table, &[], &upper),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert_eq!(repo.head().unwrap(), before.0);
-    assert_eq!(
-        git(
-            root.path(),
-            &["for-each-ref", "--format=%(refname) %(objectname)"],
-        ),
-        before.3
-    );
-    assert_eq!(
-        git(root.path(), &["config", "--local", "--null", "--list"]),
-        before.4
-    );
-    assert_eq!(
-        fs::read(root.path().join(".git/index")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        fs::read(root.path().join("main.orna")).unwrap(),
-        worktree_before
-    );
-    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
-}
-
-#[test]
-fn compact_manifest_range_hydration_materializes_selected_promises_only() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0046);
-    let plan = compact_plan(
-        &repo,
-        table,
-        [46; 16],
-        &[
-            compact_segment(table, 45, b"range-before-promised".to_vec()),
-            compact_segment(table, 46, b"range-selected-promised".to_vec()),
-        ],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let selected_key = CanonicalValue::new(OvbRaw::Int(46.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    let selected = manifest
-        .entries()
-        .iter()
-        .find(|entry| entry.min_key() == selected_key.as_slice())
-        .unwrap();
-    let unselected = manifest
-        .entries()
-        .iter()
-        .find(|entry| entry.min_key() != selected_key.as_slice())
-        .unwrap();
-    let selected_object = selected.git_object_id().to_owned();
-    let unselected_object = unselected.git_object_id().to_owned();
-    let selected_path = root
-        .path()
-        .join(".git/objects")
-        .join(&selected_object[..2])
-        .join(&selected_object[2..]);
-    let unselected_path = root
-        .path()
-        .join(".git/objects")
-        .join(&unselected_object[..2])
-        .join(&unselected_object[2..]);
-
-    let remote = continuity_remote(root.path());
-    let remote_unselected_path = remote
-        .path()
-        .join("objects")
-        .join(&unselected_object[..2])
-        .join(&unselected_object[2..]);
-    assert!(remote_unselected_path.is_file());
-    fs::remove_file(remote_unselected_path).unwrap();
-    git(
-        root.path(),
-        &["config", "extensions.partialClone", "origin"],
-    );
-    git(root.path(), &["config", "remote.origin.promisor", "true"]);
-    git(
-        root.path(),
-        &["config", "remote.origin.partialclonefilter", "blob:none"],
-    );
-    assert!(selected_path.is_file());
-    assert!(unselected_path.is_file());
-    let before = git_state(&repo, root.path());
-    let index_before = fs::read(root.path().join(".git/index")).unwrap();
-    let worktree_before = fs::read(root.path().join("main.orna")).unwrap();
-    let fetch_head = root
-        .path()
-        .join(git(root.path(), &["rev-parse", "--git-path", "FETCH_HEAD"]));
-    fs::write(&fetch_head, b"range-hydration-sentinel\n").unwrap();
-    let fetch_head_before = fs::read(&fetch_head).unwrap();
-    fs::remove_file(&selected_path).unwrap();
-    fs::remove_file(&unselected_path).unwrap();
-    assert_eq!(
-        repo.observe_git_object(&selected_object).unwrap(),
-        GitObjectState::Promised
-    );
-    assert_eq!(
-        repo.observe_git_object(&unselected_object).unwrap(),
-        GitObjectState::Promised
-    );
-
-    let hydrated = repo
-        .hydrate_compact_manifest_segments_for_key_range(&head, table, &selected_key, &selected_key)
-        .unwrap();
-
-    assert_eq!(hydrated.len(), 1);
-    assert!(matches!(
-        hydrated.get(&selected_object),
-        Some(GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        })
-    ));
-    assert_eq!(
-        repo.observe_git_object(&selected_object).unwrap(),
-        hydrated[&selected_object]
-    );
-    assert_eq!(
-        repo.observe_git_object(&unselected_object).unwrap(),
-        GitObjectState::Promised
-    );
-    assert!(!unselected_path.exists());
-    assert_eq!(repo.head().unwrap(), before.0);
-    assert_eq!(
-        git(
-            root.path(),
-            &["for-each-ref", "--format=%(refname) %(objectname)"],
-        ),
-        before.3
-    );
-    assert_eq!(
-        git(root.path(), &["config", "--local", "--null", "--list"]),
-        before.4
-    );
-    assert_eq!(
-        fs::read(root.path().join(".git/index")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        fs::read(root.path().join("main.orna")).unwrap(),
-        worktree_before
-    );
-    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
-}
-
-#[test]
-fn compact_manifest_hydration_is_manifest_bound_and_preserves_git_state() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0044);
-    let plan = compact_plan(
-        &repo,
-        table,
-        [44; 16],
-        &[compact_segment(
-            table,
-            44,
-            b"manifest-bound-hydration".to_vec(),
-        )],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    let object = manifest.entries()[0].git_object_id().to_owned();
-    let object_path = root
-        .path()
-        .join(".git/objects")
-        .join(&object[..2])
-        .join(&object[2..]);
-
-    let _remote = continuity_remote(root.path());
-    git(
-        root.path(),
-        &["config", "extensions.partialClone", "origin"],
-    );
-    git(root.path(), &["config", "remote.origin.promisor", "true"]);
-    git(
-        root.path(),
-        &["config", "remote.origin.partialclonefilter", "blob:none"],
-    );
-    assert!(object_path.is_file());
-    fs::remove_file(&object_path).unwrap();
-    assert_eq!(
-        repo.observe_git_object(&object).unwrap(),
-        GitObjectState::Promised
-    );
-
-    let fetch_head = root
-        .path()
-        .join(git(root.path(), &["rev-parse", "--git-path", "FETCH_HEAD"]));
-    fs::write(&fetch_head, b"sentinel\n").unwrap();
-    let before = git_state(&repo, root.path());
-    let fetch_head_before = fs::read(&fetch_head).unwrap();
-    let hydrated = repo
-        .hydrate_compact_manifest_segments(&head, table)
-        .unwrap();
-
-    assert!(matches!(
-        hydrated.get(&object),
-        Some(GitObjectState::Materialized {
-            kind: GitObjectKind::Blob,
-            ..
-        })
-    ));
-    assert_eq!(repo.observe_git_object(&object).unwrap(), hydrated[&object]);
-    assert_eq!(git_state(&repo, root.path()), before);
-    assert_eq!(fs::read(&fetch_head).unwrap(), fetch_head_before);
 }
 
 #[test]
@@ -5551,16 +3467,6 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
     assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
-    ));
-    let receipt =
-        CompactRuntimeReceipt::new([87; 16], [88; 32], head.clone(), [89; 32], [0; 64]).unwrap();
-    assert!(matches!(
-        repo.finish_compact_with_receipt(&receipt),
-        Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
-    ));
-    assert!(matches!(
         repo.clear_publication_journal(),
         Err(orna_repository_v1::RepositoryError::CheckoutRecoveryRequired)
     ));
@@ -5884,7 +3790,9 @@ fn publication_rejects_a_known_managed_edit_before_ref_advance() {
         journal.stage(),
         orna_repository_v1::PublicationJournalStage::Prepared
     );
-    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+    // The refusal precedes the Prepared journal, so nothing fences a retry
+    // once the editor's bytes are resolved (ORNA-PUB-006).
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
 #[test]
@@ -6059,19 +3967,24 @@ fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation
     assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
 }
 
-#[test]
-fn recovery_keeps_a_pre_ref_publication_pending() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
+/// Builds a one-row legacy candidate on `head` and its Prepared journal.
+fn row_publication(
+    repo: &Repository,
+    head: &orna_repository_v1::GitCommitRef,
+    index: &IndexGeneration,
+    row: &[u8],
+    intent: [u8; 16],
+) -> (
+    orna_repository_v1::PrivateCommit,
+    orna_repository_v1::PublicationJournal,
+) {
     let managed = ManagedPath::new("generated/row.orna").unwrap();
-    let head = repo.head().unwrap().unwrap();
-    let index_before = repo.index_generation().unwrap();
     let candidate = repo
         .build_private_commit(
-            &head,
+            head,
             &[orna_repository_v1::ManagedFileChange::new(
                 managed.clone(),
-                Some(b"candidate row\n".to_vec()),
+                Some(row.to_vec()),
             )],
             "orna: publish runtime data",
         )
@@ -6079,25 +3992,299 @@ fn recovery_keeps_a_pre_ref_publication_pending() {
     let journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
         head.clone(),
         candidate.commit().clone(),
-        index_before.tree().unwrap().clone(),
-        [8; 16],
+        index.tree().unwrap().clone(),
+        intent,
         vec![orna_repository_v1::PublicationJournalEntry::new(
-            managed.clone(),
+            managed,
             None,
-            Some(b"candidate row\n".to_vec()),
+            Some(row.to_vec()),
         )],
     )
     .unwrap();
+    (candidate, journal)
+}
+
+/// Recovery row "Ref still at H" (ORNA-PUB-006, ORNA-PUB-012): a Prepared
+/// journal whose candidate never reached HEAD is discarded even though the
+/// unreferenced candidate object survives and the user staged unrelated work
+/// since. The staged work is preserved and the batch publishes on retry.
+#[test]
+fn recovery_discards_a_pre_ref_journal_and_keeps_staged_work() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let (candidate, journal) =
+        row_publication(&repo, &head, &index_before, b"candidate row\n", [8; 16]);
     repo.write_publication_journal(&journal).unwrap();
+    fs::write(
+        root.path().join("ordinary.txt"),
+        "staged after interruption\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let staged = repo.index_generation().unwrap();
+    assert_ne!(staged, index_before);
+    assert_eq!(
+        git(
+            root.path(),
+            &["cat-file", "-t", candidate.commit().as_str()]
+        ),
+        "commit"
+    );
+
+    assert_eq!(repo.recover_publication().unwrap(), Some(staged.clone()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(repo.index_generation().unwrap(), staged);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+
+    let (retry, mut retry_journal) =
+        row_publication(&repo, &head, &staged, b"retried row\n", [9; 16]);
+    repo.publish_candidate(&staged, &retry, &mut retry_journal)
+        .unwrap();
+    repo.mark_runtime_complete([9; 16], &mut retry_journal)
+        .unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(retry.commit()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged after interruption"
+    );
+}
+
+/// A detached HEAD refuses publication before the Prepared journal exists,
+/// so attaching the branch again lets the next publication succeed.
+#[test]
+fn publication_on_a_detached_head_leaves_no_journal_and_succeeds_once_attached() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    git(root.path(), &["switch", "--quiet", "--detach"]);
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"detached row\n", [12; 16]);
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(orna_repository_v1::RepositoryError::DetachedHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        head.as_str()
+    );
+    assert_eq!(repo.index_generation().unwrap(), index);
+
+    git(root.path(), &["switch", "--quiet", "main"]);
+    assert_eq!(repo.recover_publication().unwrap(), None);
+    let index = repo.index_generation().unwrap();
+    let (retry, mut retry_journal) =
+        row_publication(&repo, &head, &index, b"attached row\n", [13; 16]);
+    repo.publish_candidate(&index, &retry, &mut retry_journal)
+        .unwrap();
+    repo.mark_runtime_complete([13; 16], &mut retry_journal)
+        .unwrap();
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        retry.commit().as_str()
+    );
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+/// A ref CAS that loses to a concurrent ref writer discards the journal its
+/// attempt wrote, so the pending batch is not fenced behind it.
+#[test]
+fn publication_that_loses_its_ref_cas_leaves_no_blocking_journal() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [14; 16]);
+    assert!(root.path().join(".git/refs/heads/main").is_file());
+    let ref_lock = root.path().join(".git/refs/heads/main.lock");
+    fs::write(&ref_lock, b"concurrent ref writer\n").unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(head.clone()));
+    assert_eq!(repo.index_generation().unwrap(), index);
+    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
+    assert_eq!(fs::read(&ref_lock).unwrap(), b"concurrent ref writer\n");
+
+    fs::remove_file(&ref_lock).unwrap();
+    assert_eq!(repo.recover_publication().unwrap(), None);
+    repo.publish_candidate(&index, &candidate, &mut journal)
+        .unwrap();
+    repo.mark_runtime_complete([14; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(candidate.commit()));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+}
+
+/// PUB-3 step 7: an index write that lands after the base was captured is
+/// refused before the ref CAS, so publication never installs an index that
+/// stages the inverse of its batch.
+#[test]
+fn publication_refuses_an_index_write_that_lands_before_the_ref_cas() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [18; 16]);
+    let index_path = root.path().join(".git/index");
+    let captured = fs::read(&index_path).unwrap();
+    fs::write(root.path().join("ordinary.txt"), "raced staging\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    let raced = fs::read(&index_path).unwrap();
+    fs::write(&index_path, &captured).unwrap();
+
+    let published =
+        repo.publish_candidate_with_stage_hook(&index, &candidate, &mut journal, |stage| {
+            if stage == PublicationJournalStage::Prepared {
+                // A writer outside Git's lock protocol lands its staged change.
+                fs::write(&index_path, &raced).unwrap();
+            }
+        });
+
+    assert!(matches!(published, Err(RepositoryError::StaleIndex { .. })));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(fs::read(&index_path).unwrap(), raced);
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "raced staging"
+    );
+}
+
+/// ORNA-PUB-005: every object the candidate adds must be durable before the
+/// ref names it. An object that cannot be flushed refuses publication before
+/// the CAS and leaves no journal behind.
+#[test]
+fn publication_flushes_candidate_objects_before_the_ref_names_them() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, mut journal) =
+        row_publication(&repo, &head, &index, b"candidate row\n", [19; 16]);
+    let blob = git(
+        root.path(),
+        &[
+            "rev-parse",
+            &format!("{}:generated/row.orna", candidate.commit().as_str()),
+        ],
+    );
+    let loose = root
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let aside = root.path().join(".git/orna-test-row-object");
+    fs::rename(&loose, &aside).unwrap();
+    // The object path no longer names a file that can be flushed.
+    fs::create_dir(&loose).unwrap();
+
+    assert!(matches!(
+        repo.publish_candidate(&index, &candidate, &mut journal),
+        Err(RepositoryError::Graph(
+            orna_repository_v1::GraphError::DurabilityFailed
+        ))
+    ));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+
+    fs::remove_dir(&loose).unwrap();
+    fs::rename(&aside, &loose).unwrap();
+    repo.publish_candidate(&index, &candidate, &mut journal)
+        .unwrap();
+    repo.mark_runtime_complete([19; 16], &mut journal).unwrap();
+    assert_eq!(repo.head().unwrap().as_ref(), Some(candidate.commit()));
+}
+
+/// A Prepared journal is discarded once HEAD moves to a commit that lacks the
+/// candidate, and kept as a recovery conflict once HEAD descends from it.
+#[test]
+fn recovery_discards_a_prepared_journal_only_while_head_lacks_the_candidate() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (_, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [16; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    git(
+        root.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "human commit"],
+    );
+    let human = repo.head().unwrap().unwrap();
+
+    assert_eq!(
+        repo.recover_publication().unwrap(),
+        Some(repo.index_generation().unwrap())
+    );
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap(), Some(human));
+
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [17; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    git(
+        root.path(),
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "human commit on the candidate",
+        ],
+    );
 
     assert!(matches!(
         repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::PublicationPending)
+        Err(orna_repository_v1::RepositoryError::StaleHead)
     ));
-    assert_eq!(repo.head().unwrap(), Some(head));
-    assert_eq!(repo.index_generation().unwrap(), index_before);
-    assert_eq!(repo.managed_file_bytes(&managed).unwrap(), None);
     assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+}
+
+/// Recovery row "Ref no longer H or N": a CAS that landed before the
+/// publisher died leaves the batch published on its branch. After the user
+/// switches to another branch, recovery must keep the journal as a conflict
+/// rather than discard it and publish the batch a second time (ORNA-PUB-008).
+#[test]
+fn recovery_keeps_a_prepared_journal_whose_candidate_another_branch_holds() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index = repo.index_generation().unwrap();
+    let (candidate, journal) = row_publication(&repo, &head, &index, b"candidate row\n", [20; 16]);
+    repo.write_publication_journal(&journal).unwrap();
+    repo.advance_current_ref(&head, &candidate).unwrap();
+    git(
+        root.path(),
+        &["switch", "--quiet", "-c", "other", head.as_str()],
+    );
+
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
+    assert_eq!(repo.head().unwrap(), Some(head));
+    assert_eq!(
+        git(root.path(), &["rev-parse", "refs/heads/main"]),
+        candidate.commit().as_str()
+    );
 }
 
 #[test]
@@ -6241,1342 +4428,15 @@ fn recovery_preserves_post_ref_external_conflict_and_can_resume() {
     assert_eq!(repo.read_publication_journal().unwrap(), None);
 }
 
-#[test]
-fn compact_publication_rejects_schema_identity_and_type_substitution() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0701);
-    let substituted = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0702);
-    let schema = compact_schema_with_roles(table, &[(key, "key", 0)]);
-    let head = repo.head().unwrap().unwrap();
-
-    for (ordinal, physical_field, type_name, columns) in [
-        (
-            701,
-            substituted,
-            "Int",
-            compact_columns_for_mapping(substituted, "Int", "int64"),
-        ),
-        (
-            702,
-            key,
-            "Bool",
-            compact_columns_for_mapping(key, "Bool", "bool"),
-        ),
-    ] {
-        let segment = compact_segment_for_schema(
-            table,
-            ordinal,
-            CompactSegmentRole::Data,
-            &schema,
-            physical_field,
-            type_name,
-            columns,
-        );
-        assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject compact schema substitution",
-            ),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-    }
-}
-
-#[test]
-fn compact_publication_accepts_immutable_ovb_int_and_bool_key_fallbacks() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let head = repo.head().unwrap().unwrap();
-
-    let int_table = Uuid::new_v4();
-    let int_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0741);
-    let int_schema = compact_schema_with_roles_type(int_table, &[(int_field, "key", 0)], "Int");
-    let int_value = CanonicalValue::new(OvbRaw::Int(
-        "123456789012345678901234567890".parse().unwrap(),
-    ))
-    .unwrap()
-    .encode()
-    .unwrap();
-    let int_segment = compact_ovb_segment_for_schema(
-        int_table,
-        741,
-        CompactSegmentRole::Data,
-        &int_schema,
-        int_field,
-        compact_columns_for_mapping(int_field, "Int", "ovb"),
-        std::slice::from_ref(&int_value),
-        int_value.clone(),
-        int_value.clone(),
-        None,
-    );
-    assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(int_table, schema_fingerprint(&int_schema)),
-            [74; 16],
-            [74; 32],
-            &[int_segment],
-            "accept immutable ovb int fallback",
-        )
-        .is_ok()
-    );
-
-    let bool_table = Uuid::new_v4();
-    let bool_field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0742);
-    let bool_schema = compact_schema_with_roles_type(bool_table, &[(bool_field, "key", 0)], "Bool");
-    let bool_values = [
-        CanonicalValue::new(OvbRaw::Bool(false))
-            .unwrap()
-            .encode()
-            .unwrap(),
-        CanonicalValue::new(OvbRaw::Bool(true))
-            .unwrap()
-            .encode()
-            .unwrap(),
-    ];
-    let bool_segment = compact_ovb_segment_for_schema(
-        bool_table,
-        742,
-        CompactSegmentRole::Data,
-        &bool_schema,
-        bool_field,
-        compact_columns_for_mapping(bool_field, "Bool", "ovb"),
-        &bool_values,
-        bool_values[0].clone(),
-        bool_values[1].clone(),
-        None,
-    );
-    assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(bool_table, schema_fingerprint(&bool_schema)),
-            [75; 16],
-            [75; 32],
-            &[bool_segment],
-            "accept immutable ovb bool fallback",
-        )
-        .is_ok()
-    );
-}
-
-#[test]
-fn compact_publication_rejects_immutable_ovb_fallback_mismatches() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0743);
-    let schema = compact_schema_with_roles_type(table, &[(field, "key", 0)], "Int");
-    let head = repo.head().unwrap().unwrap();
-    let canonical_int = CanonicalValue::new(OvbRaw::Int(7.into()))
-        .unwrap()
-        .encode()
-        .unwrap();
-    let canonical_bool = CanonicalValue::new(OvbRaw::Bool(true))
-        .unwrap()
-        .encode()
-        .unwrap();
-    let cases = [
-        (
-            743,
-            vec![0x18, 0x07],
-            compact_columns_for_mapping(field, "Int", "ovb"),
-            None,
-        ),
-        (
-            744,
-            canonical_bool,
-            compact_columns_for_mapping(field, "Int", "ovb"),
-            None,
-        ),
-        (
-            745,
-            canonical_int.clone(),
-            compact_columns_for_mapping_with_parameters(field, "Int", "ovb", Vec::new()),
-            None,
-        ),
-        (
-            746,
-            canonical_int.clone(),
-            compact_columns_for_mapping(field, "Int", "ovb"),
-            Some(" (UTF8)"),
-        ),
-    ];
-    for (ordinal, value, columns, annotation) in cases {
-        let segment = compact_ovb_segment_for_schema(
-            table,
-            ordinal,
-            CompactSegmentRole::Data,
-            &schema,
-            field,
-            columns,
-            std::slice::from_ref(&value),
-            canonical_int.clone(),
-            canonical_int.clone(),
-            annotation,
-        );
-        assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject immutable ovb fallback mismatch",
-            ),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-    }
-}
-
-#[test]
-fn compact_publication_rejects_a_schema_owned_by_another_table() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let schema_table = Uuid::new_v4();
-    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0703);
-    let schema = compact_schema_with_roles(schema_table, &[(key, "key", 0)]);
-    let segment = compact_segment_for_schema(
-        table,
-        703,
-        CompactSegmentRole::Data,
-        &schema,
-        key,
-        "Int",
-        compact_columns_for_mapping(key, "Int", "int64"),
-    );
-    let head = repo.head().unwrap().unwrap();
-
-    assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&schema)),
-            [70; 16],
-            [70; 32],
-            &[segment],
-            "reject compact foreign-table schema",
-        ),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-}
-
-#[test]
-fn compact_publication_requires_complete_unique_known_stored_mappings() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0711);
-    let stored = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0712);
-    let unknown = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0713);
-    let schema = compact_schema_with_roles(table, &[(key, "key", 0), (stored, "stored", 1)]);
-    let head = repo.head().unwrap().unwrap();
-
-    for (ordinal, physical_field, columns) in [
-        (711, key, compact_columns_for_mapping(key, "Int", "int64")),
-        (
-            712,
-            unknown,
-            compact_columns_for_mapping(unknown, "Int", "int64"),
-        ),
-        (
-            713,
-            key,
-            CanonicalValue::new(OvbRaw::Array(vec![
-                OvbRaw::Array(vec![
-                    OvbRaw::Array(vec![OvbRaw::Tag(
-                        37,
-                        Box::new(OvbRaw::Bytes(key.as_bytes().to_vec())),
-                    )]),
-                    OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", key.simple()))]),
-                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
-                    OvbRaw::Text("int64".to_owned()),
-                    OvbRaw::Array(Vec::new()),
-                ]),
-                OvbRaw::Array(vec![
-                    OvbRaw::Array(vec![OvbRaw::Tag(
-                        37,
-                        Box::new(OvbRaw::Bytes(key.as_bytes().to_vec())),
-                    )]),
-                    OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", key.simple()))]),
-                    OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".to_owned())]),
-                    OvbRaw::Text("int64".to_owned()),
-                    OvbRaw::Array(Vec::new()),
-                ]),
-            ]))
-            .unwrap()
-            .encode()
-            .unwrap(),
-        ),
-    ] {
-        let segment = compact_segment_for_schema(
-            table,
-            ordinal,
-            CompactSegmentRole::Data,
-            &schema,
-            physical_field,
-            "Int",
-            columns,
-        );
-        assert!(matches!(
-            repo.prepare_compact_publication(
-                &head,
-                repo.index_generation().unwrap(),
-                CompactManifest::empty(table, schema_fingerprint(&schema)),
-                [ordinal as u8; 16],
-                [ordinal as u8; 32],
-                &[segment],
-                "reject incomplete compact descriptor",
-            ),
-            Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-        ));
-    }
-}
-
-#[test]
-fn compact_publication_excludes_computed_fields_and_deletion_non_keys() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0721);
-    let computed = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0722);
-    let computed_schema =
-        compact_schema_with_roles(table, &[(key, "key", 0), (computed, "computed", 2)]);
-    let head = repo.head().unwrap().unwrap();
-    let accepted = compact_segment_for_schema(
-        table,
-        721,
-        CompactSegmentRole::Data,
-        &computed_schema,
-        key,
-        "Int",
-        compact_columns_for_mapping(key, "Int", "int64"),
-    );
-    assert!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&computed_schema)),
-            [72; 16],
-            [72; 32],
-            &[accepted],
-            "accept compact computed omission",
-        )
-        .is_ok()
-    );
-
-    let stored = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0723);
-    let deletion_schema =
-        compact_schema_with_roles(table, &[(key, "key", 0), (stored, "stored", 1)]);
-    let deletion = compact_segment_for_schema(
-        table,
-        722,
-        CompactSegmentRole::Deletion,
-        &deletion_schema,
-        stored,
-        "Int",
-        compact_columns_for_mapping(stored, "Int", "int64"),
-    );
-    assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint(&deletion_schema)),
-            [73; 16],
-            [73; 32],
-            &[deletion],
-            "reject compact deletion stored field",
-        ),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-}
-
-#[test]
-fn compact_publication_rejects_a_descriptor_that_does_not_match_parquet_leaves() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let head = repo.head().unwrap().unwrap();
-    let segment = compact_segment_with_manifest_columns(
-        table,
-        1,
-        b"compact object\n".to_vec(),
-        compact_columns_for_field(Uuid::from_u64_pair(7, 39)),
-    );
-
-    assert!(matches!(
-        repo.prepare_compact_publication(
-            &head,
-            repo.index_generation().unwrap(),
-            CompactManifest::empty(table, compact_schema_fingerprint(table)),
-            [39; 16],
-            [39; 32],
-            &[segment],
-            "orna: publish compact runtime data",
-        ),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(head));
-}
-
-#[test]
-fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_identity() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [40; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-    let shard_path =
-        ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
-    let manifest = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                manifest_path.as_path().display()
-            ),
-        ],
-    );
-    let shard = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                shard_path.as_path().display()
-            ),
-        ],
-    );
-    let expected_columns = base64(&compact_columns());
-    let malformed_columns = base64(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
-    let malformed_shard = String::from_utf8(shard)
-        .unwrap()
-        .replacen(&expected_columns, &malformed_columns, 1)
-        .into_bytes();
-    let expected_hash = manifest_hash_for(&manifest, "shards/00000000.orna");
-    let malformed_manifest = String::from_utf8(manifest)
-        .unwrap()
-        .replacen(
-            &expected_hash,
-            &hex_digest(&Sha256::digest(&malformed_shard)),
-            1,
-        )
-        .into_bytes();
-    let malformed = repo
-        .build_private_commit(
-            &head,
-            &[
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(malformed_manifest)),
-                orna_repository_v1::ManagedFileChange::new(shard_path, Some(malformed_shard)),
-            ],
-            "test: commit malformed compact descriptor",
-        )
-        .unwrap();
-    repo.advance_current_ref(&head, &malformed).unwrap();
-
-    assert!(matches!(
-        repo.read_compact_manifest(malformed.commit(), table),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-}
-
-#[test]
-fn compact_publication_canonically_shards_at_256_and_preserves_ordinary_git_state() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-
-    let segments = (0..257)
-        .map(|ordinal| compact_segment(table, ordinal, format!("segment-{ordinal}\n").into_bytes()))
-        .collect::<Vec<_>>();
-    let plan = compact_plan(&repo, table, [41; 16], &segments);
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    let head = repo.head().unwrap().unwrap();
-    let manifest = repo.read_compact_manifest(&head, table).unwrap().unwrap();
-    assert_eq!(manifest.entries().len(), 257);
-    assert_eq!(manifest.next_generation(), 2);
-    assert!(
-        manifest
-            .entries()
-            .iter()
-            .all(|entry| entry.generation() == 1)
-    );
-    let manifest_text = git(
-        root.path(),
-        &[
-            "show",
-            &format!("{}:.orna/storage/{table}/manifest.orna", head),
-        ],
-    );
-    assert_eq!(manifest_text.matches("entries: 256").count(), 1);
-    assert_eq!(manifest_text.matches("entries: 1").count(), 1);
-    assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged ordinary"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("main.orna")).unwrap(),
-        "unstaged ordinary\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-}
-
-#[test]
-fn compact_publication_rejects_a_noncanonical_reordered_candidate_manifest() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let segments = (1..=2)
-        .map(|ordinal| compact_segment(table, ordinal, format!("segment-{ordinal}\n").into_bytes()))
-        .collect::<Vec<_>>();
-    let plan = compact_plan(&repo, table, [44; 16], &segments);
-
-    let head = repo.head().unwrap().unwrap();
-    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-    let shard_path =
-        ManagedPath::new(format!(".orna/storage/{table}/shards/00000000.orna")).unwrap();
-    let manifest = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                manifest_path.as_path().display()
-            ),
-        ],
-    );
-    let shard = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!(
-                "{}:{}",
-                plan.candidate_commit(),
-                shard_path.as_path().display()
-            ),
-        ],
-    );
-    let reordered_shard = reorder_two_canonical_shard_entries(&shard);
-    let reordered_hash = hex_digest(&Sha256::digest(&reordered_shard));
-    let original_manifest_hash: [u8; 32] = Sha256::digest(&manifest).into();
-    let original_hash = manifest_hash_for(&manifest, "shards/00000000.orna");
-    let reordered_manifest = String::from_utf8(manifest)
-        .unwrap()
-        .replacen(&original_hash, &reordered_hash, 1)
-        .into_bytes();
-    let reordered_manifest_hash: [u8; 32] = Sha256::digest(&reordered_manifest).into();
-    let candidate = repo
-        .build_private_commit(
-            &head,
-            &[
-                orna_repository_v1::ManagedFileChange::new(manifest_path, Some(reordered_manifest)),
-                orna_repository_v1::ManagedFileChange::new(shard_path, Some(reordered_shard)),
-            ],
-            "test: commit reordered compact records",
-        )
-        .unwrap();
-    assert_ne!(original_manifest_hash, reordered_manifest_hash);
-    repo.advance_current_ref(&head, &candidate).unwrap();
-    let state_before_read = git_state(&repo, root.path());
-    let error = repo
-        .read_compact_manifest(candidate.commit(), table)
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            orna_repository_v1::RepositoryError::InvalidCompactManifest
-        ),
-        "unexpected reordered-manifest rejection: {error:?}"
-    );
-    assert_eq!(git_state(&repo, root.path()), state_before_read);
-    assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged ordinary"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("main.orna")).unwrap(),
-        "unstaged ordinary\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-}
-
-fn git_bytes(directory: &Path, arguments: &[&str]) -> Vec<u8> {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {arguments:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
-
-fn reorder_two_canonical_shard_entries(bytes: &[u8]) -> Vec<u8> {
-    let text = std::str::from_utf8(bytes).unwrap();
-    let entries = text
-        .strip_prefix("{entries: [")
-        .unwrap()
-        .strip_suffix("]}\n")
-        .unwrap();
-    let (first, second) = entries.split_once("}, {").unwrap();
-    format!("{{entries: [{{{second}}}, {{{first}}}]}}\n").into_bytes()
-}
-
-fn manifest_hash_for(bytes: &[u8], shard: &str) -> String {
-    let text = std::str::from_utf8(bytes).unwrap();
-    let marker = format!("file: \"{shard}\", hash: \"");
-    let hash = text.split_once(&marker).unwrap().1;
-    hash[..64].to_owned()
-}
-
 fn hex_digest(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
-fn compact_publication_refuses_missing_or_corrupt_referenced_objects_before_ref_advance() {
-    for corrupt in [false, true] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let segment = compact_segment(table, 1, b"compact object\n".to_vec());
-        let plan = compact_plan(
-            &repo,
-            table,
-            if corrupt { [43; 16] } else { [42; 16] },
-            &[segment],
-        );
-        let head = repo.head().unwrap().unwrap();
-        let object = plan.manifest().entries()[0].git_object_id();
-        let object_path = root
-            .path()
-            .join(".git/objects")
-            .join(&object[..2])
-            .join(&object[2..]);
-        assert!(object_path.is_file());
-        #[cfg(unix)]
-        fs::set_permissions(
-            &object_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .unwrap();
-        if corrupt {
-            fs::write(&object_path, b"corrupt").unwrap();
-        } else {
-            fs::remove_file(&object_path).unwrap();
-        }
-        assert!(matches!(
-            publish_compact_repository_boundary(&repo, plan),
-            Err(orna_repository_v1::RepositoryError::GitOperationFailed)
-        ));
-        assert_eq!(repo.head().unwrap(), Some(head));
-        assert_eq!(repo.read_publication_journal().unwrap(), None);
-    }
-}
-
-#[test]
-fn compact_manifest_journal_recovery_proves_candidate_before_reconciling() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-
-    let plan = compact_plan(
-        &repo,
-        table,
-        [44; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
-    ));
-    assert_eq!(
-        git(root.path(), &["show", ":ordinary.txt"]),
-        "staged ordinary"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("main.orna")).unwrap(),
-        "unstaged ordinary\n"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-    let persisted = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(persisted.compact_manifest().unwrap().object_count(), 1);
-    assert_eq!(persisted.compact_manifest().unwrap().generation(), 1);
-}
-
-#[test]
-fn compact_post_ref_recovery_preserves_unrelated_partial_staging() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(
-        root.path().join("ordinary.txt"),
-        "staged ordinary\nunstaged ordinary\n",
-    )
-    .unwrap();
-    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
-    let unstaged_before = git(root.path(), &["diff", "--binary"]);
-
-    let plan = compact_plan(
-        &repo,
-        table,
-        [53; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    git(
-        root.path(),
-        &[
-            "update-ref",
-            "refs/heads/main",
-            candidate.as_str(),
-            head.as_str(),
-        ],
-    );
-
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        recovery,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref pending)
-            if pending.commit() == &candidate
-    ));
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-    assert!(
-        repo.read_compact_manifest(&candidate, table)
-            .unwrap()
-            .is_some()
-    );
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_post_ref_worktree_conflict_retains_journal_and_retries_reconciliation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged source\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
-    let unstaged_before = git(root.path(), &["diff", "--binary"]);
-
-    let segment = compact_segment(table, 1, b"compact object\n".to_vec());
-    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let segment_path = PathBuf::from(format!(
-        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-        &segment_id.to_string()[..2]
-    ));
-    let plan = compact_plan(&repo, table, [54; 16], &[segment]);
-    let old_head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    git(
-        root.path(),
-        &[
-            "update-ref",
-            "refs/heads/main",
-            candidate.as_str(),
-            old_head.as_str(),
-        ],
-    );
-
-    let conflict = root.path().join(&segment_path);
-    fs::create_dir_all(conflict.parent().unwrap()).unwrap();
-    fs::write(&conflict, b"concurrent worktree content\n").unwrap();
-    assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(RepositoryError::ManagedContentConflict)
-    ));
-    let retained = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(retained.stage(), PublicationJournalStage::IndexReconciled);
-    assert_eq!(repo.head().unwrap(), Some(candidate.clone()));
-    assert_eq!(
-        fs::read(&conflict).unwrap(),
-        b"concurrent worktree content\n"
-    );
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-
-    fs::remove_file(conflict).unwrap();
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        recovery,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(pending)
-            if pending.commit() == &candidate
-    ));
-    let completed = repo.read_publication_journal().unwrap().unwrap();
-    assert_eq!(
-        completed.stage(),
-        PublicationJournalStage::WorktreeReconciled
-    );
-    let published_segment = Command::new("git")
-        .current_dir(root.path())
-        .args([
-            "show",
-            &format!("{}:{}", candidate.as_str(), segment_path.display()),
-        ])
-        .output()
-        .unwrap();
-    assert!(published_segment.status.success());
-    assert_eq!(
-        fs::read(root.path().join(&segment_path)).unwrap(),
-        published_segment.stdout
-    );
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-}
-
-#[test]
-fn compact_prepared_publication_stale_head_retains_journal_and_requires_reconciliation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let intent = [55; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    let index_at_preparation = repo.index_generation().unwrap();
-
-    repo.persist_compact_publication(&plan).unwrap();
-    let prepared = repo.read_publication_journal().unwrap().unwrap();
-    let watermark = prepared.compact_manifest().unwrap().cleanup_watermark();
-    assert_eq!(prepared.runtime_intent_id(), Some(intent));
-    assert_eq!(
-        prepared.stage(),
-        orna_repository_v1::PublicationJournalStage::Prepared
-    );
-
-    git(
-        root.path(),
-        &["commit", "--allow-empty", "-m", "human branch advance"],
-    );
-    let current = repo.head().unwrap().unwrap();
-    let index_after_human_commit = repo.index_generation().unwrap();
-    assert_ne!(current, *index_at_preparation.head().unwrap());
-    assert_eq!(index_after_human_commit.tree(), index_at_preparation.tree());
-
-    assert!(matches!(
-        repo.publish_compact_repository_boundary(plan),
-        Err(orna_repository_v1::RepositoryError::StaleHead)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(current.clone()));
-    assert_eq!(
-        repo.read_publication_journal().unwrap(),
-        Some(prepared.clone())
-    );
-
-    let recovery = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    match recovery {
-        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
-            assert_eq!(value.candidate(), &candidate);
-            assert_eq!(value.current_head(), &current);
-            assert_eq!(value.runtime_intent_id(), intent);
-            assert_eq!(value.cleanup_watermark(), watermark);
-            assert_eq!(
-                value.stage(),
-                orna_repository_v1::PublicationJournalStage::Prepared
-            );
-        }
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
-            panic!("stale compact candidate must require explicit reconciliation")
-        }
-    }
-    assert_eq!(repo.head().unwrap(), Some(current));
-    assert_eq!(repo.read_publication_journal().unwrap(), Some(prepared));
-}
-
-#[test]
-fn compact_recovery_rejects_an_unknown_profile_without_clearing_the_receipt() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [54; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-
-    let manifest_path = ManagedPath::new(format!(".orna/storage/{table}/manifest.orna")).unwrap();
-    let manifest = git_bytes(
-        root.path(),
-        &[
-            "show",
-            &format!("{}:{}", candidate, manifest_path.as_path().display()),
-        ],
-    );
-    let unsupported = String::from_utf8(manifest)
-        .unwrap()
-        .replacen("compact-storage-v1", "unsupported-profile-v9", 1)
-        .into_bytes();
-    let malformed = repo
-        .build_private_commit(
-            &candidate,
-            &[orna_repository_v1::ManagedFileChange::new(
-                manifest_path,
-                Some(unsupported),
-            )],
-            "test: commit unsupported compact profile",
-        )
-        .unwrap();
-    repo.advance_current_ref(&candidate, &malformed).unwrap();
-
-    assert!(matches!(
-        repo.recover_compact_publication_boundary(),
-        Err(orna_repository_v1::RepositoryError::InvalidCompactManifest)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(malformed.commit().clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_manifest_journal_keeps_the_runtime_prefix_at_pre_ref_and_unproven_post_ref_boundaries() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [48; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let head = repo.head().unwrap().unwrap();
-    let candidate = plan.candidate_commit().clone();
-    repo.persist_compact_publication(&plan).unwrap();
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::PublicationPending)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(head.clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-
-    publish_compact_repository_boundary(&repo, plan).unwrap();
-    let manifest_path = format!("{}:.orna/storage/{table}/manifest.orna", candidate);
-    let manifest_object = git(root.path(), &["rev-parse", &manifest_path]);
-    let object_path = root
-        .path()
-        .join(".git/objects")
-        .join(&manifest_object[..2])
-        .join(&manifest_object[2..]);
-    #[cfg(unix)]
-    fs::set_permissions(
-        &object_path,
-        std::os::unix::fs::PermissionsExt::from_mode(0o600),
-    )
-    .unwrap();
-    fs::remove_file(&object_path).unwrap();
-
-    assert!(matches!(
-        repo.recover_publication(),
-        Err(orna_repository_v1::RepositoryError::GitOperationFailed)
-    ));
-    assert_eq!(repo.head().unwrap(), Some(candidate.clone()));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-}
-
-#[test]
-fn compact_publication_rebuilds_from_the_current_manifest_after_a_stale_head() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let stale_segment = compact_segment(table, 1, b"stale candidate\n".to_vec());
-
-    let winner = compact_plan(
-        &repo,
-        table,
-        [46; 16],
-        &[compact_segment(table, 2, b"winner\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(winner).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    repo.finish_compact_with_receipt(&receipt).unwrap();
-    assert_eq!(repo.read_publication_journal().unwrap(), None);
-
-    let rebuilt = repo
-        .rebuild_compact_publication_with_watermark(
-            table,
-            compact_schema_fingerprint(table),
-            [45; 16],
-            [45; 32],
-            &[stale_segment],
-            "orna: publish compact runtime data",
-        )
-        .unwrap();
-    let generation = rebuilt.manifest().next_generation();
-    publish_compact_repository_boundary(&repo, rebuilt).unwrap();
-    assert_eq!(generation, 3);
-    assert!(
-        repo.read_compact_manifest(&repo.head().unwrap().unwrap(), table)
-            .unwrap()
-            .unwrap()
-            .entries()
-            .iter()
-            .any(|entry| entry.generation() == 2)
-    );
-}
-
-#[test]
-fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let plan = compact_plan(
-        &repo,
-        table,
-        [67; 16],
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    repo.finish_compact_with_receipt(&receipt).unwrap();
-    assert_eq!(repo.read_publication_journal().unwrap(), None);
-
-    let published = repo.head().unwrap().unwrap();
-    let manifest_path = format!(".orna/storage/{table}/manifest.orna");
-    let manifest_object = git(
-        root.path(),
-        &["rev-parse", &format!("{published}:{manifest_path}")],
-    );
-    let manifest = repo
-        .read_compact_manifest(&published, table)
-        .unwrap()
-        .unwrap();
-    let entry = manifest.entries().first().unwrap();
-    let segment_path = entry.relative_path().as_path().display().to_string();
-    let segment_object = entry.git_object_id().to_owned();
-    assert_eq!(
-        git(
-            root.path(),
-            &["rev-parse", &format!("{published}:{segment_path}")],
-        ),
-        segment_object
-    );
-
-    fs::write(root.path().join("ordinary.txt"), "staged ordinary\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    fs::write(root.path().join("main.orna"), "unstaged ordinary\n").unwrap();
-    fs::write(root.path().join("untracked.txt"), "untracked ordinary\n").unwrap();
-    let staged_before = git(root.path(), &["diff", "--cached", "--binary"]);
-    let unstaged_before = git(root.path(), &["diff", "--binary"]);
-
-    fs::write(root.path().join("ordinary-commit.txt"), "ordinary commit\n").unwrap();
-    git(root.path(), &["add", "ordinary-commit.txt"]);
-    git(
-        root.path(),
-        &[
-            "commit",
-            "-m",
-            "ordinary commit after compact publication",
-            "ordinary-commit.txt",
-        ],
-    );
-
-    let current = repo.head().unwrap().unwrap();
-    assert_ne!(current, published);
-    assert_eq!(
-        git(
-            root.path(),
-            &["rev-parse", &format!("{current}:{manifest_path}")],
-        ),
-        manifest_object
-    );
-    assert_eq!(
-        git(
-            root.path(),
-            &["rev-parse", &format!("{current}:{segment_path}")],
-        ),
-        segment_object
-    );
-    assert_eq!(
-        repo.read_compact_manifest(&current, table)
-            .unwrap()
-            .unwrap(),
-        manifest
-    );
-    assert_eq!(
-        git(root.path(), &["diff", "--cached", "--binary"]),
-        staged_before
-    );
-    assert_eq!(git(root.path(), &["diff", "--binary"]), unstaged_before);
-    assert_eq!(
-        fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "untracked ordinary\n"
-    );
-}
-
-#[test]
-fn compact_publication_refuses_missing_manifest_or_shard_witness_before_ref_advance() {
-    for (ordinal, witness_path) in [(70, "manifest.orna"), (71, "shards/00000000.orna")] {
-        let root = repository();
-        let repo = Repository::discover(root.path()).unwrap();
-        let table = Uuid::new_v4();
-        let plan = compact_plan(
-            &repo,
-            table,
-            [ordinal as u8; 16],
-            &[compact_segment(
-                table,
-                ordinal,
-                b"compact object\n".to_vec(),
-            )],
-        );
-        let head = repo.head().unwrap().unwrap();
-        let object = git(
-            root.path(),
-            &[
-                "rev-parse",
-                &format!(
-                    "{}:.orna/storage/{table}/{witness_path}",
-                    plan.candidate_commit()
-                ),
-            ],
-        );
-        let object_path = root
-            .path()
-            .join(".git/objects")
-            .join(&object[..2])
-            .join(&object[2..]);
-        #[cfg(unix)]
-        fs::set_permissions(
-            &object_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .unwrap();
-        fs::remove_file(&object_path).unwrap();
-
-        let error = publish_compact_repository_boundary(&repo, plan).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                orna_repository_v1::RepositoryError::InvalidPublicationJournal
-                    | orna_repository_v1::RepositoryError::GitOperationFailed
-            ),
-            "unexpected missing-witness rejection: {error:?}"
-        );
-        assert_eq!(repo.head().unwrap(), Some(head));
-        assert_eq!(repo.read_publication_journal().unwrap(), None);
-    }
-}
-
-#[test]
-fn compact_runtime_fence_rejects_a_runtime_failure_without_mutation() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [49; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let candidate = plan.candidate_commit().clone();
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    assert_eq!(pending.runtime_intent_id(), intent);
-    assert_eq!(pending.cleanup_watermark(), [49; 32]);
-    let recovered = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    let recovered_again = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    assert_eq!(recovered, recovered_again);
-    assert!(matches!(
-        recovered,
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value)
-            if value == &pending
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    assert_eq!(repo.head().unwrap(), Some(candidate));
-}
-
-#[test]
-fn compact_runtime_fence_rejects_signed_receipt_with_mismatched_frozen_proof() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [50; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let mismatched_watermark = [51; 32];
-    let signing_bytes = CompactRuntimeReceipt::signing_bytes(
-        pending.runtime_intent_id(),
-        mismatched_watermark,
-        pending.commit(),
-        pending.journal_verifier(),
-    )
-    .unwrap();
-    let receipt = CompactRuntimeReceipt::new(
-        pending.runtime_intent_id(),
-        mismatched_watermark,
-        pending.commit().clone(),
-        pending.journal_verifier(),
-        signing_key.sign(&signing_bytes).to_bytes(),
-    )
-    .unwrap();
-
-    assert!(matches!(
-        repo.finish_compact_with_receipt(&receipt),
-        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
-    ));
-    assert!(matches!(
-        repo.recover_compact_publication_boundary().unwrap(),
-        Some(orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(ref value))
-            if value == &pending
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    assert_eq!(repo.head().unwrap(), Some(pending.commit().clone()));
-}
-
-#[test]
-fn compact_runtime_fence_rejects_ref_drift_before_cleanup() {
-    let root = repository();
-    let repo = Repository::discover(root.path()).unwrap();
-    let signing_key = compact_receipt_signing_key();
-    provision_compact_receipt_trust_root(&repo, &signing_key);
-    let table = Uuid::new_v4();
-    let intent = [51; 16];
-    let plan = compact_plan(
-        &repo,
-        table,
-        intent,
-        &[compact_segment(table, 1, b"compact object\n".to_vec())],
-    );
-    let pending = repo.publish_compact_repository_boundary(plan).unwrap();
-    let receipt = compact_runtime_receipt(&pending, &signing_key);
-    fs::write(root.path().join("ordinary.txt"), "native writer\n").unwrap();
-    git(root.path(), &["add", "ordinary.txt"]);
-    git(root.path(), &["commit", "-m", "native writer"]);
-    let result = repo.finish_compact_with_receipt(&receipt);
-    assert!(matches!(
-        result,
-        Err(orna_repository_v1::RepositoryError::StaleHead)
-    ));
-    assert!(repo.read_publication_journal().unwrap().is_some());
-    let reconciliation = repo
-        .recover_compact_publication_boundary()
-        .unwrap()
-        .unwrap();
-    match reconciliation {
-        orna_repository_v1::CompactPublicationRecovery::ReconciliationRequired(value) => {
-            assert_eq!(value.candidate(), pending.commit());
-            assert_ne!(value.current_head(), pending.commit());
-            assert_eq!(value.runtime_intent_id(), intent);
-            assert_eq!(value.cleanup_watermark(), [51; 32]);
-        }
-        orna_repository_v1::CompactPublicationRecovery::PendingRuntimeReceipt(_) => {
-            panic!("ref drift must require explicit reconciliation")
-        }
-    }
-}
-
-#[test]
 fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
     for format in [
-        include_str!("fixtures/format-context/format-1.orna"),
-        include_str!("fixtures/format-context/format-2.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
     ] {
         let root = repository_with_legacy_format(format);
         let dependency_source = TempDir::new().unwrap();
@@ -7727,7 +4587,7 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
             PublicationJournalStage::WorktreeReconciled
         );
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
@@ -7758,7 +4618,7 @@ fn legacy_format_migration_uses_pub3_journal_and_preserves_user_state() {
 
 #[test]
 fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -7860,7 +4720,7 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
 
 #[test]
 fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -7957,7 +4817,7 @@ fn recovery_refuses_to_finish_an_unstarted_legacy_migration_and_keeps_its_pin() 
 
 #[test]
 fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -8008,8 +4868,8 @@ fn legacy_format_migration_rejects_implicit_relabel_without_publication() {
 #[test]
 fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinate() {
     for format in [
-        include_str!("fixtures/format-context/format-1.orna"),
-        include_str!("fixtures/format-context/format-2.orna"),
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+        include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
     ] {
         let root = repository_with_legacy_format(format);
         let repo = Repository::discover(root.path()).unwrap();
@@ -8118,7 +4978,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
         assert_eq!(repo.head().unwrap(), Some(old_head.clone()));
         assert!(repo.read_publication_journal().unwrap().is_none());
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
@@ -8173,7 +5033,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
             3
         );
         assert_eq!(
-            repo.read_committed_file(&old_head, ".orna/format.orna", 64)
+            repo.read_committed_file(&old_head, ".orna/format.orna", format.len())
                 .unwrap(),
             format.as_bytes()
         );
@@ -8186,7 +5046,7 @@ fn legacy_format_migration_requires_and_reports_the_annotation_default_coordinat
 
 #[test]
 fn resumed_legacy_migration_reports_the_recorded_successor_identity_without_resetting_it() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -8402,7 +5262,7 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
     // its consumer/checkpoint identity intact. The journal crosses the failure
     // at a durable stage, and recovery completes the migration from the record
     // instead of re-keying the streams it already carried.
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -8543,7 +5403,7 @@ fn interrupted_legacy_migration_recovers_without_resetting_the_recorded_consumer
 
 #[test]
 fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edits() {
-    let format = include_str!("fixtures/format-context/format-1.orna");
+    let format = include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     let root = repository_with_legacy_format(format);
     let repo = Repository::discover(root.path()).unwrap();
     let old_head = repo.head().unwrap().unwrap();
@@ -8708,8 +5568,8 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
 #[test]
 fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates() {
     for (format, format_number) in [
-        (include_str!("fixtures/format-context/format-1.orna"), 1u8),
-        (include_str!("fixtures/format-context/format-2.orna"), 2u8),
+        (include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"), 1u8),
+        (include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"), 2u8),
     ] {
         let source = repository_with_legacy_format(format);
         let module_source = TempDir::new().unwrap();
