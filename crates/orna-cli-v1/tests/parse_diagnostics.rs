@@ -10,248 +10,178 @@ use tempfile::TempDir;
 const MODULE_FIXTURES: &[(&str, &str, &str)] = &[
     (
         "assert-empty.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/assert-empty.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/assert-empty.orna"),
         "ORNA-A091-011",
     ),
     (
         "assert-missing-semicolon.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/assert-missing-semicolon.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/assert-missing-semicolon.orna"),
         "ORNA-A091-005",
     ),
     (
         "assignment-expression.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/assignment-expression.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/assignment-expression.orna"),
         "E1301",
     ),
     (
         "comparison-chain.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/comparison-chain.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/comparison-chain.orna"),
         "E1302",
     ),
     (
         "legacy-assert-else.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-assert-else.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-assert-else.orna"),
         "ORNA-A091-006",
     ),
     (
         "legacy-assert-pipe-bang.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-assert-pipe-bang.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-assert-pipe-bang.orna"),
         "ORNA-A091-010",
     ),
     (
         "legacy-colon-bound.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-colon-bound.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-colon-bound.orna"),
         "ORNA091-E-BOUND-COLON",
     ),
     (
         "legacy-constraints-block.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-constraints-block.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-constraints-block.orna"),
         "ORNA-A091-010",
     ),
     (
         "legacy-currency-declaration.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-currency-declaration.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-currency-declaration.orna"),
         "ORNA091-E-CURRENCY",
     ),
     (
         "legacy-empty-closure.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-empty-closure.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-empty-closure.orna"),
         "E1012",
     ),
     (
         "legacy-ensure.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-ensure.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-ensure.orna"),
         "ORNA-A091-010",
     ),
     (
         "legacy-fact.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-fact.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-fact.orna"),
         "ORNA-A091-010",
     ),
     (
         "legacy-field-check.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-field-check.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-field-check.orna"),
         "ORNA091-E-FIELD-CONSTRAINT",
     ),
     (
         "legacy-field-unique.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-field-unique.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-field-unique.orna"),
         "ORNA091-E-FIELD-CONSTRAINT",
     ),
     (
         "legacy-ingest.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-ingest.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-ingest.orna"),
         "E1004",
     ),
     (
         "legacy-log.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-log.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-log.orna"),
         "E1001",
     ),
     (
         "legacy-match.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-match.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-match.orna"),
         "ORNA091-E-MATCH",
     ),
     (
         "legacy-opaque.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-opaque.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-opaque.orna"),
         "ORNA091-E-OPAQUE",
     ),
     (
         "legacy-pipe-lambda.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-pipe-lambda.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-pipe-lambda.orna"),
         "E1011",
     ),
     (
         "legacy-postfix-question.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-postfix-question.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-postfix-question.orna"),
         "ORNA091-E-POSTFIX-QUESTION",
     ),
     (
         "legacy-refined-where.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-refined-where.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-refined-where.orna"),
         "ORNA-A091-001",
     ),
     (
         "legacy-return-arrow.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-return-arrow.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-return-arrow.orna"),
         "ORNA091-E-RETURN-ARROW",
     ),
     (
         "legacy-store.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-store.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-store.orna"),
         "E1003",
     ),
     (
         "legacy-top-level-impl.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-top-level-impl.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-top-level-impl.orna"),
         "ORNA091-E-IMPL-FOR",
     ),
     (
         "legacy-var.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-var.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-var.orna"),
         "ORNA091-E-VAR",
     ),
     (
         "legacy-view.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/legacy-view.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/legacy-view.orna"),
         "E1002",
     ),
     (
         "question-coalesce-adjacent.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/question-coalesce-adjacent.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/question-coalesce-adjacent.orna"),
         "ORNA091-E-POSTFIX-QUESTION",
     ),
     (
         "question-on-int.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/question-on-int.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/question-on-int.orna"),
         "ORNA091-E-POSTFIX-QUESTION",
     ),
     (
         "record-punning.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/record-punning.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/record-punning.orna"),
         "E1013",
     ),
     (
         "static-protocol-function.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/static-protocol-function.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/static-protocol-function.orna"),
         "ORNA091-E-STATIC-FN",
     ),
     (
         "top-level-expression.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/top-level-expression.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/top-level-expression.orna"),
         "E1006",
     ),
     (
         "top-level-on.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/top-level-on.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/top-level-on.orna"),
         "E1005",
     ),
     (
         "transaction-block.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/transaction-block.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/transaction-block.orna"),
         "E1007",
     ),
     (
         "unparenthesized-lambda-stage.orna",
-        include_str!(
-            "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/unparenthesized-lambda-stage.orna"
-        ),
+        include_str!("fixtures/parse-phase-invalid/unparenthesized-lambda-stage.orna"),
         "E1204",
     ),
 ];
 
 /// `row_unit` parse-phase fixture: one record expression, no declarations.
-const ROW_DECLARATION: &str = include_str!(
-    "../../orna-conformance-v1/tests/fixtures/reference/examples/invalid/row-declaration.orna"
-);
+const ROW_DECLARATION: &str = include_str!("fixtures/parse-phase-invalid/row-declaration.orna");
 
 const TABLE_MAIN: &str = "pub table X { value: Int, }\n";
 
