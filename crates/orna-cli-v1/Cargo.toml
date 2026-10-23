@@ -58,4 +58,4 @@ tungstenite = { version = "0.26.2", features = ["handshake"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"
-rustix = { version = "0.38.44", features = ["fs"] }
+rustix = { version = "0.38.44", features = ["fs", "process"] }
