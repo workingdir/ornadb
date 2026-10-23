@@ -4418,17 +4418,18 @@ fn admin_reference_descriptor(
     }
 }
 
-fn replay_admin_stream_result(
+async fn replay_admin_stream_result(
+    connection: &Connection,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
     if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
-        return Err(match failure {
-            "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
-            "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
-            "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
-            "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
-            _ => RuntimeError::StorageUnavailable,
-        });
+        if failure == "stale_capture" {
+            // The stored row proves the admission was stale; the rejection carries the capture current at replay.
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(capture_tx(connection).await?),
+            });
+        }
+        return Err(admin_failure_from_class(failure));
     }
     let result = match receipt.terminal_outcome.as_str() {
         "paused" => StreamAdministrationOutcome::Paused { changed: true },
@@ -4444,17 +4445,120 @@ fn replay_admin_stream_result(
     Ok(AdminOperationResult::Stream(result))
 }
 
-fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
+/// Stable failure class stored in admin audit rows. Exhaustive: every new
+/// variant must choose its class here.
+fn admin_failure_class(error: &RuntimeError) -> &'static str {
     match error {
-        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::InvalidIdentity => "invalid_identity",
+        RuntimeError::InvalidDigest => "invalid_digest",
         RuntimeError::InvalidObservationReference => "invalid_observation_reference",
-        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::ObservationCoordinateMismatch => "observation_coordinate_mismatch",
+        RuntimeError::ProcedureMaterializationConflict => "procedure_materialization_conflict",
+        RuntimeError::InvocationObservationConflict => "invocation_observation_conflict",
+        RuntimeError::InvocationStateConflict => "invocation_state_conflict",
+        RuntimeError::QueryObservationConflict => "query_observation_conflict",
+        RuntimeError::QueryStateConflict => "query_state_conflict",
+        RuntimeError::InvocationChildrenActive => "invocation_children_active",
+        RuntimeError::InvocationOwnerInvalid => "invocation_owner_invalid",
+        RuntimeError::InvocationTailInvalid => "invocation_tail_invalid",
+        RuntimeError::InvocationTailLimit => "invocation_tail_limit",
+        RuntimeError::StreamIdentityMismatch => "stream_identity_mismatch",
+        RuntimeError::StreamSourceNotReplayable => "stream_source_not_replayable",
         RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
-        _ => "unavailable",
+        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::SnapshotNotFound => "snapshot_not_found",
+        RuntimeError::SnapshotIncomplete => "snapshot_incomplete",
+        RuntimeError::SnapshotContextMismatch => "snapshot_context_mismatch",
+        RuntimeError::LeaseHeld => "lease_held",
+        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::AdminInvocationConflict => "admin_invocation_conflict",
+        RuntimeError::OwnerLost => "owner_lost",
+        RuntimeError::RecoveryPending => "recovery_pending",
+        RuntimeError::StaleCapture { .. } => "stale_capture",
+        RuntimeError::InvalidCapture => "invalid_capture",
+        RuntimeError::EmptyMutationBatch => "empty_mutation_batch",
+        RuntimeError::InvalidTableMutation => "invalid_table_mutation",
+        RuntimeError::ConflictingPublicationIntent => "conflicting_publication_intent",
+        RuntimeError::ConflictingPublicationCommit => "conflicting_publication_commit",
+        RuntimeError::InvalidPublicationCommit => "invalid_publication_commit",
+        RuntimeError::InvalidPublicationPolicy => "invalid_publication_policy",
+        RuntimeError::CompactPublicationRequired => "compact_publication_required",
+        RuntimeError::CompactReceiptKeyMismatch => "compact_receipt_key_mismatch",
+        RuntimeError::InvalidCompactReceipt => "invalid_compact_receipt",
+        RuntimeError::RequestUnknown => "request_unknown",
+        RuntimeError::RequestFingerprintMismatch => "request_fingerprint_mismatch",
+        RuntimeError::RequestOwnerConflict => "request_owner_conflict",
+        RuntimeError::RequestStateConflict => "request_state_conflict",
+        RuntimeError::SessionClosed => "session_closed",
+        RuntimeError::SessionWorkActive => "session_work_active",
+        RuntimeError::TerminalOutcomeTooLarge => "terminal_outcome_too_large",
+        RuntimeError::RecoveryInvalid => "recovery_invalid",
+        RuntimeError::FaultInjected(_) => "fault_injected",
+        RuntimeError::SystemProviderAbiInvalid => "system_provider_abi_invalid",
+        RuntimeError::StorageUnavailable => "storage_unavailable",
+        RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
     }
 }
 
-fn admin_result_from_receipt(
+/// Rebuilds the runtime error for a stored failure class. Payload-carrying
+/// classes keep no payload in the row, so they and unknown names surface as
+/// `RecoveryInvalid`; the legacy `unavailable` class predates stable names.
+fn admin_failure_from_class(class: &str) -> RuntimeError {
+    match class {
+        "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+        "invalid_identity" => RuntimeError::InvalidIdentity,
+        "invalid_digest" => RuntimeError::InvalidDigest,
+        "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
+        "observation_coordinate_mismatch" => RuntimeError::ObservationCoordinateMismatch,
+        "procedure_materialization_conflict" => RuntimeError::ProcedureMaterializationConflict,
+        "invocation_observation_conflict" => RuntimeError::InvocationObservationConflict,
+        "invocation_state_conflict" => RuntimeError::InvocationStateConflict,
+        "query_observation_conflict" => RuntimeError::QueryObservationConflict,
+        "query_state_conflict" => RuntimeError::QueryStateConflict,
+        "invocation_children_active" => RuntimeError::InvocationChildrenActive,
+        "invocation_owner_invalid" => RuntimeError::InvocationOwnerInvalid,
+        "invocation_tail_invalid" => RuntimeError::InvocationTailInvalid,
+        "invocation_tail_limit" => RuntimeError::InvocationTailLimit,
+        "stream_identity_mismatch" => RuntimeError::StreamIdentityMismatch,
+        "stream_source_not_replayable" => RuntimeError::StreamSourceNotReplayable,
+        "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
+        "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
+        "snapshot_not_found" => RuntimeError::SnapshotNotFound,
+        "snapshot_incomplete" => RuntimeError::SnapshotIncomplete,
+        "snapshot_context_mismatch" => RuntimeError::SnapshotContextMismatch,
+        "lease_held" => RuntimeError::LeaseHeld,
+        "admin_invocation_conflict" => RuntimeError::AdminInvocationConflict,
+        "owner_lost" => RuntimeError::OwnerLost,
+        "recovery_pending" => RuntimeError::RecoveryPending,
+        "invalid_capture" => RuntimeError::InvalidCapture,
+        "empty_mutation_batch" => RuntimeError::EmptyMutationBatch,
+        "invalid_table_mutation" => RuntimeError::InvalidTableMutation,
+        "conflicting_publication_intent" => RuntimeError::ConflictingPublicationIntent,
+        "conflicting_publication_commit" => RuntimeError::ConflictingPublicationCommit,
+        "invalid_publication_commit" => RuntimeError::InvalidPublicationCommit,
+        "invalid_publication_policy" => RuntimeError::InvalidPublicationPolicy,
+        "compact_publication_required" => RuntimeError::CompactPublicationRequired,
+        "compact_receipt_key_mismatch" => RuntimeError::CompactReceiptKeyMismatch,
+        "invalid_compact_receipt" => RuntimeError::InvalidCompactReceipt,
+        "request_unknown" => RuntimeError::RequestUnknown,
+        "request_fingerprint_mismatch" => RuntimeError::RequestFingerprintMismatch,
+        "request_owner_conflict" => RuntimeError::RequestOwnerConflict,
+        "request_state_conflict" => RuntimeError::RequestStateConflict,
+        "session_closed" => RuntimeError::SessionClosed,
+        "session_work_active" => RuntimeError::SessionWorkActive,
+        "terminal_outcome_too_large" => RuntimeError::TerminalOutcomeTooLarge,
+        "system_provider_abi_invalid" => RuntimeError::SystemProviderAbiInvalid,
+        "storage_unavailable" | "unavailable" => RuntimeError::StorageUnavailable,
+        _ => RuntimeError::RecoveryInvalid,
+    }
+}
+
+fn admin_observed_generation(capture: &CwdCapture) -> Result<u64, RuntimeError> {
+    u64::try_from(bigint_to_i64(capture.generation())?).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+async fn admin_result_from_receipt(
+    connection: &Connection,
     operation: Option<&AdminInvocationOperation>,
     descriptor: &AdminInvocationDescriptor,
     receipt: &AdminInvocationAudit,
@@ -4468,7 +4572,7 @@ fn admin_result_from_receipt(
     match operation {
         Some(AdminInvocationOperation::Reset { key, .. }) => {
             if receipt.terminal_outcome.starts_with("failure:") {
-                return replay_admin_stream_result(receipt);
+                return replay_admin_stream_result(connection, receipt).await;
             }
             let result = receipt
                 .checkpoint_reset_result
@@ -4482,7 +4586,7 @@ fn admin_result_from_receipt(
         }
         Some(AdminInvocationOperation::Pause { .. })
         | Some(AdminInvocationOperation::Resume { .. })
-        | None => replay_admin_stream_result(receipt),
+        | None => replay_admin_stream_result(connection, receipt).await,
     }
 }
 
@@ -5583,6 +5687,23 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
+    /// Applies a pause at the supplied CWD capture with a caller-stable
+    /// invocation identity. A retained receipt for that identity is returned
+    /// without reapplying the transition.
+    pub async fn pause_stream_at_capture_with_invocation_id(
+        &self,
+        lease: WriterLease,
+        key: CheckpointKey,
+        expected_capture: Option<&CwdCapture>,
+        invocation_id: [u8; 16],
+    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
+        let operation = AdminInvocationOperation::Pause { key, reason: None };
+        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
+        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
+            .await
+            .and_then(admin_stream_result)
+    }
+
     /// Applies a pause with a caller-stable invocation identity. A repeated
     /// identity with the same operation returns its retained outcome without
     /// reapplying the transition; reusing it for different arguments fails.
@@ -5880,7 +6001,7 @@ impl RuntimeState {
         {
             let error = RuntimeError::CheckpointNotReplayable;
             return match self
-                .record_failed_admin_descriptor(&descriptor, lease, &error)
+                .record_failed_admin_descriptor(&descriptor, lease, None, &error)
                 .await
             {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -5965,7 +6086,7 @@ impl RuntimeState {
         let descriptor =
             admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
         match self
-            .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
+            .record_failed_admin_descriptor(&descriptor, lease, None, &RuntimeError::AdminBusy)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => Err(RuntimeError::AdminBusy),
@@ -6110,14 +6231,23 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut admitted_generation: Option<u64> = None;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
             if let Some(receipt) =
                 load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
             {
-                return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                return admin_result_from_receipt(
+                    &transaction,
+                    Some(&operation),
+                    &descriptor,
+                    &receipt,
+                )
+                .await;
             }
             let current_capture = capture_tx(&transaction).await?;
+            let observed_generation = admin_observed_generation(&current_capture)?;
+            admitted_generation = Some(observed_generation);
             if let Some(expected_capture) = expected_capture {
                 if &current_capture != expected_capture {
                     return Err(RuntimeError::StaleCapture {
@@ -6125,8 +6255,6 @@ impl RuntimeState {
                     });
                 }
             }
-            let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let result =
                 apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
             store_admin_invocation_audit(
@@ -6159,10 +6287,16 @@ impl RuntimeState {
                     load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
                         .await?
                 {
-                    return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                    return admin_result_from_receipt(
+                        &self.connection,
+                        Some(&operation),
+                        &descriptor,
+                        &receipt,
+                    )
+                    .await;
                 }
                 match self
-                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .record_failed_admin_descriptor(&descriptor, lease, admitted_generation, &error)
                     .await
                 {
                     Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -6185,10 +6319,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, lease).await?;
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
-        let result = receipt
-            .as_ref()
-            .map(|receipt| admin_result_from_receipt(operation, descriptor, receipt))
-            .transpose()?;
+        let result = match receipt.as_ref() {
+            Some(receipt) => Some(
+                admin_result_from_receipt(&transaction, operation, descriptor, receipt).await?,
+            ),
+            None => None,
+        };
         transaction
             .commit()
             .await
@@ -6203,7 +6339,7 @@ impl RuntimeState {
     ) -> RuntimeError {
         let error = RuntimeError::AdminBusy;
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, None, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
@@ -6215,6 +6351,7 @@ impl RuntimeState {
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
         let transaction = self
@@ -6239,18 +6376,16 @@ impl RuntimeState {
                 Err(RuntimeError::AdminInvocationConflict)
             };
         }
-        let observed_generation = capture_tx(&transaction)
-            .await
-            .ok()
-            .and_then(|capture| bigint_to_i64(capture.generation()).ok())
-            .and_then(|generation| u64::try_from(generation).ok())
-            .unwrap_or(0);
+        let observed_generation = match admitted_generation {
+            Some(generation) => generation,
+            None => admin_observed_generation(&capture_tx(&transaction).await?)?,
+        };
         store_admin_invocation_audit(
             &transaction,
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{}", admin_failure_outcome(error)),
+            format!("failure:{}", admin_failure_class(error)),
             false,
             None,
         )
@@ -6268,7 +6403,7 @@ impl RuntimeState {
         error: RuntimeError,
     ) -> RuntimeError {
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, None, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
