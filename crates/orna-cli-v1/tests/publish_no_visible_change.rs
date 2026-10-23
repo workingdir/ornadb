@@ -9,7 +9,7 @@
 //!
 //! The repository is a real format-3 fixture built by `support/format3.rs`, the
 //! rows are committed through the real durable request path, and every
-//! publication is the real `orna-cli-v1` binary, so this proves the verb's exit
+//! publication is the real `orna` binary, so this proves the verb's exit
 //! status and output rather than a library call.
 use std::path::Path;
 use std::process::{Command, Output};
@@ -34,10 +34,10 @@ const REIMPORT_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")

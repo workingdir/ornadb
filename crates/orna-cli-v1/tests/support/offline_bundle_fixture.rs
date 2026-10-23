@@ -30,9 +30,9 @@ pub fn export_fixture_bundle(directory: &Path, file: &str) -> PathBuf {
     bundle
 }
 
-/// Runs `orna-cli-v1 import <bundle> --dry-run` with `extra` flags appended.
+/// Runs `orna import <bundle> --dry-run` with `extra` flags appended.
 pub fn run_import_dry_run(bundle: &Path, extra: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("import")
         .arg(bundle)
         .arg("--dry-run")
