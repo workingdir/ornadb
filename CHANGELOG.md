@@ -411,7 +411,7 @@ decision does not declare the product baseline complete. This checkout now has
 a minimal `packaging/linux/` provenance/install artifact recipe and focused
 tests, but it has no Debian changelog, signed artifact, or clean-host
 production-package evidence.
-See the [release-mechanics decision](docs/decisions/0047-first-one-zero-release.md)
+See the [release-mechanics decision](docs/decisions/archive/1.0/0047-first-one-zero-release.md)
 for the required release authority and the
 [maintainer runbook](docs/maintainer-runbook.md) for evidence rules.
 
@@ -449,7 +449,7 @@ release gate has passed.
   typed scalar/reference/record values, identity-selected mutations, client
   expression bodies, local/session/user state declarations, resources and
   actions, JSON, bounded table presentation, and the accepted structural UI
-  constructors. The [accepted demo inventory](examples/accepted-demos.toml)
+  constructors. The [accepted demo inventory BROKEN ](examples/accepted-demos.toml)
   is the authoritative list of checked-in examples; it is not a replacement
   for the missing canonical spec.
 - The CLI exposes function invocation, a bounded local function-backed REPL
