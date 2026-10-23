@@ -10,9 +10,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+import yaml
+
 from scripts.gate_evidence import (
     BASELINE,
     ITEMS,
+    baseline_status,
+    executed_tests,
+    gate_rollup,
     EvidenceError,
     Failure,
     KnownFailure,
@@ -395,7 +400,7 @@ class SelectorTests(unittest.TestCase):
         self.assertEqual(self.state({**scale, "record": "workspace-rest", "test": "million_rows"}), "not-executed")
         self.assertEqual(self.state({**scale, "record": "gate-c", "test": "million_rows"}), "passed")
         self.assertEqual(self.state({"package": "orna-demo-v1", "target": "lib", "prefix": "codec::"}), "failed")
-        self.assertEqual(self.state({"package": "orna-demo-v1", "target": "lib", "test": "round_trips"}), "passed")
+        self.assertEqual(self.state({"package": "orna-demo-v1", "target": "lib", "test": "round_trips"}), "not-executed")
         self.assertEqual(self.state({"record": "gate-e"}), "unavailable")
         self.assertEqual(self.state({"record": "gate-d"}), "not-executed")
         self.assertEqual(self.state({"record": "workspace-*", "package": "orna-missing-v1"}), "not-executed")
@@ -409,7 +414,8 @@ class SelectorTests(unittest.TestCase):
             {"gate": "C", "id": "C1", "state": "failed", "limitations": [], "conditional": False},
         ]
 
-        self.assertEqual([gate["state"] for gate in gate_rollup(items)], ["not-executed", "passed", "failed"])
+        states = {gate["gate"]: gate["state"] for gate in gate_rollup(items)}
+        self.assertEqual([states[gate] for gate in "ABC"], ["not-executed", "passed", "failed"])
 
 
 FAKE_CARGO = textwrap.dedent(
@@ -539,6 +545,163 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(item["counters"][0]["values"], {"rows": 10, "ms": 3})
             self.assertEqual(summary["problems"], ["gate-c-million-rows: no record (the job did not finish)"])
             self.assertEqual(summary["gates"][0]["state"], "not-executed")
+
+
+class ReviewFindingTests(unittest.TestCase):
+    """Regression tests for the independent review of PR 9186 (W53)."""
+
+    def test_unexplained_exit_with_a_known_failure_is_a_new_failure(self) -> None:
+        # H3: a known test failed, cargo exited 1, and nothing in the log explains the exit.
+        log = (
+            "     Running unittests src/lib.rs (target/debug/deps/orna_demo_v1-1111)\n"
+            "test codec::tests::rejects_bad_tag ... FAILED\n"
+            "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        )
+        parsed = parse_log(io.StringIO(log), EXECUTABLES, LIBRARIES)
+        failures = observed_failures(parsed, 1, False)
+        self.assertIn(Failure("*", "*", "<exit>", "cargo exited 1 without a failure the log explains"), failures)
+        baseline = [KnownFailure("orna-demo-v1", "lib", "codec::tests::rejects_bad_tag", "ornadb-5il1.1", "known")]
+        new, known = classify(failures, baseline, "workspace-rest")
+        self.assertEqual([(failure.package, failure.test) for failure in new], [("*", "<exit>")])
+        self.assertEqual([failure.test for failure, _ in known], ["codec::tests::rejects_bad_tag"])
+
+    def test_failed_to_run_custom_build_command_is_a_build_error(self) -> None:
+        # H3: a build-script failure must be recorded, not left to the exit catch-all.
+        log = "error: failed to run custom build command for `orna-demo-v1 v0.1.0 (/w/demo)`\n"
+        parsed = parse_log(io.StringIO(log), EXECUTABLES, LIBRARIES)
+        self.assertEqual(parsed.build_errors, [("orna-demo-v1", "<build>")])
+        self.assertEqual(observed_failures(parsed, 101, False), [Failure("orna-demo-v1", "<build>", "<build>", "build failed")])
+
+    def test_a_whole_binary_entry_passes_only_with_a_per_test_pass(self) -> None:
+        # M4: a `*` entry must not pass merely because its binary completed.
+        entry = KnownFailure("orna-demo-v1", "lib", "*", "ornadb-5il1.1", "known")
+        ignored_only = [target("orna-demo-v1", "lib", {"a": "ignored"})]
+        with_pass = [target("orna-demo-v1", "lib", {"a": "passed"})]
+        self.assertIsNone(baseline_status(entry, "workspace-rest", ignored_only, []))
+        self.assertEqual(baseline_status(entry, "workspace-rest", with_pass, []), "passed")
+
+    def test_a_missing_expected_record_is_not_executed_for_a_selector_without_a_record_key(self) -> None:
+        # M2: an unfinished record must never let an item read as passed.
+        records = {"workspace-rest": record("workspace-rest", "passed", [target("orna-demo-v1", "lib", {"round_trips": "passed"})])}
+        selector = {"package": "orna-demo-v1", "target": "lib", "test": "round_trips"}
+        result = evaluate_selector(selector, records, ["workspace-rest", "gate-c-million-rows"])
+        self.assertEqual(result["state"], "not-executed")
+
+    def test_a_suffix_selector_matching_two_modules_is_not_executed(self) -> None:
+        # M8: `ten_rows` must not silently select `a::ten_rows` and `b::ten_rows`.
+        records = {
+            "workspace-rest": record(
+                "workspace-rest",
+                "passed",
+                [target("orna-demo-v1", "lib", {"a::ten_rows": "passed", "b::ten_rows": "passed"})],
+            )
+        }
+        result = evaluate_selector({"package": "orna-demo-v1", "target": "lib", "test": "ten_rows"}, records, ["workspace-rest"])
+        self.assertEqual(result["state"], "not-executed")
+        self.assertIn("name the full libtest name", result["reason"])
+
+    def test_every_gate_is_reported_even_without_items(self) -> None:
+        # M5: gates G and H exist in ACCEPTANCE.md and must be reported as not-executed.
+        gates = {gate["gate"]: gate for gate in gate_rollup([])}
+        for name in "ABCDEFGH":
+            self.assertIn(name, gates)
+            self.assertEqual(gates[name]["state"], "not-executed")
+            self.assertEqual(gates[name]["reason"], "no items mapped")
+
+    def test_zero_executed_tests_are_counted_from_the_result_lines(self) -> None:
+        # M7: `cargo test` exits 0 when every test was filtered out or ignored.
+        self.assertEqual(executed_tests("test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 3 filtered out\n"), 0)
+        self.assertEqual(executed_tests("test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n"), 2)
+
+    def test_workflows_bound_every_job_and_route_cargo_through_the_recorder(self) -> None:
+        # M1, M6, L3: no per-PR job without a timeout, no raw cargo test in cli-tests, apt retried.
+        root = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+        cli = yaml.safe_load((root / "cli-tests.yml").read_text(encoding="utf-8"))
+        for name, job in cli["jobs"].items():
+            self.assertIn("timeout-minutes", job, name)
+        raw = [
+            step.get("run", "")
+            for job in cli["jobs"].values()
+            for step in job["steps"]
+            if "cargo test" in step.get("run", "") and "gate_evidence.py" not in step.get("run", "")
+        ]
+        self.assertEqual(raw, [])
+        text = (root / "cli-tests.yml").read_text(encoding="utf-8")
+        calls = [line for line in text.splitlines() if "gate_evidence.py test" in line]
+        self.assertTrue(calls)
+        for line in calls:
+            self.assertIn("--timeout-minutes", line)
+        source = (root / "source-audits.yml").read_text(encoding="utf-8")
+        self.assertIn("sudo apt-get -o Acquire::Retries=3", source)
+        self.assertNotIn("sudo apt-get update\n", source)
+
+    def test_summarize_rejects_a_foreign_commit_and_a_known_failure_that_passed(self) -> None:
+        # M9: with --expect-commit, records from another commit and a passing known failure are problems.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = root / "records"
+            records.mkdir()
+            log = records / "workspace-rest.log"
+            log.write_text("ornadb demo log\n", encoding="utf-8")
+            value = record("workspace-rest", "passed", [target("orna-demo-v1", "lib", {"codec::tests::rejects_bad_tag": "passed"})])
+            value.update(
+                schema="ornadb-gate-evidence/1",
+                commit="a" * 40,
+                totals={"passed": 1},
+                failures={"new": [], "known": []},
+                baseline=[
+                    {
+                        "package": "orna-demo-v1",
+                        "target": "lib",
+                        "test": "codec::tests::rejects_bad_tag",
+                        "record": "workspace-rest",
+                        "status": "passed",
+                    }
+                ],
+            )
+            value["log"]["sha256"] = hashlib.sha256(log.read_bytes()).hexdigest()
+            (records / "workspace-rest.record.json").write_text(json.dumps(value), encoding="utf-8")
+            items = root / "items.toml"
+            items.write_text(
+                textwrap.dedent(
+                    """\
+                    [publication]
+                    version = "1.1.0"
+                    revision = "final-2026-10-05"
+                    archive_sha256 = "fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56"
+
+                    [records]
+                    expected = ["workspace-rest"]
+                    """
+                ),
+                encoding="utf-8",
+            )
+            baseline = root / "baseline.toml"
+            baseline.write_text(
+                textwrap.dedent(
+                    """\
+                    [[failure]]
+                    package = "orna-demo-v1"
+                    target = "lib"
+                    test = "codec::tests::rejects_bad_tag"
+                    record = "workspace-rest"
+                    bead = "ornadb-5il1.1"
+                    reason = "pinned"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            out = root / "summary.json"
+            argv = [
+                "summarize", "--records", str(records), "--out", str(out), "--items", str(items),
+                "--baseline", str(baseline), "--expect-commit", "b" * 40,
+            ]
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(main(argv), 1)
+            problems = json.loads(out.read_text(encoding="utf-8"))["problems"]
+            self.assertTrue(any("records must test " + "b" * 40 in problem for problem in problems), problems)
+            self.assertTrue(any("remove its baseline entry" in problem for problem in problems), problems)
 
 
 if __name__ == "__main__":
