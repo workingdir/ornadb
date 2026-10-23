@@ -74,7 +74,8 @@ jobs:
     name: workspace (${{ matrix.shard }})
     needs: revision
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # GitHub's maximum job time. The 330-minute recorder budget, the apt step and setup must fit inside it.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -114,8 +115,10 @@ jobs:
 
       - name: Install Emacs for the editor compatibility suite
         if: matrix.shard == 'cli'
+        # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
           sudo apt-get install -y emacs-nox
 
       - name: Test the ${{ matrix.shard }} shard

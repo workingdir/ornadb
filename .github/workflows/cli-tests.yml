@@ -33,8 +33,10 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Emacs for the editor compatibility suite
+        # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
           sudo apt-get install -y emacs-nox
 
       - name: Test the orna-cli-v1 integration suite
