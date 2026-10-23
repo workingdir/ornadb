@@ -40,7 +40,7 @@ The adjacent normative clauses are narrower:
   component's WIT imports and exports. It does not specify distribution
   payload inventory or installed-manifest verification.
 
-The repository's accepted `docs/decisions/0047-first-one-zero-release.md`
+The repository's accepted `docs/decisions/archive/1.0/0047-first-one-zero-release.md`
 does define an installed distribution-manifest format 2 (lines 539–570),
 including product and Debian versions and the manifest's self-excluding
 payload inventory. That is explicit release-mechanism evidence, but it does
