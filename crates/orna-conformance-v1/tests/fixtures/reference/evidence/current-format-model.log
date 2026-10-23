@@ -1,0 +1,21 @@
+{
+  "scope": "Python reference policy/encoding/graph and isolated native Git; NOT Orna evaluator, FUSE, real editor, crash safety or large-scale conformance",
+  "passed": true,
+  "checks": 214,
+  "native_git": {
+    "payload_bytes": 2097152,
+    "sha256": "ca0b721f19c6ddef262806d54fa1514a96e6c4803c9ea9b89bffcf51b0ab2ace",
+    "chunks": 7,
+    "initial_local_media_chunks": 0,
+    "after_title_read_media_chunks": 0,
+    "requested_bytes": 131072,
+    "range_media_chunks": 1,
+    "range_fetched_payload_bytes": 383211,
+    "git_fsck": true,
+    "offline_mirror_exact": true,
+    "metadata_versions": 2,
+    "limitations": "Two-MiB reference content; map directly at store for transport proof, no full database schema admission, FUSE or fault-injection."
+  },
+  "engine_execution": "not-executed",
+  "fuse_execution": "not-executed"
+}
