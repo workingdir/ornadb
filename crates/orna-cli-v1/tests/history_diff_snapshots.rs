@@ -25,7 +25,7 @@ const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 fn run_history(directory: &Path, arguments: &[&str]) -> Output {
     let mut words = vec!["history"];
     words.extend_from_slice(arguments);
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(&words)
         .current_dir(directory)
         .output()

@@ -61,7 +61,7 @@ fn run_unmount(repository: &Path, mountpoint: &Path) {
 }
 
 fn run_unmount_from(repository: &Path, working_directory: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(working_directory)
         .args([
             "--db",
@@ -326,7 +326,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -563,7 +563,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -618,7 +618,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -720,7 +720,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -780,7 +780,7 @@ impl MountedMusicRow {
         )
         .unwrap();
         std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 self.repository_directory.path().to_str().unwrap(),
@@ -931,7 +931,7 @@ async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
         return;
     };
     let repository = row.repository_directory.path().to_path_buf();
-    let rename = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let rename = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(&repository)
         .args(["mv", "Music", "Archive"])
         .output()
@@ -998,7 +998,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("history");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1039,7 +1039,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let marker = scripts.path().join("editor-was-run");
     std::fs::write(&editor, "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1147,7 +1147,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1304,7 +1304,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
      let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1470,7 +1470,7 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1550,7 +1550,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1618,7 +1618,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         !mountinfo_contains(&mountpoint),
         "SIGTERM left the FUSE mountpoint in /proc/self/mountinfo"
     );
-    let status = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let status = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1647,7 +1647,7 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1777,7 +1777,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1809,7 +1809,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         .open(&data_path)
         .unwrap();
     document.write_all(b"{ title: \"after\", }\n").unwrap();
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1883,7 +1883,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let start_mount = || {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 repository_directory.path().to_str().unwrap(),
@@ -1945,7 +1945,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         "path-based truncate failed: {}",
         String::from_utf8_lossy(&truncated.stderr)
     );
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2010,7 +2010,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2048,7 +2048,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     );
     drop(document);
 
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2123,7 +2123,7 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2228,7 +2228,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2313,7 +2313,7 @@ struct MountedBlobRow {
 }
 
 fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository.to_str().expect("repository path is UTF-8"),
@@ -2346,11 +2346,18 @@ fn wait_for_mount_path(mounted: &mut MountedProcess, path: &Path) -> bool {
             }
             panic!("mount exited {status}: {stderr}");
         }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose {}",
-            path.display()
-        );
+        if Instant::now() >= deadline {
+            let _ = mounted.child.kill();
+            let _ = mounted.child.wait();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = mounted.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            panic!(
+                "FUSE mount did not expose {}; mount stderr: {stderr}",
+                path.display()
+            );
+        }
         thread::sleep(Duration::from_millis(20));
     }
     true
@@ -2496,7 +2503,6 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
 }
 
 #[tokio::test]
-#[ignore = "ornadb-5il1.293 open gap: remount after replacement; run with --ignored"]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
 async fn cwd_mount_rename_replacement_survives_remount() {
     let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
@@ -2527,6 +2533,137 @@ async fn cwd_mount_rename_replacement_survives_remount() {
     assert_eq!(
         restarted, replacement,
         "a restarted mount serves the acknowledged replacement"
+    );
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: an optional field committed as null and later replaced with a Blob renders that Blob as a file, and the replacement survives a restart of the mount process.
+async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let media_root = TempDir::new().unwrap();
+    let content = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let cover = lcg_bytes(0xfedc_ba98_7654_3210, 262_144 + 777);
+    std::fs::write(media_root.path().join("tone.mp3"), &content).unwrap();
+    std::fs::write(media_root.path().join("cover.png"), &cover).unwrap();
+    let source = "pub table Music(id: Str) { content: Blob, cover: Blob?, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let content_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+    );
+    let cover_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 4194304), \"image/png\")"
+    );
+    let committed_row = format!("{{\n    content: {content_capture},\n    cover: null,\n}}\n");
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_for_table_with_source_row(
+            source,
+            "Music",
+            "Music/london.orna",
+            &committed_row,
+        );
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    // The first commit publishes the committed row: `content` is a Blob and `cover` stays null.
+    let content_fields = [("content", content_capture.as_str())];
+    let content_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &content_fields,
+        source_row: None,
+        ordinal: 0x95,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &content_rows,
+    )
+    .await;
+    // The first publish advances the repository head, so the replacement is
+    // admitted against a format context pinned to that new snapshot.
+    let replacement_commit = repository.head().unwrap().unwrap();
+    let replacement_format_context =
+        format3::format3_context_for_snapshot(&repository, replacement_commit.as_str());
+    // The mount's save captures a replacement Blob at the head it is admitted against, so the
+    // replacement pins belong to that head's graph rather than the one the bindings opened before
+    // the first publish.
+    let replacement_capability = repository.capture_capability(relation_id).unwrap();
+    let mut bindings = bindings.with_repository_capture_capability(replacement_capability);
+    // The second commit replaces the row so `cover` changes from null to a Blob, but it stays
+    // unpublished: the runtime holds `cover` as a Blob while the head still commits it as null.
+    // As the mount's candidate() does, the row omits both Blob fields and binds them.
+    let replacement_row = "{\n}\n";
+    let replacement_fields = [
+        ("content", content_capture.as_str()),
+        ("cover", cover_capture.as_str()),
+    ];
+    let replacement_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &replacement_fields,
+        source_row: Some(replacement_row),
+        ordinal: 0xB5,
+        insert_only: false,
+    }];
+    media_commit::commit_source_replacement_through_save_admission(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &replacement_format_context,
+        "Music",
+        &replacement_rows[0],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let cover_path = mountpoint.join("Music/london/cover.png");
+    if !wait_for_mount_path(&mut mounted, &cover_path) {
+        return;
+    }
+    assert_eq!(std::fs::read(&cover_path).unwrap(), cover);
+    assert_eq!(
+        std::fs::read(mountpoint.join("Music/london/content.mp3")).unwrap(),
+        content
+    );
+    unmount_and_reap(repository_directory.path(), &mut mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut remounted = spawn_cwd_mount(repository_directory.path(), &remount_point);
+    let remounted_cover = remount_point.join("Music/london/cover.png");
+    assert!(
+        wait_for_mount_path(&mut remounted, &remounted_cover),
+        "FUSE remount must expose the replacement Blob"
+    );
+    let restarted = std::fs::read(&remounted_cover).unwrap();
+    unmount_and_reap(repository_directory.path(), &mut remounted);
+    assert_eq!(
+        restarted, cover,
+        "a restarted mount serves the replacement Blob"
     );
 }
 
