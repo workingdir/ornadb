@@ -1,34 +1,70 @@
 //! Editor analysis built exclusively on the frozen Orna 1.0 syntax tree.
 #![allow(deprecated)] // lsp-types 0.97 still requires DocumentSymbol::deprecated.
 
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    sync::{Arc, OnceLock},
-};
+use std::collections::{BTreeSet, HashMap};
 
 use lsp_types::{
     CompletionContext, CompletionItem, CompletionItemKind, Diagnostic,
     DiagnosticRelatedInformation, DiagnosticSeverity, DocumentLink, DocumentSymbol, Hover,
     Location, MarkupContent, MarkupKind, NumberOrString, ParameterInformation, ParameterLabel,
-    Position, SignatureHelp, SignatureInformation, SymbolKind, Uri,
+    SignatureHelp, SignatureInformation, SymbolKind, Uri,
 };
 use orna_syntax_v1::{
     Argument, Declaration, Expr, ImportSegment, Item, Keyword, Parse, Pattern, Statement,
-    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, UseTail, Visibility, lex,
-    parse_module, parse_module_with_file,
+    SyntaxSpan as SourceSpan, SyntaxTree, Token, TokenKind, TypeExpr, lex,
 };
 
-use crate::documents::{Document, PositionMapper};
+use crate::documents::PositionMapper;
+use crate::names::{DeclaredKind, LocalBindingKind, key_of};
+use crate::standard::{StandardLibrary, StandardSymbol};
+use crate::workspace::{FileAnalysis, Target, Workspace};
 
 pub type EditorParse = Parse<SyntaxTree>;
 
 /// orna-syntax-v1 carries no severity on its diagnostics; every parser error is
-/// a hard error, so the editor maps all of them to ERROR.
-const SYNTAX_DIAGNOSTIC_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
+/// a hard error, so the editor maps all of them to ERROR. Semantic analysis
+/// likewise only produces errors.
+const ERROR_SEVERITY: DiagnosticSeverity = DiagnosticSeverity::ERROR;
 
-/// Syntax diagnostics emitted by the 1.0 parser with their original byte spans.
-pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<Diagnostic> {
-    let parse = parse_document(document);
+/// The `source` of every diagnostic this server publishes: the same checks
+/// that `orna check` runs.
+pub(crate) const DIAGNOSTIC_SOURCE: &str = "orna";
+
+/// One error diagnostic for a project or semantic check, in the same shape as
+/// the syntax diagnostics.
+pub(crate) fn source_diagnostic(
+    range: lsp_types::Range,
+    code: &str,
+    message: &str,
+    help: &[&str],
+) -> Diagnostic {
+    let help = help
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    Diagnostic {
+        range,
+        severity: Some(ERROR_SEVERITY),
+        code: Some(NumberOrString::String(code.to_owned())),
+        code_description: None,
+        source: Some(DIAGNOSTIC_SOURCE.to_owned()),
+        message: lsp_diagnostic_message(message, message, &help, &[]),
+        related_information: None,
+        tags: None,
+        data: Some(serde_json::json!({
+            "title": message,
+            "help": help,
+            "notes": [],
+        })),
+    }
+}
+
+/// The parser diagnostics of one parse, as LSP diagnostics.
+pub(crate) fn syntax_diagnostics(
+    uri: &Uri,
+    parse: &EditorParse,
+    mapper: &PositionMapper<'_>,
+) -> Vec<Diagnostic> {
     parse
         .diagnostics
         .iter()
@@ -45,7 +81,7 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 })
                 .map(|label| DiagnosticRelatedInformation {
                     location: Location {
-                        uri: document.uri.clone(),
+                        uri: uri.clone(),
                         range: mapper.range(&label.span),
                     },
                     message: label.message.clone().unwrap_or_default(),
@@ -53,10 +89,10 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
                 .collect::<Vec<_>>();
             Diagnostic {
                 range: mapper.range(&diagnostic.span),
-                severity: Some(SYNTAX_DIAGNOSTIC_SEVERITY),
+                severity: Some(ERROR_SEVERITY),
                 code: Some(NumberOrString::String(diagnostic.code.to_owned())),
                 code_description: None,
-                source: Some("orna-syntax-v1".to_owned()),
+                source: Some(DIAGNOSTIC_SOURCE.to_owned()),
                 message: lsp_diagnostic_message(
                     &diagnostic.title,
                     &diagnostic.message,
@@ -75,27 +111,20 @@ pub fn check_document(document: &Document, mapper: &PositionMapper<'_>) -> Vec<D
         .collect()
 }
 
-/// Links explicit imports to a single matching open module document.
+/// Links each `use` of a module to the module's source.
 ///
-/// The parser supplies exact byte spans for the import path. Resolution is
-/// intentionally limited to open `.orna` documents: a missing or ambiguous
-/// target is left unlinked instead of guessing between the loader's flat-file
-/// and directory-module layouts.
-pub(crate) fn document_links(
-    document: &Document,
-    open_documents: &HashMap<Uri, Document>,
-) -> Vec<DocumentLink> {
-    if !document.uri.as_str().ends_with(".orna") {
+/// In a project, the import path names a module of the project's module
+/// graph, open or not. Outside a project, it links to the one other open
+/// document whose path ends in the module path, as a flat file or a
+/// directory's `main.orna`; a missing or ambiguous target stays unlinked.
+pub(crate) fn document_links(workspace: &Workspace, module: usize) -> Vec<DocumentLink> {
+    let file = workspace.file(module);
+    if !file.parse.diagnostics.is_empty() {
         return Vec::new();
     }
-
-    let parse = parse_document(document);
-    if !parse.diagnostics.is_empty() {
-        return Vec::new();
-    }
-
-    let mapper = PositionMapper::new(&document.text);
-    parse
+    let in_project = workspace.modules[module].logical_path.is_some();
+    let mapper = PositionMapper::new(file.text());
+    file.parse
         .value
         .items
         .iter()
@@ -108,30 +137,40 @@ pub(crate) fn document_links(
                 return None;
             }
             let last = path.last()?;
-            let module = path
+            let target = if in_project {
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(&segment.name))
+                    .collect::<Vec<_>>();
+                workspace
+                    .modules
+                    .iter()
+                    .find(|candidate| candidate.namespace == keys)?
+                    .file
+                    .uri()
+                    .clone()
+            } else {
+                matching_open_module(workspace, module, path)?
+            };
+            let module_name = path
                 .iter()
                 .map(|segment| segment.name.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
-            let target = matching_open_module(document, path, open_documents)?;
             Some(DocumentLink {
                 range: lsp_types::Range::new(
                     mapper.position(first.span.start),
                     mapper.position(last.span.end),
                 ),
                 target: Some(target),
-                tooltip: Some(format!("Open module `{module}`")),
+                tooltip: Some(format!("Open module `{module_name}`")),
                 data: None,
             })
         })
         .collect()
 }
 
-fn matching_open_module(
-    source: &Document,
-    path: &[ImportSegment],
-    open_documents: &HashMap<Uri, Document>,
-) -> Option<Uri> {
+fn matching_open_module(workspace: &Workspace, module: usize, path: &[ImportSegment]) -> Option<Uri> {
     let module_path = path
         .iter()
         .map(|segment| segment.name.as_str())
@@ -140,11 +179,11 @@ fn matching_open_module(
     let flat_suffix = format!("/{module_path}.orna");
     let directory_suffix = format!("/{module_path}/main.orna");
     let mut matching_target = None;
-
-    for uri in open_documents.keys() {
-        if uri == &source.uri {
+    for (index, candidate) in workspace.modules.iter().enumerate() {
+        if index == module {
             continue;
         }
+        let uri = candidate.file.uri();
         let uri_path = uri.as_str().split(['?', '#']).next().unwrap_or_default();
         if uri_path.ends_with(&flat_suffix) || uri_path.ends_with(&directory_suffix) {
             if matching_target.is_some() {
@@ -153,12 +192,7 @@ fn matching_open_module(
             matching_target = Some(uri.clone());
         }
     }
-
     matching_target
-}
-
-pub fn parse_document(document: &Document) -> EditorParse {
-    parse_module_with_file(&document.text, document.logical_path())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +206,8 @@ pub(crate) enum EditorSymbolKind {
     Method,
     Field,
     Constant,
-    Other,
+    Dimension,
+    Unit,
 }
 
 #[derive(Debug, Clone)]
@@ -189,327 +224,30 @@ pub(crate) struct EditorSymbol {
     pub children: Vec<EditorSymbol>,
 }
 
-#[derive(Debug, Clone)]
-struct StandardSymbol {
-    module: String,
-    symbol: EditorSymbol,
-    /// Workspace-relative standard source path, used to build its Location URI.
-    path: String,
-    /// The declaring standard source text, shared by every symbol in the file.
-    source: Arc<str>,
-}
-
-#[derive(Debug, Default)]
-struct StandardLibraryIndex {
-    modules: BTreeSet<String>,
-    symbols: Vec<StandardSymbol>,
-}
-
-fn standard_library() -> &'static StandardLibraryIndex {
-    static INDEX: OnceLock<StandardLibraryIndex> = OnceLock::new();
-    INDEX.get_or_init(|| {
-        let mut index = StandardLibraryIndex::default();
-        index.modules.insert("std".to_owned());
-        for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
-            let Some(module) = standard_module_name(&path) else {
-                continue;
-            };
-            let parsed = parse_module(&source);
-            let Ok(tokens) = lex(&source) else {
-                continue;
-            };
-            let shared_source: Arc<str> = Arc::from(source.as_str());
-            let mut prefix = String::new();
-            for segment in module.split('.') {
-                if !prefix.is_empty() {
-                    prefix.push('.');
-                }
-                prefix.push_str(segment);
-                index.modules.insert(prefix.clone());
-            }
-            index.symbols.extend(
-                parsed
-                    .value
-                    .items
-                    .iter()
-                    .filter(|item| matches!(&item.visibility, Visibility::Public { .. }))
-                    .filter_map(|item| {
-                        symbol_for_item(item, &source, &tokens).map(|symbol| StandardSymbol {
-                            module: module.clone(),
-                            symbol,
-                            path: path.clone(),
-                            source: Arc::clone(&shared_source),
-                        })
-                    }),
-            );
-        }
-        index.symbols.sort_by(|left, right| {
-            left.module
-                .cmp(&right.module)
-                .then_with(|| left.symbol.name.cmp(&right.symbol.name))
-        });
-        index
-    })
-}
-
-fn standard_module_name(path: &str) -> Option<String> {
-    let relative = path.strip_prefix("std/")?.strip_suffix(".orna")?;
-    let module_path = if relative == "main" {
-        ""
-    } else {
-        relative.strip_suffix("/main").unwrap_or(relative)
-    };
-    if module_path.is_empty() {
-        Some("std".to_owned())
-    } else {
-        Some(format!("std.{}", module_path.replace('/', ".")))
-    }
-}
-
-fn standard_symbol(module: &str, name: &str) -> Option<&'static StandardSymbol> {
-    standard_library()
-        .symbols
-        .iter()
-        .find(|entry| entry.module == module && entry.symbol.name == name)
-}
-
-fn standard_imported_symbols(parse: &EditorParse) -> Vec<&'static StandardSymbol> {
-    standard_imported_symbols_in_tree(&parse.value)
-}
-
-fn standard_imported_symbols_in_tree(tree: &SyntaxTree) -> Vec<&'static StandardSymbol> {
-    let mut imported = BTreeMap::new();
-    for item in &tree.items {
-        let Declaration::Use { path, tail } = &item.declaration else {
-            continue;
-        };
-        let module = path
-            .iter()
-            .map(|segment| segment.name.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        match tail {
-            UseTail::Names(names) => {
-                for name in names {
-                    if let Some(symbol) = standard_symbol(&module, &name.name) {
-                        imported.insert((module.clone(), name.name.clone()), symbol);
-                    }
-                }
-            }
-            UseTail::Glob { .. } => {
-                for symbol in standard_library()
-                    .symbols
-                    .iter()
-                    .filter(|symbol| symbol.module == module)
-                {
-                    imported.insert((module.clone(), symbol.symbol.name.clone()), symbol);
-                }
-            }
-            UseTail::None | UseTail::Alias { .. } => {}
-        }
-    }
-    imported.into_values().collect()
-}
-
-fn standard_module_aliases_in_tree(tree: &SyntaxTree) -> BTreeMap<String, String> {
-    let mut aliases = BTreeMap::new();
-    for item in &tree.items {
-        let Declaration::Use { path, tail } = &item.declaration else {
-            continue;
-        };
-        let module = path
-            .iter()
-            .map(|segment| segment.name.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        if !standard_library().modules.contains(&module) {
-            continue;
-        }
-        let alias = match tail {
-            UseTail::Alias { name, .. } => Some(name.as_str()),
-            UseTail::None => path.last().map(|segment| segment.name.as_str()),
-            UseTail::Glob { .. } | UseTail::Names(_) => None,
-        };
-        if let Some(alias) = alias {
-            aliases.insert(alias.to_owned(), module);
-        }
-    }
-    aliases
-}
-
-fn resolve_standard_module(parse: &EditorParse, qualifier: &str) -> Option<String> {
-    resolve_standard_module_in_tree(&parse.value, qualifier)
-}
-
-fn resolve_standard_module_in_tree(tree: &SyntaxTree, qualifier: &str) -> Option<String> {
-    if standard_library().modules.contains(qualifier) {
-        return Some(qualifier.to_owned());
-    }
-    let (alias, child_path) = qualifier
-        .split_once('.')
-        .map_or((qualifier, None), |(alias, child)| (alias, Some(child)));
-    let base = standard_module_aliases_in_tree(tree).remove(alias)?;
-    let module = child_path.map_or(base.clone(), |child| format!("{base}.{child}"));
-    standard_library()
-        .modules
-        .contains(&module)
-        .then_some(module)
-}
-
-fn standard_symbol_at(
-    parse: &EditorParse,
-    text: &str,
-    token: &Token,
-) -> Option<&'static StandardSymbol> {
-    let chain = identifier_chain_at_span(text, &token.span)?;
-    if chain.len() > 1 {
-        let name = chain.last()?;
-        let qualifier = chain[..chain.len() - 1].join(".");
-        if let Some(module) = resolve_standard_module(parse, &qualifier)
-            && let Some(symbol) = standard_symbol(&module, name)
-        {
-            return Some(symbol);
-        }
-    }
-    let mut matches = standard_imported_symbols(parse)
-        .into_iter()
-        .filter(|entry| entry.symbol.name == token.text);
-    let found = matches.next()?;
-    matches.next().is_none().then_some(found)
-}
-
-pub(crate) fn standard_parameter_names_for_call(
-    tree: &SyntaxTree,
-    name: &str,
-    callee: &Expr,
-) -> Option<Vec<Option<String>>> {
-    if callee_resolves_to_local(tree, callee) {
-        return None;
-    }
-    let symbol = standard_symbol_for_call_in_tree(tree, name)?;
-    if symbol.symbol.kind != EditorSymbolKind::Function {
-        return None;
-    }
-    Some(symbol.symbol.parameter_names.clone())
-}
-
-pub(crate) fn standard_result_type_for_call(
-    tree: &SyntaxTree,
-    name: &str,
-    callee: &Expr,
-) -> Option<String> {
-    if callee_resolves_to_local(tree, callee) {
-        return None;
-    }
-    let symbol = standard_symbol_for_call_in_tree(tree, name)?;
-    if symbol.symbol.kind == EditorSymbolKind::Function {
-        symbol.symbol.result_type.clone()
-    } else {
-        None
-    }
-}
-
-fn identifier_chain_at_span(text: &str, span: &SourceSpan) -> Option<Vec<String>> {
-    let tokens = lex(text).ok()?;
-    let index = tokens.iter().position(|token| {
-        same_span(&token.span, span) && matches!(token.kind, TokenKind::Identifier { .. })
-    })?;
-    let mut first = index;
-    while first >= 2
-        && tokens[first - 1].text == "."
-        && matches!(tokens[first - 2].kind, TokenKind::Identifier { .. })
-    {
-        first -= 2;
-    }
-    let mut last = index;
-    while last + 2 < tokens.len()
-        && tokens[last + 1].text == "."
-        && matches!(tokens[last + 2].kind, TokenKind::Identifier { .. })
-    {
-        last += 2;
-    }
-    Some(
-        tokens[first..=last]
-            .iter()
-            .step_by(2)
-            .map(|token| token.text.clone())
-            .collect(),
-    )
-}
-
-/// A top-level function and the calls in its body, with source spans kept in
-/// syntax byte offsets until the server maps them to LSP coordinates.
-#[derive(Debug, Clone)]
-pub(crate) struct FunctionDefinition {
-    pub name: String,
-    pub selection: SourceSpan,
-    pub full: SourceSpan,
-    pub detail: Option<String>,
-    pub calls: Vec<FunctionCall>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FunctionCall {
-    pub name: String,
-    pub selection: SourceSpan,
-}
-
-/// Returns top-level function declarations and syntactic calls that are not
-/// shadowed by a local binding. The caller decides whether declarations from
-/// different open documents resolve uniquely.
-pub(crate) fn function_definitions(parse: &EditorParse, text: &str) -> Vec<FunctionDefinition> {
-    let symbols = declaration_symbols(parse, text);
-    let mut definitions = Vec::new();
-    for item in &parse.value.items {
-        let Declaration::Function { signature, body } = &item.declaration else {
-            continue;
-        };
-        let Some(symbol) = symbols.iter().find(|symbol| {
-            symbol.kind == EditorSymbolKind::Function
-                && same_span(&symbol.full, &item.span)
-                && symbol.name == signature.name
-        }) else {
-            continue;
-        };
-        let mut call_sites = Vec::new();
-        collect_calls(body, &mut call_sites);
-        let calls = call_sites
-            .into_iter()
-            .filter(|call| !callee_resolves_to_local(&parse.value, &call.callee))
-            .filter_map(|call| {
-                Some(FunctionCall {
-                    name: call.name.rsplit('.').next()?.to_owned(),
-                    selection: expression_name_span(&call.callee)?,
-                })
-            })
-            .collect();
-        definitions.push(FunctionDefinition {
-            name: symbol.name.clone(),
-            selection: symbol.selection.clone(),
-            full: symbol.full.clone(),
-            detail: symbol.detail.clone(),
-            calls,
-        });
-    }
-    definitions.sort_by_key(|definition| definition.selection.start);
-    definitions
-}
-
 pub(crate) fn declaration_symbols(parse: &EditorParse, text: &str) -> Vec<EditorSymbol> {
     let Ok(tokens) = lex(text) else {
         return Vec::new();
     };
+    declaration_symbols_from_tokens(parse, text, &tokens)
+}
+
+/// Declaration symbols from an already lexed text.
+pub(crate) fn declaration_symbols_from_tokens(
+    parse: &EditorParse,
+    text: &str,
+    tokens: &[Token],
+) -> Vec<EditorSymbol> {
     let mut symbols = parse
         .value
         .items
         .iter()
-        .filter_map(|item| symbol_for_item(item, text, &tokens))
+        .filter_map(|item| symbol_for_item(item, text, tokens))
         .collect::<Vec<_>>();
     symbols.sort_by_key(|symbol| symbol.selection.start);
     symbols
 }
 
-fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSymbol> {
+pub(crate) fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSymbol> {
     let (name, kind, selection_scope, detail, parameters) = match &item.declaration {
         Declaration::Function { signature, .. } => (
             signature.name.as_str(),
@@ -550,9 +288,16 @@ fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Option<EditorSy
             None,
             Vec::new(),
         ),
-        Declaration::Dimension { name, .. } | Declaration::Unit { name, .. } => (
+        Declaration::Dimension { name, .. } => (
             name.as_str(),
-            EditorSymbolKind::Other,
+            EditorSymbolKind::Dimension,
+            &item.span,
+            None,
+            Vec::new(),
+        ),
+        Declaration::Unit { name, .. } => (
+            name.as_str(),
+            EditorSymbolKind::Unit,
             &item.span,
             None,
             Vec::new(),
@@ -605,14 +350,11 @@ fn symbol_from_scope(
     text: &str,
     tokens: &[Token],
 ) -> Option<EditorSymbol> {
-    let selection = tokens
+    let first = tokens.partition_point(|token| token.span.start < selection_scope.start);
+    let selection = tokens[first..]
         .iter()
-        .find(|token| {
-            token.span.start >= selection_scope.start
-                && token.span.end <= selection_scope.end
-                && token.text == name
-                && matches!(token.kind, TokenKind::Identifier { .. })
-        })?
+        .take_while(|token| token.span.end <= selection_scope.end)
+        .find(|token| token.text == name && matches!(token.kind, TokenKind::Identifier { .. }))?
         .span
         .clone();
     Some(EditorSymbol {
@@ -909,54 +651,12 @@ pub(crate) fn normalized_identifier(text: &str) -> String {
 /// Documentation shared by keyword hover cards and keyword completion items.
 const KEYWORD_DOCUMENTATION: &str = "Reserved word of the Orna language (ORNA-LEX-007).";
 
-fn keyword_at(text: &str, byte: usize) -> Option<Keyword> {
-    lex(text).ok()?.into_iter().find_map(|token| match token.kind {
-        TokenKind::Keyword(keyword) if token.span.start <= byte && byte < token.span.end => {
-            Some(keyword)
-        }
-        _ => None,
-    })
-}
-
-fn token_at(text: &str, byte: usize) -> Option<Token> {
-    lex(text).ok()?.into_iter().find(|token| {
-        matches!(token.kind, TokenKind::Identifier { .. })
-            && token.span.start <= byte
-            && byte < token.span.end
-    })
-}
-
-pub(crate) fn identifier_at(
-    document: &Document,
-    position: Position,
-    mapper: &PositionMapper<'_>,
-) -> Option<(String, SourceSpan)> {
-    let token = token_at(&document.text, mapper.byte_offset(position))?;
-    Some((token.text, token.span))
-}
-
-pub(crate) fn symbol_for_name<'a>(
-    symbols: &'a [EditorSymbol],
-    name: &str,
-) -> Option<&'a EditorSymbol> {
-    let key = normalized_identifier(name);
-    let mut matches = symbols
-        .iter()
-        .filter(|symbol| normalized_identifier(&symbol.name) == key);
-    let found = matches.next()?;
-    matches.next().is_none().then_some(found)
-}
-
-pub fn hover(
-    document: &Document,
-    parse: &EditorParse,
-    position: Position,
-    mapper: &PositionMapper<'_>,
-) -> Option<Hover> {
-    let byte = mapper.byte_offset(position);
+/// The hover card for the name or keyword at `byte`.
+pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option<Hover> {
+    let file = workspace.file(module);
     // Reserved words cannot name a binding or symbol, so the lexer's keyword
-    // table decides the card before any identifier or scope lookup.
-    if let Some(keyword) = keyword_at(&document.text, byte) {
+    // table decides the card before any name lookup.
+    if let Some(keyword) = file.keyword_at(byte) {
         return Some(crate::hover::declaration(
             "keyword",
             keyword.spelling(),
@@ -965,32 +665,100 @@ pub fn hover(
             Some(KEYWORD_DOCUMENTATION),
         ));
     }
-    let token = token_at(&document.text, byte)?;
-    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
-        let kind = match binding.kind {
-            crate::locals::LocalBindingKind::Parameter => "parameter",
-            crate::locals::LocalBindingKind::Local => "local",
-            crate::locals::LocalBindingKind::Pattern => "pattern binding",
-        };
-        let context = source_slice(&document.text, &binding.context);
-        return Some(crate::hover::declaration(
-            kind,
-            &binding.name,
-            (!context.trim().is_empty()).then_some(context),
+    let (_, resolved) = workspace.resolve_at(module, byte)?;
+    match resolved.target()? {
+        Target::Local { module, binding } => {
+            let file = workspace.file(module);
+            let binding = file.names.binding(binding);
+            let kind = match binding.kind {
+                LocalBindingKind::Parameter => "parameter",
+                LocalBindingKind::Local => "local",
+                LocalBindingKind::Pattern => "pattern binding",
+            };
+            let context = source_slice(file.text(), &binding.context);
+            Some(crate::hover::declaration(
+                kind,
+                &binding.name,
+                (!context.trim().is_empty()).then_some(context),
+                &[],
+                None,
+            ))
+        }
+        Target::Declared { module, index } => {
+            let file = workspace.file(module);
+            let declared = file.names.declaration(index);
+            if let Some(symbol) = declared_symbol(&file.symbols, &declared.selection) {
+                return Some(hover_symbol(symbol));
+            }
+            let detail = match &declared.ty {
+                Some(ty) => format!("{}: {}", declared.name, source_slice(file.text(), type_span(ty))),
+                None => source_slice(file.text(), &declared.full).trim().to_owned(),
+            };
+            Some(crate::hover::declaration(
+                declared_noun(declared.kind),
+                &declared.name,
+                Some(&detail),
+                &[],
+                None,
+            ))
+        }
+        Target::Standard { module, name } => workspace
+            .standard
+            .symbol(&module, &name)
+            .map(|standard| hover_symbol(&standard.symbol)),
+        Target::Module(path) => Some(crate::hover::declaration(
+            "module",
+            &path.join("."),
+            None,
             &[],
             None,
-        ));
+        )),
     }
-    let symbols = declaration_symbols(parse, &document.text);
-    let symbol = symbols
-        .iter()
-        .find(|symbol| same_span(&symbol.selection, &token.span))
-        .or_else(|| symbol_for_name(&symbols, &token.text));
-    if let Some(symbol) = symbol {
-        return Some(hover_symbol(symbol));
+}
+
+/// The editor symbol declared at `selection`, including nested members.
+pub(crate) fn declared_symbol<'a>(
+    symbols: &'a [EditorSymbol],
+    selection: &SourceSpan,
+) -> Option<&'a EditorSymbol> {
+    symbols.iter().find_map(|symbol| {
+        if same_span(&symbol.selection, selection) {
+            Some(symbol)
+        } else {
+            declared_symbol(&symbol.children, selection)
+        }
+    })
+}
+
+fn declared_noun(kind: DeclaredKind) -> &'static str {
+    match kind {
+        DeclaredKind::Function => "function",
+        DeclaredKind::Table => "table",
+        DeclaredKind::Type => "type",
+        DeclaredKind::Enum => "enum",
+        DeclaredKind::Protocol => "protocol",
+        DeclaredKind::Dimension => "dimension",
+        DeclaredKind::Unit => "unit",
+        DeclaredKind::Let => "value",
+        DeclaredKind::Field => "field",
+        DeclaredKind::KeyField => "key field",
+        DeclaredKind::Variant => "enum variant",
+        DeclaredKind::PayloadField => "field",
+        DeclaredKind::Method => "method",
+        DeclaredKind::Static => "constant",
     }
-    let symbol = standard_symbol_at(parse, &document.text, &token)?;
-    Some(hover_symbol(&symbol.symbol))
+}
+
+fn type_span(ty: &TypeExpr) -> &SourceSpan {
+    match ty {
+        TypeExpr::Name { span, .. }
+        | TypeExpr::Optional { span, .. }
+        | TypeExpr::Product { span, .. }
+        | TypeExpr::List { span, .. }
+        | TypeExpr::Record { span, .. }
+        | TypeExpr::Tuple { span, .. }
+        | TypeExpr::Function { span, .. } => span,
+    }
 }
 
 fn hover_symbol(symbol: &EditorSymbol) -> Hover {
@@ -1004,7 +772,8 @@ fn hover_symbol(symbol: &EditorSymbol) -> Hover {
         EditorSymbolKind::Method => "method",
         EditorSymbolKind::Field => "field",
         EditorSymbolKind::Constant => "constant",
-        EditorSymbolKind::Other => "declaration",
+        EditorSymbolKind::Dimension => "dimension",
+        EditorSymbolKind::Unit => "unit",
     };
     crate::hover::declaration(
         kind,
@@ -1019,16 +788,16 @@ fn same_span(left: &SourceSpan, right: &SourceSpan) -> bool {
     left.start == right.start && left.end == right.end
 }
 
-pub fn signature_help(
-    document: &Document,
-    parse: &EditorParse,
-    position: Position,
-    mapper: &PositionMapper<'_>,
+/// Signature help for the innermost call around `byte`.
+pub(crate) fn signature_help(
+    workspace: &Workspace,
+    module: usize,
+    byte: usize,
 ) -> Option<SignatureHelp> {
-    let byte = mapper.byte_offset(position);
+    let file = workspace.file(module);
     let mut calls = Vec::new();
-    for item in &parse.value.items {
-        if let Declaration::Function { body, .. } = &item.declaration {
+    for item in &file.parse.value.items {
+        for body in item_bodies(item) {
             collect_calls(body, &mut calls);
         }
     }
@@ -1036,27 +805,45 @@ pub fn signature_help(
         .into_iter()
         .filter(|call| call.span.start <= byte && byte <= call.span.end)
         .min_by_key(|call| call.span.end.saturating_sub(call.span.start))?;
-    if callee_resolves_to_local(&parse.value, &call.callee) {
-        return None;
-    }
-    let short_name = call.name.rsplit('.').next().unwrap_or(&call.name);
-    let symbols = declaration_symbols(parse, &document.text);
-    // Every same-name declaration in the file is a candidate signature.
-    let mut functions = symbols
-        .iter()
-        .filter(|symbol| symbol.name == short_name)
-        .cloned()
+    let name = callee_name_span(file, &call.callee)?;
+    let occurrence = file.names.occurrence(&name)?;
+    let functions = match workspace.resolve(module, occurrence).target()? {
+        Target::Declared {
+            module: declared_module,
+            index,
+        } => {
+            let declared = workspace.declaration(declared_module, index);
+            let symbols = &workspace.file(declared_module).symbols;
+            if declared.owner.is_none() {
+                // Every same-name top-level declaration is a candidate signature.
+                symbols
+                    .iter()
+                    .filter(|symbol| normalized_identifier(&symbol.name) == declared.key)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                declared_symbol(symbols, &declared.selection)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            }
+        }
+        Target::Standard { module, name } => workspace
+            .standard
+            .symbol(&module, &name)
+            .map(|standard| standard.symbol.clone())
+            .into_iter()
+            .collect(),
+        Target::Local { .. } | Target::Module(_) => return None,
+    };
+    let functions = functions
+        .into_iter()
+        .filter(|function| matches!(function.kind, EditorSymbolKind::Function | EditorSymbolKind::Method))
         .collect::<Vec<_>>();
     if functions.is_empty() {
-        functions.extend(
-            standard_symbol_for_call(parse, &call.name).map(|entry| entry.symbol.clone()),
-        );
-    }
-    functions.retain(|function| function.kind == EditorSymbolKind::Function);
-    if functions.is_empty() {
         return None;
     }
-    let active_argument = active_argument_index(&call, &document.text, byte);
+    let active_argument = active_argument_index(&call, &file.tokens, byte);
     let signatures = functions
         .iter()
         .map(|function| {
@@ -1106,24 +893,88 @@ pub fn signature_help(
     })
 }
 
-fn standard_symbol_for_call(parse: &EditorParse, name: &str) -> Option<&'static StandardSymbol> {
-    standard_symbol_for_call_in_tree(&parse.value, name)
+/// The span of the name a call's callee ends in.
+pub(crate) fn callee_name_span(file: &FileAnalysis, callee: &Expr) -> Option<SourceSpan> {
+    match callee {
+        Expr::Name { span, .. } => Some(span.clone()),
+        Expr::Field { base, span, .. } => file
+            .tokens_in(&SourceSpan::new(base.span().end, span.end))
+            .iter()
+            .rev()
+            .find(|token| matches!(token.kind, TokenKind::Identifier { .. }))
+            .map(|token| token.span.clone()),
+        Expr::Group { inner, .. } => callee_name_span(file, inner),
+        _ => None,
+    }
 }
 
-fn standard_symbol_for_call_in_tree(
-    tree: &SyntaxTree,
-    name: &str,
-) -> Option<&'static StandardSymbol> {
-    if let Some((qualifier, symbol_name)) = name.rsplit_once('.') {
-        let module = resolve_standard_module_in_tree(tree, qualifier)?;
-        return standard_symbol(&module, symbol_name);
+/// Every expression body an item declares: function bodies, implementation
+/// members, field initializers, assertions and values.
+pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
+    fn implementation<'a>(implementation: &'a orna_syntax_v1::Implementation, bodies: &mut Vec<&'a Expr>) {
+        for member in &implementation.members {
+            match member {
+                orna_syntax_v1::ImplMember::Function { body, .. } => bodies.push(body),
+                orna_syntax_v1::ImplMember::Static { value, .. } => bodies.push(value),
+            }
+        }
     }
-
-    let mut matches = standard_imported_symbols_in_tree(tree)
-        .into_iter()
-        .filter(|entry| entry.symbol.name == name);
-    let found = matches.next()?;
-    matches.next().is_none().then_some(found)
+    let mut bodies = Vec::new();
+    match &item.declaration {
+        Declaration::Function { body, .. } => bodies.push(body),
+        Declaration::Let { value, .. } | Declaration::Assertion { value } => bodies.push(value),
+        Declaration::Table { members, .. } => {
+            for member in members {
+                match member {
+                    orna_syntax_v1::TableMember::Field {
+                        initializer:
+                            Some(
+                                orna_syntax_v1::FieldInitializer::Default(value)
+                                | orna_syntax_v1::FieldInitializer::Computed(value),
+                            ),
+                        ..
+                    }
+                    | orna_syntax_v1::TableMember::Assertion { value, .. } => bodies.push(value),
+                    orna_syntax_v1::TableMember::Implementation { implementation: inner, .. } => {
+                        implementation(inner, &mut bodies);
+                    }
+                    orna_syntax_v1::TableMember::Field { .. } => {}
+                }
+            }
+        }
+        Declaration::Type { representation, .. } => {
+            let members = match representation {
+                orna_syntax_v1::TypeRepresentation::Alias { refinements, .. } => refinements,
+                orna_syntax_v1::TypeRepresentation::Nominal { members } => members,
+            };
+            for member in members {
+                match member {
+                    orna_syntax_v1::TypeMember::Field {
+                        initializer: Some(value),
+                        ..
+                    }
+                    | orna_syntax_v1::TypeMember::Assertion { value, .. } => bodies.push(value),
+                    orna_syntax_v1::TypeMember::Implementation { implementation: inner, .. } => {
+                        implementation(inner, &mut bodies);
+                    }
+                    orna_syntax_v1::TypeMember::Field { .. } => {}
+                }
+            }
+        }
+        Declaration::Unit {
+            definition: orna_syntax_v1::UnitDefinition::Derived { value, offset, .. },
+            ..
+        } => {
+            bodies.push(value);
+            bodies.extend(offset.iter());
+        }
+        Declaration::Use { .. }
+        | Declaration::Protocol { .. }
+        | Declaration::Enum { .. }
+        | Declaration::Dimension { .. }
+        | Declaration::Unit { .. } => {}
+    }
+    bodies
 }
 
 #[derive(Debug)]
@@ -1134,17 +985,15 @@ struct CallSite {
     arguments: Vec<Argument>,
 }
 
-fn active_argument_index(call: &CallSite, text: &str, position: usize) -> usize {
-    let Ok(tokens) = lex(text) else {
-        return 0;
-    };
+fn active_argument_index(call: &CallSite, tokens: &[Token], position: usize) -> usize {
     let is_comma_before = |start: usize, end: usize| {
-        tokens.iter().any(|token| {
-            matches!(token.kind, TokenKind::Punct(","))
-                && token.span.start >= start
-                && token.span.end <= end
-                && token.span.start < position
-        })
+        let first = tokens.partition_point(|token| token.span.start < start);
+        tokens[first..]
+            .iter()
+            .take_while(|token| token.span.end <= end)
+            .any(|token| {
+                matches!(token.kind, TokenKind::Punct(",")) && token.span.start < position
+            })
     };
     let separators = call
         .arguments
@@ -1156,16 +1005,6 @@ fn active_argument_index(call: &CallSite, text: &str, position: usize) -> usize 
         .last()
         .is_some_and(|last| is_comma_before(last.span.end, call.span.end));
     separators + usize::from(trailing_separator)
-}
-
-fn callee_resolves_to_local(tree: &SyntaxTree, callee: &Expr) -> bool {
-    match callee {
-        Expr::Name { text, span } => crate::locals::binding_at(tree, text, span).is_some(),
-        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => {
-            callee_resolves_to_local(tree, base)
-        }
-        _ => false,
-    }
 }
 
 fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
@@ -1252,6 +1091,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             }
         }
         Expr::Control {
+            kind,
             condition,
             body,
             arms,
@@ -1264,7 +1104,7 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             if let Some(body) = body {
                 collect_calls(body, output);
             }
-            for arm in arms {
+            for arm in crate::names::control_arms(*kind, arms) {
                 if let Some(guard) = &arm.guard {
                     collect_calls(guard, output);
                 }
@@ -1304,177 +1144,92 @@ pub(crate) fn expression_name(expression: &Expr) -> Option<String> {
         _ => None,
     }
 }
+/// The declaration of the name at `byte`.
+pub(crate) fn definition(workspace: &Workspace, module: usize, byte: usize) -> Option<Location> {
+    let (_, resolved) = workspace.resolve_at(module, byte)?;
+    target_location(workspace, &resolved.target()?)
+}
 
-fn expression_name_span(expression: &Expr) -> Option<SourceSpan> {
-    match expression {
-        Expr::Name { span, .. } => Some(span.clone()),
-        Expr::Field { name, span, .. } => {
-            Some(SourceSpan::new(span.end.checked_sub(name.len())?, span.end))
+/// Where `target` is declared.
+pub(crate) fn target_location(workspace: &Workspace, target: &Target) -> Option<Location> {
+    match target {
+        Target::Local { module, binding } => Some(location(
+            workspace,
+            *module,
+            &workspace.file(*module).names.binding(*binding).selection,
+        )),
+        Target::Declared { module, index } => Some(location(
+            workspace,
+            *module,
+            &workspace.declaration(*module, *index).selection,
+        )),
+        Target::Standard { module, name } => {
+            let standard = workspace.standard.symbol(module, name)?;
+            workspace.standard.location(standard)
         }
-        Expr::Group { inner, .. } => expression_name_span(inner),
-        _ => None,
+        Target::Module(path) => workspace
+            .modules
+            .iter()
+            .find(|module| &module.namespace == path)
+            .map(|module| Location {
+                uri: module.file.uri().clone(),
+                range: lsp_types::Range::default(),
+            }),
     }
 }
 
-pub fn definition(
-    document: &Document,
-    parse: &EditorParse,
-    position: Position,
-    mapper: &PositionMapper<'_>,
-) -> Option<Location> {
-    let byte = mapper.byte_offset(position);
-    let token = token_at(&document.text, byte)?;
-    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
-        return Some(Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&binding.selection),
-        });
-    }
-    let symbols = declaration_symbols(parse, &document.text);
-    if let Some(symbol) = symbol_for_name(&symbols, &token.text) {
-        return Some(Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&symbol.selection),
-        });
-    }
-    let standard = standard_symbol_at(parse, &document.text, &token)?;
-    Some(standard_location(standard))
+/// The LSP location of a byte span in one module.
+pub(crate) fn location(workspace: &Workspace, module: usize, span: &SourceSpan) -> Location {
+    locations(workspace, std::slice::from_ref(&(module, span.clone())))
+        .pop()
+        .expect("one location")
 }
 
-/// Returns the declaration Location of a standard-library symbol in its own
-/// pinned source. The URI is the stable `orna-std:` path, not a host file.
-fn standard_location(standard: &StandardSymbol) -> Location {
-    let mapper = PositionMapper::new(&standard.source);
-    Location {
-        uri: standard_uri(&standard.path),
-        range: mapper.range(&standard.symbol.selection),
-    }
+/// LSP locations of byte spans, building each module's line index once.
+pub(crate) fn locations(workspace: &Workspace, spans: &[(usize, SourceSpan)]) -> Vec<Location> {
+    let mut mappers = HashMap::<usize, PositionMapper<'_>>::new();
+    spans
+        .iter()
+        .map(|(module, span)| {
+            let file = workspace.file(*module);
+            let mapper = mappers
+                .entry(*module)
+                .or_insert_with(|| PositionMapper::new(file.text()));
+            Location {
+                uri: file.uri().clone(),
+                range: mapper.range(span),
+            }
+        })
+        .collect()
 }
 
-fn standard_uri(path: &str) -> Uri {
-    format!("orna-std:///{path}")
-        .parse()
-        .expect("standard source paths form valid orna-std URIs")
-}
-
-/// References to an imported or qualified standard-library symbol: every
-/// unshadowed occurrence in this document that resolves to the same
-/// declaration. A local binding of the same name is never a reference.
-fn standard_references(
-    document: &Document,
-    parse: &EditorParse,
-    mapper: &PositionMapper<'_>,
-    token: &Token,
+/// Every occurrence that resolves to what the name at `byte` refers to.
+pub(crate) fn references(
+    workspace: &Workspace,
+    module: usize,
+    byte: usize,
     include_declaration: bool,
 ) -> Vec<Location> {
-    let Some(target) = standard_symbol_at(parse, &document.text, token) else {
+    let Some(target) = workspace
+        .resolve_at(module, byte)
+        .and_then(|(_, resolved)| resolved.target())
+    else {
         return Vec::new();
     };
-    let local_references = crate::locals::resolved_reference_spans(&parse.value);
-    let mut locations = Vec::new();
-    for (occurrence, span) in reference_occurrences(&parse.value, &document.text) {
-        if local_references.contains(&(span.start, span.end)) {
-            continue;
-        }
-        // A qualified occurrence reports each segment; only the final segment
-        // names the symbol, so the segments before a `.` are not references.
-        if document.text[span.end..].starts_with('.') {
-            continue;
-        }
-        let occurrence_token = Token {
-            kind: token.kind.clone(),
-            text: occurrence.clone(),
-            span: span.clone(),
-        };
-        let resolves_here = standard_symbol_at(parse, &document.text, &occurrence_token)
-            .is_some_and(|found| found.module == target.module && found.symbol.name == target.symbol.name);
-        if resolves_here {
-            locations.push(Location {
-                uri: document.uri.clone(),
-                range: mapper.range(&span),
-            });
-        }
-    }
-    if include_declaration {
-        locations.push(standard_location(target));
+    let declaration = target_location(workspace, &target);
+    let mut locations = locations(workspace, &workspace.search(&target).found);
+    match (&target, include_declaration, declaration) {
+        (Target::Standard { .. }, true, Some(declaration)) => locations.push(declaration),
+        (_, false, Some(declaration)) => locations.retain(|location| location != &declaration),
+        _ => {}
     }
     locations
 }
 
-pub fn references(
-    document: &Document,
-    parse: &EditorParse,
-    position: Position,
-    mapper: &PositionMapper<'_>,
-    include_declaration: bool,
-) -> Vec<Location> {
-    let byte = mapper.byte_offset(position);
-    let Some(token) = token_at(&document.text, byte) else {
-        return Vec::new();
-    };
-    if let Some(binding) = crate::locals::binding_at(&parse.value, &token.text, &token.span) {
-        let mut spans = crate::locals::references(&parse.value, &binding);
-        if include_declaration {
-            spans.push(binding.selection);
-        }
-        spans.sort_by_key(|span| (span.start, span.end));
-        spans.dedup_by_key(|span| (span.start, span.end));
-        return spans
-            .into_iter()
-            .map(|span| Location {
-                uri: document.uri.clone(),
-                range: mapper.range(&span),
-            })
-            .collect();
-    }
-    let symbols = declaration_symbols(parse, &document.text);
-    let Some(symbol) = symbol_for_name(&symbols, &token.text) else {
-        return standard_references(
-            document,
-            parse,
-            mapper,
-            &token,
-            include_declaration,
-        );
-    };
-    let name = normalized_identifier(&symbol.name);
-    let local_references = crate::locals::resolved_reference_spans(&parse.value);
-    let mut spans = reference_occurrences(&parse.value, &document.text)
-        .into_iter()
-        .filter(|(occurrence, span)| {
-            normalized_identifier(occurrence) == name
-                && !local_references.contains(&(span.start, span.end))
-        })
-        .map(|(_, span)| span)
-        .collect::<Vec<_>>();
-    if include_declaration {
-        spans.push(symbol.selection.clone());
-    }
-    spans.sort_by_key(|span| (span.start, span.end));
-    spans.dedup_by_key(|span| (span.start, span.end));
-    spans
-        .into_iter()
-        .map(|span| Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&span),
-        })
-        .collect()
-}
-
-pub(crate) fn local_declaration_spans(parse: &EditorParse) -> Vec<SourceSpan> {
-    crate::locals::all_bindings(&parse.value)
-        .into_iter()
-        .map(|binding| binding.selection)
-        .collect()
-}
-
-pub fn document_symbols(
-    parse: &EditorParse,
-    text: &str,
-    mapper: &PositionMapper<'_>,
-) -> Vec<DocumentSymbol> {
-    declaration_symbols(parse, text)
-        .into_iter()
+pub fn document_symbols(symbols: &[EditorSymbol], mapper: &PositionMapper<'_>) -> Vec<DocumentSymbol> {
+    symbols
+        .iter()
+        .cloned()
         .map(|symbol| document_symbol(symbol, mapper))
         .collect()
 }
@@ -1493,7 +1248,8 @@ fn document_symbol(symbol: EditorSymbol, mapper: &PositionMapper<'_>) -> Documen
             EditorSymbolKind::Method => SymbolKind::METHOD,
             EditorSymbolKind::Field => SymbolKind::FIELD,
             EditorSymbolKind::Constant => SymbolKind::CONSTANT,
-            EditorSymbolKind::Other => SymbolKind::NAMESPACE,
+            EditorSymbolKind::Dimension => SymbolKind::STRUCT,
+            EditorSymbolKind::Unit => SymbolKind::CONSTANT,
         },
         tags: None,
         deprecated: None,
@@ -1509,23 +1265,27 @@ fn document_symbol(symbol: EditorSymbol, mapper: &PositionMapper<'_>) -> Documen
     }
 }
 
-pub fn completion_at(
-    parse: &EditorParse,
-    text: &str,
+pub(crate) fn completion_at(
+    workspace: &Workspace,
+    module: usize,
     byte: Option<usize>,
     _context: Option<&CompletionContext>,
 ) -> Vec<CompletionItem> {
+    let file = workspace.file(module);
+    let text = file.text();
+    let parse = &file.parse;
     let (prefix, qualifier) = byte
         .map(|byte| completion_parts(text, byte))
         .unwrap_or_default();
     let prefix_key = normalized_identifier(&prefix).to_ascii_lowercase();
-    let import_module = byte.and_then(|byte| import_module_before_cursor(text, byte));
+    let standard = &workspace.standard;
+    let import_module = byte.and_then(|byte| import_module_before_cursor(standard, text, byte));
     let qualified_module = qualifier
         .as_deref()
-        .and_then(|value| resolve_standard_module(parse, value));
+        .and_then(|value| standard.resolve_module(&parse.value, value));
     let module_parent = qualifier
         .as_deref()
-        .filter(|value| *value == "std" || standard_library().modules.contains(*value));
+        .filter(|value| *value == "std" || standard.module_exists(value));
     let standard_context = import_module.is_some() || module_parent.is_some();
     let mut completions = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1533,8 +1293,8 @@ pub fn completion_at(
 
     if !standard_context {
         if let Some(byte) = byte {
-            for binding in crate::locals::visible_bindings(&parse.value, byte) {
-                let key = normalized_identifier(&binding.name);
+            for binding in file.names.visible_bindings(byte) {
+                let key = binding.key.clone();
                 if !completion_matches(&key, &prefix_key) || !seen.insert(key.clone()) {
                     continue;
                 }
@@ -1544,11 +1304,11 @@ pub fn completion_at(
                     label: binding.name.clone(),
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(match binding.kind {
-                        crate::locals::LocalBindingKind::Parameter => "Parameter".to_owned(),
-                        crate::locals::LocalBindingKind::Local => "Local variable".to_owned(),
-                        crate::locals::LocalBindingKind::Pattern => "Pattern binding".to_owned(),
+                        LocalBindingKind::Parameter => "Parameter".to_owned(),
+                        LocalBindingKind::Local => "Local variable".to_owned(),
+                        LocalBindingKind::Pattern => "Pattern binding".to_owned(),
                     }),
-                    insert_text: Some(binding.name),
+                    insert_text: Some(binding.name.clone()),
                     sort_text: Some(completion_sort_text(&prefix_key, 0, &key)),
                     ..CompletionItem::default()
                 };
@@ -1563,7 +1323,8 @@ pub fn completion_at(
             }
         }
 
-        for symbol in declaration_symbols(parse, text) {
+        for symbol in workspace.completion_symbols(module) {
+            let symbol = symbol.clone();
             let key = normalized_identifier(&symbol.name);
             if !completion_matches(&key, &prefix_key)
                 || shadowed.contains(&key)
@@ -1581,7 +1342,8 @@ pub fn completion_at(
                 EditorSymbolKind::Method => CompletionItemKind::METHOD,
                 EditorSymbolKind::Field => CompletionItemKind::FIELD,
                 EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
-                EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
+                EditorSymbolKind::Dimension => CompletionItemKind::STRUCT,
+                EditorSymbolKind::Unit => CompletionItemKind::UNIT,
             };
             let insert_text = if symbol.kind == EditorSymbolKind::Function {
                 let placeholders = symbol
@@ -1622,10 +1384,7 @@ pub fn completion_at(
         append_standard_symbols(
             &mut completions,
             &mut seen,
-            standard_library()
-                .symbols
-                .iter()
-                .filter(|entry| entry.module == module),
+            standard.symbols_in(module).iter(),
             &prefix_key,
             1,
             false,
@@ -1634,17 +1393,14 @@ pub fn completion_at(
         append_standard_symbols(
             &mut completions,
             &mut seen,
-            standard_library()
-                .symbols
-                .iter()
-                .filter(|entry| entry.module == module),
+            standard.symbols_in(module).iter(),
             &prefix_key,
             1,
             true,
         );
-        append_standard_modules(&mut completions, &mut seen, module, &prefix_key);
+        append_standard_modules(standard, &mut completions, &mut seen, module, &prefix_key);
     } else if let Some(parent) = module_parent {
-        append_standard_modules(&mut completions, &mut seen, parent, &prefix_key);
+        append_standard_modules(standard, &mut completions, &mut seen, parent, &prefix_key);
     } else {
         if !prefix_key.is_empty() && completion_matches("std", &prefix_key) {
             completions.push(CompletionItem {
@@ -1660,7 +1416,7 @@ pub fn completion_at(
         append_standard_symbols(
             &mut completions,
             &mut seen,
-            standard_imported_symbols(parse).into_iter(),
+            standard.imported_symbols(&parse.value).into_iter(),
             &prefix_key,
             1,
             true,
@@ -1717,7 +1473,8 @@ fn append_standard_symbols<'a>(
             EditorSymbolKind::Method => CompletionItemKind::METHOD,
             EditorSymbolKind::Field => CompletionItemKind::FIELD,
             EditorSymbolKind::Constant => CompletionItemKind::CONSTANT,
-            EditorSymbolKind::Other => CompletionItemKind::REFERENCE,
+            EditorSymbolKind::Dimension => CompletionItemKind::STRUCT,
+            EditorSymbolKind::Unit => CompletionItemKind::UNIT,
         };
         let insert_text = if snippets && symbol.kind == EditorSymbolKind::Function {
             let placeholders = symbol
@@ -1759,13 +1516,14 @@ fn append_standard_symbols<'a>(
 }
 
 fn append_standard_modules(
+    standard: &StandardLibrary,
     completions: &mut Vec<CompletionItem>,
     seen: &mut BTreeSet<String>,
     parent: &str,
     prefix: &str,
 ) {
     let stem = format!("{parent}.");
-    for module in &standard_library().modules {
+    for module in standard.modules() {
         let Some(child) = module.strip_prefix(&stem) else {
             continue;
         };
@@ -1816,17 +1574,14 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn import_module_before_cursor(text: &str, byte: usize) -> Option<String> {
+fn import_module_before_cursor(standard: &StandardLibrary, text: &str, byte: usize) -> Option<String> {
     let before_cursor = text.get(..byte)?;
     let line_start = before_cursor.rfind('\n').map_or(0, |offset| offset + 1);
     let line = before_cursor.get(line_start..)?.trim_start();
     let path = line.strip_prefix("use ")?;
     let brace = path.rfind('{')?;
     let module = path[..brace].trim().trim_end_matches('.').trim();
-    standard_library()
-        .modules
-        .contains(module)
-        .then(|| module.to_owned())
+    standard.module_exists(module).then(|| module.to_owned())
 }
 
 fn completion_matches(candidate: &str, prefix: &str) -> bool {
@@ -1841,220 +1596,6 @@ fn completion_sort_text(prefix: &str, group: u8, key: &str) -> String {
 fn parameter_name(source: &str) -> Option<&str> {
     let name = source.split(':').next()?.split('=').next()?.trim();
     (!name.is_empty()).then_some(name)
-}
-
-pub(crate) fn reference_occurrences(tree: &SyntaxTree, text: &str) -> Vec<(String, SourceSpan)> {
-    let mut output = Vec::new();
-    for item in &tree.items {
-        match &item.declaration {
-            Declaration::Function { signature, body } => {
-                for parameter in &signature.parameters {
-                    if let Some(ty) = &parameter.annotation {
-                        collect_type_refs(ty, text, &mut output);
-                    }
-                }
-                if let Some(result) = &signature.result {
-                    collect_type_refs(result, text, &mut output);
-                }
-                collect_expr_refs(body, text, &mut output);
-            }
-            Declaration::Let {
-                annotation, value, ..
-            } => {
-                if let Some(ty) = annotation {
-                    collect_type_refs(ty, text, &mut output);
-                }
-                collect_expr_refs(value, text, &mut output);
-            }
-            Declaration::Assertion { value } => collect_expr_refs(value, text, &mut output),
-            Declaration::Table { members, .. } => {
-                for member in members {
-                    if let orna_syntax_v1::TableMember::Field {
-                        ty, initializer, ..
-                    } = member
-                    {
-                        collect_type_refs(ty, text, &mut output);
-                        if let Some(
-                            orna_syntax_v1::FieldInitializer::Default(value)
-                            | orna_syntax_v1::FieldInitializer::Computed(value),
-                        ) = initializer
-                        {
-                            collect_expr_refs(value, text, &mut output);
-                        }
-                    } else if let orna_syntax_v1::TableMember::Assertion { value, .. } = member {
-                        collect_expr_refs(value, text, &mut output);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    output
-}
-
-fn collect_type_refs(ty: &TypeExpr, text: &str, output: &mut Vec<(String, SourceSpan)>) {
-    match ty {
-        TypeExpr::Name {
-            path,
-            span,
-            arguments,
-        } => {
-            let tokens = lex(text).unwrap_or_default();
-            for token in tokens.into_iter().filter(|token| {
-                token.span.start >= span.start
-                    && token.span.end <= span.end
-                    && matches!(token.kind, TokenKind::Identifier { .. })
-            }) {
-                output.push((token.text, token.span));
-            }
-            for argument in arguments {
-                collect_type_refs(argument, text, output);
-            }
-            let _ = path;
-        }
-        TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
-            collect_type_refs(inner, text, output)
-        }
-        TypeExpr::Product { lhs, rhs, .. } => {
-            collect_type_refs(lhs, text, output);
-            collect_type_refs(rhs, text, output);
-        }
-        TypeExpr::Record { fields, .. } => {
-            for (_, ty, _) in fields {
-                collect_type_refs(ty, text, output);
-            }
-        }
-        TypeExpr::Tuple { elements, .. } => {
-            for ty in elements {
-                collect_type_refs(ty, text, output);
-            }
-        }
-        TypeExpr::Function {
-            parameters, result, ..
-        } => {
-            for ty in parameters {
-                collect_type_refs(ty, text, output);
-            }
-            collect_type_refs(result, text, output);
-        }
-    }
-}
-
-fn collect_expr_refs(expression: &Expr, text: &str, output: &mut Vec<(String, SourceSpan)>) {
-    match expression {
-        Expr::Name { text: name, span } => output.push((name.clone(), span.clone())),
-        Expr::Field { base, name, span } => {
-            output.push((
-                name.clone(),
-                SourceSpan::new(span.end.saturating_sub(name.len()), span.end),
-            ));
-            collect_expr_refs(base, text, output);
-        }
-        Expr::Call {
-            callee, arguments, ..
-        } => {
-            collect_expr_refs(callee, text, output);
-            for arg in arguments {
-                collect_expr_refs(&arg.value, text, output);
-            }
-        }
-        Expr::GenericCall {
-            callee,
-            type_arguments,
-            arguments,
-            ..
-        } => {
-            collect_expr_refs(callee, text, output);
-            for ty in type_arguments {
-                collect_type_refs(ty, text, output);
-            }
-            for arg in arguments {
-                collect_expr_refs(&arg.value, text, output);
-            }
-        }
-        Expr::Unary { rhs, .. } => collect_expr_refs(rhs, text, output),
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_expr_refs(lhs, text, output);
-            collect_expr_refs(rhs, text, output);
-        }
-        Expr::Range { lower, upper, .. } => {
-            if let Some(expr) = lower {
-                collect_expr_refs(expr, text, output);
-            }
-            if let Some(expr) = upper {
-                collect_expr_refs(expr, text, output);
-            }
-        }
-        Expr::Index { base, index, .. } => {
-            collect_expr_refs(base, text, output);
-            collect_expr_refs(index, text, output);
-        }
-        Expr::Group { inner, .. } => collect_expr_refs(inner, text, output),
-        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
-            for expr in elements {
-                collect_expr_refs(expr, text, output);
-            }
-        }
-        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
-            for field in fields {
-                collect_expr_refs(&field.value, text, output);
-            }
-        }
-        Expr::Lambda { body, .. } => collect_expr_refs(body, text, output),
-        Expr::Block {
-            statements, tail, ..
-        } => {
-            for statement in statements {
-                match statement {
-                    Statement::Let {
-                        annotation, value, ..
-                    } => {
-                        if let Some(ty) = annotation {
-                            collect_type_refs(ty, text, output);
-                        }
-                        collect_expr_refs(value, text, output);
-                    }
-                    Statement::Assert { value, .. }
-                    | Statement::Expression { value, .. }
-                    | Statement::Control { value, .. } => collect_expr_refs(value, text, output),
-                    Statement::Return { value, .. } | Statement::Break { value, .. } => {
-                        if let Some(value) = value {
-                            collect_expr_refs(value, text, output);
-                        }
-                    }
-                    Statement::Assignment { value, .. } => collect_expr_refs(value, text, output),
-                    Statement::Continue { .. } => {}
-                }
-            }
-            if let Some(tail) = tail {
-                collect_expr_refs(tail, text, output);
-            }
-        }
-        Expr::Control {
-            condition,
-            body,
-            arms,
-            alternate,
-            ..
-        } => {
-            if let Some(expr) = condition {
-                collect_expr_refs(expr, text, output);
-            }
-            if let Some(expr) = body {
-                collect_expr_refs(expr, text, output);
-            }
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    collect_expr_refs(guard, text, output);
-                }
-                collect_expr_refs(&arm.body, text, output);
-            }
-            if let Some(expr) = alternate {
-                collect_expr_refs(expr, text, output);
-            }
-        }
-        Expr::Literal { .. } | Expr::InterpolatedString { .. } | Expr::ReplBinding { .. } => {}
-    }
 }
 
 #[cfg(test)]
