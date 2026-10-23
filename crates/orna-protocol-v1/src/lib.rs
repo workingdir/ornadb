@@ -1475,6 +1475,31 @@ impl Diagnostic {
             && matches!(field(5), Some(Node::Array(causes)) if causes.is_empty())
             && matches!(field(6), Some(Node::Bool(false)))
     }
+
+    /// Portable protocol code from diagnostic field `0`.
+    pub fn code(&self) -> Result<String> {
+        self.text_field(0)
+    }
+
+    /// Message text admitted by the protocol boundary (field `2`). Every
+    /// diagnostic except the fixed safe read-only one arrives redacted.
+    pub fn message(&self) -> Result<String> {
+        self.text_field(2)
+    }
+
+    fn text_field(&self, id: u8) -> Result<String> {
+        let Node::Tag(60011, value) = &self.0.0 else {
+            return Err(Error::InvalidValue);
+        };
+        let fields = map(value).ok_or(Error::InvalidValue)?;
+        match fields
+            .iter()
+            .find(|(key, _)| *key == Node::Int(BigInt::from(id)))
+        {
+            Some((_, Node::Text(text))) => Ok(text.clone()),
+            _ => Err(Error::InvalidValue),
+        }
+    }
 }
 impl ResultBody {
     /// Extracts the validated canonical body from a terminal `Result` envelope.
