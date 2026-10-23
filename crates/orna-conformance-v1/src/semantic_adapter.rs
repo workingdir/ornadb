@@ -2218,6 +2218,8 @@ impl DurableTransactionalEvaluator {
 
     /// Executes one admitted source activation against durable committed rows.
     /// Failed source evaluation never reaches the durable commit boundary.
+    /// Zero-scope: this entry point carries no request identity, so its table mutation
+    /// ids stay content-addressed. The CLI never reaches it; conformance and tests do.
     pub async fn execute_source(
         &self,
         repository: &Repository,
@@ -2605,7 +2607,8 @@ impl DurableTransactionalEvaluator {
         }
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
             .with_sys_host_context(self.sys_host.clone())
-            .with_activation_time(continuation.context().activation_time());
+            .with_activation_time(continuation.context().activation_time())
+            .with_mutation_scope(request_mutation_scope(&continuation.identity()));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -3475,6 +3478,8 @@ impl DurableTransactionalEvaluator {
             .await
     }
 
+    /// Stream rows take delivery-addressed mutation ids (ORNA-LIST-STREAM-MUTATION),
+    /// not the content-addressed source digest, so no request mutation scope applies.
     async fn execute_admitted_project_stream<C>(
         &self,
         target: RuntimeTarget<'_>,
@@ -3617,6 +3622,8 @@ impl DurableTransactionalEvaluator {
         }
     }
 
+    /// Zero-scope: reached only through `execute_project_with_arguments`, which has no
+    /// request identity. Mutation ids stay content-addressed.
     async fn execute_admitted_project_with_arguments(
         &self,
         target: RuntimeTarget<'_>,

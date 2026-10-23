@@ -3,6 +3,7 @@
 //! (`insert`) exits 0; a REPL capture exits 0; and the first run's committed effect is
 //! still readable from the durable runtime state afterwards. Each step must exit 0 with
 //! no error code. A repeated run and a run after a REPL effect also exit 0 (ornadb-5il1.95).
+//! A run restoring an earlier title after an edit commits that title again (ornadb-5il1.95).
 //!
 //! Not asserted here (inherited on origin/main, orna-1.1.0-gap), each dropped step names
 //! its bead:
@@ -26,6 +27,7 @@ mod format3;
 const SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
 pub fn seed() { music.insert({ id: \"london\", title: \"Original\", artist: \"Kieran\" }); }\n\
 pub fn exercise() { music.update(\"london\", { title: \"Edited by run\" }); }\n\
+pub fn restore() { music.update(\"london\", { title: \"Original\" }); }\n\
 pub fn main() {}\n";
 
 fn orna(directory: &Path, arguments: &[&str]) -> Output {
@@ -161,4 +163,32 @@ async fn run_after_repl_effect_exits_zero() {
         ),
     );
     assert_success("run after REPL effect", &orna(root, &["run", "exercise"]));
+    let rows = committed_music_text(root).await;
+    assert!(
+        rows.iter().any(|row| row.contains("Edited by run")),
+        "run after REPL effect must commit its edit: {rows:?}"
+    );
+}
+
+/// A run that restores an earlier title after an edit must commit that title again.
+/// The restored row equals the seed row, so its mutation identity must not collide with
+/// the seed's durable mutation (ornadb-5il1.95).
+#[tokio::test(flavor = "current_thread")]
+async fn restore_run_after_edit_commits_original_title_again() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(SOURCE, "music");
+    let root = directory.path();
+
+    assert_success("seed run", &orna(root, &["run", "seed"]));
+    assert_success("first run exercise", &orna(root, &["run", "exercise"]));
+    assert_success("restore run", &orna(root, &["run", "main.restore"]));
+
+    let rows = committed_music_text(root).await;
+    assert!(
+        rows.iter().any(|row| row.contains("Original")),
+        "restore run must commit the original title again: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("Edited by run")),
+        "restore run must replace the edited title: {rows:?}"
+    );
 }
