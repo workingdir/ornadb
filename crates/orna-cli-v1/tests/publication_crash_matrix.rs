@@ -476,6 +476,21 @@ fn head(repository: &Repository) -> String {
     repository.head().unwrap().unwrap().as_str().to_owned()
 }
 
+/// Every publication pin ref, in `for-each-ref` order (ORNA-GIT-010).
+fn publication_pin_refs(root: &Path) -> Vec<String> {
+    let listing = git_output(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/orna/publication-indexes/",
+            "refs/orna/publication-candidates/",
+        ],
+        None,
+    );
+    String::from_utf8_lossy(&listing).lines().map(str::to_owned).collect()
+}
+
 #[tokio::test]
 async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary() {
     publish_kill_matrix(|_, _| {}).await;
@@ -549,6 +564,17 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
         assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        let pins_before = publication_pin_refs(root);
+        if let Some(journal) = repository.read_publication_journal().unwrap() {
+            let mut expected = vec![format!("refs/orna/publication-candidates/{}", journal.new_head().as_str())];
+            if let Some(tree) = journal.base_index_tree() {
+                expected.push(format!("refs/orna/publication-indexes/{}", tree.as_str()));
+            }
+            expected.sort();
+            assert_eq!(pins_before, expected, "journal pins mismatch at {boundary}");
+        }
+        // A SIGKILL between adoption and the Prepared write leaves orphan pins with no
+        // journal. Recovery sweeps them (asserted after recovery below).
         drop(state);
         between_kill_and_recovery(&repository, root);
 
@@ -569,6 +595,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         // ORNA-PUB-018: pending pins stay protected through publication/recovery.
         let post_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(post_pins, seeded_pins, "accepted pending pin not retained through recovery at {boundary}");
+        assert!(publication_pin_refs(root).is_empty(), "publication pins remain after recovery at {boundary}");
         let (identity, digest) = cli_runtime_identity(&repository);
         let reopened = RuntimeState::open(&repository, identity, digest)
             .await
@@ -578,6 +605,7 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        assert!(publication_pin_refs(root).is_empty(), "publication pins remain after second publish at {boundary}");
         // Fence last: takeover_lease may leave takeover_recovery_pending set.
         let fresh = [0x5a; 16];
         let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
