@@ -10,6 +10,7 @@
 //! the size of the tree around them (ORNA-ROW-009).
 
 use std::{
+    collections::HashMap,
     fmt,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -22,6 +23,21 @@ use crate::{
     Repository, RepositoryError, init::format_context::STORE_PATH, native_graph::GitHashAlgorithm,
     scrub_git_routing_environment,
 };
+
+/// Most entries a committed source-tree walk may visit, counting every
+/// occurrence of a shared subtree.
+const MAX_SOURCE_TREE_WALK_ENTRIES: u64 = 1 << 20;
+/// Deepest tree nesting a committed source-tree walk may expand.
+const MAX_SOURCE_TREE_DEPTH: usize = 256;
+
+/// Entry count and nesting height of a measured source tree.
+#[derive(Clone, Copy)]
+struct SourceTreeSummary {
+    /// Entries the walk visits, counting every occurrence of shared subtrees.
+    entries: u64,
+    /// Levels of tree nesting below the measured tree.
+    height: usize,
+}
 
 /// Bounds one response header: an echoed object name or a full SHA-256 ID,
 /// followed by the object type and size.
@@ -533,8 +549,11 @@ impl Repository {
     }
 
     /// Walks a tree depth first in Git's tree order, as `git ls-tree -r`
-    /// lists it, and skips the subtree at the fixed store position.
+    /// lists it, and skips the subtree at the fixed store position. The walk
+    /// is preceded by a measurement, because shared subtrees multiply their
+    /// entries without any bound on the stored bytes.
     fn source_tree_entries(&self, root: &str) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        self.summarize_source_tree(root, Some(0), 0, &mut HashMap::new())?;
         let mut listed = Vec::new();
         let mut pending = vec![(String::new(), self.objects.tree_entries(root)?.into_iter())];
         loop {
@@ -572,6 +591,64 @@ impl Repository {
         }
         Ok(listed)
     }
+
+    /// Measures the tree at `oid` without listing it. `site` is the number of
+    /// leading `STORE_PATH` components the tree names, or `None` once it leaves
+    /// that prefix. Results are memoised per tree and site, so each shared
+    /// subtree is read once while its expanded entries still count per
+    /// occurrence.
+    fn summarize_source_tree(
+        &self,
+        oid: &str,
+        site: Option<usize>,
+        depth: usize,
+        memo: &mut HashMap<(String, Option<usize>), SourceTreeSummary>,
+    ) -> Result<SourceTreeSummary, RepositoryError> {
+        let key = (oid.to_owned(), site);
+        if let Some(summary) = memo.get(&key) {
+            return Ok(*summary);
+        }
+        if depth > MAX_SOURCE_TREE_DEPTH {
+            return Err(RepositoryError::SourceTreeLimit);
+        }
+        let store_depth = STORE_PATH.split('/').count();
+        let mut summary = SourceTreeSummary {
+            entries: 0,
+            height: 0,
+        };
+        for entry in self.objects.tree_entries(oid)? {
+            summary.entries += 1;
+            if summary.entries > MAX_SOURCE_TREE_WALK_ENTRIES {
+                return Err(RepositoryError::SourceTreeLimit);
+            }
+            if !matches!(entry.mode(), TreeEntryMode::Tree) {
+                continue;
+            }
+            let child_site = Self::store_child_site(site, entry.name());
+            if child_site == Some(store_depth) {
+                continue;
+            }
+            let child = self.summarize_source_tree(entry.oid(), child_site, depth + 1, memo)?;
+            if depth + 1 + child.height > MAX_SOURCE_TREE_DEPTH {
+                return Err(RepositoryError::SourceTreeLimit);
+            }
+            summary.entries += child.entries;
+            if summary.entries > MAX_SOURCE_TREE_WALK_ENTRIES {
+                return Err(RepositoryError::SourceTreeLimit);
+            }
+            summary.height = summary.height.max(child.height + 1);
+        }
+        memo.insert(key, summary);
+        Ok(summary)
+    }
+
+    /// The store site of the child `name` of a tree at `site`, or `None` once
+    /// the child leaves the `STORE_PATH` prefix.
+    fn store_child_site(site: Option<usize>, name: &[u8]) -> Option<usize> {
+        let index = site?;
+        let component = STORE_PATH.split('/').nth(index)?;
+        (component.as_bytes() == name).then_some(index + 1)
+    }
 }
 
 #[cfg(test)]
@@ -584,7 +661,7 @@ mod tests {
     };
 
     use super::{ObjectKind, TreeEntryMode};
-    use crate::{CommittedTreeEntryKind, Repository};
+    use crate::{CommittedTreeEntryKind, Repository, RepositoryError};
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
         git_with_input(directory, arguments, "")
@@ -863,5 +940,53 @@ mod tests {
                 .expect("the source listing never enters the store"),
             complete
         );
+    }
+
+    /// Each level holds two entries naming the same next tree, so the listing
+    /// of the root expands to `2^levels` leaves from `levels + 1` objects. The
+    /// walk must refuse it before it materialises any of that expansion.
+    #[test]
+    fn source_listing_rejects_a_shared_subtree_bomb_before_expanding_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let mut tree = git_with_input(root, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+        for _ in 0..30 {
+            tree = git_with_input(
+                root,
+                &["mktree"],
+                &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+            );
+        }
+        let commit = git(root, &["commit-tree", &tree, "-m", "tree bomb"]);
+        git(root, &["update-ref", "HEAD", &commit]);
+        let commit = repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the bomb commit");
+        assert!(matches!(
+            repository.list_committed_source_tree(&commit),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// A chain nested beyond the depth limit is refused as well, even though
+    /// it holds only one entry per level.
+    #[test]
+    fn source_listing_rejects_trees_nested_beyond_the_depth_limit() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let mut tree = git_with_input(root, &["mktree"], "");
+        for _ in 0..300 {
+            tree = git_with_input(root, &["mktree"], &format!("040000 tree {tree}\td\n"));
+        }
+        let commit = git(root, &["commit-tree", &tree, "-m", "deep chain"]);
+        git(root, &["update-ref", "HEAD", &commit]);
+        let commit = repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the deep commit");
+        assert!(matches!(
+            repository.list_committed_source_tree(&commit),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
     }
 }

@@ -967,6 +967,48 @@ fn committed_snapshot_loader_enforces_source_module_limit_before_reads() {
     ));
 }
 
+/// Builds a commit whose root is a chain of trees in which every level holds
+/// two entries that name the same next tree. Git stores only about one object
+/// per level, but a listing that re-expands each reference sees `2^levels`
+/// leaves.
+fn tree_bomb_commit(directory: &TempDir, levels: usize) -> String {
+    let leaf = git_with_input(directory, &["hash-object", "-w", "--stdin"], "leaf\n");
+    let mut tree = git_with_input(directory, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+    for _ in 0..levels {
+        tree = git_with_input(
+            directory,
+            &["mktree"],
+            &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+        );
+    }
+    git_output(directory, &["commit-tree", &tree, "-m", "tree bomb"])
+        .trim()
+        .to_owned()
+}
+
+/// A hostile repository can make the shared-subtree listing exponential. The
+/// committed loader must reject it with the source limit diagnostic before it
+/// expands the tree.
+#[test]
+fn committed_snapshot_loader_rejects_shared_subtree_tree_bomb_before_expansion() {
+    let (directory, repository) =
+        repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
+    commit_all(&directory);
+    let commit = tree_bomb_commit(&directory, 30);
+    git_output(&directory, &["update-ref", "HEAD", &commit]);
+    let commit = repository.resolve_snapshot(&commit).unwrap();
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_source_modules: 1,
+    });
+
+    assert!(matches!(
+        loader.load_committed_snapshot(&repository, &commit),
+        Err(ProjectLoadError::RepositoryLimit)
+    ));
+}
+
 /// The materialised store at `.orna/store` is database content, not source:
 /// the worktree loader neither walks nor counts it, and files that are not
 /// modules do not count against the source-module limit.

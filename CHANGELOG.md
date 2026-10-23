@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A committed source tree whose shared subtrees would expand past 2^20 entries, or nest deeper than 256 levels, is refused with a source-tree limit before any entry is listed. A project loaded from such a snapshot reports the project source-module limit, instead of spending unbounded time and memory on the expansion (W46 F1).
 - `orna --help` names the command `orna`. It says that `unmount DIR` detaches
   the kernel mount, including an orphaned Orna mount, and releases its view
   record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
