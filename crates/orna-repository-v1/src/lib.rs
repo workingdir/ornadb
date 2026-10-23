@@ -9957,6 +9957,9 @@ pub enum RepositoryError {
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
+    /// A committed source tree exceeds the walk-size or depth limit before
+    /// its entries are expanded.
+    SourceTreeLimit,
 }
 
 impl fmt::Display for RepositoryError {
@@ -10035,6 +10038,7 @@ impl fmt::Display for RepositoryError {
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
+            Self::SourceTreeLimit => f.write_str("source tree exceeds the walk limit"),
         }
     }
 }
