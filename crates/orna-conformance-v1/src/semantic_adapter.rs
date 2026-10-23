@@ -1001,6 +1001,9 @@ impl RuntimeEvaluator for BoundedEvaluator {
                 outcome => return outcome,
             }
         }
+        if let Err(outcome) = bind_standard_function_aliases(&mut staged.functions, project) {
+            return outcome;
+        }
         *self = staged;
         StageOutcome::Passed
     }
@@ -1054,6 +1057,53 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
     }
 }
+
+/// Binds unqualified names from `use std.<module>.{name}` declarations in the
+/// project's modules to the retained standard functions. User functions keep
+/// their own names; conflicting standard aliases are rejected.
+fn bind_standard_function_aliases(
+    functions: &mut BTreeMap<String, RetainedFunction>,
+    project: &ProjectUnit,
+) -> Result<(), StageOutcome<Diagnostic>> {
+    let mut aliases = BTreeMap::<String, String>::new();
+    for unit in &project.modules {
+        let parsed = parse_module(&unit.source);
+        for item in parsed.value.items {
+            let Declaration::Use {
+                path,
+                tail: orna_syntax_v1::UseTail::Names(names),
+            } = item.declaration
+            else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let namespace = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            for name in names {
+                let target = format!("{namespace}.{}", name.name);
+                if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
+                    && previous != target
+                {
+                    return Err(StageOutcome::Skipped {
+                        reason: "standard imports have conflicting unqualified function names".into(),
+                    });
+                }
+            }
+        }
+    }
+    for (alias, target) in aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            functions.entry(alias).or_insert(function);
+        }
+    }
+    Ok(())
+}
+
 
 fn module_namespace(unit: &SourceUnit) -> Option<String> {
     let mut components = unit.source_id.split('/').collect::<Vec<_>>();
