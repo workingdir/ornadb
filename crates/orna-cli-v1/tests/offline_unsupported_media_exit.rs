@@ -15,9 +15,9 @@ use offline_bundle_fixture::export_fixture_bundle;
 
 const FIXTURE: &str = "catalogue-unsupported-media-ogx1.orna";
 
-/// Runs `orna-cli-v1 import <bundle> --dry-run --type <media_type>`.
+/// Runs `orna import <bundle> --dry-run --type <media_type>`.
 fn run_import(bundle: &Path, media_type: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("import")
         .arg(bundle)
         .arg("--dry-run")

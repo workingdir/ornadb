@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use tempfile::tempdir;
 
 fn orna(directory: &std::path::Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(arguments)
         .current_dir(directory)
         .output()

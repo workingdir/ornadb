@@ -134,7 +134,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -278,7 +278,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -317,7 +317,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\ncp \"$ORNA_ROW_SOURCE\" \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -336,7 +336,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -353,7 +353,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     );
     assert!(mounted.child.wait().unwrap().success());
 
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -391,7 +391,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "row edit must retain the owner-issued Blob binding"
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),

@@ -23,7 +23,7 @@ fn annotate_with_suffix(
     suffix: Option<&str>,
 ) -> (Output, PathBuf) {
     let output_path = directory.path().join("annotated.ovb2");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command.current_dir(directory.path()).args([
         "annotate",
         source.to_str().unwrap(),
@@ -129,7 +129,7 @@ fn preserves_existing_destination_and_removes_staging_file() {
 fn rejects_incompatible_suffix_without_creating_output() {
     let directory = TempDir::new().unwrap();
     let output_path = directory.path().join("annotated.ovb2");
-    let result = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let result = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(directory.path())
         .args([
             "annotate",
@@ -161,7 +161,7 @@ fn rejects_fifo_without_writer_promptly_and_preserves_existing_output() {
 
     let output_path = directory.path().join("annotated.ovb2");
     std::fs::write(&output_path, b"existing destination").unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(directory.path())
         .args([
             "annotate",
