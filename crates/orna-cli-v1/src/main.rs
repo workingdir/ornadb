@@ -218,10 +218,18 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
-    if let orna_project_v1::ProjectLoadError::InvalidModule {
-        logical_path,
-        diagnostics,
-    } = &error
+    let invalid_unit = match &error {
+        orna_project_v1::ProjectLoadError::InvalidModule {
+            logical_path,
+            diagnostics,
+        }
+        | orna_project_v1::ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        } => Some((logical_path, diagnostics)),
+        _ => None,
+    };
+    if let Some((logical_path, diagnostics)) = invalid_unit
         && let Some(first) = diagnostics.first()
     {
         // The first parser diagnostic is the primary code: it is the spec code
