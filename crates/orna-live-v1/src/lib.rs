@@ -8346,19 +8346,7 @@ fn decode_token(value: &str) -> Option<[u8; 32]> {
         .and_then(|bytes| bytes.try_into().ok())
 }
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let unpadded = value.trim_end_matches('=');
-    let padding = value.len() - unpadded.len();
-    let expected_padding = match unpadded.len() % 4 {
-        0 => 0,
-        2 => 2,
-        3 => 1,
-        _ => return None,
-    };
-    if padding != expected_padding {
-        return None;
-    }
-    let normalized = unpadded.replace('+', "-").replace('/', "_");
-    decode_base64url(&normalized)
+    orna_value_v1::base64_decode(value).ok()
 }
 #[allow(clippy::cast_possible_truncation)]
 fn decode_base64url(value: &str) -> Option<Vec<u8>> {
@@ -8597,32 +8585,9 @@ fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
     Ok(Some((total, fin, opcode, payload)))
 }
 fn websocket_accept(key: &str) -> String {
-    base64_standard(&sha1(
+    orna_value_v1::base64_encode(&sha1(
         format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
     ))
-}
-fn base64_standard(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for part in bytes.chunks(3) {
-        out.push(TABLE[(part[0] >> 2) as usize] as char);
-        out.push(
-            TABLE[(((part[0] & 3) << 4) | (part.get(1).copied().unwrap_or(0) >> 4)) as usize]
-                as char,
-        );
-        out.push(if part.len() > 1 {
-            TABLE[(((part[1] & 15) << 2) | (part.get(2).copied().unwrap_or(0) >> 6)) as usize]
-                as char
-        } else {
-            '='
-        });
-        out.push(if part.len() > 2 {
-            TABLE[(part[2] & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 #[allow(clippy::many_single_char_names)]
 fn sha1(input: &[u8]) -> [u8; 20] {
@@ -11367,5 +11332,64 @@ mod tests {
         ] {
             assert_eq!(admin_failure_code(&error), code, "{error:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    /// Same inputs as the value, evaluator and compact decoder tables.
+    const CASES: &[(&str, bool)] = &[
+        ("", true),
+        ("Zm8=", true),
+        ("Zm9v", true),
+        ("+/8=", true),
+        ("-_8=", false),
+        ("+_8=", false),
+        ("-/8=", false),
+        ("Zm8", false),
+        ("Zm9v=", false),
+        ("Zm9v==", false),
+        ("Zm8= ", false),
+        (" Zm8=", false),
+        ("Zh==", false),
+        ("Zm9=", false),
+        ("====", false),
+        ("Zg==Zm9v", false),
+    ];
+
+    #[test]
+    fn sec_websocket_key_decoder_accepts_only_the_standard_alphabet() {
+        for &(input, accepted) in CASES {
+            assert_eq!(decode_base64(input).is_some(), accepted, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn long_inputs_follow_the_same_rules() {
+        let valid = "Zm9v".repeat(65_536);
+        assert_eq!(decode_base64(&valid).map(|bytes| bytes.len()), Some(196_608));
+        let invalid = format!("{}-_8=", "Zm9v".repeat(65_536));
+        assert_eq!(decode_base64(&invalid), None);
+    }
+}
+
+#[cfg(test)]
+mod websocket_key_alphabet {
+    use super::{decode_base64, websocket_accept};
+
+    #[test]
+    fn rfc6455_sample_key_is_accepted_with_the_standard_accept() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        assert!(decode_base64(key).is_some());
+        assert_eq!(websocket_accept(key), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn url_safe_key_is_rejected_at_the_handshake() {
+        // 24 characters, URL alphabet '_' in the final group.
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA_w==").is_none());
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA-w==").is_none());
     }
 }
