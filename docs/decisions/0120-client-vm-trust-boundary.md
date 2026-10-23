@@ -1,4 +1,4 @@
-# Work ADR 0100: OrnaDB 1.0 CLIENT VM Trust Boundary
+# Work ADR 0120: OrnaDB 1.0 CLIENT VM Trust Boundary
 
 **Status:** Accepted 1.0 boundary; production CLIENT VM trust and sandbox are deferred
 
