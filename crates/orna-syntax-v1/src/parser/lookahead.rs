@@ -226,11 +226,7 @@ mod tests {
         Token {
             kind,
             text: String::new(),
-            span: SourceSpan {
-                start: 0,
-                end: 0,
-                file: None,
-            },
+            span: SourceSpan::new(0, 0),
         }
     }
 
