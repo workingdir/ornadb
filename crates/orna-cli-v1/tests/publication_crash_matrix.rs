@@ -478,10 +478,36 @@ fn head(repository: &Repository) -> String {
 
 #[tokio::test]
 async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary() {
-    // The repository observer fires after each ref/index stage is durable;
-    // ref-index remains the existing boundary after both stages complete.
-    // index-install parks after the reconciled index is installed but before
-    // its IndexReconciled journal stage is durable (ORNA-PUB-007).
+    publish_kill_matrix(|_, _| {}).await;
+}
+
+/// Gate D (ACCEPTANCE.md): coordinated GC/repack inside the kill window. After the
+/// publisher is SIGKILLed at each reachable boundary and before recovery runs,
+/// `git gc --prune=now` and `git repack -a -d` execute while holding the Orna
+/// coordination lock, the declared maintenance boundary (ORNA-CAP-006). Pinned,
+/// staged and unstaged content must survive and recovery must still publish. This
+/// is coordinated GC only; it claims nothing for uncoordinated `git prune --expire
+/// now` (ORNA-GIT-010).
+#[tokio::test]
+async fn cli_publication_reopens_after_coordinated_gc_and_repack_in_kill_window() {
+    publish_kill_matrix(coordinated_gc_and_repack).await;
+}
+
+fn coordinated_gc_and_repack(repository: &Repository, root: &Path) {
+    repository
+        .with_coordination_lock(|| {
+            git(root, &["gc", "--prune=now", "--quiet"]);
+            git(root, &["repack", "-a", "-d", "--quiet"]);
+            Ok::<(), orna_repository_v1::RepositoryError>(())
+        })
+        .expect("coordination lock is free once the publisher is killed");
+}
+
+// The repository observer fires after each ref/index stage is durable;
+// ref-index remains the existing boundary after both stages complete.
+// index-install parks after the reconciled index is installed but before
+// its IndexReconciled journal stage is durable (ORNA-PUB-007).
+async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) {
     for boundary in ["index-lock", "capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
@@ -524,12 +550,17 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
         assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
         drop(state);
+        between_kill_and_recovery(&repository, root);
 
-        let resumed = cli(root, &["publish"]);
+        let resumed = cli(root, &["--debug", "publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
         assert_ne!(once, base.as_str(), "candidate not retained after {boundary}");
         assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
+        assert!(
+            !root.join(".git/index.lock").exists(),
+            "index lock stranded after {boundary}"
+        );
         assert_eq!(git_output(root, &["diff", "--cached", "--binary"], None), staged_before, "staged work lost after {boundary}");
         assert_eq!(git_output(root, &["diff", "--binary"], None), unstaged_before, "unstaged work lost after {boundary}");
         let fsck = Command::new("git").args(["fsck", "--no-dangling", "--no-progress"]).current_dir(root)
@@ -563,6 +594,91 @@ async fn cli_publication_reopens_after_process_kill_at_each_reachable_boundary()
             second.status.code().unwrap()
         );
     }
+}
+
+/// Family B: an external edit to a tracked worktree file lands inside the kill window at the
+/// `index` boundary, after the publisher is SIGKILLed and before recovery runs. Recovery must
+/// leave that edit intact and publication must still succeed.
+#[tokio::test]
+async fn cli_publication_reopens_after_external_edit_in_kill_window() {
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+    git(root, &["add", "--", "unrelated-tracked.txt"]);
+    git(
+        root,
+        &["commit", "--quiet", "-m", "add unrelated tracked file"],
+    );
+    let base = repository.head().unwrap().unwrap();
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch(root, "index", crash.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "child never reached index; status: {:?}",
+        child.try_wait().unwrap()
+    );
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed child");
+    assert!(!status.success(), "child unexpectedly returned at index");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "index");
+    std::fs::remove_file(&marker).unwrap();
+    drop(state);
+
+    let external = b"external edit during kill window\n";
+    std::fs::write(root.join("unrelated-tracked.txt"), external).unwrap();
+
+    let resumed = cli(root, &["--debug", "publish"]);
+    assert!(
+        resumed.status.success(),
+        "recovery after external edit failed (exit {:?}): {}",
+        resumed.status.code(),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_ne!(
+        head(&repository),
+        base.as_str(),
+        "candidate not published after external edit"
+    );
+    assert_eq!(
+        std::fs::read(root.join("unrelated-tracked.txt")).unwrap(),
+        external,
+        "external worktree edit lost during recovery"
+    );
+    assert!(
+        repository.read_publication_journal().unwrap().is_none(),
+        "journal left after external edit"
+    );
+    assert!(
+        !root.join(".git/index.lock").exists(),
+        "index lock stranded after external edit"
+    );
+    let fsck = Command::new("git")
+        .args(["fsck", "--no-dangling", "--no-progress"])
+        .current_dir(root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        fsck.status.success(),
+        "fsck after external edit: {}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+    let second = cli(root, &["publish"]);
+    assert!(
+        second.status.success(),
+        "second publish after external edit failed (exit {:?}): {}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
 }
 
 /// W14-01 / ORNA-PUB-016: a `commit` killed after the Orna index lock is taken
