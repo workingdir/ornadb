@@ -34,11 +34,16 @@ use unicode_normalization::UnicodeNormalization;
 mod attachments;
 mod unicode16;
 mod object_identity;
+mod table_storage;
 
 pub use object_identity::{
     ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectIdentityRename,
     ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
     OBJECT_IDENTITY_MANIFEST_PATH,
+};
+pub use table_storage::{
+    CommittedTable, TableStorageError, committed_tables, evaluator_rows, has_text_primary_key,
+    runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
 };
 
 pub use attachments::{
