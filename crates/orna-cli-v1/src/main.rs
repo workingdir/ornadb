@@ -2006,15 +2006,24 @@ fn run_project_invocation_with_arguments(
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => {
-            let mut rejection = Diagnostic::target(
-                "E2200",
-                "durable project invocation was rejected",
-                "the project transaction failed atomically; no partial changes were committed",
-            );
-            rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
-            Err(rejection)
-        }
+        StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
+            Some(mut published) => {
+                published.detail = Some(
+                    "the project transaction failed atomically; no partial changes were committed"
+                        .into(),
+                );
+                published
+            }
+            None => {
+                let mut rejection = Diagnostic::target(
+                    "E2200",
+                    "durable project invocation was rejected",
+                    "the project transaction failed atomically; no partial changes were committed",
+                );
+                rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+                rejection
+            }
+        }),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -2093,6 +2102,21 @@ fn run_project_stream_invocation_with_project(
             "use a supported finite-list stream root",
         )),
     }
+}
+
+/// Publishes a runtime failure under its catalogued Orna code, with the
+/// catalogue title and help. Uncatalogued evaluator codes return `None` so each
+/// caller keeps its own fallback; no unpublished code is promoted.
+fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Option<Diagnostic> {
+    let documentation = diagnostic_documentation(diagnostic.code())?;
+    Some(Diagnostic {
+        code: documentation.code,
+        title: Cow::Borrowed(documentation.title),
+        help: documentation.help,
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    })
 }
 fn run_pure_invocation(
     endpoint: &Endpoint,
@@ -2193,7 +2217,11 @@ fn run_pure_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| Diagnostic::unavailable(
+            "requested invocation is not available",
+            "define a reachable zero-argument pure function with the requested name",
+        ))),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
