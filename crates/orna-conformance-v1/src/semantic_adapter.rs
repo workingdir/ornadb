@@ -1839,7 +1839,9 @@ impl TransactionalEvaluator {
     }
 
     /// Opts this evaluator into the conformance fixture catalogue. Production
-    /// evaluators never use it.
+    /// evaluators never use it. The only callers are the conformance harness
+    /// (`CompositeEvaluator::default` in `main.rs` and
+    /// `SemanticAdapter::evaluate`), which need `execute_duplicate_key_fixture`.
     #[must_use]
     pub fn with_fixture_catalogue(mut self) -> Self {
         self.admission = AdmissionCatalogue::ConformanceFixture;
@@ -2192,14 +2194,6 @@ impl DurableTransactionalEvaluator {
             #[cfg(test)]
             activation_time_observer: None,
         }
-    }
-
-    /// Opts this evaluator into the conformance fixture catalogue. Production
-    /// evaluators never use it.
-    #[must_use]
-    pub fn with_fixture_catalogue(mut self) -> Self {
-        self.admission = AdmissionCatalogue::ConformanceFixture;
-        self
     }
 
     /// Attaches the repository and activation facts that `sys.rt.info()` reads
