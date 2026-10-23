@@ -131,6 +131,8 @@ async fn stale_capture_failure_records_admitted_generation_and_replays_same_erro
         .pause_stream_at_capture_with_invocation_id(writer, key(), Some(&stale), [8; 16])
         .await
         .expect_err("replayed stale capture must fail");
+    // The row stores only the class (ORNA-ADMIN-001), so the replayed StaleCapture
+    // carries the capture current at replay. Compare the class, not that payload.
     assert!(
         matches!(replay, RuntimeError::StaleCapture { .. }),
         "{replay:?}"
