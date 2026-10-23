@@ -1539,7 +1539,7 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             "invoke": "warehouse.transfer",
             "args": ["north", "south", "pencil", 100],
             "expect": "assertion failure; both stock rows unchanged",
-            "diagnostic_code": "ORNA-EVAL-ASSERT"
+            "diagnostic_code": "ORNA-A091-008"
         },
         {
             "invoke": "library.lend",
