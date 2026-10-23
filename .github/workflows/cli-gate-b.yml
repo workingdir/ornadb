@@ -6,19 +6,21 @@ name: CLI Gate B
 #
 # When it runs:
 # - on every push to main, once per commit (the group is keyed on the commit);
-# - on demand (workflow_dispatch);
-# - on a pull request that carries the `gate-b` label (add the label to a pull request
-#   that changes the data path: orna-cli-v1, evaluator, repository, runtime, storage,
-#   sys, value, syntax, project or the stdlib). A new commit cancels that pull request's
-#   older run.
+# - on demand (workflow_dispatch; dispatches of one ref queue behind each other);
+# - on a pull request that carries the `gate-b` label. Add the label to a pull request
+#   whose change reaches the dependency closure of the orna-cli-v1 tests (28 workspace
+#   crates: `cargo metadata --format-version 1` lists them; the data path is mostly
+#   orna-cli-v1, evaluator, repository, runtime, storage, sys, value, syntax, project,
+#   stream, foundation and the stdlib). A new commit cancels that pull request's older
+#   run.
 #
-# Why not on every pull request that touches a listed path: a path list cannot name the
-# whole dependency closure (the orna-cli-v1 tests depend on 28 workspace crates; a change
-# to orna-syntax-v1 alone matched no path), and each run holds a runner for one to two
-# hours. On 2026-10-23 ten pull request runs were in progress and three queued at once,
-# which delayed every other CI job, and two pull requests merged before their Gate B run
-# finished. No branch protection rule requires this check. The run on main after each
-# merge is the evidence; a pull request author who wants it earlier adds the label.
+# Why not on every pull request that touches a listed path: the old path list named
+# 7 of the 28 closure crates (a change to orna-syntax-v1 alone matched nothing), and each
+# run holds a runner for one to two hours. At 22:30Z on 2026-10-23 ten Gate B runs were
+# in progress (eight for pull requests) and three were queued, which delayed every other
+# CI job, and two pull requests merged before their Gate B run finished. No branch
+# protection rule requires this check. The run on main after each merge is the evidence;
+# a pull request author who wants it earlier adds the label.
 
 on:
   push:
@@ -26,6 +28,7 @@ on:
       - main
   pull_request:
     types:
+      - opened
       - labeled
       - synchronize
       - reopened
@@ -38,10 +41,13 @@ env:
   CARGO_BUILD_JOBS: 2
   RUST_TEST_THREADS: 2
 
-# A pull request run that will not execute the job (no gate-b label, or another label was
-# added) gets a unique group, so it can never cancel a running labelled Gate B run.
+# Push: one group per commit. Dispatch: one group per ref (dispatches queue, none is
+# cancelled). Pull request: one group per pull request when the job will run, so a new
+# commit cancels the older run; a pull request run that will not execute the job (no
+# gate-b label, or another label was added) gets a unique group, so it can never cancel
+# a running labelled Gate B run.
 concurrency:
-  group: cli-gate-b-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b') && github.ref) || github.run_id }}
+  group: cli-gate-b-${{ github.event_name }}-${{ (github.event_name == 'push' && github.sha) || (github.event_name == 'workflow_dispatch' && github.ref) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b') && github.ref) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
