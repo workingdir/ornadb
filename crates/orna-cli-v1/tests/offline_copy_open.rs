@@ -182,7 +182,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
             .unwrap()
             .trim()
             .to_owned();
-    let export = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let export = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(directory.path())
         .args([
             "export",
@@ -219,7 +219,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     drop(directory);
 
     let restored = outside.path().join("restored");
-    let restore = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let restore = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(outside.path())
         .args([
             "export",
@@ -330,7 +330,7 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
         .trim()
         .to_owned();
     assert_eq!(selected_snapshot, source_snapshot);
-    let query = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let query = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(&restored)
         .args([
             "query",
