@@ -15,10 +15,12 @@ env:
   RUST_TEST_THREADS: 2
 
 # Keep each ref's native CLI gate independent. A worker branch must not replace
-# main's pending test run.
+# main's pending test run. A newer push to the same PR replaces that PR's own
+# older run; push-to-main runs are never cancelled, so each main commit keeps
+# its own result for attribution.
 concurrency:
   group: cli-tests-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == "pull_request" }}
 
 jobs:
   cli-tests:
