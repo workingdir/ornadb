@@ -130,8 +130,15 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
         Command::Unmount { ref mountpoint } => cli_mount::run_unmount(&parsed.endpoint, mountpoint),
         Command::Edit { ref path, row } => cli_mount::run_edit(&parsed.endpoint, path, row),
-        Command::Diff(ref arguments) => run_git_diff(arguments),
-        Command::Log(ref arguments) => run_git_log(arguments),
+        Command::Diff(ref arguments) => run_git_passthrough(&parsed.endpoint, "diff", arguments),
+        Command::Log(ref arguments) => run_git_passthrough(&parsed.endpoint, "log", arguments),
+        Command::GitPassthrough {
+            name,
+            ref arguments,
+        } => run_git_passthrough(&parsed.endpoint, name, arguments),
+        Command::RestoreRow { ref table, ref key } => {
+            cli_stage::unstage_row(&parsed.endpoint, table, key)
+        }
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Query(arguments) => cli_query::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
@@ -938,12 +945,16 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     let usage = || {
         Diagnostic::usage(
             "E1002",
-            "unsupported `migrate copy` arguments",
-            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers`",
+            "unsupported `migrate` arguments",
+            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers` or `migrate abort DEST`",
         )
     };
     let mut arguments = arguments.iter().map(String::as_str);
-    if arguments.next() != Some("copy") {
+    let subcommand = arguments.next();
+    if subcommand == Some("abort") {
+        return run_migrate_abort(endpoint, arguments);
+    }
+    if subcommand != Some("copy") {
         return Err(usage());
     }
     let destination = arguments.next().ok_or_else(|| {
@@ -1118,6 +1129,59 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
     Ok(())
 }
 
+fn run_migrate_abort<'a>(
+    endpoint: &Endpoint,
+    mut arguments: impl Iterator<Item = &'a str>,
+) -> Result<(), Diagnostic> {
+    let destination = arguments.next().ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate abort` needs a destination",
+            "supply DEST after `migrate abort`",
+        )
+    })?;
+    if arguments.next().is_some() {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "unsupported `migrate abort` arguments",
+            "use `migrate abort DEST`",
+        ));
+    }
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository_v1::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
+        )
+    })?;
+    let destination = std::path::PathBuf::from(destination);
+    let outcome = orna_repository_v1::migration_copy::discard_prepared_format3_migration(
+        &repository,
+        &destination,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration copy could not be discarded",
+            "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })?;
+    match outcome {
+        orna_repository_v1::migration_copy::DiscardOutcome::Discarded => println!(
+            "discarded prepared format-3 migration copy: destination={}",
+            destination.display()
+        ),
+        orna_repository_v1::migration_copy::DiscardOutcome::NothingToDiscard => println!(
+            "nothing to discard: no prepared format-3 migration copy at destination={}",
+            destination.display()
+        ),
+    }
+    Ok(())
+}
+
 fn run_status_short_with_runtime_summary(
     endpoint: &Endpoint,
     color_enabled: bool,
@@ -1164,34 +1228,33 @@ mod short_runtime_summary_tests {
     }
 }
 
-fn run_git_diff(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("diff")
-        .args(arguments)
-        .status()
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2000",
-                "Git diff could not be started",
-                "check that Git is installed and available on PATH",
-                error.to_string(),
-            )
-        })?;
-    if let Some(code) = status.code() {
-        std::process::exit(code);
+/// Run a Git-native command (ORNA-CLI-001). A local `--db PATH` runs as
+/// `git -C PATH NAME ...` so the Git operation targets the database's repository,
+/// not the current directory. Managed-local runs in the current worktree. Socket
+/// and remote endpoints have no local repository to run Git against.
+fn run_git_passthrough(endpoint: &Endpoint, name: &str, arguments: &[String]) -> Result<(), Diagnostic> {
+    let mut command = std::process::Command::new("git");
+    match endpoint {
+        Endpoint::ManagedLocal => {}
+        Endpoint::Path(path) => {
+            command.arg("-C").arg(path);
+        }
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
+            return Err(Diagnostic::target(
+                "E2100",
+                "Git passthrough requires a local repository",
+                "run the command against a local worktree or with `--db PATH`",
+            ));
+        }
     }
-    std::process::exit(128)
-}
-
-fn run_git_log(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("log")
+    let status = command
+        .arg(name)
         .args(arguments)
         .status()
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2000",
-                "Git log could not be started",
+                "Git command could not be started",
                 "check that Git is installed and available on PATH",
                 error.to_string(),
             )

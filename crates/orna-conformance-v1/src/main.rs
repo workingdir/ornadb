@@ -507,7 +507,7 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
         let state = block_on(RuntimeState::open(&repository, identity, [44; 32])).ok()?;
         let matches = match scenario.id.as_str() {
             "TXN-001" => {
-                matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+                matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
                     && block_on(state.committed_table_rows("Note"))
                         .ok()?
                         .is_empty()
