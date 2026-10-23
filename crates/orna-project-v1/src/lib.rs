@@ -1835,7 +1835,7 @@ fn validate_committed_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_committed_source_tree(commit)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
 }
 
@@ -1846,8 +1846,17 @@ fn validate_private_candidate_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_private_candidate_source_tree(candidate)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
+}
+
+/// A source tree over the walk limit is a source-module limit for the project,
+/// and every other repository failure stays a repository error.
+fn source_tree_load_error(error: RepositoryError) -> ProjectLoadError {
+    match error {
+        RepositoryError::SourceTreeLimit => ProjectLoadError::RepositoryLimit,
+        error => ProjectLoadError::Repository(error),
+    }
 }
 
 fn validate_snapshot_tree(
