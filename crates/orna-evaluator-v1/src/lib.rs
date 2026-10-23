@@ -18386,6 +18386,28 @@ mod table_reference_value_tests {
             compare_values(&value, &other_key).unwrap(),
             std::cmp::Ordering::Less
         );
+
+        fn identity(value: &Value) -> &CanonicalValue {
+            match value {
+                Value::TableReference(identity) => identity,
+                _ => panic!("expected table reference"),
+            }
+        }
+        fn hash_of(value: &CanonicalValue) -> u64 {
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+        // Same key, different table: distinct identity (not equal, hashes differ).
+        let other_table =
+            orna_value_v1::Value::table_reference([1; 16], [3; 16], Raw::Text("ada".into()))
+                .unwrap();
+        let other_table = Value::from_canonical(&other_table, &mut context, 0).unwrap();
+        assert_ne!(value, other_table);
+        assert_ne!(hash_of(identity(&value)), hash_of(identity(&other_table)));
+        // Same identity rebuilt from fresh bytes: equal hash.
+        assert_eq!(hash_of(identity(&value)), hash_of(identity(&same)));
     }
 }
 
