@@ -15,7 +15,7 @@ const VERSION_2_SOURCE: &[u8] = include_bytes!("fixtures/init/version-2.orna");
 const FOREIGN_SOURCE: &[u8] = include_bytes!("fixtures/init/foreign.orna");
 
 fn command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command);
     command
 }

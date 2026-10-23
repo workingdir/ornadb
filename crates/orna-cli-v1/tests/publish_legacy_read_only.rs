@@ -46,7 +46,7 @@ const LEGACY_FORMAT_RECORDS: [(&str, u8); 2] = [
 ];
 
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
