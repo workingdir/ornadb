@@ -4350,7 +4350,11 @@ pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
+/// Encodes one value for a repository row in canonical CBOR, preserving
+/// repository-profile tags such as stored ROV-3 Blob references; the inverse
+/// of [`decode_canonical_storage_value`]. Callers validate the encoded value
+/// against its authenticated row schema before storing it.
+pub fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_raw(raw, &mut bytes)?;
     Ok(bytes)
@@ -4684,11 +4688,22 @@ fn validate_nominal_stored_value(value: &Raw, id: [u8; 16], definitions: &[Raw])
     match kind {
         0 => validate_record_fields(value, id, array(body)?, definitions),
         1 => validate_enum_fields(value, id, array(body)?, definitions),
-        2 => validate_stored_value_as_type(
-            value,
-            array(body)?.first().ok_or(Error::InvalidSchema)?,
-            definitions,
-        ),
+        // A refined nominal value is tag 60020 `[type_object_id, base_value]`
+        // (29-formats.md); the base value has the definition's base type.
+        2 => {
+            let Raw::Tag(60020, payload) = value else {
+                return Err(Error::InvalidValue);
+            };
+            let refined = array(payload)?;
+            if refined.len() != 2 || uuid_array(&refined[0])? != id {
+                return Err(Error::InvalidValue);
+            }
+            validate_stored_value_as_type(
+                &refined[1],
+                array(body)?.first().ok_or(Error::InvalidSchema)?,
+                definitions,
+            )
+        }
         _ => Err(Error::InvalidSchema),
     }
 }

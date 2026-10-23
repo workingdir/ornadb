@@ -1709,6 +1709,64 @@ impl NativeGraphContext {
         })
     }
 
+    /// Every committed row of this relation in key order, each with its
+    /// complete canonical stored-field tuple: an overflow value is read back
+    /// to its full ROV-3 encoding. Schema evolution rewrites these tuples for
+    /// a successor descriptor; Blob payload chunks are never fetched.
+    pub(crate) fn committed_rows_with_fields(
+        &self,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<(crate::row_store::TypedKey, Vec<u8>)>, GraphError> {
+        scope.authorize(self)?;
+        let version = self.row_snapshot.version();
+        let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
+        let root = version.primary_root().clone();
+        let domain = rows_domain_for_version(version);
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let root_node = self.read_native_node(&root, scope, &mut objects)?;
+        validate_ordered_root_node(&root_node, &domain, expected_count)?;
+        let limit = usize::try_from(expected_count).unwrap_or(usize::MAX);
+        let mut raw = Vec::new();
+        collect_ordered_range_with(
+            &mut |oid: &NativeOid| self.read_native_node(oid, scope, &mut objects),
+            root_node,
+            &domain,
+            None,
+            None,
+            None,
+            None,
+            limit,
+            &mut raw,
+        )?;
+        let mut rows = Vec::with_capacity(raw.len());
+        for entry in raw {
+            let key = crate::row_store::TypedKey::decode_canonical(&entry.key)
+                .map_err(|_| GraphError::NonCanonicalData)?;
+            let fields = match self.decode_persisted_row_value(entry.value, scope, &mut objects)? {
+                crate::row_store::RowValue::Inline { encoded, .. } => encoded,
+                crate::row_store::RowValue::Overflow(reference) => {
+                    let root = reference
+                        .native_root()
+                        .ok_or(GraphError::UnsupportedRowValueForm)?;
+                    self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
+                        .encoded_value
+                        .ok_or(GraphError::ContextMismatch)?
+                }
+            };
+            rows.push((key, fields));
+        }
+        if rows.len() as u64 != expected_count {
+            return Err(GraphError::InvalidCount(rows.len()));
+        }
+        Ok(rows)
+    }
+
     fn decode_persisted_row_value(
         &self,
         encoded: Vec<u8>,

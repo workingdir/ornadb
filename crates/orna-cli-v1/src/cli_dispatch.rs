@@ -263,6 +263,19 @@ fn run_mv(
     if old_qualified == new_qualified {
         return Err(mv_usage());
     }
+    if let Ok(repository) = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
+        && repository
+            .capture_staged_candidate()
+            .is_ok_and(|staged| staged.store_root().is_some())
+    {
+        return run_store_mv(
+            endpoint,
+            &repository,
+            &old_qualified,
+            &new_qualified,
+            color_enabled,
+        );
+    }
 
     let project = load_project_without_standard_rejection(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -531,9 +544,234 @@ fn run_mv(
 fn mv_usage() -> Diagnostic {
     Diagnostic::usage(
         "E1002",
-        "invalid table rename names",
-        "use `mv TABLE NEW_NAME` within the table's existing module namespace",
+        "invalid rename names",
+        "use `mv OLD NEW` with a qualified name such as `Music` or `Music.title`, renaming only its last part",
     )
+}
+
+/// The identity kinds `orna mv` can rename, in lookup order.
+const RENAMEABLE_KINDS: [orna_project_v1::ObjectKind; 7] = [
+    orna_project_v1::ObjectKind::Table,
+    orna_project_v1::ObjectKind::Field,
+    orna_project_v1::ObjectKind::Type,
+    orna_project_v1::ObjectKind::Variant,
+    orna_project_v1::ObjectKind::TypeField,
+    orna_project_v1::ObjectKind::VariantField,
+    orna_project_v1::ObjectKind::Unit,
+];
+
+/// `orna mv OLD NEW` over the identity inventory a format-3 index stages
+/// in `.orna/store` (ORNA-OBJECT-003): renames one table, field, type,
+/// variant, type or variant field, or unit declaration in its source file and
+/// moves its ObjectId to the new name in the staged inventory, so the next
+/// `orna commit` keeps the identity and evolves the stored rows by it. The
+/// source edit stays in the worktree for review and staging; nothing is
+/// committed. A failed staging restores the source.
+fn run_store_mv(
+    endpoint: &Endpoint,
+    repository: &orna_repository_v1::Repository,
+    old: &str,
+    new: &str,
+    color_enabled: bool,
+) -> Result<(), Diagnostic> {
+    let identity_error = |error: orna_project_v1::ObjectIdentityError| {
+        Diagnostic::target_with_detail(
+            "E2101",
+            "the rename could not keep the object identity",
+            "fix the reported condition, then retry `orna mv`; the source was left unchanged",
+            error.to_string(),
+        )
+    };
+    let inventory = orna_project_v1::ObjectIdentityManifest::read_index(repository)
+        .map_err(identity_error)?
+        .unwrap_or_default();
+    let Some(kind) = RENAMEABLE_KINDS
+        .into_iter()
+        .find(|kind| inventory.id(*kind, old).is_some())
+    else {
+        return Err(Diagnostic::target(
+            "E2101",
+            "no committed or staged definition has that name",
+            "name a table, field, type, variant or unit by its qualified name, such as `Music.title`; a definition that was never committed has no identity yet, so rename it in source",
+        ));
+    };
+    let new_leaf = new.rsplit('.').next().unwrap_or(new);
+    let project = load_project_without_standard_rejection(endpoint)?;
+    let mut modules = project.modules().to_vec();
+    let (module_index, span) = declaration_name_span(&modules, kind, old).ok_or_else(|| {
+        Diagnostic::target(
+            "E2101",
+            "the declaration to rename was not found in the worktree source",
+            "restore the declaration under its committed name, then retry `orna mv`",
+        )
+    })?;
+    let original_source = std::mem::take(&mut modules[module_index].source);
+    let mut updated_source = String::with_capacity(original_source.len() + new_leaf.len());
+    updated_source.push_str(&original_source[..span.start]);
+    updated_source.push_str(new_leaf);
+    updated_source.push_str(&original_source[span.end..]);
+    modules[module_index].source = updated_source;
+    let catalogue = semantic_catalogue(&project)?;
+    if !orna_semantic_v1::analyze_with_catalogue(&modules, &catalogue).is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "the rename would leave the source project invalid",
+            "update the source that refers to the old name, then retry `orna mv`",
+        ));
+    }
+    let source_path =
+        checked_project_source_path(repository.worktree(), &modules[module_index].logical_path)?;
+    let updated = modules[module_index].source.as_bytes();
+    if write_source_atomically(&source_path, original_source.as_bytes(), updated).is_err() {
+        if !restore_source_after_failed_write(&source_path, original_source.as_bytes(), updated) {
+            return Err(mv_partial_update_error());
+        }
+        return Err(Diagnostic::target(
+            "E2100",
+            "the source could not be updated",
+            "check source-file permissions and retry `orna mv`",
+        ));
+    }
+    let rename = orna_project_v1::ObjectIdentityRename::new(kind, old, new);
+    match orna_project_v1::ObjectIdentityManifest::stage_renames(
+        repository,
+        &modules,
+        std::slice::from_ref(&rename),
+    ) {
+        Ok(Some(_)) => {}
+        failed => {
+            if !restore_source_after_failed_write(&source_path, original_source.as_bytes(), updated) {
+                return Err(mv_partial_update_error());
+            }
+            return Err(match failed {
+                Err(error) => identity_error(error),
+                Ok(_) => identity_error(orna_project_v1::ObjectIdentityError::MissingIdentity),
+            });
+        }
+    }
+    write_success_line(
+        &format!(
+            "renamed {old} to {new}; the identity move is staged: review the source change, stage it with `git add`, then run `orna commit`"
+        ),
+        color_enabled,
+    )
+}
+
+/// The module and byte span of the name in the declaration `qualified`
+/// names: a table, type, enum or unit declaration, or a table field or key,
+/// an enum variant, a type field or a variant payload field.
+fn declaration_name_span(
+    modules: &[orna_semantic_v1::ModuleInput],
+    kind: orna_project_v1::ObjectKind,
+    qualified: &str,
+) -> Option<(usize, orna_syntax_v1::SyntaxSpan)> {
+    use orna_project_v1::ObjectKind;
+    use orna_syntax_v1::{Declaration, Keyword, TableMember, TypeMember, TypeRepresentation};
+    let segments = qualified.split('.').collect::<Vec<_>>();
+    let members = match kind {
+        ObjectKind::Table | ObjectKind::Type | ObjectKind::Unit => 0,
+        ObjectKind::Field | ObjectKind::Variant | ObjectKind::TypeField => 1,
+        ObjectKind::VariantField => 2,
+    };
+    let declaration_index = segments.len().checked_sub(members + 1)?;
+    let namespace = segments[..declaration_index].join(".");
+    let declaration = segments[declaration_index];
+    let module_index = modules
+        .iter()
+        .position(|module| module_namespace_matches(&module.logical_path, &namespace))?;
+    let source = &modules[module_index].source;
+    let parsed = orna_syntax_v1::parse_module(source);
+    if !parsed.is_ok() {
+        return None;
+    }
+    let tokens = orna_syntax_v1::lex(source).ok()?;
+    // The identifier `name` that follows `keyword` inside `span`, or the first
+    // identifier `name` inside `span` when no keyword introduces it.
+    let name_in = |span: &orna_syntax_v1::SyntaxSpan, keyword: Option<Keyword>, name: &str| {
+        let inside = tokens
+            .iter()
+            .filter(|token| token.span.start >= span.start && token.span.end <= span.end)
+            .collect::<Vec<_>>();
+        let start = match keyword {
+            Some(keyword) => {
+                inside
+                    .iter()
+                    .position(|token| token.kind == orna_syntax_v1::TokenKind::Keyword(keyword))?
+                    + 1
+            }
+            None => 0,
+        };
+        inside[start..]
+            .iter()
+            .find(|token| {
+                matches!(
+                    &token.kind,
+                    orna_syntax_v1::TokenKind::Identifier { normalized } if normalized == name
+                )
+            })
+            .filter(|token| keyword.is_none() || std::ptr::eq(**token, inside[start]))
+            .map(|token| token.span.clone())
+    };
+    let leaf = segments.last()?;
+    let span = parsed.value.items.iter().find_map(|item| match (&item.declaration, kind) {
+        (Declaration::Table { name, .. }, ObjectKind::Table) if name == declaration => {
+            name_in(&item.span, Some(Keyword::Table), name)
+        }
+        (Declaration::Type { name, .. }, ObjectKind::Type) if name == declaration => {
+            name_in(&item.span, Some(Keyword::Type), name)
+        }
+        (Declaration::Enum { name, .. }, ObjectKind::Type) if name == declaration => {
+            name_in(&item.span, Some(Keyword::Enum), name)
+        }
+        (Declaration::Unit { name, .. }, ObjectKind::Unit) if name == declaration => {
+            name_in(&item.span, Some(Keyword::Unit), name)
+        }
+        (Declaration::Table { name, keys, members }, ObjectKind::Field) if name == declaration => {
+            keys.iter()
+                .find_map(|key| match &key.pattern {
+                    orna_syntax_v1::Pattern::Name(key_name, span) if key_name == leaf => {
+                        Some(span.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    members.iter().find_map(|member| match member {
+                        TableMember::Field { name, span, .. } if name == leaf => {
+                            name_in(span, None, name)
+                        }
+                        _ => None,
+                    })
+                })
+        }
+        (Declaration::Enum { name, variants, .. }, ObjectKind::Variant) if name == declaration => {
+            variants
+                .iter()
+                .find(|variant| variant.name == *leaf)
+                .and_then(|variant| name_in(&variant.span, None, &variant.name))
+        }
+        (Declaration::Enum { name, variants, .. }, ObjectKind::VariantField)
+            if name == declaration =>
+        {
+            let variant = variants
+                .iter()
+                .find(|variant| variant.name == segments[declaration_index + 1])?;
+            let field = variant.fields.iter().find(|field| field.name == *leaf)?;
+            name_in(&field.span, None, &field.name)
+        }
+        (
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { members },
+                ..
+            },
+            ObjectKind::TypeField,
+        ) if name == declaration => members.iter().find_map(|member| match member {
+            TypeMember::Field { name, span, .. } if name == leaf => name_in(span, None, name),
+            _ => None,
+        }),
+        _ => None,
+    })?;
+    Some((module_index, span))
 }
 
 fn split_qualified_name(name: &str) -> Option<(&str, &str)> {
