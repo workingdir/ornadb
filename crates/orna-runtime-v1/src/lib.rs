@@ -4502,6 +4502,9 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::StaleCapture { .. } => "stale_capture",
         RuntimeError::InvalidCapture => "invalid_capture",
         RuntimeError::EmptyMutationBatch => "empty_mutation_batch",
+        RuntimeError::StreamFailureStale => "stream_failure_stale",
+        RuntimeError::StreamFailureStateConflict => "stream_failure_state_conflict",
+        RuntimeError::StreamFailureSkipUnsupported => "stream_failure_skip_unsupported",
         RuntimeError::InvalidTableMutation => "invalid_table_mutation",
         RuntimeError::ConflictingPublicationIntent => "conflicting_publication_intent",
         RuntimeError::ConflictingPublicationCommit => "conflicting_publication_commit",
@@ -4562,6 +4565,9 @@ fn admin_failure_from_class(class: &str) -> RuntimeError {
         "owner_lost" => RuntimeError::OwnerLost,
         "recovery_pending" => RuntimeError::RecoveryPending,
         "invalid_capture" => RuntimeError::InvalidCapture,
+        "stream_failure_stale" => RuntimeError::StreamFailureStale,
+        "stream_failure_state_conflict" => RuntimeError::StreamFailureStateConflict,
+        "stream_failure_skip_unsupported" => RuntimeError::StreamFailureSkipUnsupported,
         "empty_mutation_batch" => RuntimeError::EmptyMutationBatch,
         "invalid_table_mutation" => RuntimeError::InvalidTableMutation,
         "conflicting_publication_intent" => RuntimeError::ConflictingPublicationIntent,
@@ -40323,7 +40329,7 @@ mod tests {
 
     #[test]
     fn admin_failure_class_round_trips_every_payload_free_variant() {
-        // The 45 payload-free variants. StaleCapture, FaultInjected and
+        // The 48 payload-free variants. StaleCapture, FaultInjected and
         // LegacyHeadReadOnly carry payloads the row does not store; they are
         // checked by the class-only assertions below.
         let table: &[(RuntimeError, &str)] = &[
@@ -40372,8 +40378,11 @@ mod tests {
             (RuntimeError::RecoveryInvalid, "recovery_invalid"),
             (RuntimeError::SystemProviderAbiInvalid, "system_provider_abi_invalid"),
             (RuntimeError::StorageUnavailable, "storage_unavailable"),
+            (RuntimeError::StreamFailureStale, "stream_failure_stale"),
+            (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
+            (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
         ];
-        assert_eq!(table.len(), 45);
+        assert_eq!(table.len(), 48);
         for (variant, class) in table {
             assert_eq!(admin_failure_class(variant), *class);
             assert_eq!(admin_failure_from_class(class), *variant, "{class}");
