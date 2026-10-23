@@ -5540,7 +5540,7 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         }
         validate_raw(value, depth + 1)?;
     }
-    let mut keys = Vec::new();
+    let mut keys = BTreeSet::new();
     for child in array(&a[3])? {
         let Raw::Tag(60012, node) = child else {
             return Err(Error::InvalidTag);
@@ -5549,10 +5549,9 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         let child_fields = array(node)?;
         if !matches!(child_fields[1], Raw::Null) {
             let k = encode_raw(&child_fields[1])?;
-            if keys.contains(&k) {
+            if !keys.insert(k) {
                 return Err(Error::DuplicateOrUnorderedMapKey);
             }
-            keys.push(k)
         }
     }
     Ok(())
@@ -5783,11 +5782,12 @@ fn validate_schema(raw: &Raw) -> Result<()> {
     if ids.windows(2).any(|x| x[0] >= x[1]) {
         return Err(Error::InvalidSchema);
     }
+    let id_set: BTreeSet<[u8; 16]> = ids.iter().copied().collect();
     let mut key_ids = Vec::new();
     let mut key_id_set = BTreeSet::new();
     for key in keys {
         let key = uuid_array(key)?;
-        if !ids.contains(&key) || !key_id_set.insert(key) {
+        if !id_set.contains(&key) || !key_id_set.insert(key) {
             return Err(Error::InvalidSchema);
         }
         key_ids.push(key);
@@ -5817,15 +5817,17 @@ fn validate_schema(raw: &Raw) -> Result<()> {
         }
         validate_definition(kind, &a[2])?;
     }
+    let definition_set: BTreeSet<[u8; 16]> = definition_ids.iter().copied().collect();
+    let unit_definition_set: BTreeSet<[u8; 16]> = unit_definition_ids.iter().copied().collect();
     for field in fields {
-        validate_type_refs(&array(field)?[2], &definition_ids, &unit_definition_ids)?;
+        validate_type_refs(&array(field)?[2], &definition_set, &unit_definition_set)?;
     }
     for definition in defs {
         validate_definition_refs(
             int_u64(&array(definition)?[1])?,
             &array(definition)?[2],
-            &definition_ids,
-            &unit_definition_ids,
+            &definition_set,
+            &unit_definition_set,
         )?;
     }
     validate_schema_constructibility(fields, defs, &definition_ids)?;
@@ -5833,8 +5835,8 @@ fn validate_schema(raw: &Raw) -> Result<()> {
 }
 fn validate_type_refs(
     node: &Raw,
-    definitions: &[[u8; 16]],
-    unit_definitions: &[[u8; 16]],
+    definitions: &BTreeSet<[u8; 16]>,
+    unit_definitions: &BTreeSet<[u8; 16]>,
 ) -> Result<()> {
     let a = array(node)?;
     match int_u64(&a[0])? {
@@ -5873,8 +5875,8 @@ fn validate_type_refs(
 fn validate_definition_refs(
     kind: u64,
     body: &Raw,
-    definitions: &[[u8; 16]],
-    unit_definitions: &[[u8; 16]],
+    definitions: &BTreeSet<[u8; 16]>,
+    unit_definitions: &BTreeSet<[u8; 16]>,
 ) -> Result<()> {
     match kind {
         0 => {
