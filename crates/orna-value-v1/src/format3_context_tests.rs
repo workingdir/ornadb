@@ -1224,3 +1224,65 @@ fn table_reference_accepts_each_permitted_key_shape() {
         assert!(Value::table_reference([1; 16], [2; 16], key.clone()).is_ok(), "{key:?}");
     }
 }
+
+#[test]
+fn tuple_primary_key_with_pinned_reference_keeps_base_behaviour() {
+    // Base accepts and compares 60010 components inside tuple primary keys;
+    // only Value::table_reference applies the strict snapshot-free rule.
+    let pinned = |n: i32| {
+        Raw::Tag(
+            60010,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(n.into()), Raw::Null])),
+        )
+    };
+    let one = Value::new(Raw::Array(vec![pinned(1)])).unwrap();
+    let two = Value::new(Raw::Array(vec![pinned(2)])).unwrap();
+    assert_eq!(
+        compare_primary_keys(&one, &one).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        compare_primary_keys(&one, &two).unwrap(),
+        std::cmp::Ordering::Less
+    );
+}
+
+#[test]
+fn permitted_key_shapes_compare_as_tuple_primary_keys() {
+    let decimal = |c: i32| {
+        Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![Raw::Int(c.into()), Raw::Int(0.into())])),
+        )
+    };
+    let date = |s: &str| Raw::Tag(60001, Box::new(Raw::Text(s.into())));
+    let instant = |s: i32| {
+        Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![Raw::Int(s.into()), Raw::Int(0.into())])),
+        )
+    };
+    for (left, right) in [
+        (decimal(1), decimal(2)),
+        (date("2024-01-01"), date("2024-01-02")),
+        (instant(1), instant(2)),
+    ] {
+        let left = Value::new(Raw::Array(vec![left])).unwrap();
+        let right = Value::new(Raw::Array(vec![right])).unwrap();
+        assert_eq!(
+            compare_primary_keys(&left, &right).unwrap(),
+            std::cmp::Ordering::Less
+        );
+    }
+    let tuple = |n: i32, s: &str| {
+        Value::new(Raw::Array(vec![Raw::Int(n.into()), Raw::Text(s.into())])).unwrap()
+    };
+    assert_eq!(
+        compare_primary_keys(&tuple(1, "a"), &tuple(1, "b")).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        compare_primary_keys(&tuple(1, "b"), &tuple(1, "b")).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+}
