@@ -152,7 +152,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0050:**
   [Canonical Raw Calls Update One Selected Object with One Value](0050-canonical-raw-reference-value-update.md)
 * **work ADR 0051:**
-  [Text Fields Have Byte-Exact Uniqueness](archive/1.0/0051-unique-text-fields.md)
+  [Text Fields Have Byte-Exact Uniqueness](0051-unique-text-fields.md)
 * **work ADR 0052:**
   [Raw Calls Select One Object by Unique Text](0052-raw-unique-text-server-select.md)
 * **work ADR 0053:**
@@ -244,7 +244,7 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 * **work ADR 0093:**
   [Gateway and Protocol Contract Boundaries](0093-reflective-gateway-contracts.md)
 * **work ADR 0094:**
-  [Reference-Defined Run Entry Contract](archive/1.0/0094-std-launch-contract.md)
+  [Reference-Defined Run Entry Contract](0094-std-launch-contract.md)
 * **work ADR 0095:**
   [OrnaDB 1.0 Principal, Credential, and Delegation Scope](0095-principal-credential-delegation-scope.md)
 * **work ADR 0096:**

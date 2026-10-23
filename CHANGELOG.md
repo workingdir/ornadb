@@ -5,6 +5,10 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
+  archived under `docs/decisions/archive/1.0/` with an evidence table in
+  `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
+  0119 (was 0059) and the CLIENT VM trust boundary ADR is 0120 (was 0101).
 - `orna --help` names the command `orna`. It says that `unmount DIR` detaches
   the kernel mount, including an orphaned Orna mount, and releases its view
   record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
@@ -449,7 +453,7 @@ release gate has passed.
   typed scalar/reference/record values, identity-selected mutations, client
   expression bodies, local/session/user state declarations, resources and
   actions, JSON, bounded table presentation, and the accepted structural UI
-  constructors. The [accepted demo inventory BROKEN ](examples/accepted-demos.toml)
+  constructors. The [accepted demo inventory](examples/accepted-demos.toml)
   is the authoritative list of checked-in examples; it is not a replacement
   for the missing canonical spec.
 - The CLI exposes function invocation, a bounded local function-backed REPL
