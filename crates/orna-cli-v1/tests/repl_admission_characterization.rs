@@ -1,4 +1,4 @@
-//! CHARACTERIZATION of REPL admission through `orna-cli-v1 --db <dir> repl`.
+//! CHARACTERIZATION of REPL admission through `orna --db <dir> repl`.
 //!
 //! Every test here pins what the binary does today on `origin/main`; none of
 //! them states the intended behaviour. Later slices of the REPL/CWD design
