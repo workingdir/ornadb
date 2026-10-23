@@ -3825,6 +3825,112 @@ impl Repository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(RepositoryError::LocalStateUnavailable),
         }
+        self.sweep_publication_pins_locked(&[])?;
+        Ok(())
+    }
+
+    /// Pins the objects an unfinished publication journal needs for recovery
+    /// (ORNA-GIT-010): its base index tree and its candidate commit. The pins
+    /// are private and owned by the journal. They are adopted before Git's
+    /// index lock is taken or the Prepared journal is written, and every pin
+    /// that no journal names is swept, so GC and repack cannot prune the
+    /// objects reconciliation reads.
+    fn adopt_publication_pins_locked(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let mut pins = Vec::new();
+        if let Some(tree) = journal.base_index_tree.as_ref() {
+            pins.push((
+                Self::publication_index_pin_ref(tree.as_str()),
+                tree.as_str().to_owned(),
+            ));
+        }
+        pins.push((
+            Self::publication_candidate_pin_ref(journal.new_head.as_str()),
+            journal.new_head.as_str().to_owned(),
+        ));
+        let keep: Vec<String> = pins
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        self.sweep_publication_pins_locked(&keep)?;
+        for (reference, oid) in &pins {
+            self.pin_publication_object_locked(reference, oid)?;
+        }
+        Ok(())
+    }
+
+    fn publication_index_pin_ref(tree: &str) -> String {
+        format!("refs/orna/publication-indexes/{tree}")
+    }
+
+    fn publication_candidate_pin_ref(commit: &str) -> String {
+        format!("refs/orna/publication-candidates/{commit}")
+    }
+
+    /// Pins one object a journal names. An object Git no longer holds cannot
+    /// be kept alive, so it is left unpinned: the recovery path already
+    /// classifies a lost candidate or base tree (ORNA-GIT-010).
+    fn pin_publication_object_locked(
+        &self,
+        reference: &str,
+        oid: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut exists = self.command();
+        exists.args(["cat-file", "-e", oid]);
+        let present = exists
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if !present.status.success() {
+            return Ok(());
+        }
+        let zero = "0".repeat(oid.len());
+        let mut update = self.command();
+        update.args(["update-ref", "--no-deref", reference, oid, zero.as_str()]);
+        if self.run(update).is_ok() {
+            return Ok(());
+        }
+        // Creation is refused when the pin already names this object. Accept
+        // only that exact pin; any other value is a conflicting journal pin.
+        let mut verify = self.command();
+        verify.args(["rev-parse", "--verify", "--quiet", reference]);
+        let output = verify
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() && trim_output(&output.stdout) == oid {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidPublicationJournal)
+        }
+    }
+
+    /// Deletes every publication pin not named in `keep`. Callers hold the
+    /// coordination lock, so no publisher can sit between its pin and its
+    /// journal. With no journal no pin may survive; with a journal only its
+    /// own pins may (ORNA-GIT-010).
+    fn sweep_publication_pins_locked(&self, keep: &[String]) -> Result<(), RepositoryError> {
+        let mut list = self.command();
+        list.args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/orna/publication-indexes/",
+            "refs/orna/publication-candidates/",
+        ]);
+        let listing = self.run(list)?.stdout;
+        for line in listing
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let reference =
+                std::str::from_utf8(line).map_err(|_| RepositoryError::GitOperationFailed)?;
+            if keep.iter().any(|kept| kept == reference) {
+                continue;
+            }
+            let mut delete = self.command();
+            delete.args(["update-ref", "-d", "--no-deref", reference]);
+            self.run(delete)?;
+        }
         Ok(())
     }
 
@@ -4474,6 +4580,7 @@ impl Repository {
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
+        self.adopt_publication_pins_locked(journal)?;
         let lock_binding = journal.lock_binding()?;
         // Own Git's writer lock before persisting a prepared intent so lock contention
         // cannot strand a timestamped journal that blocks a fresh retry. This closes the
@@ -4605,9 +4712,11 @@ impl Repository {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
         let Some(mut journal) = self.read_publication_journal_locked()? else {
+            self.sweep_publication_pins_locked(&[])?;
             self.reclaim_orphan_publication_index_lock()?;
             return Ok(None);
         };
+        self.adopt_publication_pins_locked(&journal)?;
         self.reclaim_abandoned_publication_index_lock(&journal)?;
         let base_tree = journal
             .base_index_tree()
