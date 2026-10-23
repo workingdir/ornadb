@@ -18,7 +18,7 @@ pub fn add(id: Str, title: Str, content: Blob) =
 "#;
 
 fn run_repl(directory: &std::path::Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
@@ -36,7 +36,7 @@ fn run_repl(directory: &std::path::Path, input: &str) -> Output {
 }
 
 fn start_repl(directory: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
