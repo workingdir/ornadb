@@ -7714,7 +7714,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
             &Environment::new(),
             Limits::default(),
         )),
-        "ORNA-EVAL-ASSERT"
+        "ORNA-A091-008"
     );
     assert_eq!(
         code(evaluate_expression(
