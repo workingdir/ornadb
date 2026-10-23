@@ -218,6 +218,13 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
+        return Diagnostic::target(
+            "E2100",
+            "committed source tree exceeds the fixed walk limit",
+            "reduce the committed tree's entry count, nesting depth or path length, then run check again",
+        );
+    }
     let invalid_unit = match &error {
         orna_project_v1::ProjectLoadError::InvalidModule {
             logical_path,
