@@ -119,7 +119,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             }
             Ok(())
         }
-        Command::Serve { port } => cli_serve::run(&parsed.endpoint, port),
+        Command::Serve { port, allow_push } => cli_serve::run(&parsed.endpoint, port, allow_push),
         Command::Mount {
             ref mountpoint,
             ref selector,
@@ -130,8 +130,15 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
         Command::MountStatus { json } => cli_mount::run_mount_status(&parsed.endpoint, json),
         Command::Unmount { ref mountpoint } => cli_mount::run_unmount(&parsed.endpoint, mountpoint),
         Command::Edit { ref path, row } => cli_mount::run_edit(&parsed.endpoint, path, row),
-        Command::Diff(ref arguments) => run_git_diff(arguments),
-        Command::Log(ref arguments) => run_git_log(arguments),
+        Command::Diff(ref arguments) => run_git_passthrough(&parsed.endpoint, "diff", arguments),
+        Command::Log(ref arguments) => run_git_passthrough(&parsed.endpoint, "log", arguments),
+        Command::GitPassthrough {
+            name,
+            ref arguments,
+        } => run_git_passthrough(&parsed.endpoint, name, arguments),
+        Command::RestoreRow { ref table, ref key } => {
+            cli_stage::unstage_row(&parsed.endpoint, table, key)
+        }
         Command::History(arguments) => cli_history::run(&parsed.endpoint, &arguments),
         Command::Query(arguments) => cli_query::run(&parsed.endpoint, &arguments),
         Command::Import(ref arguments) => cli_import::run(arguments),
@@ -348,7 +355,7 @@ fn run_mv(
     };
 
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(&modules, &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -917,16 +924,37 @@ fn mv_partial_update_error() -> Diagnostic {
     )
 }
 
+/// Names why the migration source failed format admission. The title carries
+/// the `FormatContextError` message, so the cause is user-visible; the stable
+/// code is kept in the detail.
+fn migration_source_admission_diagnostic(
+    error: orna_repository_v1::FormatContextError,
+) -> Diagnostic {
+    let title = format!("migration source could not be admitted: {error}");
+    Diagnostic {
+        code: "E2100",
+        title: std::borrow::Cow::Owned(title),
+        help: "verify the source worktree and retry with the same migration coordinates",
+        exit: Exit::Target,
+        detail: Some(format!("{} ({error:?})", error.code())),
+        body: None,
+    }
+}
+
 fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let usage = || {
         Diagnostic::usage(
             "E1002",
-            "unsupported `migrate copy` arguments",
-            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers`",
+            "unsupported `migrate` arguments",
+            "use `migrate copy DEST --annotation-defaults N --no-persistent-consumers` or `migrate abort DEST`",
         )
     };
     let mut arguments = arguments.iter().map(String::as_str);
-    if arguments.next() != Some("copy") {
+    let subcommand = arguments.next();
+    if subcommand == Some("abort") {
+        return run_migrate_abort(endpoint, arguments);
+    }
+    if subcommand != Some("copy") {
         return Err(usage());
     }
     let destination = arguments.next().ok_or_else(|| {
@@ -966,7 +994,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
         return Err(Diagnostic::usage(
             "E1001",
             "`migrate copy` needs an explicit consumer-continuity choice",
-            "supply `--no-persistent-consumers` when no persistent consumer state must be carried",
+            "supply `--no-persistent-consumers` to acknowledge that persistent consumer checkpoints are carried under recorded identity correspondence",
         ));
     }
     let annotation_defaults = annotation_defaults.ok_or_else(|| {
@@ -996,36 +1024,161 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{error:?}"),
         )
     })?;
-    let continuity =
-        orna_repository_v1::MigrationContinuityRecord::new(Vec::new()).map_err(|error| {
-            Diagnostic::target_with_detail(
+    // Persistent stream checkpoints are carried into the prepared destination
+    // under the identity correspondence recorded there before any row is
+    // imported. Live per-attempt stream state is not carried: a source holding
+    // it refuses before a copy is built and its state is left unchanged.
+    let source_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
                 "E2100",
-                "migration consumer continuity could not be represented",
-                "retry with the migration continuity inventory available",
-                format!("{error:?}"),
+                "migration source runtime could not be inspected",
+                "retry `migrate copy` once the local runtime can start",
             )
         })?;
+    let carry = source_runtime
+        .block_on(orna_runtime_v1::read_stream_carry(&repository))
+        .map_err(|error| match error {
+            orna_runtime_v1::StreamCarryError::NotCarriable(tables) => {
+                Diagnostic::target_with_detail(
+                    "E2100",
+                    "migration source holds live stream state that is not carried",
+                    "release or drain the source's live stream state; no copy was prepared and the source is unchanged",
+                    format!("tables={}", tables.join(", ")),
+                )
+            }
+            orna_runtime_v1::StreamCarryError::Runtime(error) => Diagnostic::target_with_detail(
+                "E2100",
+                "migration source runtime state could not be inspected",
+                "repair the source runtime state; no copy was prepared",
+                format!("{error:?}"),
+            ),
+        })?;
+    let continuity = carry.continuity_record().map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration consumer continuity could not be represented",
+            "retry with the migration continuity inventory available",
+            format!("{error:?}"),
+        )
+    })?;
     let copy = orna_repository_v1::migration_copy::prepare_format3_migration(
         &repository,
         &std::path::PathBuf::from(destination),
         continuity,
         annotation_defaults,
     )
-    .map_err(|error| {
-        Diagnostic::target_with_detail(
+    .map_err(|error| match error {
+        orna_repository_v1::RepositoryError::FormatContext(context) => {
+            migration_source_admission_diagnostic(context)
+        }
+        other => Diagnostic::target_with_detail(
             "E2100",
             "migration copy could not be prepared or recovered",
             "verify the source worktree and retry with the same migration coordinates",
-            format!("{error:?}"),
-        )
+            format!("{other:?}"),
+        ),
     })?;
+    let destination_repository =
+        orna_repository_v1::Repository::discover(copy.destination()).map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration destination could not be opened",
+                "verify the prepared destination and retry with the same migration coordinates",
+                format!("{error:?}"),
+            )
+        })?;
+    let recorded_journal = destination_repository
+        .read_publication_journal()
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration destination journal could not be read",
+                "verify the prepared destination and retry with the same migration coordinates",
+                format!("{error:?}"),
+            )
+        })?;
+    let recorded_continuity = recorded_journal
+        .as_ref()
+        .and_then(|journal| journal.migration_continuity());
+    source_runtime
+        .block_on(orna_runtime_v1::import_stream_carry(
+            &destination_repository,
+            &carry,
+            recorded_continuity,
+        ))
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "migration stream checkpoints could not be carried",
+                "verify the destination continuity record and that the destination holds no carried checkpoints; the copy was prepared but no checkpoint was imported",
+                format!("{error:?}"),
+            )
+        })?;
     println!(
-        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={}",
+        "prepared or recovered format-3 migration copy: source_format={} source_commit={} candidate_commit={} destination={} carried_checkpoints={} carried_history={}",
         copy.source_format_number(),
         copy.source_commit().as_str(),
         copy.candidate_journal().new_head().as_str(),
         copy.destination().display(),
+        carry.checkpoint_count(),
+        carry.history_count(),
     );
+    Ok(())
+}
+
+fn run_migrate_abort<'a>(
+    endpoint: &Endpoint,
+    mut arguments: impl Iterator<Item = &'a str>,
+) -> Result<(), Diagnostic> {
+    let destination = arguments.next().ok_or_else(|| {
+        Diagnostic::usage(
+            "E1001",
+            "`migrate abort` needs a destination",
+            "supply DEST after `migrate abort`",
+        )
+    })?;
+    if arguments.next().is_some() {
+        return Err(Diagnostic::usage(
+            "E1002",
+            "unsupported `migrate abort` arguments",
+            "use `migrate abort DEST`",
+        ));
+    }
+    let source = std::path::Path::new(local_project_path(endpoint)?);
+    let repository = orna_repository_v1::Repository::discover(source).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "legacy migration source could not be opened",
+            "run the command from a local format-1 or format-2 worktree",
+            format!("{error:?}"),
+        )
+    })?;
+    let destination = std::path::PathBuf::from(destination);
+    let outcome = orna_repository_v1::migration_copy::discard_prepared_format3_migration(
+        &repository,
+        &destination,
+    )
+    .map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2100",
+            "migration copy could not be discarded",
+            "verify that DEST is the prepared copy of this source; the source worktree is unchanged",
+            format!("{error:?}"),
+        )
+    })?;
+    match outcome {
+        orna_repository_v1::migration_copy::DiscardOutcome::Discarded => println!(
+            "discarded prepared format-3 migration copy: destination={}",
+            destination.display()
+        ),
+        orna_repository_v1::migration_copy::DiscardOutcome::NothingToDiscard => println!(
+            "nothing to discard: no prepared format-3 migration copy at destination={}",
+            destination.display()
+        ),
+    }
     Ok(())
 }
 
@@ -1075,34 +1228,33 @@ mod short_runtime_summary_tests {
     }
 }
 
-fn run_git_diff(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("diff")
-        .args(arguments)
-        .status()
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2000",
-                "Git diff could not be started",
-                "check that Git is installed and available on PATH",
-                error.to_string(),
-            )
-        })?;
-    if let Some(code) = status.code() {
-        std::process::exit(code);
+/// Run a Git-native command (ORNA-CLI-001). A local `--db PATH` runs as
+/// `git -C PATH NAME ...` so the Git operation targets the database's repository,
+/// not the current directory. Managed-local runs in the current worktree. Socket
+/// and remote endpoints have no local repository to run Git against.
+fn run_git_passthrough(endpoint: &Endpoint, name: &str, arguments: &[String]) -> Result<(), Diagnostic> {
+    let mut command = std::process::Command::new("git");
+    match endpoint {
+        Endpoint::ManagedLocal => {}
+        Endpoint::Path(path) => {
+            command.arg("-C").arg(path);
+        }
+        Endpoint::UnixSocket(_) | Endpoint::RemoteTls(_) => {
+            return Err(Diagnostic::target(
+                "E2100",
+                "Git passthrough requires a local repository",
+                "run the command against a local worktree or with `--db PATH`",
+            ));
+        }
     }
-    std::process::exit(128)
-}
-
-fn run_git_log(arguments: &[String]) -> Result<(), Diagnostic> {
-    let status = std::process::Command::new("git")
-        .arg("log")
+    let status = command
+        .arg(name)
         .args(arguments)
         .status()
         .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2000",
-                "Git log could not be started",
+                "Git command could not be started",
                 "check that Git is installed and available on PATH",
                 error.to_string(),
             )

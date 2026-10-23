@@ -162,9 +162,6 @@ pub const LINE_COMMENT_START: &str = "//";
 pub const BLOCK_COMMENT_START: &str = "/*";
 pub const BLOCK_COMMENT_END: &str = "*/";
 pub const STRING_DELIMITER: char = '"';
-/// Candidate-number expression shared with generated editor grammars. The
-/// lexer remains authoritative for validating complete numeric tokens.
-pub const NUMBER_PATTERN: &str = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -683,19 +680,24 @@ enum CalendarLiteral {
 }
 
 /// Recognise only the grammar's complete calendar forms.  A date-shaped
-/// source still becomes a Date token so calendar-invalid input receives a
-/// literal diagnostic rather than being reinterpreted as subtraction.
+/// source (`digit4 "-" digit2 "-" digit2`, ASCII digits) still becomes a
+/// Date token so calendar-invalid input receives a literal diagnostic rather
+/// than being reinterpreted as subtraction; anything else, such as
+/// `1+10-20-30`, is ordinary arithmetic.
 fn calendar_literal(source: &str) -> Option<(usize, CalendarLiteral)> {
     let bytes = source.as_bytes();
-    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+    let digits = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    if bytes.len() < 10
+        || !digits(0..4)
+        || bytes[4] != b'-'
+        || !digits(5..7)
+        || bytes[7] != b'-'
+        || !digits(8..10)
+    {
         return None;
     }
     if bytes.get(10) != Some(&b'T') {
-        let mut end = 10;
-        while !source.is_char_boundary(end) {
-            end += 1;
-        }
-        return Some((end, CalendarLiteral::Date));
+        return Some((10, CalendarLiteral::Date));
     }
 
     // Once a date-shaped candidate has a `T`, it is an instant candidate even

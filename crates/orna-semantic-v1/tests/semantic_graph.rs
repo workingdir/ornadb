@@ -8,10 +8,13 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 }
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
-    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
+    Catalogue, DIAG_ABSOLUTE_QUANTITY_SUM, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_AMBIGUOUS,
+    DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
+    DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_LEGACY_RESULT,
+    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_MONEY_BINARY_FLOAT, DIAG_PRIMARY_KEY_FLOAT,
+    DIAG_RELATION_EQUALITY_AMBIGUOUS, DIAG_RESERVED, DIAG_RESERVED_SYS, DIAG_TABLE_FIELD_TYPE,
+    DIAG_TABLE_UNKNOWN_FIELD, DIAG_TYPE, DIAG_TYPE_MISMATCH, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
     StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind, Type, analyze,
     analyze_with_catalogue,
 };
@@ -21,6 +24,19 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code() == code)
+}
+
+/// Corpus snippets name `GBP` and `EUR` without declaring them; the
+/// manifest's fixture environment supplies that semantic support.
+fn analyze_corpus(inputs: &[ModuleInput]) -> orna_semantic_v1::Analysis {
+    analyze_with_catalogue(inputs, &Catalogue::authoritative_fixture())
+}
+
+/// ORNA-UNIT-001: unit names never resolve from spelling. Snippets that name corpus units
+/// import them from `fixture.units`, because the conformance manifest's `fixture_environment.snippets`
+/// says semantic support "must be supplied explicitly before implementation execution".
+fn with_fixture_units(source: &str) -> String {
+    format!("use fixture.units.*;\n{source}")
 }
 
 // ORNA-TYPE-005: closed variants are declared as nominal enums, while pipe-separated types are rejected.
@@ -412,19 +428,27 @@ fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
         assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
     }
-    for source in [
-        include_str!("fixtures/attached-table-reject-customer-payment.orna"),
-        include_str!("fixtures/attached-table-reject-struct-payment.orna"),
-        include_str!("fixtures/attached-table-reject-contact-order.orna"),
-        include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+    for (source, code) in [
+        (
+            include_str!("fixtures/attached-table-reject-customer-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-struct-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-contact-order.orna"),
+            DIAG_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+            DIAG_TYPE,
+        ),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
-        assert!(
-            has(&result, DIAG_TYPE),
-            "{source}: {:?}",
-            result.diagnostics
-        );
+        assert!(has(&result, code), "{source}: {:?}", result.diagnostics);
     }
 }
 
@@ -438,11 +462,11 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
         ),
         (
             include_str!("fixtures/stored-email-provider-wrong-type.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_FIELD_TYPE),
         ),
         (
             include_str!("fixtures/stored-email-provider-unknown-field.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_UNKNOWN_FIELD),
         ),
         (
             include_str!("fixtures/stored-email-provider-connector-message.orna"),
@@ -827,10 +851,19 @@ fn table_insert_and_upsert_validate_provided_fields() {
             }
         }
     }
-    for value in [
-        include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
-        include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
-        include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+    for (value, code) in [
+        (
+            include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
+            DIAG_TABLE_UNKNOWN_FIELD,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
@@ -839,7 +872,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
                 &[("value", &value)],
             ),
         )]);
-        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+        assert!(has(&result, code), "{:?}", result.diagnostics);
     }
 }
 
@@ -964,7 +997,7 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
             ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE
+            diagnostic.code() == DIAG_RELATION_EQUALITY_AMBIGUOUS
                 && diagnostic.message() == "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
         }), "{:?}", result.diagnostics);
     }
@@ -1917,13 +1950,13 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
         "key.orna",
         include_str!("fixtures/inline-semantic_graph/4bae95d858a3.orna"),
     )]);
-    assert!(has(&key, DIAG_TYPE));
+    assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
     let temperature = analyze(&[ModuleInput::new(
         "temperature.orna",
         include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
     )]);
-    assert!(has(&temperature, DIAG_TYPE));
+    assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
 
 #[test]
@@ -2037,15 +2070,17 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
 
 #[test]
 fn table_rows_reject_overlapping_protocol_implementations() {
+    // A key-less table's row includes its automatic `id` (ORNA-AUTOID-001,
+    // ORNA-KEY-002), so these structural conversion rows use an explicit key.
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/ddc1070ae1fd.orna"),
+        include_str!("fixtures/inline-semantic_graph/e6cba2ed225f.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/6f9f39aac506.orna"),
+        include_str!("fixtures/inline-semantic_graph/e12bf9706073.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
@@ -2120,7 +2155,7 @@ fn system_commit_rows_reject_mutation() {
 // Specified: ORNA-MONEY-003; the exact money-rate unit expression is resolved before rejecting an unqualified Float calculation.
 #[test]
 fn money_rate_unit_resolves_before_float_exactness_check() {
-    let analysis = analyze(&[ModuleInput::new(
+    let analysis = analyze_corpus(&[ModuleInput::new(
         "rate.orna",
         include_str!("fixtures/inline-semantic_graph/459784eb93e7.orna"),
     )]);
@@ -2129,9 +2164,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
         "{:?}",
         analysis.diagnostics
     );
-    assert!(has(&analysis, DIAG_TYPE), "{:?}", analysis.diagnostics);
+    assert!(has(&analysis, DIAG_MONEY_BINARY_FLOAT), "{:?}", analysis.diagnostics);
 
-    let unknown = analyze(&[ModuleInput::new(
+    let unknown = analyze_corpus(&[ModuleInput::new(
         "unknown.orna",
         include_str!("fixtures/inline-semantic_graph/e2e3ba7cadca.orna"),
     )]);
@@ -2140,9 +2175,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 
 #[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
-    let affine_sum = analyze(&[ModuleInput::new(
+    let affine_sum = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
     )]);
     assert!(
         affine_sum
@@ -2160,7 +2195,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
             == "currency symbols belong to locale-aware formatting, not Currency identity"
     }));
 
-    let float_money = analyze(&[ModuleInput::new(
+    let float_money = analyze_corpus(&[ModuleInput::new(
         "money.orna",
         include_str!("fixtures/inline-semantic_graph/e6cc03beb7e7.orna"),
     )]);
@@ -2168,7 +2203,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
         diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
     }));
 
-    let float_constructor = analyze(&[ModuleInput::new(
+    let float_constructor = analyze_corpus(&[ModuleInput::new(
         "constructor.orna",
         include_str!("fixtures/inline-semantic_graph/7012225696c5.orna"),
     )]);
@@ -2177,7 +2212,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
             == "Money cannot be constructed from an inexact Float without explicit rounding"
     }));
 
-    let exact_constructor = analyze(&[ModuleInput::new(
+    let exact_constructor = analyze_corpus(&[ModuleInput::new(
         "constructor.orna",
         include_str!("fixtures/inline-semantic_graph/210723bc8b9b.orna"),
     )]);
@@ -2186,7 +2221,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
         "{:?}",
         exact_constructor.diagnostics
     );
-    let good = &exact_constructor.modules.values().next().unwrap().exports["good"];
+    let good = &exact_constructor.modules[&Namespace(vec!["constructor".into()])].exports["good"];
     assert!(matches!(
         &good.ty,
         Type::Function { result, .. }
@@ -2390,7 +2425,7 @@ fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
 
 #[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
-    let currencies = analyze(&[ModuleInput::new(
+    let currencies = analyze_corpus(&[ModuleInput::new(
         "currency.orna",
         include_str!("fixtures/inline-semantic_graph/1b8649578d3c.orna"),
     )]);
@@ -2398,9 +2433,9 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
         diagnostic.message() == "cannot add different currencies without conversion"
     }));
 
-    let dimensions = analyze(&[ModuleInput::new(
+    let dimensions = analyze_corpus(&[ModuleInput::new(
         "dimensions.orna",
-        include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna")),
     )]);
     assert!(
         dimensions
@@ -2412,24 +2447,42 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
 #[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
-    let result = analyze(&[ModuleInput::new(
+    // ORNA-UNIT-001: unit spellings do not resolve by name alone. Without a
+    // supplied environment the postfix units are unresolved and the literals
+    // are rejected.
+    let unsupplied = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/7f039374396b.orna"),
     )]);
+    assert!(!unsupplied.is_ok(), "{:?}", unsupplied.diagnostics);
+    assert!(
+        has(&unsupplied, DIAG_UNRESOLVED),
+        "{:?}",
+        unsupplied.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
 
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let rates = analyze(&[ModuleInput::new(
+        "rates.orna",
+        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
+    )]);
+    assert!(
+        has(&rates, DIAG_UNRESOLVED),
+        "{:?}",
+        rates.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
+
+    // With the corpus environment supplied, the same postfix literals succeed.
+    let supplied = analyze_corpus(&[ModuleInput::new(
+        "literals.orna",
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/7f039374396b.orna")),
+    )]);
+    assert!(supplied.is_ok(), "{:?}", supplied.diagnostics);
 
     let non_currency = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/4f50dc5cff02.orna"),
     )]);
     assert!(has(&non_currency, DIAG_TYPE));
-
-    let unsupported = analyze(&[ModuleInput::new(
-        "rates.orna",
-        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
-    )]);
-    assert!(has(&unsupported, DIAG_UNSUPPORTED));
 }
 
 #[test]
@@ -2514,13 +2567,12 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
 
 #[test]
 fn authoritative_core_types_locale_aware_money_pipeline() {
-    let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "receipt.orna",
-            include_str!("fixtures/inline-semantic_graph/e9055e4effff.orna"),
-        )],
-        &Catalogue::authoritative_core(),
-    );
+    // The fixture catalogue is the authoritative core plus the `GBP` the
+    // corpus snippet assumes.
+    let result = analyze_corpus(&[ModuleInput::new(
+        "receipt.orna",
+        include_str!("fixtures/inline-semantic_graph/e9055e4effff.orna"),
+    )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
@@ -14967,7 +15019,7 @@ fn qualified_kwh_units_share_the_closed_cross_database_identity() {
         "units.orna",
         include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
     )]);
-    assert!(has(&incompatible, DIAG_TYPE));
+    assert!(has(&incompatible, DIAG_INCOMPATIBLE_DIMENSIONS));
 }
 
 #[test]
@@ -15431,7 +15483,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     )]);
     assert!(
         reserved_table.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }),
         "{:#?}",
         reserved_table.diagnostics
@@ -15527,13 +15579,15 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                 arguments: vec![Type::Named("T".into())],
             }
     ));
+    // The fixture declares its own `GBP` currency, so the identity is
+    // qualified by the declaring module.
     let money = &explicit_metadata.exports["money"];
     assert!(matches!(
         &money.ty,
         Type::Function { result, .. }
             if result.as_ref() == &Type::Applied {
                 base: "Money".into(),
-                arguments: vec![Type::Named("GBP".into())],
+                arguments: vec![Type::Named("explicit-metadata.GBP".into())],
             }
     ));
 
@@ -17864,7 +17918,7 @@ fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
         "sum.orna",
         include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
     )]);
-    assert!(has(&invalid, DIAG_TYPE));
+    assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
 }
 
@@ -17876,9 +17930,9 @@ fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
     )]);
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
 
-    let absolute = analyze(&[ModuleInput::new(
+    let absolute = analyze_corpus(&[ModuleInput::new(
         "temperatures.orna",
-        include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna")),
     )]);
     assert!(
         absolute
@@ -18099,7 +18153,9 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
         "mismatched-compound-assignment.orna",
         include_str!("fixtures/inline-semantic_graph/7f30f77a4e31.orna"),
     )]);
-    assert!(has(&mismatched_compound, DIAG_TYPE));
+    // `value += true` is `value = value + true`; Int + Bool is not an
+    // arithmetic operand pair (ORNA-CFLOW-006).
+    assert!(has(&mismatched_compound, DIAG_TYPE_MISMATCH));
 
     let field_assignment = analyze(&[ModuleInput::new(
         "field-assignment.orna",
@@ -18162,9 +18218,11 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         .find(|module| module.namespace.display() == "while")
         .unwrap();
     let poll = &module.symbols["poll"];
+    // The trailing `while` is the block tail and a loop completes with
+    // `Unit` (ORNA-CFLOW-001), not the `null` value.
     assert!(matches!(
         &poll.ty,
-        Type::Function { result, .. } if result.as_ref() == &Type::Null
+        Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
     assert!(poll.effects.effects.contains("database write"));
     assert!(poll.effects.may_fail);

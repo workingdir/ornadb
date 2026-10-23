@@ -104,6 +104,7 @@ pub enum Error {
     /// fenced owner.
     ApplicationDeferred,
     RuntimeUnavailable,
+    SnapshotExpired,
 }
 
 impl Error {
@@ -125,6 +126,7 @@ impl Error {
             Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
+            Self::SnapshotExpired => "wire.snapshot_expired",
         }
     }
 }
@@ -1211,7 +1213,8 @@ pub trait LiveAdminEffectDispatcher: Send + Sync {
         _context: &'a RuntimeActivationContext,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<CanonicalValue, String>> + Send + 'a>>
     {
-        Box::pin(async { Err("sys.admin.unavailable".to_owned()) })
+        // A dispatcher without resume support cannot perform the mutation.
+        Box::pin(async { Err("sys.admin.read_only".to_owned()) })
     }
 
     fn reject_staged_admin_effect<'a>(
@@ -1251,7 +1254,7 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                 .publication_metadata_rows()
                 .await
                 .map(Some)
-                .map_err(|_| "sys.storage.metadata_unavailable".to_owned())
+                .map_err(|_| "sys.storage.unavailable".to_owned())
         })
     }
 
@@ -1276,16 +1279,13 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Paused { changed: true }
                     | orna_runtime_v1::StreamAdministrationOutcome::PausePending { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1308,15 +1308,12 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     .await
             })
             .await
-            .map_err(|error| match error {
-                RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                _ => "sys.admin.unavailable".to_owned(),
-            })?;
+            .map_err(|error| admin_failure_code(&error))?;
             let changed = matches!(
                 outcome,
                 orna_runtime_v1::StreamAdministrationOutcome::Running { changed: true }
             );
-            CanonicalValue::new(OvbRaw::Bool(changed)).map_err(|_| "sys.admin.result".to_owned())
+            Ok(CanonicalValue::new(OvbRaw::Bool(changed)).expect("a Bool is a canonical value"))
         })
     }
 
@@ -1346,13 +1343,34 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
                     invocation_id,
                 )
                 .await
-                .map_err(|error| match error {
-                    RuntimeError::AdminBusy => "sys.admin.busy".to_owned(),
-                    _ => "sys.admin.unavailable".to_owned(),
-                })?;
+                .map_err(|error| admin_failure_code(&error))?;
             Err("sys.admin.busy".to_owned())
         })
     }
+}
+
+/// Maps a runtime administration failure onto the portable code
+/// `source/16-administration.md` assigns it (ORNA-SYS-097): an incompatible
+/// owner, lease or concurrent write activation is `sys.admin.busy`
+/// (ORNA-ADMIN-002); a stream reference naming no live stream of the current
+/// owner is a missing object, `sys.admin.missing_object`; snapshot and
+/// checkpoint failures keep their more specific codes; and a runtime store
+/// that cannot complete the transition is `sys.storage.unavailable`.
+fn admin_failure_code(error: &RuntimeError) -> String {
+    error
+        .public_code()
+        .unwrap_or(match error {
+            RuntimeError::InvalidObservationReference
+            | RuntimeError::ObservationCoordinateMismatch
+            | RuntimeError::StreamIdentityMismatch => "sys.admin.missing_object",
+            RuntimeError::LeaseHeld
+            | RuntimeError::OwnerLost
+            | RuntimeError::StaleCapture { .. }
+            | RuntimeError::AdminInvocationConflict
+            | RuntimeError::RecoveryPending => "sys.admin.busy",
+            _ => "sys.storage.unavailable",
+        })
+        .to_owned()
 }
 
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
@@ -1656,6 +1674,7 @@ impl HttpResponse {
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
                 | Error::ApplicationRejected
+                | Error::SnapshotExpired
                 | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
@@ -2684,6 +2703,20 @@ impl LiveHost {
         } else {
             None
         };
+        if let Err(error) = self.verify_snapshot_pin(&envelope.message).await {
+            work.complete();
+            // Durable admission has already begun this request, so the pin
+            // rejection is a terminal correlated diagnostic, not a bare failure.
+            if let Some(outcome) =
+                self.operational_error_outcome(Some(session), &envelope, error, true)?
+            {
+                return Ok(ApplicationPreparation::Completed(
+                    self.complete(session, request, &envelope, outcome).await?,
+                ));
+            }
+            self.retain_failure(session, request, fingerprint).await?;
+            return Err(error);
+        }
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
@@ -3053,6 +3086,7 @@ impl LiveHost {
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3577,6 +3611,10 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        // A CWD pin must resolve before any activation or application effect.
+        // The caller's rejection path turns SnapshotExpired into the retained
+        // correlated diagnostic; no lease or activation may be taken first.
+        self.verify_snapshot_pin(message).await?;
         let activation_runtime = self.runtime.clone();
         let activation_lease = if activation_runtime.is_some() {
             Some(self.writer_lease().await?)
@@ -3998,8 +4036,11 @@ impl LiveHost {
                 orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
             ) => Ok(false),
             Err(ServingError::RequestUnknown) => {
+                // An id the host has never admitted is not an active target.
+                // 30-protocol.md: a cancel that names no live request is still a
+                // correlated control operation and acknowledges with Unit.
                 let Some(runtime) = &self.runtime else {
-                    return Err(Error::Denied);
+                    return Ok(false);
                 };
                 let status = runtime
                     .request_status_for_identity(RequestIdentity {
@@ -4007,9 +4048,8 @@ impl LiveHost {
                         request_id: request,
                     })
                     .await
-                    .map_err(|error| map_runtime(&error))?
-                    .ok_or(Error::Denied)?;
-                Ok(!status.state.is_terminal())
+                    .map_err(|error| map_runtime(&error))?;
+                Ok(status.is_some_and(|status| !status.state.is_terminal()))
             }
             Err(error) => Err(map_serving(error)),
         }
@@ -4758,6 +4798,56 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Resolves a client-supplied CWD pin before any application effect runs.
+    /// Only the admitted writable generation is exact here. Any other
+    /// generation is never evaluated against current state: a generation the
+    /// runtime cannot resolve is expired, and a retained historical generation
+    /// is unsupported because read-only historical evaluation is not wired.
+    /// Commit pins are unsupported on durable hosts because the runtime cannot
+    /// read their objects.
+    async fn verify_snapshot_pin(&self, message: &Message) -> Result<()> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => {
+                database.snapshot.as_ref()
+            }
+            _ => None,
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let CanonicalSnapshot::Cwd {
+            database,
+            runtime: pinned_runtime,
+            generation,
+            ..
+        } = snapshot
+        else {
+            return Err(Error::UnsupportedOperation);
+        };
+        let current = runtime
+            .capture()
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        if current.database_id() == *database
+            && current.runtime_id() == *pinned_runtime
+            && current.generation() == generation
+        {
+            return Ok(());
+        }
+        match runtime.resolve_historical_snapshot(snapshot).await {
+            Ok(_) => Err(Error::UnsupportedOperation),
+            Err(
+                RuntimeError::SnapshotNotFound
+                | RuntimeError::SnapshotIncomplete
+                | RuntimeError::SnapshotContextMismatch,
+            ) => Err(Error::SnapshotExpired),
+            Err(error) => Err(map_runtime(&error)),
+        }
     }
 
     /// The execution host calls these around work it has accepted from a
@@ -5882,6 +5972,10 @@ pub enum WebSocketOutput {
         payload: Vec<u8>,
     },
     Pong(Vec<u8>),
+    /// A host-initiated keepalive Ping. An executable host that owns the
+    /// socket sends it when its peer has been silent, so a half-open
+    /// connection cannot hold an attachment indefinitely.
+    Ping(Vec<u8>),
     /// A WebSocket close, optionally carrying one RFC 6455 close code and
     /// its already-validated UTF-8 reason bytes.
     ///
@@ -5907,6 +6001,10 @@ impl fmt::Debug for WebSocketOutput {
                 .finish(),
             Self::Pong(payload) => formatter
                 .debug_struct("WebSocketOutput::Pong")
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Ping(payload) => formatter
+                .debug_struct("WebSocketOutput::Ping")
                 .field("payload_bytes", &payload.len())
                 .finish(),
             Self::Close { code, reason } => formatter
@@ -5939,6 +6037,7 @@ pub fn encode_websocket_output(
         WebSocketOutput::Accepted(_) => return Ok(None),
         WebSocketOutput::Binary { payload, .. } => (2, payload.as_slice()),
         WebSocketOutput::Pong(payload) => (10, payload.as_slice()),
+        WebSocketOutput::Ping(payload) => (9, payload.as_slice()),
         WebSocketOutput::Close { code, reason } => {
             close_payload = code
                 .map(|code| {
@@ -6239,6 +6338,7 @@ impl LiveTransport {
             .iter()
             .filter_map(|(session, record)| {
                 (!self.delivering_upgrades.contains_key(session)
+                    && !self.host.attachments.values().any(|owner| owner == session)
                     && record.metadata.expires_at <= now)
                     .then_some(*session)
             })
@@ -6452,6 +6552,16 @@ impl LiveTransport {
         {
             self.queue_retired_attachment(session, attachment);
         }
+        // The lease is the finite reconnection grace that starts when the
+        // session loses its socket (30-protocol, Session creation and
+        // ownership), so it is measured from this detachment.
+        if let Some(session) = session
+            && outcome.is_ok()
+            && !self.host.attachments.values().any(|owner| *owner == session)
+            && let Some(record) = self.sessions.get_mut(&session)
+        {
+            record.metadata.expires_at = now.saturating_add(self.limits.lease_ms);
+        }
         outcome
     }
 
@@ -6513,8 +6623,10 @@ impl LiveTransport {
         let Ok(origin) = required_origin(&request.headers) else {
             return wire_error(403, "live.origin_denied");
         };
+        // 30-protocol, Session creation and ownership: requests are
+        // `application/json`, so a charset parameter may only name UTF-8.
         if request.method == "POST"
-            && !header_eq(&request.headers, "content-type", "application/json")
+            && !header(&request.headers, "content-type").is_some_and(is_json_media_type)
         {
             return wire_error(400, "live.malformed_request");
         }
@@ -6667,6 +6779,13 @@ impl LiveTransport {
                             headers: Vec::new(),
                             body: Vec::new(),
                         };
+                    }
+                    // 30-protocol, Session creation and ownership: the token
+                    // must be the session's current one. Any other token for
+                    // a live session is unauthenticated; 410 is for a session
+                    // that has ended.
+                    if self.sessions.contains_key(&id) {
+                        return wire_error(401, "live.unauthenticated");
                     }
                     return wire_error(410, "live.expired");
                 }
@@ -6926,6 +7045,16 @@ impl LiveTransport {
     /// accept, TLS, cancellation, attachment identity, and clock ownership;
     /// this bridge only adapts the accepted socket to the transport's
     /// byte-stream contract.
+    ///
+    /// The bridge borrows the transport for the whole connection and has no
+    /// cancellation or read deadline, so it suits a transport owned by that
+    /// one connection. A host that shares one transport between connections
+    /// must not hold it across socket I/O: it drives
+    /// [`Self::begin_websocket_upgrade`] and
+    /// [`Self::commit_websocket_upgrade`], then
+    /// [`Self::prepare_websocket_application`] and
+    /// [`Self::complete_application`] one frame at a time, and cancels the
+    /// workers named by [`Self::take_retired_attachments`].
     ///
     /// # Errors
     ///
@@ -7544,6 +7673,11 @@ impl LiveTransport {
         if credential != record.credential {
             return Err(wire_error(401, "live.unauthenticated"));
         }
+        // 30-protocol, Session creation and ownership: an upgrade from
+        // another origin is prohibited (403); it is not an expired session.
+        if origin != record.origin {
+            return Err(wire_error(403, "live.origin_denied"));
+        }
         self.host
             .validate_resume(&ResumeRequest {
                 id,
@@ -7943,6 +8077,20 @@ fn header_token(headers: &[(String, String)], name: &str, expected: &str) -> boo
             .any(|token| token.trim().eq_ignore_ascii_case(expected))
     })
 }
+/// Whether a Content-Type value names JSON: `application/json` in any case,
+/// with no parameter other than `charset=utf-8`.
+fn is_json_media_type(value: &str) -> bool {
+    let mut parts = value.split(';');
+    parts
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+        && parts.all(|parameter| {
+            parameter.split_once('=').is_some_and(|(name, value)| {
+                name.trim().eq_ignore_ascii_case("charset")
+                    && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+            })
+        })
+}
 fn required_origin(headers: &[(String, String)]) -> std::result::Result<Origin, ()> {
     header(headers, "origin")
         .ok_or(())
@@ -8123,6 +8271,10 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
+        // A session whose application work must first be joined is
+        // temporarily unavailable on a route that cannot join it; the
+        // request itself is well formed.
+        Error::ApplicationDrainRequired => (503, "live.unavailable"),
         _ => (400, "live.malformed_request"),
     };
     wire_error(status, code)
@@ -10775,6 +10927,11 @@ mod tests {
                 origin,
             },
         );
+        // Expiry only applies to detached sessions; the socket's detachment
+        // starts the lease, which the test then pins to an expired deadline.
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion::default();
         let mut children = ExpiryChildren {
             fail: true,
@@ -10815,6 +10972,89 @@ mod tests {
         assert!(transport.take_retired_attachments().is_empty());
     }
 
+    fn attached_session_transport() -> LiveTransport {
+        let origin = Origin::parse("https://app.example").unwrap();
+        let mut host = subscribed_host(None);
+        host.application_sessions.insert([1; 16]);
+        let credential = SessionCredential {
+            security: OpaqueCredential::from_bytes([7; 32]),
+            serving: ServingCredential::new([7; 32]),
+        };
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential,
+                origin,
+            },
+        );
+        transport
+    }
+
+    #[test]
+    fn attached_session_is_not_expired_by_its_lease_deadline() {
+        let mut transport = attached_session_transport();
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                10,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+
+        assert_eq!(children.calls, 0);
+        assert_eq!(deletion.calls, 0);
+        assert!(transport.sessions.contains_key(&[1; 16]));
+    }
+
+    #[test]
+    fn detaching_the_socket_restarts_the_lease_from_detachment() {
+        let mut transport = attached_session_transport();
+        // The security session is valid through 10, so the detach happens
+        // inside that window; the lease then runs from the detach time.
+        let lease_ms = transport.limits.lease_ms;
+
+        futures::executor::block_on(transport.close_attachment([4; 16], 5))
+            .expect("detaching the attachment starts the reconnection lease");
+        assert_eq!(
+            transport.sessions[&[1; 16]].metadata.expires_at,
+            5 + lease_ms
+        );
+
+        let mut deletion = ExpiryDeletion::default();
+        let mut children = ExpiryChildren::default();
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                5 + lease_ms - 1,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(transport.sessions.contains_key(&[1; 16]));
+
+        assert_eq!(
+            futures::executor::block_on(transport.expire_sessions_with_children(
+                5 + lease_ms,
+                &mut deletion,
+                &mut children,
+            )),
+            Ok(())
+        );
+        assert!(!transport.sessions.contains_key(&[1; 16]));
+    }
+
     #[test]
     fn expiry_retries_failed_durable_deletion_while_fencing_attachment() {
         let origin = Origin::parse("https://app.example").unwrap();
@@ -10839,6 +11079,11 @@ mod tests {
                 origin,
             },
         );
+        // The resumed socket must detach first: an attached session is governed
+        // by its reconnection lease, which starts at WebSocket loss (30-protocol).
+        futures::executor::block_on(transport.close_attachment([4; 16], 0))
+            .expect("detaching the attachment starts the reconnection lease");
+        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
         let mut deletion = ExpiryDeletion {
             fail: true,
             ..ExpiryDeletion::default()
@@ -11093,5 +11338,34 @@ mod tests {
             ),
             Err(ActionRegistrationError::InvalidDescriptor)
         );
+    }
+
+    /// ORNA-SYS-097, ORNA-ADMIN-002: stream administration failures surface
+    /// the portable codes of `source/16-administration.md`, never a
+    /// vendor-only code.
+    #[test]
+    fn admin_failures_map_onto_portable_codes() {
+        for (error, code) in [
+            (RuntimeError::AdminBusy, "sys.admin.busy"),
+            (RuntimeError::LeaseHeld, "sys.admin.busy"),
+            (RuntimeError::OwnerLost, "sys.admin.busy"),
+            (RuntimeError::AdminInvocationConflict, "sys.admin.busy"),
+            (
+                RuntimeError::InvalidObservationReference,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamIdentityMismatch,
+                "sys.admin.missing_object",
+            ),
+            (
+                RuntimeError::StreamCheckpointStale,
+                "sys.checkpoint.conflict",
+            ),
+            (RuntimeError::SnapshotNotFound, "sys.snapshot.not_found"),
+            (RuntimeError::StorageUnavailable, "sys.storage.unavailable"),
+        ] {
+            assert_eq!(admin_failure_code(&error), code, "{error:?}");
+        }
     }
 }

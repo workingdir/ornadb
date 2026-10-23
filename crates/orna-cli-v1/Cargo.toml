@@ -52,6 +52,7 @@ required-features = ["crash-barriers"]
 
 [dev-dependencies]
 bytes = "1.11.1"
+libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 tungstenite = { version = "0.26.2", features = ["handshake"] }
 [target.'cfg(target_os = "linux")'.dependencies]

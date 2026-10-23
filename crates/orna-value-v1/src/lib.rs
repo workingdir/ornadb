@@ -23,6 +23,7 @@ use unicode_normalization::UnicodeNormalization;
 
 mod blob_role;
 pub use blob_role::{BlobRole, MediaFamily};
+mod mime1;
 
 #[cfg(test)]
 #[path = "format3_context_tests.rs"]
@@ -317,6 +318,21 @@ pub const OVB2_BLOB_TAG: u64 = 60_110;
 pub const ROV3_BLOB_TAG: u64 = 60_111;
 pub const SOV3_BLOB_TAG: u64 = 60_112;
 pub const ROV3_OVERFLOW_TAG: u64 = 60_113;
+
+/// Whether a CBOR tag may appear in format-3 native node data.
+///
+/// Store format 3 admits registered tags only: the bignums 2 and 3, UUID tag
+/// 37, the portable value tags 60000..=60025 and the profile tags
+/// 60110..=60113 (`profiles/store-format-3.md` §2, `tools/final_model.py`).
+/// Where a profile tag may appear (for example, 60111 and 60113 only in ROV-3
+/// rows) is checked by the reader that interprets the node.
+pub const fn is_format3_node_tag(number: u64) -> bool {
+    matches!(
+        number,
+        2 | 3 | 37 | 60_000..=60_025 | OVB2_BLOB_TAG..=ROV3_OVERFLOW_TAG
+    )
+}
+
 const MAX_BLOB_LENGTH: u64 = 1_u64 << 63;
 const MAX_BLOB_READ: u64 = 8 * 1024 * 1024;
 
@@ -1532,7 +1548,8 @@ pub struct MediaAnnotation {
     suffix: Option<String>,
 }
 
-/// The closed MIME-1 registry selected by format 3.
+/// The closed MIME-1 registry selected by format 3, read from the pinned
+/// `profiles/media-1.json` tables in `mime1.rs`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct MimeRegistry {
     profile: &'static str,
@@ -1540,7 +1557,9 @@ pub struct MimeRegistry {
 
 impl MimeRegistry {
     pub const fn mime1() -> Self {
-        Self { profile: "MIME-1" }
+        Self {
+            profile: mime1::PROFILE,
+        }
     }
 
     pub const fn profile(self) -> &'static str {
@@ -1548,16 +1567,10 @@ impl MimeRegistry {
     }
 
     pub fn normalize(self, media_type: &str) -> Result<String> {
-        if self.profile != "MIME-1" {
-            return Err(Error::InvalidContext);
-        }
         normalize_media_type(media_type)
     }
 
     pub fn annotation(self, media_type: &str, suffix: Option<&str>) -> Result<MediaAnnotation> {
-        if self.profile != "MIME-1" {
-            return Err(Error::InvalidContext);
-        }
         MediaAnnotation::with_mime1(media_type, suffix)
     }
 
@@ -1569,17 +1582,33 @@ impl MimeRegistry {
         suffix: Option<&str>,
     ) -> Result<MediaAnnotation> {
         let media_type = self.normalize(media_type)?;
-        let suffix = suffix.map(str::to_ascii_lowercase);
-        let preferred = media_suffixes(media_type.split(';').next().unwrap_or(&media_type)).0;
-        let suffix = suffix.filter(|value| value != preferred);
-        self.annotation(&media_type, suffix.as_deref())
+        let suffix = match suffix {
+            Some(hint) => mime1::canonical_hint(mime1::essence(&media_type), hint)?,
+            None => None,
+        };
+        Ok(MediaAnnotation { media_type, suffix })
+    }
+
+    /// The annotation a uniquely mapped file suffix selects (ORNA-MIME-006).
+    ///
+    /// Only a suffix that exactly one entry lists as compatible selects that
+    /// entry's essence, kept as the hint unless it is the preferred suffix. A
+    /// suffix that two entries list, such as `mp4`, or that no entry lists
+    /// selects nothing, so the caller keeps its octet-stream/null fallback.
+    pub fn annotation_for_suffix(self, suffix: &str) -> Option<MediaAnnotation> {
+        let suffix = suffix.to_lowercase();
+        let entry = mime1::unique_entry_for_suffix(&suffix)?;
+        Some(MediaAnnotation {
+            media_type: entry.essence.to_owned(),
+            suffix: (suffix != entry.preferred).then_some(suffix),
+        })
     }
 }
 
 impl Default for MediaAnnotation {
     fn default() -> Self {
         Self {
-            media_type: "application/octet-stream".to_owned(),
+            media_type: mime1::OCTET_STREAM.to_owned(),
             suffix: None,
         }
     }
@@ -1595,32 +1624,19 @@ impl MediaAnnotation {
         if canonical_media_type != media_type {
             return Err(Error::NonCanonical);
         }
-        let media_type = canonical_media_type;
-        let (preferred, compatible) =
-            media_suffixes(media_type.split(';').next().unwrap_or(&media_type));
-        let suffix = if let Some(value) = suffix {
-            if value.len() > 32 {
-                return Err(Error::InvalidSuffix);
+        let suffix = match suffix {
+            Some(value) => {
+                let canonical =
+                    mime1::canonical_hint(mime1::essence(&canonical_media_type), value)?;
+                if canonical.as_deref() != Some(value) {
+                    return Err(Error::NonCanonical);
+                }
+                canonical
             }
-            let lowercase = value.to_ascii_lowercase();
-            if value != lowercase && valid_suffix(&lowercase) {
-                return Err(Error::NonCanonical);
-            }
-            if !valid_suffix(value) {
-                return Err(Error::InvalidSuffix);
-            }
-            if value == preferred {
-                return Err(Error::NonCanonical);
-            }
-            if !compatible.is_empty() && !compatible.contains(&value) {
-                return Err(Error::IncompatibleSuffix);
-            }
-            Some(value.to_owned())
-        } else {
-            None
+            None => None,
         };
         Ok(Self {
-            media_type,
+            media_type: canonical_media_type,
             suffix,
         })
     }
@@ -1633,15 +1649,22 @@ impl MediaAnnotation {
         self.suffix.as_deref()
     }
 
+    /// The canonical essence: the media type without its parameters.
+    pub fn essence(&self) -> &str {
+        mime1::essence(&self.media_type)
+    }
+
     pub fn selected_suffix(&self) -> &str {
-        self.suffix.as_deref().unwrap_or_else(|| {
-            media_suffixes(self.media_type.split(';').next().unwrap_or(&self.media_type)).0
-        })
+        self.suffix
+            .as_deref()
+            .unwrap_or_else(|| mime1::preferred_suffix(self.essence()))
     }
 }
 
 pub fn normalize_media_type(media_type: &str) -> Result<String> {
-    if media_type.len() > 1024 || media_type.bytes().any(|byte| !(32..=126).contains(&byte)) {
+    if media_type.len() > mime1::MAX_MEDIA_TYPE_BYTES
+        || media_type.bytes().any(|byte| !(32..=126).contains(&byte))
+    {
         return Err(Error::InvalidMediaType);
     }
     let input = media_type.trim_matches(' ');
@@ -1660,14 +1683,8 @@ pub fn normalize_media_type(media_type: &str) -> Result<String> {
         return Err(Error::InvalidMediaType);
     }
     at = subtype_end;
-    let essence = match format!("{kind}/{subtype}").as_str() {
-        "application/javascript" | "application/ecmascript" | "text/ecmascript" => {
-            "text/javascript".to_owned()
-        }
-        "audio/x-wav" | "audio/wave" => "audio/wav".to_owned(),
-        "audio/x-flac" => "audio/flac".to_owned(),
-        other => other.to_owned(),
-    };
+    let essence = format!("{kind}/{subtype}");
+    let essence = mime1::alias_target(&essence).map_or(essence, str::to_owned);
     let mut parameters = Vec::<(String, String)>::new();
     while at < bytes.len() {
         while bytes.get(at) == Some(&b' ') {
@@ -1719,12 +1736,9 @@ pub fn normalize_media_type(media_type: &str) -> Result<String> {
             at = value_end;
             value
         };
-        if name == "charset" {
-            if parameters.iter().any(|(existing, _)| existing == &name) {
-                return Err(Error::InvalidMediaType);
-            }
-        }
-        if parameters.iter().any(|(existing, _)| existing == &name) || parameters.len() >= 32 {
+        if parameters.iter().any(|(existing, _)| existing == &name)
+            || parameters.len() >= mime1::MAX_PARAMETERS
+        {
             return Err(Error::InvalidMediaType);
         }
         parameters.push((name, value));
@@ -1777,41 +1791,6 @@ fn is_mime_token(byte: u8) -> bool {
 
 fn valid_mime_token(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.iter().copied().all(is_mime_token)
-}
-
-fn valid_suffix(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-' || byte == b'.')
-        && !value.split('.').any(str::is_empty)
-}
-
-fn media_suffixes(media_type: &str) -> (&'static str, &'static [&'static str]) {
-    match media_type {
-        "application/gzip" => ("gz", &["gz", "tar.gz", "tgz"]),
-        "application/json" => ("json", &["json"]),
-        "application/octet-stream" => ("bin", &["bin"]),
-        "application/pdf" => ("pdf", &["pdf"]),
-        "application/wasm" => ("wasm", &["wasm"]),
-        "application/zip" => ("zip", &["zip"]),
-        "audio/flac" => ("flac", &["flac"]),
-        "audio/mp4" => ("m4a", &["m4a", "m4b", "mp4", "mpg4"]),
-        "audio/mpeg" => ("mp3", &["mp1", "mp2", "mp3"]),
-        "audio/ogg" => ("ogg", &["oga", "ogg", "opus"]),
-        "audio/wav" => ("wav", &["wav"]),
-        "image/gif" => ("gif", &["gif"]),
-        "image/jpeg" => ("jpg", &["jpe", "jpeg", "jpg"]),
-        "image/png" => ("png", &["png"]),
-        "image/svg+xml" => ("svg", &["svg"]),
-        "image/webp" => ("webp", &["webp"]),
-        "text/css" => ("css", &["css"]),
-        "text/javascript" => ("js", &["js", "mjs"]),
-        "text/plain" => ("txt", &["text", "txt"]),
-        "video/mp4" => ("mp4", &["m4v", "mp4"]),
-        "video/webm" => ("webm", &["webm"]),
-        _ => ("bin", &[]),
-    }
 }
 
 /// A validated value paired with its explicit value profile.
@@ -4227,6 +4206,34 @@ pub fn domain_digest(domain: &str, payload: &Raw) -> Result<[u8; 32]> {
     hash.update([0]);
     hash.update(bytes);
     Ok(hash.finalize().into())
+}
+
+/// SHA-256 of ASCII domain, NUL and the canonical SOV-3 bytes of a payload
+/// that needs no format-3 context. Tagged values are rejected at any depth:
+/// their encoding depends on context this function does not carry.
+pub fn sov3_context_free_domain_digest(domain: &str, payload: &Raw) -> Result<[u8; 32]> {
+    if !domain.is_ascii() || domain.as_bytes().contains(&0) || raw_contains_tag(payload) {
+        return Err(Error::InvalidValue);
+    }
+    let bytes = encode_context_raw(payload, ValueFormat::Sov3, None, MimeRegistry::mime1())?;
+    let mut hash = Sha256::new();
+    hash.update(domain.as_bytes());
+    hash.update([0]);
+    hash.update(bytes);
+    Ok(hash.finalize().into())
+}
+
+fn raw_contains_tag(raw: &Raw) -> bool {
+    match raw {
+        Raw::Tag(..) => true,
+        Raw::Array(items) => items.iter().any(raw_contains_tag),
+        Raw::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| raw_contains_tag(key) || raw_contains_tag(value)),
+        Raw::Null | Raw::Bool(_) | Raw::Int(_) | Raw::Float(_) | Raw::Bytes(_) | Raw::Text(_) => {
+            false
+        }
+    }
 }
 pub fn row_identity(
     database: [u8; 16],

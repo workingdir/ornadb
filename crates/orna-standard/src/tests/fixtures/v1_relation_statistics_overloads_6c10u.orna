@@ -1,9 +1,9 @@
 use std.stats as stats;
 
-pub fn query_count(rows: Relation<Int>): Int = std.query.count(rows);
-pub fn query_sum(rows: Relation<Int>): Int = std.query.sum(rows);
-pub fn query_min(rows: Relation<Int>): Int? = std.query.min(rows);
-pub fn query_max(rows: Relation<Int>): Int? = std.query.max(rows);
+pub fn query_count(rows: Relation<Int>): Int = count(rows);
+pub fn query_sum(rows: Relation<Int>): Int = sum(rows);
+pub fn query_min(rows: Relation<Int>): Int? = min(rows);
+pub fn query_max(rows: Relation<Int>): Int? = max(rows);
 pub fn average(rows: Relation<Int>): Int? = stats.mean(rows);
 pub fn median(rows: Relation<Int>): Int? = stats.median(rows);
 pub fn percentile(rows: Relation<Int>): Int? =

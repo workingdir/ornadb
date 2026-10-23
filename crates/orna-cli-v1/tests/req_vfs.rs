@@ -58,12 +58,14 @@ fn row_projection_rejects_escapes_and_classifies_unlink_targets() {
         row.resolve_unlink("data.orna").expect("row document target"),
         VfsUnlinkTarget::RowDocument
     ));
-    let required = project_content_name("content", "audio/mpeg", None);
+    let required =
+        project_content_name("content", "audio/mpeg", None).expect("registered annotation");
     assert!(matches!(
         row.resolve_unlink(&required).expect("required blob target"),
         VfsUnlinkTarget::RequiredContent(_)
     ));
-    let optional = project_content_name("cover", "image/jpeg", None);
+    let optional =
+        project_content_name("cover", "image/jpeg", None).expect("registered annotation");
     assert!(matches!(
         row.resolve_unlink(&optional).expect("optional blob target"),
         VfsUnlinkTarget::OptionalContent(_)

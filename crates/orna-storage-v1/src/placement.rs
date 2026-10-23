@@ -9,9 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use orna_foundation_v1::CanonicalValue;
 use sha2::{Digest, Sha256};
 
-use crate::{
-    CompactKeyIdentity, CompactOvbProfile, HybridBaseState, LoosePath, LooseRow,
-};
+use crate::{CompactKeyIdentity, CompactOvbProfile, HybridBaseState, LoosePath};
 
 const MIB: usize = 1024 * 1024;
 /// Automatic placement stays editable through this resulting table size.
@@ -436,7 +434,33 @@ fn placement_paths_collide(paths: &[&LoosePath]) -> bool {
     if paths.iter().any(|path| !exact_paths.insert(*path)) {
         return true;
     }
-    crate::validate_portable_paths(paths.iter().copied()).is_err()
+    portable_siblings_collide(paths.iter().copied())
+}
+
+/// Whether two encoded key siblings within one table differ only by ASCII
+/// case, which a case-insensitive checkout would merge into one path.
+fn portable_siblings_collide<'a>(paths: impl IntoIterator<Item = &'a LoosePath>) -> bool {
+    let mut siblings = BTreeMap::new();
+    for path in paths {
+        let mut prefix = Vec::new();
+        for (index, component) in path.as_managed_path().as_path().iter().enumerate() {
+            let Some(component) = component.to_str() else {
+                return true;
+            };
+            // Table roots come from the schema; only key components fold.
+            prefix.push(if index == 0 {
+                component.to_owned()
+            } else {
+                component.to_ascii_lowercase()
+            });
+            if let Some(previous) = siblings.insert(prefix.clone(), component)
+                && previous != component
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// One canonical row included in a full placement rewrite.
@@ -770,16 +794,18 @@ pub fn plan_storage_rewrite(
                     return Err(StorageRewriteError::PathCollision);
                 }
                 let bytes = encode_editable_row(&key, &value)?;
-                let row = LooseRow::new(bytes.clone()).map_err(|_| StorageRewriteError::InvalidEditableRow)?;
-                let (decoded_key, decoded_value) = decode_editable_row(row.bytes())?;
+                if bytes.is_empty() || bytes.len() > MAX_EDITABLE_ROW_BYTES {
+                    return Err(StorageRewriteError::InvalidEditableRow);
+                }
+                let (decoded_key, decoded_value) = decode_editable_row(&bytes)?;
                 if decoded_key != key_bytes || decoded_value != value_bytes {
                     return Err(StorageRewriteError::CandidateMismatch);
                 }
                 total_output_bytes = total_output_bytes
-                    .checked_add(row.bytes().len())
+                    .checked_add(bytes.len())
                     .ok_or(StorageRewriteError::ResourceLimit)?;
                 staged_bytes = staged_bytes
-                    .checked_add(row.bytes().len())
+                    .checked_add(bytes.len())
                     .ok_or(StorageRewriteError::ResourceLimit)?;
                 (PhysicalPlacement::Editable, Some(path), Some(bytes))
             }
@@ -800,8 +826,9 @@ pub fn plan_storage_rewrite(
         });
     }
     if let StorageRewriteTarget::Editable = target {
-        crate::validate_portable_paths(output.iter().filter_map(|row| row.editable_path.as_ref()))
-            .map_err(|_| StorageRewriteError::UnrepresentablePath)?;
+        if portable_siblings_collide(output.iter().filter_map(|row| row.editable_path.as_ref())) {
+            return Err(StorageRewriteError::UnrepresentablePath);
+        }
     }
     let logical_digest = digest_rows(
         output

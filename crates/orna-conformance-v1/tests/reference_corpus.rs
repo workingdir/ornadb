@@ -3,18 +3,18 @@ use orna_conformance_v1::*;
 #[test]
 fn loads_the_complete_unchanged_reference_corpus() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
-    assert_eq!(corpus.manifest.fixtures.len(), 167);
+    assert_eq!(corpus.manifest.fixtures.len(), 176);
     assert_eq!(corpus.invalid_metadata.fixtures.len(), 80);
     assert_eq!(corpus.vectors.len(), 6);
     assert_eq!(corpus.requirements.len(), 947);
     assert!(corpus.diagnostics.values().all(|diagnostic| {
-        diagnostic.version == "1.0.0" && diagnostic.status == "expected-not-executed"
+        diagnostic.version == "1.1.0" && diagnostic.status == "expected-not-executed"
     }));
     assert_eq!(
         corpus.diagnostics["examples/invalid/unsafe-row-key-repeat.orna"].failing_phase,
         "row-validation"
     );
-    assert_eq!(corpus.publication_digests.len(), 46);
+    assert_eq!(corpus.publication_digests.len(), 58);
 }
 
 #[test]
@@ -31,14 +31,11 @@ fn requirement_evidence_keeps_all_authoritative_not_executed_markers() {
 
     assert_eq!(entries.len(), 947);
     assert!(entries.iter().all(|entry| {
-        entry["implementation_result"] == "not executed"
+        entry["implementation_result"] == "not-executed"
             && entry["full_implementation_coverage_claimed"] == false
             && entry["tests"].as_array().is_some_and(|tests| {
                 tests.iter().all(|test| {
-                    test["status"] == "planned"
-                        && !test.as_object().is_some_and(|test| {
-                            test.contains_key("fixture") || test.contains_key("path")
-                        })
+                    test["status"] == "not-executed"
                 })
             })
     }));
@@ -242,7 +239,7 @@ fn no_adapter_cannot_create_runtime_passes() {
     let corpus = Corpus::load_default().expect("reference corpus loads");
     let mut adapter = SkippingAdapter;
     let report = Harness::new(corpus).run(&mut adapter);
-    assert_eq!(report.fixtures.len(), 167);
+    assert_eq!(report.fixtures.len(), 176);
     assert!(report.runtime_evidence.is_empty());
     assert!(!report.skipped_evidence.is_empty());
     assert!(
@@ -251,7 +248,7 @@ fn no_adapter_cannot_create_runtime_passes() {
             .iter()
             .all(|e| e.status == EvidenceStatus::Specified)
     );
-    assert_eq!(report.scenarios.len(), 144);
+    assert_eq!(report.scenarios.len(), 279);
     assert!(
         report
             .scenarios
@@ -1505,7 +1502,7 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
     let evidence = run_reference_project_runtime_adapter(&corpus);
 
     assert_eq!(evidence.classification, EvidenceClass::RuntimeAdapter);
-    assert_eq!(evidence.specification_version, "1.0.0");
+    assert_eq!(evidence.specification_version, "1.1.0");
     assert_eq!(evidence.profile, "reference-project-runtime-adapter");
     assert_eq!(evidence.implementation_execution, "not executed");
     assert!(!evidence.compiler_artifact_execution);
@@ -1542,7 +1539,7 @@ fn reference_project_runtime_adapter_reports_exactly_separate_evidence() {
             "invoke": "warehouse.transfer",
             "args": ["north", "south", "pencil", 100],
             "expect": "assertion failure; both stock rows unchanged",
-            "diagnostic_code": "ORNA-EVAL-ASSERT"
+            "diagnostic_code": "ORNA-A091-008"
         },
         {
             "invoke": "library.lend",
@@ -1814,7 +1811,7 @@ fn date_range_implementation_evidence_is_pinned_partial_and_does_not_promote_the
         .tests
         .clone();
     assert_eq!(reloaded_range_plan, frozen_range_plan);
-    assert_eq!(reloaded_range_plan[0]["status"], "planned");
+    assert_eq!(reloaded_range_plan[0]["status"], "not-executed");
 }
 
 #[test]
@@ -2371,7 +2368,8 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
             text: "Generic parameters are explicit in public source when a generic abstraction is intended; local type arguments may be inferred.".into(),
         }],
         requirement_evidence: RequirementEvidence {
-            meaning: "focused report-stage witness".into(),
+            version: "1.1.0".into(),
+            scope: "focused report-stage witness".into(),
             requirements: vec![RequirementEvidenceEntry {
                 requirement: "ORNA-GENERIC-001".into(),
                 tests: vec![requirement_test(accepted_id), requirement_test(rejected_id)],
@@ -2381,7 +2379,7 @@ fn harness_report_retains_imported_generic_sys_meta_evidence() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -2575,7 +2573,8 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
             },
         ],
         requirement_evidence: RequirementEvidence {
-            meaning: "focused system semantic Harness witness".into(),
+            version: "1.1.0".into(),
+            scope: "focused system semantic Harness witness".into(),
             requirements: vec![
                 RequirementEvidenceEntry {
                     requirement: "ORNA-SYS-005".into(),
@@ -2603,7 +2602,7 @@ fn harness_maps_runtime_info_semantics_and_serializes_runtime_rejection() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },

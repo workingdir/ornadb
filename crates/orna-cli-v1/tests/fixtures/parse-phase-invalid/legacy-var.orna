@@ -1,0 +1,4 @@
+pub fn bad(): Int {
+    var value = 1;
+    value
+}

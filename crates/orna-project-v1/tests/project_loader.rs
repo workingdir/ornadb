@@ -87,6 +87,32 @@ fn git_output_at(directory: &Path, arguments: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+fn git_with_input(directory: &TempDir, arguments: &[&str], input: &str) -> String {
+    use std::io::Write as _;
+
+    let mut child = Command::new("git")
+        .args(arguments)
+        .current_dir(directory.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 fn commit_directory(directory: &Path, message: &str) {
     for (key, value) in [
         ("user.email", "kieran@drewett.dev"),
@@ -101,7 +127,9 @@ fn commit_directory(directory: &Path, message: &str) {
 
 #[test]
 fn committed_project_carries_verified_source_snapshot_identity() {
-    let (directory, repository) = repository(&[("main.orna", "pub let answer: Int = 42\n")]);
+    // A module unit holds declarations only (ORNA-SOURCE-002); `let` is a REPL
+    // input, not a top-level module item (34-grammar.md, top_level_item).
+    let (directory, repository) = repository(&[("main.orna", "pub fn answer(): Int = 42;\n")]);
     commit_all(&directory);
     let commit = repository.head().unwrap().unwrap();
     let project = ProjectLoader::default()
@@ -151,7 +179,7 @@ fn format3_committed_rows_are_not_loaded_as_source_files() {
 fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
     let (directory, repository) = repository(&[
         ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
-        (".orna/format.orna", "format 1\n"),
+        (".orna/format.orna", "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"),
         (".orna/database.orna", "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n"),
         ("Music/london.orna", "{\n    title: \"Legacy row\",\n}\n"),
     ]);
@@ -163,8 +191,10 @@ fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
 
     assert_eq!(project.loose_rows().len(), 1);
     assert_eq!(project.loose_rows()[0].logical_path(), "Music/london.orna");
+    // The candidate adds a valid top-level declaration (ORNA-SOURCE-002) so
+    // its source differs from the committed module.
     let candidate_source =
-        "pub table Music(id: Str) { title: Str, }\npub let answer: Int = 42\n";
+        "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n";
     let candidate = repository
         .build_private_commit(
             &commit,
@@ -217,6 +247,61 @@ fn loads_only_reachable_modules_in_deterministic_logical_order() {
         project.identities()[2].namespace(),
         ["sensors", "greenhouse"]
     );
+}
+
+/// Editors check unsaved buffers: an overlay replaces the saved module text
+/// and an overlay-only module is importable before it is written.
+#[test]
+fn overlays_replace_saved_modules_and_make_unsaved_imports_reachable() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub fn saved(): Int = 1;\n"),
+        ("unused.orna", "pub fn unused(): Int = 2;\n"),
+    ]);
+    let overlays = std::collections::BTreeMap::from([
+        (
+            "main.orna".to_owned(),
+            "use helpers;\npub fn edited(): Int = helpers.value();\n".to_owned(),
+        ),
+        (
+            "helpers.orna".to_owned(),
+            "pub fn value(): Int = 3;\n".to_owned(),
+        ),
+    ]);
+
+    let project = ProjectLoader::default()
+        .load_with_overlays(&repository, &overlays)
+        .unwrap();
+    let modules = project
+        .modules()
+        .iter()
+        .map(|module| (module.logical_path.as_str(), module.source.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modules,
+        [
+            ("helpers.orna", overlays["helpers.orna"].as_str()),
+            ("main.orna", overlays["main.orna"].as_str()),
+        ]
+    );
+    assert!(!directory.path().join("helpers.orna").exists());
+    let analysis = analyze_with_catalogue(project.modules(), &Catalogue::authoritative_core());
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+
+    let saved = ProjectLoader::default()
+        .load_with_overlays(&repository, &Default::default())
+        .unwrap();
+    assert_eq!(saved.modules().len(), 1);
+    assert_eq!(saved.modules()[0].source, "pub fn saved(): Int = 1;\n");
+    assert!(matches!(
+        ProjectLoader::default().load_with_overlays(
+            &repository,
+            &std::collections::BTreeMap::from([(
+                "main.orna".to_owned(),
+                "use missing;\n".to_owned()
+            )])
+        ),
+        Err(ProjectLoadError::ImportUnavailable)
+    ));
 }
 
 #[test]
@@ -454,6 +539,53 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
 }
 
 #[test]
+fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
+    let (_directory, repository) = repository(&[(
+        "main.orna",
+        include_str!("fixtures/captured-standard-parent.orna"),
+    )]);
+    let module_path = repository.worktree().join("stdlib/std");
+    fs::create_dir_all(module_path.join("io")).unwrap();
+    orna_repository_v1::initialize_repository(&module_path).unwrap();
+    fs::write(
+        module_path.join("collection.orna"),
+        "use std.io;\npub fn answer(): Int = 41 + 1;\n",
+    )
+    .unwrap();
+    fs::write(module_path.join("io/main.orna"), "use fs;\npub fn read(): Int = 1;\n").unwrap();
+    fs::write(module_path.join("io/fs.orna"), "pub fn open(): Int = 2;\n").unwrap();
+    commit_directory(&module_path, "standard");
+    let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
+
+    fs::write(
+        repository.worktree().join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
+    )
+    .unwrap();
+    git_output_at(repository.worktree(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(repository.worktree(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
+    let link = format!("160000,{module_commit},stdlib/std");
+    git_output_at(repository.worktree(), &["update-index", "--add", "--cacheinfo", &link]);
+    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std"]);
+    let parent_commit = repository.head().unwrap().unwrap();
+
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &parent_commit)
+        .unwrap();
+    let profile = project.standard_profile().expect("attached std profile");
+    assert_eq!(profile.snapshot(), module_commit);
+    assert_eq!(
+        project
+            .standard_sources()
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        ["std/collection.orna", "std/io/fs.orna", "std/io/main.orna", "std/main.orna"]
+    );
+}
+
+#[test]
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let directory = tempfile::tempdir().unwrap();
     for (name, source) in [
@@ -526,7 +658,7 @@ fn applies_limits_before_reading_an_unbounded_project() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1024,
-        max_repository_entries: 16,
+        max_source_modules: 16,
     });
     assert!(matches!(
         loader.load(&repository),
@@ -541,7 +673,7 @@ fn applies_total_source_limit_with_a_bounded_read() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1,
-        max_repository_entries: 16,
+        max_source_modules: 16,
     });
     assert!(matches!(
         loader.load(&repository),
@@ -561,7 +693,7 @@ fn bounds_repository_metadata_before_reachable_source_processing() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1024,
-        max_repository_entries: 1,
+        max_source_modules: 1,
     });
     assert!(matches!(
         loader.load(&repository),
@@ -813,7 +945,7 @@ fn loads_private_candidate_source_without_reading_human_edits_or_changing_head()
 }
 
 #[test]
-fn committed_snapshot_loader_enforces_repository_entry_limit_before_reads() {
+fn committed_snapshot_loader_enforces_source_module_limit_before_reads() {
     let (directory, repository) = repository(&[
         ("main.orna", include_str!("fixtures/main_run.orna")),
         (
@@ -826,13 +958,92 @@ fn committed_snapshot_loader_enforces_repository_entry_limit_before_reads() {
     let loader = ProjectLoader::new(ProjectLimits {
         max_modules: 1,
         max_source_bytes: 1024,
-        max_repository_entries: 1,
+        max_source_modules: 1,
     });
 
     assert!(matches!(
         loader.load_committed_snapshot(&repository, &commit),
         Err(ProjectLoadError::RepositoryLimit)
     ));
+}
+
+/// The materialised store at `.orna/store` is database content, not source:
+/// the worktree loader neither walks nor counts it, and files that are not
+/// modules do not count against the source-module limit.
+#[test]
+fn worktree_loader_counts_only_source_modules_and_never_walks_the_store() {
+    let (_directory, repository) = repository(&[
+        ("main.orna", include_str!("fixtures/main_run.orna")),
+        ("README.md", "notes\n"),
+        ("assets/logo.txt", "logo\n"),
+        (".orna/store/data", "root node\n"),
+        // Not NFC, so the portability check rejects it if the walk enters the
+        // store.
+        (".orna/store/refs/cafe\u{301}/data", "child node\n"),
+    ]);
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_source_modules: 1,
+    });
+    let project = loader
+        .load(&repository)
+        .expect("only main.orna counts, and the store is never walked");
+    assert_eq!(project.identities().len(), 1);
+}
+
+/// The committed loader lists the source tree without entering the store, so
+/// a store whose nodes are not present locally, as in a partial clone, does
+/// not stop the program from loading.
+#[test]
+fn committed_snapshot_loader_counts_only_source_modules_and_never_reads_the_store() {
+    let (directory, repository) = repository(&[
+        ("main.orna", include_str!("fixtures/main_run.orna")),
+        ("README.md", "notes\n"),
+    ]);
+    commit_all(&directory);
+    let head = git_output(&directory, &["rev-parse", "HEAD"]);
+    let absent_node = "1".repeat(head.trim().len());
+    let store = git_with_input(
+        &directory,
+        &["mktree", "--missing"],
+        &format!("040000 tree {absent_node}\tnode\n"),
+    );
+    let metadata = git_with_input(
+        &directory,
+        &["mktree"],
+        &format!("040000 tree {store}\tstore\n"),
+    );
+    let mut root = git_output(&directory, &["ls-tree", "HEAD"]);
+    root.push_str(&format!("040000 tree {metadata}\t.orna\n"));
+    let tree = git_with_input(&directory, &["mktree"], &root);
+    let commit = git_output(
+        &directory,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            "HEAD",
+            "-m",
+            "store beside source",
+        ],
+    );
+    git_output(&directory, &["update-ref", "HEAD", commit.trim()]);
+    let commit = repository.resolve_snapshot(commit.trim()).unwrap();
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_source_modules: 1,
+    });
+
+    let project = loader
+        .load_committed_snapshot(&repository, &commit)
+        .expect("only main.orna counts, and no store node is read");
+    assert_eq!(project.identities().len(), 1);
+    assert!(
+        repository.list_committed_tree(&commit, 1_024).is_err(),
+        "a recursive listing cannot read this store"
+    );
 }
 
 #[test]

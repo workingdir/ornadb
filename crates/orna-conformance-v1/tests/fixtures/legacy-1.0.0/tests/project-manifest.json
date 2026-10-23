@@ -1,0 +1,14 @@
+{
+  "project": "examples/reference",
+  "entry": "main.orna",
+  "modules": [
+    "main.orna",
+    "library.orna",
+    "warehouse.orna",
+    "sensors.orna",
+    "values.orna"
+  ],
+  "dependencies": [],
+  "expected": "examples/reference/expectations.json",
+  "implementation_execution": "not executed"
+}
