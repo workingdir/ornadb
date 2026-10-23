@@ -2478,13 +2478,23 @@ pub enum RuntimeError {
     /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
     /// format and remedy.
     LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
+    /// A retry, skip or resolve named a failure version or successor that is
+    /// not the stored one (`sys.failure.stale_version`).
+    StreamFailureStale,
+    /// The requested failure transition is not allowed from the stored state,
+    /// such as resolving a blocking open or retrying failure
+    /// (`sys.failure.state_conflict`).
+    StreamFailureStateConflict,
+    /// The provider cannot safely advance past this failed delivery
+    /// (`sys.failure.skip_unsupported`).
+    StreamFailureSkipUnsupported,
 }
 impl RuntimeError {
     /// Returns the stable public system code when this runtime error has one.
     ///
-    /// The provider boundary deliberately exposes only the two checkpoint
-    /// outcomes required by the system contract. Other runtime failures stay
-    /// internal to this crate's existing error convention.
+    /// The provider boundary exposes the checkpoint outcomes and the failure
+    /// transition outcomes required by the system contract. Other runtime
+    /// failures stay internal to this crate's existing error convention.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
             Self::AdminBusy => Some("sys.admin.busy"),
@@ -2495,6 +2505,9 @@ impl RuntimeError {
             // No standalone cross-context code is defined; an exact pin that
             // cannot be resolved in this runtime is incomplete, never rebound.
             Self::SnapshotContextMismatch => Some("sys.snapshot.incomplete"),
+            Self::StreamFailureStale => Some("sys.failure.stale_version"),
+            Self::StreamFailureStateConflict => Some("sys.failure.state_conflict"),
+            Self::StreamFailureSkipUnsupported => Some("sys.failure.skip_unsupported"),
             _ => None,
         }
     }
@@ -2527,6 +2540,9 @@ impl fmt::Display for RuntimeError {
             Self::SnapshotNotFound => "runtime checkpoint generation was not found",
             Self::SnapshotIncomplete => "historical runtime generation is incomplete",
             Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
+            Self::StreamFailureStale => "stream failure changed after it was observed",
+            Self::StreamFailureStateConflict => "stream failure transition is not allowed from its state",
+            Self::StreamFailureSkipUnsupported => "stream failure cannot be skipped safely",
             Self::LeaseHeld => "runtime writer is held",
             Self::AdminBusy => "runtime administration callback is busy",
             Self::AdminInvocationConflict => "administrative invocation identity was reused",
@@ -16902,6 +16918,29 @@ fn stream_pause_key(result: &CommitResult) -> Result<&CheckpointKey, RuntimeErro
     }
 }
 
+/// Maps a rejected failure transition to its public system outcome.
+///
+/// A version or successor the stored failure did not record is
+/// `sys.failure.stale_version`. A resolve that is blocked by an open or
+/// retrying failure, or a retry that the stored state does not admit, is
+/// `sys.failure.state_conflict`. A skip over a failure that is not skippable
+/// is `sys.failure.skip_unsupported`. Other rejections keep their internal
+/// classification and return `None`.
+pub fn failure_transition_error(
+    reason: RejectReason,
+    purpose: Option<LeasePurpose>,
+) -> Option<RuntimeError> {
+    match (reason, purpose) {
+        (RejectReason::StaleFailure, _) => Some(RuntimeError::StreamFailureStale),
+        (RejectReason::ResolveBlocked, _) => Some(RuntimeError::StreamFailureStateConflict),
+        (RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)) => {
+            Some(RuntimeError::StreamFailureSkipUnsupported)
+        }
+        (RejectReason::RetryNotAllowed, _) => Some(RuntimeError::StreamFailureStateConflict),
+        _ => None,
+    }
+}
+
 fn stream_administration_outcome(
     result: CommitResult,
 ) -> Result<StreamAdministrationOutcome, RuntimeError> {
@@ -17950,7 +17989,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &failure).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_version {
+            if record.version != expected_version
+                || record.identity.0.successor != failure.0.successor
+            {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
             if record.status != FailureStatus::Failed {
@@ -18076,7 +18117,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &identity).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_failure_version || record.status != FailureStatus::Failed
+            if record.version != expected_failure_version
+                || record.status != FailureStatus::Failed
+                || record.identity.0.successor != lease.delivery.successor
             {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
@@ -39940,6 +39983,170 @@ mod tests {
             CommitResult::CheckpointAdvanced { ref checkpoint }
                 if checkpoint.committed == Some(revised.successor)
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_retry_rejects_a_successor_the_failure_did_not_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-retry-successor", "runtime-recorded-next");
+        let forged = stream_delivery("runtime-retry-successor", "runtime-forged-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: FailureIdentity(forged),
+                    expected_version: failed.version,
+                    expected,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.version, failed.version);
+        assert_eq!(stored.status, FailureStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn runtime_skip_rejects_a_successor_the_failure_did_not_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-skip-successor", "runtime-skip-recorded-next");
+        let forged = stream_delivery("runtime-skip-successor", "runtime-skip-forged-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let deliver_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                deliver_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let forged_lease = DeliveryLease {
+            delivery: forged,
+            ..skip_lease
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Skip {
+                    lease: forged_lease,
+                    expected: expected.clone(),
+                    expected_failure_version: failed.version,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.version, failed.version);
+        assert_eq!(stored.status, FailureStatus::Failed);
+        let checkpoint = stream
+            .checkpoint_async(&recorded.checkpoint_key())
+            .await
+            .unwrap();
+        assert_eq!(checkpoint.version, 0);
+        assert!(checkpoint.committed.is_none());
+    }
+
+    #[test]
+    fn failure_transition_rejections_map_to_public_failure_codes() {
+        let code = |reason, purpose| {
+            failure_transition_error(reason, purpose).and_then(|error| error.public_code())
+        };
+        assert_eq!(
+            code(RejectReason::StaleFailure, Some(LeasePurpose::Skip)),
+            Some("sys.failure.stale_version")
+        );
+        assert_eq!(
+            code(RejectReason::ResolveBlocked, None),
+            Some("sys.failure.state_conflict")
+        );
+        assert_eq!(
+            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Deliver)),
+            Some("sys.failure.state_conflict")
+        );
+        assert_eq!(
+            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)),
+            Some("sys.failure.skip_unsupported")
+        );
+        assert_eq!(code(RejectReason::StreamBusy, None), None);
     }
 
     #[tokio::test]
