@@ -402,7 +402,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
         .await
         .expect("durable rollback execution");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+        matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
     );
     assert_failed_request_left_no_rows(&repository, identity, "Note", [44; 32]).await;
 
@@ -460,7 +460,7 @@ async fn partial_mutation_rollback_keeps_the_empty_batch_for_a_failed_request() 
         .await
         .expect("durable partial rollback execution");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+        matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
     );
     assert_failed_request_left_no_rows(&repository, identity, "Note", [64; 32]).await;
 }

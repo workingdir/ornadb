@@ -20,6 +20,16 @@ fn usage() -> Diagnostic {
     )
 }
 
+const NOTHING_TO_COMMIT_TITLE: &str = "nothing is staged to commit";
+const NOTHING_TO_COMMIT_HELP: &str =
+    "stage changes with `orna add` or `git add`, then retry `orna commit -m MESSAGE`";
+
+/// The single diagnostic for a commit with no staged tree, shared by the index
+/// (`SysGitNothingToCommit`) and relation-admission (`EmptyIndex`) paths (F9).
+fn nothing_to_commit() -> Diagnostic {
+    Diagnostic::target("E2304", NOTHING_TO_COMMIT_TITLE, NOTHING_TO_COMMIT_HELP)
+}
+
 fn message(arguments: &[String]) -> Result<&str, Diagnostic> {
     if arguments.len() != 2
         || !matches!(arguments[0].as_str(), "-m" | "--message")
@@ -67,6 +77,7 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
                 other.to_string(),
             )
         }
+        RelationAdmissionError::EmptyIndex => nothing_to_commit(),
         other => staging_error(title, other.to_string()),
     }
 }
@@ -198,8 +209,8 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
         // sys.git.nothing_to_commit
         RepositoryError::SysGitNothingToCommit => (
             "E2304",
-            "nothing is staged to commit",
-            "stage changes with `orna add` or `git add`, then retry `orna commit -m MESSAGE`",
+            NOTHING_TO_COMMIT_TITLE,
+            NOTHING_TO_COMMIT_HELP,
         ),
         _ => (
             "E2300",
