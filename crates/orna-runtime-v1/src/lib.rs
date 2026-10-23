@@ -126,6 +126,15 @@ CREATE TABLE IF NOT EXISTS pending_mutation (
     payload BLOB NOT NULL,
     digest BLOB NOT NULL CHECK (length(digest) = 32)
 );
+-- Every admitted mutation keeps its identity and digest for the life of the
+-- database. Publication prunes `pending_mutation`, so exact-replay detection
+-- must not depend on it (ORNA-VFS-008).
+CREATE TABLE IF NOT EXISTS admitted_mutation (
+    mutation_id BLOB PRIMARY KEY CHECK (length(mutation_id) = 16),
+    digest BLOB NOT NULL CHECK (length(digest) = 32)
+);
+INSERT OR IGNORE INTO admitted_mutation (mutation_id, digest)
+    SELECT mutation_id, digest FROM pending_mutation;
 CREATE TABLE IF NOT EXISTS accepted_content_pin (
     pin_id BLOB PRIMARY KEY CHECK (length(pin_id) = 16),
     repository_id BLOB NOT NULL CHECK (length(repository_id) = 32),
@@ -19542,7 +19551,7 @@ async fn table_mutations_already_durable_tx(
     for mutation in mutations {
         let mut rows = connection
             .query(
-                "SELECT payload, digest FROM pending_mutation WHERE mutation_id = ?1",
+                "SELECT digest FROM admitted_mutation WHERE mutation_id = ?1",
                 params![mutation.id.to_vec()],
             )
             .await
@@ -19554,9 +19563,8 @@ async fn table_mutations_already_durable_tx(
         else {
             continue;
         };
-        let payload: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if payload != mutation.payload || digest != mutation.digest {
+        let digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
         retained += 1;
@@ -19612,6 +19620,13 @@ async fn append_mutations_with_catalogue_tx(
                     mutation.payload.clone(),
                     mutation.digest.to_vec()
                 ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        connection
+            .execute(
+                "INSERT INTO admitted_mutation (mutation_id, digest) VALUES (?1, ?2)",
+                params![mutation.id.to_vec(), mutation.digest.to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -21958,6 +21973,126 @@ mod tests {
             "a changed candidate is a new revision and does commit"
         );
     }
+
+    /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
+    /// replay of an already-accepted candidate after publication must still
+    /// not append a second mutation or checkpoint.
+    #[tokio::test]
+    async fn replaying_a_published_vfs_save_does_not_commit_twice() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = b"saved".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &accepted_row).await.unwrap();
+        let applied = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // Publication consumes the pending mutation record of the accepted save.
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+        assert!(state.pending().await.unwrap().is_empty());
+
+        // The replay of the identical candidate arrives after publication.
+        let replay_draft = target.open_draft(1 << 20).await;
+        replay_draft.truncate(0).await.unwrap();
+        replay_draft.write_at(0, &accepted_row).await.unwrap();
+        let replayed = target
+            .commit_durable_document_save(
+                &replay_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            replayed,
+            vfs::TemporaryRenameOutcome::Applied { generation: 2, .. }
+        ));
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the acknowledged save keeps its checkpoint")
+                .generation,
+            1,
+            "a post-publication replay must not advance the durable generation"
+        );
+        assert!(
+            state.pending().await.unwrap().is_empty(),
+            "a post-publication replay must not re-admit the mutation"
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "the replay leaves the accepted row in place"
+        );
+    }
+
 
     /// One complete VFS row save candidate for `identity`, exactly as a caller's
     /// admission callback must build it: the typed row replacement plus the
