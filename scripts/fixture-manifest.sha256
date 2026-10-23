@@ -203,6 +203,7 @@ c51923175ec365d3db5d77cad486e830b3dc5e7a2074a9ee9ac685731e962b5f  crates/orna-cl
 2755dd327f63d7fb5c8d16233fbe095adebfeab08141dbc465ffd1044f596571  crates/orna-cli-v1/tests/fixtures/repl-status-binding.orna
 29e38749dbdc4179b8e8ef5b0c9f28799f71a771c5f08449ddd8ab13be124656  crates/orna-cli-v1/tests/fixtures/repl-unlisted-std-import.orna
 7105126cfab2f1af5ee6bd69dbb198276d276d3d389c9294a5ae215d89d990c2  crates/orna-cli-v1/tests/fixtures/repl-use-library.orna
+4dae28cd5cb1470931e93698ade318ae1dc0a03d02e7f27d90c86dbce1e2f185  crates/orna-cli-v1/tests/fixtures/run/assert-false-library.orna
 1ced5610df3f3d29b0e1282147dcd313bb6c5b5f58ffdef732bcbffe92d15268  crates/orna-cli-v1/tests/fixtures/run/library.orna
 cad1e74f9b1269d55e6e2467f64effdc9567d0dbe4057a541d85ba6d9be6bb93  crates/orna-cli-v1/tests/fixtures/run/main.orna
 7986d35cde5a9b6baa4c705ca830d74087321434c0476e210958fde86849ec7b  crates/orna-cli-v1/tests/fixtures/run/no-main.orna
