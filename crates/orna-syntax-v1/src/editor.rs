@@ -1,4 +1,4 @@
-//! Editor highlighting and generated lexical grammars for Orna 1.0.0.
+//! Editor highlighting and generated lexical grammars for the Orna language.
 //!
 //! Every generated vocabulary is derived from this crate's lexer. In
 //! particular, editor keyword lists come from `Keyword::ALL`, the table used
@@ -24,7 +24,8 @@ pub const BRACKET_PAIRS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")]
 pub const LANGUAGE_ID: &str = "orna";
 pub const SOURCE_EXTENSION: &str = "orna";
 pub const SOURCE_SCOPE: &str = "source.orna";
-pub const LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The Orna language publication every generated editor artifact describes.
+pub const LANGUAGE_VERSION: &str = "1.1.0";
 pub const ARTIFACT_MANIFEST_PATH: &str = "editors/generated-artifacts.json";
 pub const EDITOR_EMITTERS: &[&str] = &[
     "TextMate grammar and VSCode extension",
@@ -120,10 +121,13 @@ const REFINEMENT_TOKEN_TYPES: &[&str] = &[
     "interface",
     "function",
     "parameter",
+    "namespace",
+    "enumMember",
+    "property",
 ];
 
 /// Semantic-token modifiers advertised to editors, in protocol bit order.
-pub const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly", "modification"];
+pub const TOKEN_MODIFIERS: &[&str] = &["declaration", "readonly", "modification", "defaultLibrary"];
 
 /// Renders the complete semantic-token legend as the JSON that editor
 /// attachments and the `semantic-legend` command consume.
@@ -233,6 +237,9 @@ const TOKEN_TYPE_SAMPLES: &[(&str, &str)] = &[
     ("interface", "Printable"),
     ("function", "increment"),
     ("parameter", "value"),
+    ("namespace", "math"),
+    ("enumMember", "less"),
+    ("property", "name"),
 ];
 
 /// Hover sample for one legend token type, if it has one.
