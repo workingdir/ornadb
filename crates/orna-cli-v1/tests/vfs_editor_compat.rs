@@ -573,6 +573,30 @@ else:
     );
 }
 
+/// ORNA-VFS-014 (W40-03): ownership and permission changes on an editable mount
+/// fail with EPERM. The adapter reports uid/gid 0 and permission bits are
+/// advisory. For a non-root caller the kernel owner check already refuses; for
+/// root the adapter's EPERM is the refusal, so the test covers both paths.
+#[tokio::test]
+async fn editor_mount_refuses_chmod_and_chown_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let chmod = std::fs::set_permissions(&fixture.data_path, std::fs::Permissions::from_mode(0o600));
+    assert_eq!(
+        chmod.expect_err("chmod on an editable mount must fail").raw_os_error(),
+        Some(libc::EPERM),
+        "chmod on an editable mount"
+    );
+    let chown = std::os::unix::fs::chown(&fixture.data_path, Some(0), Some(0));
+    assert_eq!(
+        chown.expect_err("chown on an editable mount must fail").raw_os_error(),
+        Some(libc::EPERM),
+        "chown on an editable mount"
+    );
+}
+
 /// ORNA-VFS-020/022: writes remain speculative; admission validates the source-backed candidate and stale handles cannot overwrite a later CLI commit.
 #[tokio::test]
 async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation() {
