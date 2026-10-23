@@ -10,7 +10,11 @@ use std::{
     pin::Pin,
 };
 
-use orna_protocol_v1::{CanonicalSnapshot, Envelope, Limits, Message, PresentNode};
+use orna_foundation_v1::CanonicalValue;
+use orna_protocol_v1::{
+    CanonicalSnapshot, Envelope, Limits, Message, PresentNode, RequestState, ResultBody,
+    ResultStatus,
+};
 
 use crate::live_presentation::{
     LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
@@ -62,14 +66,65 @@ pub trait RequestIdAllocator {
 }
 
 /// Result of one driver receive/publish step.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LiveSessionEvent {
     SnapshotPublished { revision: u64 },
     DeltaPublished { revision: u64 },
     ResyncSent { request: ResyncRequest },
     ResyncAwaitingSnapshot { request: [u8; 16] },
-    DiagnosticReceived,
-    ResyncRejected,
+    /// A host diagnostic not consumed by this driver's resync barrier.
+    DiagnosticReceived {
+        request: Option<[u8; 16]>,
+        diagnostic: LiveDiagnostic,
+    },
+    /// The host rejected this driver's outstanding resync request.
+    ResyncRejected { diagnostic: LiveDiagnostic },
+    /// Terminal outcome of a request. It is never published as presentation.
+    ResultReceived {
+        request: Option<[u8; 16]>,
+        status: ResultStatus,
+        value: Option<CanonicalValue>,
+        fingerprint: [u8; 32],
+        diagnostic: Option<LiveDiagnostic>,
+    },
+    /// Recovery answer for a previously submitted request.
+    RequestStatusReceived {
+        request: Option<[u8; 16]>,
+        target: [u8; 16],
+        state: RequestState,
+        fingerprint: Option<[u8; 32]>,
+        result: Option<ResultBody>,
+    },
+}
+
+/// A protocol diagnostic as the client surfaces it. `code` is the portable
+/// protocol code; `message` is what the protocol boundary admits, which is
+/// `<redacted>` for every diagnostic except the fixed safe read-only one.
+///
+/// `outcome_unknown` is set for `wire.outcome_unknown`: the correlated request
+/// may already have completed, so callers must recover its recorded status and
+/// must not blindly re-submit a mutating evaluation (WIRE-012, EVAL-011).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveDiagnostic {
+    pub code: String,
+    pub message: String,
+    pub recoverable: Option<bool>,
+    pub outcome_unknown: bool,
+}
+
+impl LiveDiagnostic {
+    fn from_protocol(
+        diagnostic: &orna_protocol_v1::Diagnostic,
+        recoverable: Option<bool>,
+    ) -> Result<Self, orna_protocol_v1::Error> {
+        let code = diagnostic.code()?;
+        Ok(Self {
+            outcome_unknown: code == "wire.outcome_unknown",
+            message: diagnostic.message()?,
+            code,
+            recoverable,
+        })
+    }
 }
 /// Errors from the authenticated live attachment, typed presentation owner,
 /// or renderer publication boundary.
@@ -232,22 +287,66 @@ where
                 self.detached = true;
                 LiveSessionError::Io(error)
             })?;
-        if let Ok(frame) = Envelope::decode(&encoded, self.limits)
-            && let Message::Diagnostic { .. } = frame.message
-        {
-            if frame.watch.is_some() && frame.watch != Some(self.watch) {
-                return Err(LiveSessionError::Presentation(
-                    LivePresentationError::WrongWatch,
-                ));
+        if let Ok(frame) = Envelope::decode(&encoded, self.limits) {
+            match frame.message {
+                Message::Diagnostic {
+                    diagnostic,
+                    recoverable,
+                } => {
+                    if frame.watch.is_some() && frame.watch != Some(self.watch) {
+                        return Err(LiveSessionError::Presentation(
+                            LivePresentationError::WrongWatch,
+                        ));
+                    }
+                    let diagnostic = LiveDiagnostic::from_protocol(&diagnostic, recoverable)
+                        .map_err(LiveSessionError::Protocol)?;
+                    if frame.watch == Some(self.watch)
+                        && frame.request.is_some()
+                        && frame.request == self.expected_resync_request
+                    {
+                        self.expected_resync_request = None;
+                        return Ok(LiveSessionEvent::ResyncRejected { diagnostic });
+                    }
+                    return Ok(LiveSessionEvent::DiagnosticReceived {
+                        request: frame.request,
+                        diagnostic,
+                    });
+                }
+                Message::Result {
+                    status,
+                    value,
+                    fingerprint,
+                    diagnostic,
+                } => {
+                    let diagnostic = diagnostic
+                        .as_ref()
+                        .map(|diagnostic| LiveDiagnostic::from_protocol(diagnostic, None))
+                        .transpose()
+                        .map_err(LiveSessionError::Protocol)?;
+                    return Ok(LiveSessionEvent::ResultReceived {
+                        request: frame.request,
+                        status,
+                        value,
+                        fingerprint,
+                        diagnostic,
+                    });
+                }
+                Message::RequestStatusResult {
+                    target,
+                    state,
+                    fingerprint,
+                    result,
+                } => {
+                    return Ok(LiveSessionEvent::RequestStatusReceived {
+                        request: frame.request,
+                        target,
+                        state,
+                        fingerprint,
+                        result,
+                    });
+                }
+                _ => {}
             }
-            if frame.watch == Some(self.watch)
-                && frame.request.is_some()
-                && frame.request == self.expected_resync_request
-            {
-                self.expected_resync_request = None;
-                return Ok(LiveSessionEvent::ResyncRejected);
-            }
-            return Ok(LiveSessionEvent::DiagnosticReceived);
         }
         self.validate_snapshot_request(&encoded)?;
         self.validate_resync_response(&encoded)?;
@@ -650,15 +749,67 @@ mod tests {
     }
 
     fn diagnostic_body() -> Vec<u8> {
-        let mut body = vec![0xa2, 0x00, 0xd9, 0xea, 0x6b, 0xa7];
-        body.extend([0x00, 0x74]);
-        body.extend(b"wire.invalid_message");
+        diagnostic_body_with_code("wire.invalid_message")
+    }
+
+    fn diagnostic_body_with_code(code: &str) -> Vec<u8> {
+        let mut body = vec![0xa2, 0x00, 0xd9, 0xea, 0x6b, 0xa7, 0x00];
+        body.extend(text(code));
         body.extend([0x01, 0x03, 0x02, 0x6f]);
         body.extend(b"invalid message");
         body.extend([0x03, 0x80, 0x04, 0x80, 0x05, 0x80, 0x06, 0xf5]);
         body.extend([0x01, 0xf5]);
         body
     }
+
+    fn protocol_diagnostic() -> orna_protocol_v1::Diagnostic {
+        let Message::Diagnostic { diagnostic, .. } = Envelope::decode(
+            &frame_without_watch(19, None, diagnostic_body()),
+            Limits::default(),
+        )
+        .unwrap()
+        .message
+        else {
+            panic!("test diagnostic frame")
+        };
+        diagnostic
+    }
+
+    fn result_frame(
+        request: [u8; 16],
+        diagnostic: Option<orna_protocol_v1::Diagnostic>,
+    ) -> Vec<u8> {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Failure,
+                value: None,
+                fingerprint: [9; 32],
+                diagnostic,
+            },
+            extensions: Default::default(),
+        }
+        .encode(Limits::default())
+        .expect("result test frame encodes")
+    }
+
+    fn request_status_frame(request: [u8; 16], target: [u8; 16]) -> Vec<u8> {
+        Envelope {
+            request: Some(request),
+            watch: None,
+            message: Message::RequestStatusResult {
+                target,
+                state: RequestState::Running,
+                fingerprint: None,
+                result: None,
+            },
+            extensions: Default::default(),
+        }
+        .encode(Limits::default())
+        .expect("request status test frame encodes")
+    }
+
     fn replace_text(property: &str) -> Vec<u8> {
         let path = array(vec![array(vec![vec![0x00], text("text")])]);
         array(vec![vec![0x02], path, text(property)])
@@ -2832,10 +2983,14 @@ mod tests {
             Some(request),
             diagnostic_body(),
         ));
-        assert_eq!(
-            block_on(driver.receive_once()).unwrap(),
-            LiveSessionEvent::ResyncRejected
-        );
+        let LiveSessionEvent::ResyncRejected { diagnostic } =
+            block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("correlated resync diagnostic must release the barrier")
+        };
+        assert_eq!(diagnostic.code, "wire.invalid_message");
+        assert_eq!(diagnostic.message, "<redacted>");
+        assert!(!diagnostic.outcome_unknown);
         driver
             .io
             .incoming
@@ -2875,10 +3030,16 @@ mod tests {
             .io
             .incoming
             .push_back(frame_without_watch(19, Some(request), diagnostic_body()));
-        assert_eq!(
-            block_on(driver.receive_once()).unwrap(),
-            LiveSessionEvent::DiagnosticReceived
-        );
+        let LiveSessionEvent::DiagnosticReceived {
+            request: received,
+            diagnostic,
+        } = block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("uncorrelated diagnostic must be surfaced")
+        };
+        assert_eq!(received, Some(request));
+        assert_eq!(diagnostic.code, "wire.invalid_message");
+        assert!(!diagnostic.outcome_unknown);
         assert!(driver.presentation().awaiting_snapshot());
 
         driver.io.incoming.push_back(delta(0, 1, "stale"));
@@ -2926,10 +3087,95 @@ mod tests {
             Allocator::default(),
         )
         .unwrap();
-        assert_eq!(
-            block_on(driver.receive_once()).unwrap(),
-            LiveSessionEvent::DiagnosticReceived
-        );
+        let LiveSessionEvent::DiagnosticReceived {
+            request: None,
+            diagnostic,
+        } = block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("connection diagnostic must be surfaced")
+        };
+        assert_eq!(diagnostic.code, "wire.invalid_message");
+    }
+
+    #[test]
+    fn outcome_unknown_diagnostic_is_correlated_to_its_request() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming.push_back(frame_with_request(
+            19,
+            [7; 16],
+            Some([4; 16]),
+            diagnostic_body_with_code("wire.outcome_unknown"),
+        ));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        block_on(driver.receive_once()).unwrap();
+        let LiveSessionEvent::DiagnosticReceived {
+            request,
+            diagnostic,
+        } = block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("outcome-unknown diagnostic must be surfaced")
+        };
+        assert_eq!(request, Some([4; 16]));
+        assert_eq!(diagnostic.code, "wire.outcome_unknown");
+        assert!(diagnostic.outcome_unknown);
+        assert_eq!(diagnostic.recoverable, Some(true));
+    }
+
+    #[test]
+    fn request_outcomes_are_surfaced_without_touching_presentation() {
+        let mut io = MemoryIo::default();
+        io.incoming.push_back(snapshot(0));
+        io.incoming
+            .push_back(result_frame([5; 16], Some(protocol_diagnostic())));
+        io.incoming.push_back(request_status_frame([6; 16], [3; 16]));
+        let mut driver = LiveSessionDriver::new(
+            io,
+            [7; 16],
+            Limits::default(),
+            Renderer::default(),
+            Allocator::default(),
+        )
+        .unwrap();
+        block_on(driver.receive_once()).unwrap();
+        let LiveSessionEvent::ResultReceived {
+            request,
+            status,
+            value,
+            fingerprint,
+            diagnostic,
+        } = block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("result must be surfaced")
+        };
+        assert_eq!(request, Some([5; 16]));
+        assert_eq!(status, ResultStatus::Failure);
+        assert_eq!(value, None);
+        assert_eq!(fingerprint, [9; 32]);
+        assert_eq!(diagnostic.unwrap().code, "wire.invalid_message");
+        let LiveSessionEvent::RequestStatusReceived {
+            request,
+            target,
+            state,
+            fingerprint,
+            result,
+        } = block_on(driver.receive_once()).unwrap()
+        else {
+            panic!("request status must be surfaced")
+        };
+        assert_eq!(request, Some([6; 16]));
+        assert_eq!(target, [3; 16]);
+        assert_eq!(state, RequestState::Running);
+        assert_eq!(fingerprint, None);
+        assert_eq!(result, None);
+        assert_eq!(driver.presentation().published().unwrap().revision(), 0);
     }
 
     #[test]
