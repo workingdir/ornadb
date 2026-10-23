@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-ingest.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1004",
+  "message_contains": "`ingest` is not a declaration",
+  "status": "expected-not-executed"
+}

@@ -5,6 +5,160 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna --help` names the command `orna`. It says that `unmount DIR` detaches
+  the kernel mount, including an orphaned Orna mount, and releases its view
+  record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
+  `migrate copy` help says that `--no-persistent-consumers` confirms that
+  consumer checkpoints are carried, not reset (ORNA-UPGRADE-008).
+- The Linux package archive holds only `usr/bin/orna` and its distribution
+  manifest. The retired embedded-engine manifest, its builder image and its
+  predecessor-engine fields are gone, so a default `packaging/linux/package.sh
+  build` no longer needs an input that nothing produces.
+- `orna commit` stages the format-3 store: a database made by `orna init`
+  gets its `.orna/store` on the first commit, which creates the branch on an
+  unborn HEAD. Each newly declared table is admitted with its schema node, an
+  empty row map and a relation entry. Stable object IDs live in the store as a
+  sealed identity relation keyed by UUID rather than
+  `.orna/object-identities.cbor`, which is read only from older commits. A
+  commit that fails leaves its newly staged tables free to change or drop, and
+  `orna commit` refuses to stage while an interrupted publication awaits
+  recovery. `orna publish` refuses rows whose table has no relation in the
+  committed store. Identity rows record each object's kind as the
+  specification's `sys.ObjectKind` ordinal (table 2, field 3, unit 15, type 8,
+  variant 10, type and variant fields 9), not a private integer. Stores written
+  with the private integers are not readable, and the sidecar's version 1 codes
+  are mapped only when reading an older commit.
+- `orna commit` refuses a staged index whose `.orna/store` is partial after `git rm --cached .orna/store`, leaving skip-worktree payload entries behind, with `E2302` naming the unstaged committed relation and its `git restore --staged .orna/store` remedy, instead of a generic staging failure.
+- A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
+- A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
+- `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
+- Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
+- A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
+- A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
+- Enum values can be written in source: `Level.low` references a payload-free
+  variant and `SyncResult.ok { count: 3 }` constructs a payload variant, also
+  through named imports and module bindings. `orna check` reports an unknown
+  variant as unresolved and unknown, missing and mistyped payload fields as
+  `E2003`, `E2002` and `E2001`. The project REPL and `orna run` evaluate the
+  constructed values, so `case` matches them and tables store them.
+- `std.io.fs` operations resolve every path from the root directory handle held
+  since the host allowed it, one component at a time without following
+  symbolic links, and act on the final entry through its open parent directory.
+  Parent traversal, absolute paths, symbolic links and `.git` metadata are
+  refused as `sys.host.filesystem.denied`, while a missing target reports
+  `sys.host.filesystem.not_found`; only `symlink_metadata` still describes a
+  final link, without following it. Writes without overwrite create
+  exclusively, moves without overwrite never replace a destination, and
+  listings omit `.git`. Platforms other than Linux refuse these operations as
+  unavailable.
+- `sys.explain` works in `orna run`, `orna serve` and the REPL. Each host pins
+  it to its activation snapshot: the admitted project tables, plus
+  `sys.Storage` and `sys.MaintenanceJob` where the host serves their rows
+  (`orna run` and `orna serve`; the REPL serves neither yet). A query returns its
+  structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
+  row's own message as the summary (the explicit marker only when the row is
+  redacted), its causes, its help as suggestions and the objects it names.
+  `sys.explain(FunctionRef)` is dispatched. The production explain catalogue
+  does not resolve function references (`resolves_functions` defaults to
+  false), so every function reference reports `sys.version.incompatible`.
+  `sys.object.not_found` applies to an unknown source, or to an unknown function
+  only when the catalogue resolves functions.
+- Changed failure codes, all now taken from the portable failure table:
+  - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
+    `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
+    source, `sys.version.incompatible` for a stage or source the
+    planner cannot represent, and `sys.object.wrong_kind` for a reference to
+    another relation. `ORNA-EVAL-TYPE` no longer rejects function and
+    diagnostic arguments.
+  - `sys.blob.capture_file`: `ORNA-INGEST-001`, `-002` and `-003` become
+    `sys.blob.source_denied`; `ORNA-INGEST-004` becomes `sys.blob.limit`; and
+    `ORNA-INGEST-005` becomes `sys.blob.source_changed`. A negative or
+    unrepresentable `max_bytes` is `sys.blob.bounds`, and a repository capture
+    quota is `sys.blob.limit`. A host without a filesystem provider reports
+    `sys.blob.source_denied`, and one without a repository Blob writer reports
+    `sys.version.incompatible`, instead of `ORNA-EVAL-UNSUPPORTED`. The native
+    host operation declares `sys.blob.source_denied`, `sys.blob.bounds`,
+    `sys.blob.limit` and `sys.blob.source_changed` instead of
+    `sys.blob.capture.*`; the binding raises only these declared codes and the
+    global `sys.version.incompatible`, and the portable operation declares the
+    same set plus that global code, which every callable operation carries.
+    `orna annotate` source errors cite the portable code.
+  - `sys.blob.annotate`: an OVB-1 value is
+    `sys.codec.unsupported_value_profile`; arguments that are not annotated
+    Blobs are `ORNA-EVAL-TYPE`; a host without the generated provider is
+    `sys.version.incompatible`. No `sys.abi.*` code reaches programs.
+  - `orna serve` stream administration: `sys.admin.unavailable` becomes
+    `sys.admin.missing_object`, `sys.admin.busy`, the specific checkpoint or
+    snapshot code, or `sys.storage.unavailable`. A dispatcher without resume
+    reports `sys.admin.read_only`, unavailable publication metadata reports
+    `sys.storage.unavailable` instead of `sys.storage.metadata_unavailable`, and
+    `sys.admin.result` is gone.
+- Every portable `sys` operation now declares its failure codes explicitly
+  through `#[ornasys(failures = ...)]`, replacing the namespace-prefix guess.
+  The build checks that every published code is declared by an operation, is
+  global, or belongs to a non-callable surface (the `sys.repl` singleton or the
+  VFS).
+- Removed the unreachable duplicate explain implementations:
+  `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
+  `orna_sys_v1::explain_diagnostic` with `Explanation` and
+  `DiagnosticExplanationError`, and the `orna_foundation_v1` explanation
+  envelope (`SystemDiagnosticExplanationInput`,
+  `SystemDiagnosticExplanationOutput`, `system_diagnostic_explanation_input`
+  and `SystemDiagnosticAdapterError`). Also removed
+  `SysHostBindingRegistry::with_explain_catalogue` and
+  `CaptureFileError::code`.
+- Opening a repository format context reads only the root tree, the `.orna`
+  tree and its metadata blobs, through one long-lived `git cat-file
+  --batch-command` reader per repository handle. It no longer lists the whole
+  commit, `.orna/store` included, with a Git process per entry, so point reads
+  no longer slow down as the store grows, and a snapshot with more than 65,536
+  tree entries opens.
+- The project loader's 4,096-entry limit is now `ProjectLimits::max_source_modules`
+  (formerly `max_repository_entries`) and counts source modules only. The
+  loader never walks `.orna/store`, in the worktree or in a committed snapshot,
+  so `orna check`, `orna run` and `orna repl` load databases with large stores.
+- The evaluator's depth limit (`Limits::max_depth`, default 64) now counts
+  active calls: function, closure and callback bodies. Expression nesting inside
+  one body no longer consumes it, so recursion depth no longer shrinks as bodies
+  nest deeper. The parser bounds expression nesting. Pattern and decoded-value
+  nesting are checked from their own roots against the same limit. Exceeding
+  any of these fails with `ORNA-EVAL-LIMIT` and never returns a partial result
+  (ORNA-CLOSURE-004).
+- An assignment inside a `case` arm now replaces the enclosing `let` slot, as
+  assignments inside blocks and loops already did (ORNA-CFLOW-005). Names bound
+  by the arm pattern stay local to the arm.
+- Counting an in-memory list costs one evaluator step instead of one step per
+  element. A plain `=` assignment no longer copies the value it replaces.
+  Callback calls no longer copy the callee's syntax tree. Block, loop and `case`
+  write-back moves values instead of copying them.
+- Evaluator list values share their elements between copies. Appending to the
+  newest list reuses spare capacity, so building a list one element at a time
+  costs amortised constant work per element instead of copying the whole list
+  each time. `union` and `__list_concat` charge steps only for the elements
+  they actually write.
+- Ordered comparisons (`<`, `<=`, `>`, `>=`) between two Decimals evaluate
+  exactly across scales (ORNA-COMPARE-002). They previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Decimal `%` evaluates as the exact truncated remainder, matching Int `%`: the
+  result keeps the dividend's sign. It previously failed with
+  `ORNA-EVAL-UNSUPPORTED`.
+- Exponent-only Decimal numerals such as `1e3`, `1E-2` and `2e-30` evaluate as
+  exact Decimals (ORNA-LIT-002). They previously failed with `ORNA-EVAL-VALUE`.
+- Relation scans charge each streamed row to the step budget. Only values that a
+  stage or terminal keeps (sort buffers, distinct sets, collected results) count
+  against `max_collection_items`. `count`, `exists`, `every`, filtered or
+  dropped counts, `sum`, `min` and `max` now work on relations larger than the
+  item budget. Sorting more rows than the budget still fails with
+  `ORNA-EVAL-LIMIT`.
+- `sort_by`, `rank` and relation sorts use a stable merge sort, with
+  O(n log n) comparisons that each cost one step, instead of an insertion sort.
+  The default evaluator step budget is now 200 steps per item plus 10,000
+  (419,600), down from 2,516,752. The pinned std helpers stay within it at the
+  2,048-item limit. A runaway loop such as `while true {}` now fails with
+  `ORNA-EVAL-LIMIT` six times sooner. Std bodies that are inherently quadratic,
+  such as the Orna `std.collection.distinct`, reach the limit at a few hundred
+  elements.
+- `std.collection.map` evaluates its pinned Orna while-loop body instead of the Rust binding when the pinned `map_from` is a loop. Historical pins whose `map_from` is recursive keep the native binding. Other list-input collection operations already take their Orna bodies; relation inputs stay on the Rust relation path.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - Remounted writable workspace views capture one runtime activation and project
@@ -19,9 +173,30 @@ been published.
   time adds the Time exponent and returns a length quantity. Dimension expressions
   parse qualified names without consuming multiplication or division operators.
 
+- `orna publish` refuses a format-1/2 `HEAD` before recovery, runtime access or
+  any freeze, with `E2300`; it writes nothing and the pending range stays. The
+  help says this build has no writer or in-place upgrade for format-1/2
+  snapshots and names the upgrade work item, ornadb-5il1.184. Inside a prepared
+  migration copy it says the format-3 candidate is prepared but not activated,
+  and that activation is tracked as ornadb-5il1.192. The loose and compact
+  (Parquet) row writers, their recovery paths and the CLI compact-journal
+  recovery are retired. Format-1/2 commits keep their library readers, but no
+  CLI verb reads them yet (ORNA-UPGRADE-003, ORNA-ROW-013).
+
+- The `format.orna` records that the legacy writers produced are now read as
+  read-only format-1/2 inputs: OrnaDB 1.0's `{repository_format: 1,
+  storage_profile: "compact-storage-v1"}` and the previous draft's closed
+  format-2 record. They were rejected as malformed, so `orna migrate copy`
+  failed on every real legacy repository. Runtime writes now follow the format
+  recorded at `HEAD`. A format-1/2 `HEAD` refuses them with
+  `ORNA-REPO-CONTEXT-015` even when the worktree holds format-3 metadata, and
+  `orna run` and the other write verbs exit with `E2200`. The one exception is
+  a prepared migration copy (ORNA-UPGRADE-001).
+
+- `orna migrate copy` reports a source whose format context cannot be admitted as `E2100` titled `migration source could not be admitted: <cause>`, with the cause's `ORNA-REPO-CONTEXT-*` code, and creates no destination.
+
 - Format-3 store-only publication validates canonical row keys without legacy
-  loose-row path resolution, including no-op preparation. Legacy formats retain
-  their existing loose-path resolution.
+  loose-row path resolution, including no-op preparation.
 
 - Explicit format-3 row rekeys retain their relation identity and canonical old/new
   addresses in the publication journal so replay and recovery do not infer a move
@@ -50,9 +225,12 @@ been published.
   unrelated edits so the exact result is not observed, that step is not persisted
   (fail closed); reusing a renamed-away name before save may lose identity continuity.
 - The `mv` CLI command renames committed tables and retains their table and
-  child-field IDs in uncommitted source and identity-manifest changes. It moves
-  the associated loose-row directory and can resume after a source rename is
-  interrupted before the manifest update.
+  child-field IDs in uncommitted source and identity-manifest changes. It can
+  resume after a source rename is interrupted before the manifest update. The
+  format-3 store keeps rows under the retained table ID, so `mv` moves no row
+  files. If a legacy format-1/2 loose-row directory exists, `mv` still renames
+  it. That is legacy-layout handling, not a format-3 feature: Orna 1.1.0
+  forbids loose-row writes for the new format (ORNA-UPGRADE-003).
 
 - Optional Blob fields preserve `Some` bindings through source-row admission,
   metadata queries, history diffs and offline export; overflow verification counts
@@ -83,7 +261,142 @@ been published.
 - Decimal currency suffixes construct Money only when the selected nominal
   implements Currency; a bare uppercase code is no longer sufficient.
 
+- `Money<C>` requires a currency type: a nominal type that implements the core
+  `Currency` protocol, or a generic parameter bounded by it. A declared or
+  imported `Currency` counts only when its surface is exactly the core one.
+  `Money<Int>`, table rows, types without `Currency` and undeclared names are
+  rejected, and three-letter names are no longer assumed to be currencies.
+  Imported currencies now construct Money from `12.34.GBP`. A Float currency
+  literal such as `12.34f.GBP` is rejected with E5004.
+
+
+- Format-3 table schemas encode defaulted fields and keys as stored or key
+  fields, computed fields as non-stored role-2 selectors with an expression
+  digest, table-typed fields as stored references, and enum, nominal record,
+  refined, transparent-alias and `Money` field types with their closed
+  definitions. The identity manifest issues stable IDs for nominal types, enum
+  variants and their fields. Explicit type and variant renames passed to the
+  manifest reconciliation API carry those IDs; `orna mv` and LSP rename still
+  rename only tables and fields. A manifest that records these new identity
+  kinds cannot be read by older binaries, which reject unknown kinds.
+- Format-3 rows admit every registered value tag. Tables keyed by Uuid, Date,
+  Instant, Decimal, enum, reference or tuple values store and order rows by
+  logical key, and Int and UInt spellings of one integer are one key.
+- MIME and file-name code reads one MIME-1 registry pinned to the Orna 1.1.0
+  `profiles/media-1.json`. Octet-stream and unregistered media types accept any
+  safe suffix hint, and stored Blob annotations with quoted parameters or `_`
+  hints read back. `sys.blob.capture_file` now supplies the
+  `application/octet-stream` annotation with no suffix instead of guessing from
+  the file extension; declare the media type with `sys.blob.annotate`.
+
+- The parser no longer changes valid source silently: a comparison followed
+  later by `> (` keeps all of its tokens; a braced control statement (`if`,
+  `case`, `for`, `while` or `loop`) ends before a following `(`, `[`, `-`, `+`
+  or `..` item; control headers never read `Name {` as a constructor (an
+  unparenthesised one before the body is reported); table subjectless
+  predicates keep their operator; and spaceless arithmetic such as
+  `1+10-20-30` is not a date.
+- Case guards such as `x if x < limit:`, `assert` as a variant, label, field or
+  member name, and default parameters of generic functions parse in modules as
+  in the REPL. Legacy assertion, colon-bound and assignment-expression
+  diagnostics now come from the failing production in every entry point.
+- Publication refuses a detached HEAD, a stale reviewed candidate, managed-file
+  edits and store conflicts before it writes its prepared journal, and rechecks
+  the captured index immediately before the ref compare-and-set. A refused or
+  lost compare-and-set discards that journal, so the pending batch can be
+  retried. Recovery likewise discards a prepared journal when neither HEAD nor
+  any local branch contains its candidate, even if the candidate object
+  survives or the index changed since; legacy-migration journals stay
+  resumable. Recovery also recognises a reconciled `.orna/store` index
+  installed before its journal stage. New candidate objects are flushed before
+  the ref names them, and the ref is flushed before the runtime tail is
+  consumed.
+
+- `orna serve` no longer holds its shared session state while a WebSocket
+  waits on its peer, so open sockets do not block other sockets or
+  `/orna/session` requests. A resume replaces and closes the old socket, idle
+  sockets are pinged and silent peers are disconnected, and request heads are
+  bounded in time and size. Requests whose Host is not the listener's loopback
+  authority, and cross-origin writes, get 403. Smart-HTTP push now requires
+  `serve --allow-push`.
+
+- `orna serve` ends live sessions in order. `DELETE /orna/session/<id>` cancels
+  and joins the session's application work and closes its socket before it
+  answers 204, including while the socket is attached; it used to answer 503
+  then, and 400 once the session had evaluated anything. A sweep ends sessions
+  whose lease has elapsed in the same way.
+
+- `orna serve` serves at most 64 connections at once. The accept loop answers
+  any further connection with 503 straight away, without reading its request.
+
+- `orna serve` bounds each HTTP request body and each response with one
+  deadline for the whole transfer, 15 s plus the time it takes at 64 KiB/s,
+  instead of bounding each blocked read or write. A peer that sends or reads a
+  few bytes at a time can no longer keep a connection busy.
+
+- Live session HTTP errors use the statuses `30-protocol.md` assigns: a
+  WebSocket upgrade from another origin gets 403 instead of 410, and a DELETE
+  carrying a token other than the live session's current one gets 401 instead
+  of 410. A child-free DELETE that would first have to drain application work
+  gets 503 instead of 400. `Content-Type: application/json; charset=utf-8` is
+  accepted.
+- Semantic checking types `+ - * / % ^`, unary signs and compound
+  assignment through one operator table: Int, Decimal and Float never mix,
+  Money scales only by exact numbers in one currency, declared-unit
+  quantities follow dimension and affine algebra, and other operand pairs
+  report `E2001` (`E5001` for incompatible dimensions). Every reachable
+  `return`, including inside anonymous functions, is checked against the
+  declared result or joined into the inferred one. Blocks without a final
+  expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+- `sys.rt.info()` is linked into the production sys provider, so it evaluates
+  to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
+  of an unlinked callable. Admission no longer reports a version diagnostic for
+  it (ORNA-SYS-006).
+- The CLI's `migrate abort DEST` discards a prepared format-3 migration copy only
+  after verifying that DEST is the copy prepared from the current source. The
+  source is unchanged. Until the verified copy is renamed to its reserved
+  sibling quarantine, a change to the source commit, index, or working tree
+  since preparation makes the command refuse and remove nothing. That rename is
+  the commit point: a repeated `migrate abort DEST` finishes an interrupted
+  removal without rechecking the source, reports nothing to discard once nothing
+  remains, and `migrate copy` refuses the destination while the quarantine
+  exists.
+
 ## 1.0.0 — release inventory (publication pending)
+
+> **Historical inventory (note added 2026-10-21).** This section was written
+> for an Orna 1.0.0 release that was never published. Most surfaces that it
+> lists were removed from the tree before any release. Do not read it as a
+> description of the current product. The current target is Orna 1.1.0
+> (publication `final-2026-10-05`, repository writer format 3). Its reference
+> bundle `../reference/Orna-1.1.0` has 947 requirements. The Unreleased section
+> above describes current behaviour.
+>
+> These surfaces were removed. No release shipped them.
+>
+> - The previous `orna` binary of the `orna-server` package. It provided
+>   `orna source check`, `source diff` and `source apply`, daemon and server
+>   administration, runtime description, raw calls, USER state, inspection,
+>   security administration, the Inspector, `--explain`, argument files,
+>   canonical output, the JSON, table and CSV presenters, invocation tracing
+>   and the managed Unix-socket `invoke` route. Commit `4777f6213` removed it
+>   (issue #603). The current `orna` command is the `orna-cli-v1` binary. It
+>   rejects `orna+unix://` and TLS endpoints.
+> - The direct SQLite adapter that a filesystem `--db` path selected. Commits
+>   `b0f4c4f76` (issue #285) and `3dc8360b5` (issue #603) removed it. `--db
+>   PATH` now selects a local Git worktree. SQLite remains only as private
+>   runtime state.
+> - The PostgreSQL engine, its generated SQL migrations and the `_orna_kernel`
+>   tables. Commits `3dc8360b5` (issue #603) and `f1fb5684c` (issue #889)
+>   removed them.
+> - The accepted demo inventory `examples/accepted-demos.toml`. Commit
+>   `d0dbd7a59` removed it.
+> - ORV5 and ORV6 as value contracts. Orna 1.1.0 defines OVB-1, OVB-2, ROV-3
+>   and SOV-3. The CLI does not depend on the `orna-runtime-tty` crate.
+>
+> Four bullets below describe surfaces that are still in the tree. They were
+> corrected in place on 2026-10-21: `mount --at`, the system API publication
+> fields, `migrate copy`, and loose-row paths.
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
 checkout is not a published production release. The audited immutable
@@ -155,17 +468,18 @@ release gate has passed.
   editors that open with `O_TRUNC`. Existing rows are validated and replaced
   before durable data changes; sibling temporary files renamed over `data.orna`
   remain supported. `orna unmount DIR` releases the kernel mount and its view
-  record; `orna mount DIR --at SELECTOR` remains a read-only, record-only
-  snapshot view.
+  record. `orna mount DIR --at SELECTOR` starts a read-only FUSE session pinned
+  to one resolved commit; see the Unreleased section.
 - Committed snapshot loading preserves nested module import candidates while
   keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
-- The system API exposes publication metadata as typed records. `sys.Storage` and
-  `sys.MaintenanceJob` include pending and published row and byte counts.
-  `sys.PublicationPolicy` declares the size and age limits. Its schema supports
-  field access under Orna 1.1.0 Section 29.
+- The system API exposes publication metadata as typed records. `sys.Storage`
+  declares `pending_rows`, `pending_bytes`, `last_publication` and a
+  `publication_policy` field of type `sys.Value`. Orna 1.1.0 defines no
+  `sys.PublicationPolicy` type, and `sys.MaintenanceJob` has no row or byte
+  counts.
 - The Inspector exposes immutable invocation epochs, eight closed projections,
   redacted-by-default records, privilege checks, and sequence-addressable
   traces. Local SQLite inspection is narrower and stores only bounded,
@@ -195,10 +509,15 @@ release gate has passed.
   rows is unsupported.
 - The CLI's `migrate copy` command prepares or recovers a journalled candidate
   in a separate directory from a local format-1/2 repository, leaving the
-  source commit and workspace unchanged. It requires an explicit decoded
-  annotation-default count and no-persistent-consumers choice. This preparation
-  step does not convert legacy rows into a format-3 store or activate a writable
-  format-3 repository.
+  source commit and workspace unchanged. It requires a decoded annotation-default
+  count (`--annotation-defaults N`) and the `--no-persistent-consumers` flag.
+  Despite its name, that flag confirms that persistent consumer checkpoints are
+  carried, not reset. Each carried checkpoint must match a consumer identity
+  correspondence recorded in the candidate before any row is imported. A source
+  that holds live stream state (leases, claims, failures or receipts) is
+  refused. This follows ORNA-UPGRADE-008. This preparation step does not
+  convert legacy rows into a format-3 store or activate a writable format-3
+  repository.
 - Format-3 committed Blob rows require exact canonical MIME-1 media types and
   suffixes. Readers reject noncanonical stored annotations instead of
   normalizing them during metadata projection or SOV-3 conversion.
@@ -207,9 +526,10 @@ release gate has passed.
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
 - The CLI publication boundary validates format-3 rows against the pinned
-  committed table binding and derives portable loose-row paths from typed
-  keys; legacy formats retain committed-source path resolution. Invalid rows
-  fail closed while preserving the pending range.
+  committed table binding and writes them to the committed format-3 store. It
+  derives no loose-row paths. Loose-row paths are a format-1/2 layout only;
+  Orna 1.1.0 forbids them for new-format writes (ORNA-UPGRADE-003). Invalid
+  rows fail closed while preserving the pending range.
 - `orna history <relation> --diff <from> <to>` decodes source-owned Object row
   fields against each endpoint's committed schema and compares stored Blob
   annotations without fetching payloads.

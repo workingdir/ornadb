@@ -1,8 +1,8 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "fixture": "examples/invalid/legacy-postfix-question.orna",
   "failing_phase": "parse",
   "primary_diagnostic": "ORNA091-E-POSTFIX-QUESTION",
-  "message_contains": "postfix propagation `?` was removed; failures propagate automatically",
+  "message_contains": "remove postfix `?`; failure propagation is automatic",
   "status": "expected-not-executed"
 }

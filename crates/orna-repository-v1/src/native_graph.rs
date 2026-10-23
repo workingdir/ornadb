@@ -22,10 +22,10 @@ use std::{
 
 use fs2::FileExt;
 use orna_value_v1::{
-    AvailabilityState, BlobMetadata, BlobResolver, ContentReference, Error as ValueError,
-    Format3Context, Format3Quota, GitHash, MediaAnnotation, MimeRegistry,
-    NativeOid as ValueNativeOid, OwnerLifetime, Raw, SchemaDescriptor,
-    Snapshot as ValueSnapshot,
+    AvailabilityState, Blob, BlobMetadata, BlobResolver, ContentIdentity as ValueContentIdentity,
+    ContentReference, ContextValue, Error as ValueError, Format3Context, Format3Quota, GitHash,
+    MediaAnnotation, MimeRegistry, NativeOid as ValueNativeOid, OwnerLifetime, Raw,
+    SchemaDescriptor, Snapshot as ValueSnapshot, ValueFormat,
 };
 use sha2::{Digest, Sha256};
 
@@ -377,6 +377,9 @@ impl AdmittedRowFields {
 pub struct RepositoryCaptureCapability {
     graph: Arc<NativeGraphContext>,
     scope: RepositoryReadScope,
+    /// The snapshot-pinned value context that captured candidates are bound
+    /// to, present when a format context issued this capability.
+    capture_context: Option<Format3Context>,
 }
 
 impl PartialEq for RepositoryCaptureCapability {
@@ -395,7 +398,18 @@ impl RepositoryCaptureCapability {
         scope: RepositoryReadScope,
     ) -> Result<Self, GraphError> {
         scope.authorize(&graph)?;
-        Ok(Self { graph, scope })
+        Ok(Self {
+            graph,
+            scope,
+            capture_context: None,
+        })
+    }
+
+    /// Binds the values this capability issues for captured candidates to the
+    /// exact snapshot pin of the format context that issued it.
+    pub(crate) fn with_capture_pin(mut self, pin: ValueSnapshot) -> Result<Self, ValueError> {
+        self.capture_context = Some(self.value_context(pin)?);
+        Ok(self)
     }
 
     /// Cumulative media payload bytes this capability has read from the graph.
@@ -427,6 +441,34 @@ impl RepositoryCaptureCapability {
     ) -> Result<CapturedBlobCandidate, GraphError> {
         self.graph
             .capture_blob_candidate(source, max_bytes, &self.scope)
+    }
+
+    /// The lazy Blob value of a captured candidate: its content identity, the
+    /// octet-stream fallback annotation and its descriptor, as a ROV-3 value
+    /// in this capability's snapshot-pinned context. Reading it streams
+    /// verified chunks from the graph on demand; the value never holds the
+    /// payload, whatever its size.
+    pub fn candidate_value(
+        &self,
+        candidate: &CapturedBlobCandidate,
+    ) -> Result<ContextValue, GraphError> {
+        let context = self
+            .capture_context
+            .as_ref()
+            .ok_or(GraphError::ContextMismatch)?;
+        if candidate.context != self.graph.identity || candidate.owner_id != self.graph.owner_id {
+            return Err(GraphError::ContextMismatch);
+        }
+        let identity =
+            ValueContentIdentity::new(candidate.identity.length(), candidate.identity.sha256())
+                .map_err(|_| GraphError::InvalidLength(candidate.identity.length()))?;
+        let descriptor = ValueNativeOid::from_bytes(candidate.descriptor_oid.as_bytes())
+            .map_err(|_| GraphError::MalformedOid)?;
+        let reference = context
+            .reference(identity, descriptor)
+            .map_err(|_| GraphError::MalformedOid)?;
+        let blob = Blob::from_reference(reference).map_err(|_| GraphError::ContextMismatch)?;
+        ContextValue::from_blob(&blob, ValueFormat::Rov3).map_err(|_| GraphError::ContextMismatch)
     }
 
     /// Promotes a captured source into an owner-scoped durable pending pin,
@@ -1103,112 +1145,22 @@ impl NativeGraphContext {
             .into_iter()
             .map(|(key, value)| crate::row_store::RowEntry::new(key, value))
             .collect();
-        let leaf_pages = crate::row_store::partition_pages(&entries, 0)
-            .map_err(|_| GraphError::NonCanonicalData)?;
-
         let mut written = BTreeSet::new();
         // Envelope object ids only. A data blob carries the same value bytes
         // whenever a page is rebuilt with unchanged stored values, so counting
         // it as churn would report media as an index object.
         let mut written_nodes = BTreeSet::new();
         let mut new_payload = BTreeSet::new();
-        let mut level: Vec<BranchCandidate> = Vec::new();
-        if leaf_pages.is_empty() {
-            // The empty table is one empty leaf, not zero pages.
-            let node = NodeData::OrderedLeaf {
-                domain: domain.clone(),
-                entries: Vec::new(),
-            };
-            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
+        let primary_root = Self::build_canonical_ordered_map(&domain, &entries, &mut |node| {
+            if matches!(node, NodeData::OrderedLeaf { .. }) {
+                for dependency in node.dependencies()? {
+                    new_payload.insert(dependency.oid);
+                }
+            }
+            let oid = self.write_capture_node(node, &mut written, scope.max_objects)?;
             written_nodes.insert(oid.clone());
-            level.push(BranchCandidate {
-                max_key: Vec::new(),
-                oid,
-                row_count: 0,
-            });
-        }
-        for page in &leaf_pages {
-            let mut page_entries = Vec::with_capacity(page.entries().len());
-            for entry in page.entries() {
-                page_entries.push(OrderedLeafEntry {
-                    key: entry
-                        .key()
-                        .canonical_bytes()
-                        .map_err(|_| GraphError::NonCanonicalData)?,
-                    value: entry
-                        .value()
-                        .canonical_page_bytes()
-                        .map_err(|_| GraphError::NonCanonicalData)?,
-                });
-            }
-            let node = NodeData::OrderedLeaf {
-                domain: domain.clone(),
-                entries: page_entries,
-            };
-            for dependency in node.dependencies()? {
-                new_payload.insert(dependency.oid);
-            }
-            let NodeData::OrderedLeaf { entries, .. } = &node else {
-                unreachable!("constructed ordered leaf")
-            };
-            // The fence is the canonical encoding of the page's inclusive
-            // maximum key. `entry.key` is already that encoding, so it is kept
-            // as bytes: decoding it to a typed key and re-encoding it would be
-            // the same bytes, and the branch encoder and every fence comparison
-            // consume the canonical spelling rather than a typed key (ORP-1).
-            let max_key = entries.last().map_or(Vec::new(), |entry| entry.key.clone());
-            let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-            written_nodes.insert(oid.clone());
-            level.push(BranchCandidate {
-                max_key,
-                oid,
-                row_count: entries.len() as u64,
-            });
-        }
-
-        let mut height = 1u8;
-        while level.len() > 1 {
-            if height > MAX_GRAPH_HEIGHT {
-                return Err(GraphError::HeightExceeded(height));
-            }
-            let groups = partition_branch_candidates(&domain, height, &level)?;
-            if groups.len() >= level.len() {
-                return Err(GraphError::FanoutExceeded(level.len()));
-            }
-            let mut next = Vec::with_capacity(groups.len());
-            for group in groups {
-                let node = NodeData::OrderedBranch {
-                    domain: domain.clone(),
-                    height,
-                    entries: group
-                        .iter()
-                        .map(|candidate| OrderedBranchEntry {
-                            inclusive_max_key: candidate.max_key.clone(),
-                            child: candidate.oid.clone(),
-                            row_count: candidate.row_count,
-                        })
-                        .collect(),
-                };
-                let oid = self.write_capture_node(&node, &mut written, scope.max_objects)?;
-                written_nodes.insert(oid.clone());
-                next.push(BranchCandidate {
-                    max_key: group
-                        .last()
-                        .ok_or(GraphError::InvalidCount(0))?
-                        .max_key
-                        .clone(),
-                    oid,
-                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
-                });
-            }
-            level = next;
-            height += 1;
-        }
-        let primary_root = level
-            .first()
-            .ok_or(GraphError::InvalidCount(0))?
-            .oid
-            .clone();
+            Ok(oid)
+        })?;
         self.sync_object_closure(&written, scope)?;
 
         let index_objects_created: Vec<NativeOid> = written_nodes
@@ -1363,6 +1315,219 @@ impl NativeGraphContext {
             row_count: maintenance.row_count(),
             store_root,
         })
+    }
+
+    /// Builds one canonical ORP-1 ordered map over `entries`, which must be in
+    /// strictly ascending logical key order (store-format-3 §3). Leaf pages
+    /// are cut by the boundary anchor and the 64 KiB, 256-entry and 256-ref
+    /// bounds; each branch level repeats the rule over its children's
+    /// inclusive maximum keys until one root remains; an empty map is one
+    /// empty leaf. Every node is written through `write_node`, leaves first,
+    /// and the root is returned. This is the one ORP-1 builder: row
+    /// maintenance and relation admission both build through it.
+    pub(crate) fn build_canonical_ordered_map(
+        domain: &[u8],
+        entries: &[crate::row_store::RowEntry],
+        write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
+    ) -> Result<NativeOid, GraphError> {
+        if entries
+            .windows(2)
+            .any(|pair| pair[0].key() >= pair[1].key())
+        {
+            return Err(GraphError::NonCanonicalData);
+        }
+        let leaf_pages = crate::row_store::partition_pages(entries, 0)
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        let mut level: Vec<BranchCandidate> = Vec::new();
+        if leaf_pages.is_empty() {
+            // The empty table is one empty leaf, not zero pages.
+            let oid = write_node(&NodeData::OrderedLeaf {
+                domain: domain.to_vec(),
+                entries: Vec::new(),
+            })?;
+            level.push(BranchCandidate {
+                max_key: Vec::new(),
+                oid,
+                row_count: 0,
+            });
+        }
+        for page in &leaf_pages {
+            let mut page_entries = Vec::with_capacity(page.entries().len());
+            for entry in page.entries() {
+                page_entries.push(OrderedLeafEntry {
+                    key: entry
+                        .key()
+                        .canonical_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                    value: entry
+                        .value()
+                        .canonical_page_bytes()
+                        .map_err(|_| GraphError::NonCanonicalData)?,
+                });
+            }
+            // The fence is the canonical encoding of the page's inclusive
+            // maximum key. `entry.key` is already that encoding, so it is kept
+            // as bytes: decoding it to a typed key and re-encoding it would be
+            // the same bytes, and the branch encoder and every fence comparison
+            // consume the canonical spelling rather than a typed key (ORP-1).
+            let max_key = page_entries
+                .last()
+                .map_or(Vec::new(), |entry| entry.key.clone());
+            let row_count = page_entries.len() as u64;
+            let oid = write_node(&NodeData::OrderedLeaf {
+                domain: domain.to_vec(),
+                entries: page_entries,
+            })?;
+            level.push(BranchCandidate {
+                max_key,
+                oid,
+                row_count,
+            });
+        }
+
+        let mut height = 1u8;
+        while level.len() > 1 {
+            if height > MAX_GRAPH_HEIGHT {
+                return Err(GraphError::HeightExceeded(height));
+            }
+            let groups = partition_branch_candidates(domain, height, &level)?;
+            if groups.len() >= level.len() {
+                return Err(GraphError::FanoutExceeded(level.len()));
+            }
+            let mut next = Vec::with_capacity(groups.len());
+            for group in groups {
+                let oid = write_node(&NodeData::OrderedBranch {
+                    domain: domain.to_vec(),
+                    height,
+                    entries: group
+                        .iter()
+                        .map(|candidate| OrderedBranchEntry {
+                            inclusive_max_key: candidate.max_key.clone(),
+                            child: candidate.oid.clone(),
+                            row_count: candidate.row_count,
+                        })
+                        .collect(),
+                })?;
+                next.push(BranchCandidate {
+                    max_key: group
+                        .last()
+                        .ok_or(GraphError::InvalidCount(0))?
+                        .max_key
+                        .clone(),
+                    oid,
+                    row_count: group.iter().map(|candidate| candidate.row_count).sum(),
+                });
+            }
+            level = next;
+            height += 1;
+        }
+        Ok(level
+            .first()
+            .ok_or(GraphError::InvalidCount(0))?
+            .oid
+            .clone())
+    }
+
+    /// Reads every relation entry of one `.orna/store` root in ascending
+    /// relation-UUID order. The store root node, the relation map's
+    /// `["relations", database_uuid]` domain, every page's key order, fences
+    /// and exact counts, and each relation value's shape are validated
+    /// before any entry is returned (store-format-3 §2).
+    pub(crate) fn read_store_relations(
+        repository: &crate::Repository,
+        algorithm: GitHashAlgorithm,
+        database_id: [u8; 16],
+        store_root: &NativeOid,
+    ) -> Result<Vec<StoreRelationEntry>, GraphError> {
+        if store_root.algorithm() != algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: algorithm.width(),
+                actual: store_root.as_bytes().len(),
+            });
+        }
+        let mut reader = PinnedNativeGraphReader::new(repository.clone(), algorithm);
+        let store = reader.read_native_node(store_root)?;
+        let NodeData::StoreRoot { relation_map } = store else {
+            return Err(GraphError::WrongNodeKind {
+                expected: NodeKind::StoreRoot,
+                actual: store.kind(),
+            });
+        };
+        let domain = canonical_domain(vec![
+            CborValue::Text("relations".to_owned()),
+            CborValue::Bytes(database_id.to_vec()),
+        ]);
+        let root = reader.read_native_node(&relation_map)?;
+        let count = match &root {
+            NodeData::OrderedLeaf { entries, .. } => entries.len() as u64,
+            NodeData::OrderedBranch { entries, .. } => {
+                entries.iter().try_fold(0u64, |sum, entry| {
+                    sum.checked_add(entry.row_count)
+                        .filter(|count| *count <= MAX_SIGNED_LENGTH)
+                        .ok_or(GraphError::InvalidCount(usize::MAX))
+                })?
+            }
+            other => {
+                return Err(GraphError::WrongNodeKind {
+                    expected: NodeKind::OrderedLeaf,
+                    actual: other.kind(),
+                });
+            }
+        };
+        validate_ordered_root_node(&root, &domain, count)?;
+        let limit = usize::try_from(count).map_err(|_| GraphError::InvalidCount(usize::MAX))?;
+        let mut read_node = |oid: &NativeOid| reader.read_native_node(oid);
+        let mut nodes = BTreeSet::from([relation_map.clone()]);
+        let mut payload = BTreeSet::new();
+        let mut validated_contexts = BTreeSet::new();
+        collect_ordered_index_objects_with(
+            &mut read_node,
+            &root,
+            &relation_map,
+            &domain,
+            None,
+            &mut nodes,
+            &mut payload,
+            &mut validated_contexts,
+        )?;
+        let mut raw = Vec::new();
+        collect_ordered_range_with(
+            &mut read_node,
+            root,
+            &domain,
+            None,
+            None,
+            None,
+            None,
+            limit,
+            &mut raw,
+        )?;
+        if raw.len() != limit {
+            return Err(GraphError::InvalidCount(raw.len()));
+        }
+        raw.into_iter()
+            .map(|entry| {
+                let crate::row_store::TypedKey::Bytes(relation_id) =
+                    crate::row_store::TypedKey::decode_canonical(&entry.key)
+                        .map_err(|_| GraphError::NonCanonicalData)?
+                else {
+                    return Err(GraphError::InvalidDomain);
+                };
+                let relation_id = relation_id
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| GraphError::InvalidDomain)?;
+                let (schema_oid, primary_root, secondary_root, row_count) =
+                    decode_relation_value(&entry.value, algorithm)?;
+                Ok(StoreRelationEntry {
+                    relation_id,
+                    schema_oid,
+                    primary_root,
+                    secondary_root,
+                    row_count,
+                })
+            })
+            .collect()
     }
 
 
@@ -1787,7 +1952,14 @@ impl NativeGraphContext {
                 }
                 Ok(CborValue::Map(transformed))
             }
-            CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+            // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+            CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+            // Other typed values keep their tag; only nested Blob and
+            // overflow references change between ROV-3 and SOV-3.
+            CborValue::Tag(tag, payload) => Ok(CborValue::Tag(
+                tag,
+                Box::new(self.to_sov_value(*payload, scope, objects, active)?),
+            )),
             scalar => Ok(scalar),
         }
     }
@@ -3814,42 +3986,7 @@ impl NativeGraphContext {
     ) -> Result<(), GraphError> {
         let objects_output = self.git_output(&["rev-parse", "--git-path", "objects"])?;
         let objects_dir = resolve_git_path(self.repository.worktree(), &objects_output)?;
-        let pack_dir = objects_dir.join("pack");
-        let alternates = objects_dir.join("info").join("alternates");
-        match fs::symlink_metadata(&alternates) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_file() || metadata.len() != 0 {
-                    return Err(GraphError::ObjectDurabilityUnavailable);
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
-        }
-        let mut needs_pack_sync = false;
-        for oid in objects {
-            scope.check_cancelled()?;
-            let hex = oid.to_hex();
-            let loose = objects_dir.join(&hex[..2]).join(&hex[2..]);
-            match fs::symlink_metadata(&loose) {
-                Ok(metadata) => {
-                    if !metadata.file_type().is_file() {
-                        return Err(GraphError::DurabilityFailed);
-                    }
-                    File::open(&loose)
-                        .and_then(|file| file.sync_all())
-                        .map_err(|_| GraphError::DurabilityFailed)?;
-                    sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    needs_pack_sync = true;
-                }
-                Err(_) => return Err(GraphError::DurabilityFailed),
-            }
-        }
-        if needs_pack_sync {
-            sync_all_pack_files(&pack_dir)?;
-        }
-        sync_directory(&objects_dir)
+        sync_object_files(&objects_dir, objects, || scope.check_cancelled())
     }
 }
 
@@ -4780,6 +4917,100 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), GraphError> {
         .map_err(|_| GraphError::DurabilityFailed)
 }
 
+/// Persists the named objects before a ref may name them: each loose object
+/// file and its shard directory, the whole pack set when an object is not
+/// loose, then the object directory. An object that is not loose may live in
+/// another repository's store, so a non-empty `objects/info/alternates` is
+/// then refused rather than half-synced. `before_each` runs ahead of every
+/// object.
+pub(crate) fn sync_object_files<'a>(
+    objects_dir: &Path,
+    objects: impl IntoIterator<Item = &'a NativeOid>,
+    mut before_each: impl FnMut() -> Result<(), GraphError>,
+) -> Result<(), GraphError> {
+    let mut needs_pack_sync = false;
+    for oid in objects {
+        before_each()?;
+        let hex = oid.to_hex();
+        let loose = objects_dir.join(&hex[..2]).join(&hex[2..]);
+        match fs::symlink_metadata(&loose) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(GraphError::DurabilityFailed);
+                }
+                File::open(&loose)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| GraphError::DurabilityFailed)?;
+                sync_directory(loose.parent().ok_or(GraphError::DurabilityFailed)?)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                needs_pack_sync = true;
+            }
+            Err(_) => return Err(GraphError::DurabilityFailed),
+        }
+    }
+    if needs_pack_sync {
+        let alternates = objects_dir.join("info").join("alternates");
+        match fs::symlink_metadata(&alternates) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() || metadata.len() != 0 {
+                    return Err(GraphError::ObjectDurabilityUnavailable);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(GraphError::ObjectDurabilityUnavailable),
+        }
+        sync_all_pack_files(&objects_dir.join("pack"))?;
+    }
+    sync_directory(objects_dir)
+}
+
+/// Refuses a ref backend whose refs cannot be flushed as loose files or
+/// through `packed-refs`. Only Git's `files` backend stores refs that way.
+pub(crate) fn require_files_ref_backend(repository: &crate::Repository) -> Result<(), GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let format = owner.git_output(&["rev-parse", "--show-ref-format"])?;
+    if format.trim_ascii() == b"files" {
+        Ok(())
+    } else {
+        Err(GraphError::DurabilityFailed)
+    }
+}
+
+/// Persists `reference` after a ref transaction wrote it: the loose ref
+/// file, each directory from it up to the common Git directory, and
+/// `packed-refs`. Under the `files` backend, a ref that `git pack-refs` has
+/// since moved has no loose file and is persisted through `packed-refs`, so
+/// recovery after a `git gc` is not refused. Any other missing ref file is
+/// refused.
+pub(crate) fn sync_git_ref_durably(
+    repository: &crate::Repository,
+    reference: &str,
+) -> Result<(), GraphError> {
+    let owner = PrivateRefCleanupOwner {
+        repository: repository.clone(),
+    };
+    let output = owner.git_output(&["rev-parse", "--git-path", reference])?;
+    let path = resolve_git_path(repository.worktree(), &output)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => File::open(&path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| GraphError::DurabilityFailed)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            require_files_ref_backend(repository)?;
+            let packed = owner.git_output(&["rev-parse", "--git-path", "packed-refs"])?;
+            let packed = resolve_git_path(repository.worktree(), &packed)?;
+            if !fs::symlink_metadata(&packed).is_ok_and(|metadata| metadata.file_type().is_file()) {
+                return Err(GraphError::DurabilityFailed);
+            }
+        }
+        _ => return Err(GraphError::DurabilityFailed),
+    }
+    owner.sync_ref_directories(reference)
+}
+
 pub(crate) fn sync_all_pack_files(pack_dir: &Path) -> Result<(), GraphError> {
     let entries = fs::read_dir(pack_dir).map_err(|_| GraphError::ObjectDurabilityUnavailable)?;
     let mut indexes = Vec::new();
@@ -5047,6 +5278,18 @@ struct RelationIndexCandidate {
     store_root: NativeOid,
 }
 
+/// One relation entry of a `.orna/store` relation map: the stable relation
+/// UUID key and its `[schema_oid, primary_map_oid, secondary_map_or_null,
+/// row_count]` value (store-format-3 §2).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StoreRelationEntry {
+    pub(crate) relation_id: [u8; 16],
+    pub(crate) schema_oid: NativeOid,
+    pub(crate) primary_root: NativeOid,
+    pub(crate) secondary_root: Option<NativeOid>,
+    pub(crate) row_count: u64,
+}
+
 /// Upper bound on commits one revision walk may list.
 const MAX_REVISION_WALK: usize = 4096;
 
@@ -5091,13 +5334,13 @@ impl AdmittedBlobReference {
 /// the content capability that serves its bytes.
 #[derive(Clone, Debug)]
 pub struct AdmittedStoredBlob {
-    annotation: crate::blob_store::BlobAnnotation,
+    annotation: MediaAnnotation,
     reference: AdmittedBlobReference,
 }
 
 impl AdmittedStoredBlob {
     /// The canonical declared metadata stored beside this reference.
-    pub fn annotation(&self) -> &crate::blob_store::BlobAnnotation {
+    pub fn annotation(&self) -> &MediaAnnotation {
         &self.annotation
     }
 
@@ -7622,6 +7865,14 @@ mod persisted_orp_tests {
             (Raw::Int(4.into()), Raw::Array(Vec::new())),
         ]))
         .expect("valid fixture schema descriptor");
+        fixture_descriptor_node(directory, &descriptor)
+    }
+
+    /// Writes `descriptor` as a kind-6 schema node over a one-chunk byte index.
+    fn fixture_descriptor_node(
+        directory: &Path,
+        descriptor: &SchemaDescriptor,
+    ) -> (NativeOid, [u8; 32]) {
         let schema_bytes = descriptor.encode().expect("canonical fixture schema bytes");
         let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
         let chunk = fixture_git_object(directory, "blob", &schema_bytes);
@@ -7672,20 +7923,34 @@ mod persisted_orp_tests {
         root: &Path,
         include_blob_field: bool,
     ) -> NativeGraphContext {
+        init_fixture_repository(root);
+        let relation_id = [0x32; 16];
+        // The schema descriptor binds relation identity and its complete field layout
+        // (Orna 1.1.0 Section 29).
+        let (schema_oid, schema_digest) =
+            fixture_schema_node(root, relation_id, include_blob_field);
+        fixture_relation_context(root, relation_id, schema_oid, schema_digest)
+    }
+
+    fn init_fixture_repository(root: &Path) {
         let init = Command::new("git")
             .current_dir(root)
             .args(["init", "--quiet", "--template="])
             .status()
             .expect("initialize capture repository");
         assert!(init.success());
+    }
 
+    /// Issues the graph context of a fixture store whose one relation has an
+    /// empty row map under the given schema node.
+    fn fixture_relation_context(
+        root: &Path,
+        relation_id: [u8; 16],
+        schema_oid: NativeOid,
+        schema_digest: [u8; 32],
+    ) -> NativeGraphContext {
         let algorithm = GitHashAlgorithm::Sha1;
         let database_id = [0x31; 16];
-        let relation_id = [0x32; 16];
-        // The schema descriptor binds relation identity and its complete field layout
-        // (Orna 1.1.0 Section 29).
-        let (schema_oid, schema_digest) =
-            fixture_schema_node(root, relation_id, include_blob_field);
         let primary_root = fixture_git_node(
             root,
             &NodeData::OrderedLeaf {
@@ -8169,6 +8434,135 @@ mod persisted_orp_tests {
         assert_eq!(*pin.transfer_record().owner_id(), graph.owner_id);
         assert!(fixture_ref_exists(directory.path(), pin.protected_ref()));
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    /// A byte-identical copy of the Orna 1.1.0 release `tests/final-vectors.json`,
+    /// pinned to its release `SHA256SUMS` value so drift from the publication
+    /// fails here.
+    const FINAL_VECTORS_JSON: &str =
+        include_str!("../tests/fixtures/reference/tests/final-vectors.json");
+    const FINAL_VECTORS_SHA256: &str =
+        "985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d";
+
+    fn vector_hex(value: &serde_json::Value) -> Vec<u8> {
+        let text = value.as_str().expect("a hexadecimal vector field");
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hexadecimal digits"))
+            .collect()
+    }
+
+    /// Reads one object straight from the fixture repository's Git store.
+    fn stored_git_object(directory: &Path, oid: &str) -> (String, Vec<u8>) {
+        let kind = Command::new("git")
+            .current_dir(directory)
+            .args(["cat-file", "-t", oid])
+            .output()
+            .expect("read the stored object kind");
+        assert!(kind.status.success(), "object {oid} is not stored");
+        let kind = String::from_utf8(kind.stdout)
+            .expect("object kinds are UTF-8")
+            .trim()
+            .to_owned();
+        let bytes = Command::new("git")
+            .current_dir(directory)
+            .args(["cat-file", &kind, oid])
+            .output()
+            .expect("read the stored object bytes");
+        assert!(bytes.status.success(), "object {oid} is unreadable");
+        (kind, bytes.stdout)
+    }
+
+    /// Orna 1.1.0 `tests/final-vectors.json` `native_graph`: capturing the
+    /// published three-byte payload into a sha1 graph and accepting it with
+    /// the `rov3-text` annotation writes exactly the seven published OGS-1
+    /// objects, roots them at the published descriptor OID and binds the exact
+    /// `rov3-text` value. The release authors the vector with
+    /// `tools/write_vectors.py` over `tools/final_model.py` `store_blob`.
+    #[test]
+    fn capture_reproduces_the_final_vector_native_graph() {
+        assert_eq!(
+            hex_encode(&Sha256::digest(FINAL_VECTORS_JSON.as_bytes())),
+            FINAL_VECTORS_SHA256,
+            "the vendored final vectors no longer match the release"
+        );
+        let vectors: serde_json::Value =
+            serde_json::from_str(FINAL_VECTORS_JSON).expect("the vendored final vectors are JSON");
+        let expected = &vectors["native_graph"];
+        assert_eq!(expected["algorithm"], "sha1");
+        let rov3 = vectors["values"]
+            .as_array()
+            .expect("value vectors")
+            .iter()
+            .find(|case| case["id"] == "rov3-text")
+            .expect("the rov3-text vector");
+        let annotation = rov3["value"]["value"].as_array().expect("rov3-text fields");
+
+        // The generator captures `abc`; the vector records its length and digest.
+        let payload = b"abc";
+        assert_eq!(expected["blob_length"], payload.len());
+        assert_eq!(expected["blob_sha256"], hex_encode(&Sha256::digest(payload)));
+
+        let (directory, graph) = capture_test_context();
+        assert_eq!(graph.algorithm, GitHashAlgorithm::Sha1);
+        let graph = Arc::new(graph);
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let capability = RepositoryCaptureCapability::new(Arc::clone(&graph), scope)
+            .expect("matching graph and owner scope");
+        let candidate = capability
+            .capture_blob_candidate(&payload[..], payload.len() as u64)
+            .expect("capture the published payload");
+        let binding = capability
+            .accept_captured_blob(
+                candidate,
+                annotation[2].as_str().expect("a media type"),
+                annotation[3].as_str(),
+            )
+            .expect("accept with the published annotation");
+        assert_eq!(
+            binding.descriptor_oid().to_hex(),
+            expected["descriptor_oid"].as_str().expect("a descriptor OID")
+        );
+        assert_eq!(
+            binding.encoded_value(),
+            vector_hex(&rov3["canonical_hex"]),
+            "rov3-text"
+        );
+
+        // The verified closure under the descriptor is exactly the published
+        // object set, and Git stores each object with its published kind and
+        // bytes.
+        let pin = binding.into_pin();
+        let reference = AdmittedBlobReference {
+            context: pin.context,
+            database_id: pin.database_id,
+            owner_id: pin.owner_id,
+            snapshot_id: pin.snapshot_id,
+            descriptor_oid: pin.descriptor_oid.clone(),
+            identity: pin.identity,
+        };
+        let closure_scope = graph.open_read_scope().expect("closure verification scope");
+        let closure = graph
+            .verify_full_blob(&reference, &closure_scope)
+            .expect("verify the captured closure")
+            .into_iter()
+            .map(|oid| oid.to_hex())
+            .collect::<BTreeSet<_>>();
+        let objects = expected["objects"].as_array().expect("native objects");
+        assert_eq!(objects.len(), 7);
+        assert_eq!(
+            closure,
+            objects
+                .iter()
+                .map(|object| object["oid"].as_str().expect("an object ID").to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        for object in objects {
+            let oid = object["oid"].as_str().expect("an object ID");
+            let (kind, bytes) = stored_git_object(directory.path(), oid);
+            assert_eq!(kind, object["kind"].as_str().expect("an object kind"), "{oid}");
+            assert_eq!(bytes, vector_hex(&object["bytes_hex"]), "{oid}");
+        }
     }
 
 /// ORNA-CAP-003: accepted pins transfer to an owner-scoped local ref namespace, never an ordinary remote ref.
@@ -8846,6 +9240,122 @@ mod persisted_orp_tests {
                 .is_some());
         }
     }
+
+    /// Applies one maintenance pass to the fixture relation and publishes it
+    /// as the graph's pinned row map, so the next pass rewrites from it.
+    /// Returns the new primary root, its row count, every object the pass
+    /// wrote (sorted) and its created/reused index node counts.
+    fn maintain_and_repin(
+        graph: &mut NativeGraphContext,
+        mutations: &[RowIndexMutation],
+    ) -> (String, u64, Vec<String>, usize, usize) {
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let maintenance = graph
+            .maintain_row_index(mutations, &scope)
+            .expect("maintain fixture rows");
+        let version = graph.row_snapshot.version().clone();
+        let store_root = graph
+            .replace_relation_primary_root(
+                &graph.store_root,
+                &version,
+                maintenance.primary_root(),
+                maintenance.row_count(),
+                &scope,
+            )
+            .expect("publish maintained rows into the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            *version.relation_id(),
+        )
+        .expect("reload the maintained relation");
+        graph.store_root = store_root;
+        let mut objects = maintenance
+            .objects_written()
+            .iter()
+            .map(NativeOid::to_hex)
+            .collect::<Vec<_>>();
+        objects.sort();
+        (
+            maintenance.primary_root().to_hex(),
+            maintenance.row_count(),
+            objects,
+            maintenance.index_objects_created().len(),
+            maintenance.index_objects_reused().len(),
+        )
+    }
+
+    /// Pins the exact ORP-1 objects `maintain_row_index` writes for a
+    /// multi-page build, an edit of that build (delete, rekey, insert) and its
+    /// deletion down to the one empty leaf. Object ids are hashes of the page
+    /// and branch bytes, so a builder change that alters any page, fence,
+    /// count or partition boundary changes this transcript.
+    #[test]
+    fn maintain_row_index_writes_pinned_page_bytes() {
+        let (_directory, mut graph) = capture_test_context();
+        let empty = RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
+        let flagged = RowValue::decode_canonical_fields(vec![0x81, 0xf5]).expect("one-field tuple");
+        let key = |index: usize| TypedKey::Text(format!("row-{index:04}"));
+        let seed = (0..300)
+            .map(|index| RowIndexMutation::Insert {
+                key: key(index),
+                value: empty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let edit = vec![
+            RowIndexMutation::Delete { key: key(0) },
+            RowIndexMutation::Delete { key: key(150) },
+            RowIndexMutation::Rekey {
+                from: key(299),
+                to: TypedKey::Text("row-0300-z".to_owned()),
+            },
+            RowIndexMutation::Insert {
+                key: TypedKey::Text("row-0150-b".to_owned()),
+                value: flagged,
+            },
+        ];
+        let mut remaining = (1..299)
+            .filter(|index| *index != 150)
+            .map(|index| RowIndexMutation::Delete { key: key(index) })
+            .collect::<Vec<_>>();
+        remaining.push(RowIndexMutation::Delete {
+            key: TypedKey::Text("row-0150-b".to_owned()),
+        });
+        remaining.push(RowIndexMutation::Delete {
+            key: TypedKey::Text("row-0300-z".to_owned()),
+        });
+
+        let mut transcript = String::new();
+        for mutations in [&seed, &edit, &remaining] {
+            let (root, rows, objects, created, reused) = maintain_and_repin(&mut graph, mutations);
+            let digest = Sha256::digest(objects.join("\n").as_bytes());
+            transcript.push_str(&format!(
+                "{root} {rows} {} {created} {reused} {}\n",
+                objects.len(),
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            ));
+        }
+        assert_eq!(
+            transcript, PINNED_PAGE_TRANSCRIPT,
+            "ORP-1 page bytes changed"
+        );
+    }
+
+    /// Captured from `maintain_row_index` before its page builder became the
+    /// shared canonical ordered-map builder: root, row count, objects
+    /// written, index nodes created and reused, and SHA-256 of the sorted
+    /// written object ids, per pass.
+    const PINNED_PAGE_TRANSCRIPT: &str = "\
+2583d34d0259dc3c211beae75d643b1b8805ebda 300 17 8 0 e61e710d338c430e3e220cc650b462a70647b40c8f65b6de2d3cee41d9a6c054
+a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b907a12043fed3ab9727a7671bc2cf984bee2f
+688b927aafa299404d1a556273512bfaf6fc5df1 0 2 1 0 06a46d3af2a9e016cfeeed1c84fd3aa635ba63330b698da834af83821ae9bcc1
+";
 
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
@@ -10524,6 +11034,554 @@ mod persisted_orp_tests {
         drop(directory);
     }
 
+    /// The registered-tag rule of store-format-3 §2 and `final_model.decode`:
+    /// node data admits bignums 2 and 3, UUID 37, the value tags
+    /// 60000..=60025 and the profile tags 60110..=60113, and every negative
+    /// 64-bit head.
+    #[test]
+    fn canonical_reader_admits_exactly_the_format3_registered_tags() {
+        let tagged = |tag: u64, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            cbor_head(&mut bytes, 6, tag);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        for tag in [
+            37, 60_000, 60_001, 60_002, 60_005, 60_008, 60_009, 60_015, 60_025, 60_110, 60_113,
+        ] {
+            assert!(
+                decode_canonical_cbor(&tagged(tag, &[0x80])).is_ok(),
+                "tag {tag} is registered for format-3 nodes"
+            );
+        }
+        for tag in [0, 1, 4, 36, 38, 59_999, 60_026, 60_027, 60_109, 60_114] {
+            assert!(
+                matches!(
+                    decode_canonical_cbor(&tagged(tag, &[0x80])),
+                    Err(GraphError::NonCanonicalData)
+                ),
+                "tag {tag} is not registered for format-3 nodes"
+            );
+        }
+
+        // A bignum spells only an Int beyond the 64-bit heads.
+        let mut two_to_the_64 = vec![0x49, 0x01];
+        two_to_the_64.extend_from_slice(&[0; 8]);
+        let mut leading_zero = vec![0x49, 0x00];
+        leading_zero.extend_from_slice(&[0xff; 8]);
+        let mut narrow = vec![0x48];
+        narrow.extend_from_slice(&[0xff; 8]);
+        for tag in [2, 3] {
+            assert!(decode_canonical_cbor(&tagged(tag, &two_to_the_64)).is_ok());
+            for payload in [&leading_zero[..], &narrow[..], &[0x61, b'x'][..]] {
+                assert!(matches!(
+                    decode_canonical_cbor(&tagged(tag, payload)),
+                    Err(GraphError::NonCanonicalData)
+                ));
+            }
+        }
+        // -2^64 is the last Int a negative head spells.
+        let mut most_negative = vec![0x3b];
+        most_negative.extend_from_slice(&[0xff; 8]);
+        assert_eq!(
+            decode_canonical_cbor(&most_negative),
+            Ok(CborValue::Negative(u64::MAX))
+        );
+    }
+
+    /// Blob and overflow references nested in records, enum payloads, tuples
+    /// and options are row dependencies (`final_model.blob_references`);
+    /// other typed values add none, and OVB-2 or SOV-3 Blob tags are refused.
+    #[test]
+    fn row_dependencies_recurse_into_typed_value_payloads() {
+        let algorithm = GitHashAlgorithm::Sha1;
+        let descriptor = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
+        let overflow = NativeObjectId::new(algorithm, &[0x55; 20]).unwrap();
+        let uuid = |byte: u8| CborValue::Tag(37, Box::new(CborValue::Bytes(vec![byte; 16])));
+        let blob = CborValue::Tag(
+            60111,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(1),
+                CborValue::Bytes(vec![0x66; 32]),
+                CborValue::Text("text/plain".to_owned()),
+                CborValue::Null,
+                CborValue::Bytes(descriptor.as_bytes().to_vec()),
+            ])),
+        );
+        let record = CborValue::Tag(
+            60009,
+            Box::new(CborValue::Array(vec![
+                uuid(0x10),
+                CborValue::Array(vec![CborValue::Array(vec![uuid(0x11), blob])]),
+            ])),
+        );
+        let decimal = CborValue::Tag(
+            60000,
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(15),
+                CborValue::Negative(0),
+            ])),
+        );
+        let overflow_value = CborValue::Tag(
+            60113,
+            Box::new(CborValue::Array(vec![CborValue::Bytes(
+                overflow.as_bytes().to_vec(),
+            )])),
+        );
+        let fields = CborValue::Array(vec![
+            decimal.clone(),
+            CborValue::Tag(
+                60008,
+                Box::new(CborValue::Array(vec![uuid(0x20), uuid(0x21), record])),
+            ),
+            CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![
+                    decimal,
+                    CborValue::Tag(
+                        60013,
+                        Box::new(CborValue::Array(vec![
+                            CborValue::Unsigned(1),
+                            overflow_value,
+                        ])),
+                    ),
+                ])),
+            ),
+        ]);
+        let dependencies = row_fields_dependencies(&canonical_value_bytes(&fields))
+            .expect("typed values are admitted in a stored row");
+        assert_eq!(
+            dependencies,
+            vec![
+                NativeDependency::new(descriptor, NativeObjectKind::Tree),
+                NativeDependency::new(overflow, NativeObjectKind::Tree),
+            ]
+        );
+        // The nested kind-3 value is charged to its own inline threshold.
+        assert_eq!(direct_blob_reference_count(&fields), Ok(1));
+
+        for refused in [60110, 60112] {
+            let nested = CborValue::Array(vec![CborValue::Tag(
+                60015,
+                Box::new(CborValue::Array(vec![CborValue::Tag(
+                    refused,
+                    Box::new(CborValue::Array(Vec::new())),
+                )])),
+            )]);
+            assert!(matches!(
+                row_fields_dependencies(&canonical_value_bytes(&nested)),
+                Err(GraphError::NonCanonicalData)
+            ));
+        }
+    }
+
+    fn uuid_raw(id: [u8; 16]) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(id.to_vec())))
+    }
+
+    fn primitive_type(name: &str) -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text(name.to_owned())])
+    }
+
+    fn field_descriptor(id: [u8; 16], name: &str, ty: Raw, role: u64) -> Raw {
+        Raw::Array(vec![
+            uuid_raw(id),
+            Raw::Text(name.to_owned()),
+            ty,
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    }
+
+    /// A closed table descriptor; `fields` are sorted by id and key fields
+    /// have role 0.
+    fn typed_schema(
+        relation_id: [u8; 16],
+        key_ids: &[[u8; 16]],
+        fields: Vec<Raw>,
+        definitions: Vec<Raw>,
+    ) -> SchemaDescriptor {
+        SchemaDescriptor::new(Raw::Map(vec![
+            (Raw::Int(0.into()), Raw::Int(1.into())),
+            (Raw::Int(1.into()), uuid_raw(relation_id)),
+            (
+                Raw::Int(2.into()),
+                Raw::Array(key_ids.iter().copied().map(uuid_raw).collect()),
+            ),
+            (Raw::Int(3.into()), Raw::Array(fields)),
+            (Raw::Int(4.into()), Raw::Array(definitions)),
+        ]))
+        .expect("valid typed table descriptor")
+    }
+
+    fn canonical_raw(raw: Raw) -> Vec<u8> {
+        orna_value_v1::Value::new(raw)
+            .expect("registered canonical value")
+            .encode()
+            .expect("canonical value bytes")
+    }
+
+    /// Stores rows of canonical key and stored-field bytes in a fresh store
+    /// whose one relation uses `descriptor`, through the mutation and
+    /// relation-swap path publication uses, then reopens the published root.
+    fn store_typed_rows(
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        rows: &[(Vec<u8>, Vec<u8>)],
+    ) -> (tempfile::TempDir, NativeGraphContext) {
+        let directory = tempfile::tempdir().expect("create typed row repository");
+        init_fixture_repository(directory.path());
+        let (schema_oid, schema_digest) = fixture_descriptor_node(directory.path(), descriptor);
+        let mut graph =
+            fixture_relation_context(directory.path(), relation_id, schema_oid, schema_digest);
+        let mutations = rows
+            .iter()
+            .map(|(key, fields)| {
+                RowIndexMutation::insert_canonical(key, fields).expect("typed row is admitted")
+            })
+            .collect::<Vec<_>>();
+        let scope = graph.open_read_scope().expect("owner write scope");
+        let maintained = graph
+            .maintain_row_index(&mutations, &scope)
+            .expect("maintain the typed row map");
+        let version = graph.row_snapshot.version();
+        let store_root = graph
+            .replace_relation_primary_root(
+                version.store_root(),
+                version,
+                maintained.primary_root(),
+                maintained.row_count(),
+                &scope,
+            )
+            .expect("publish typed rows into the relation map");
+        graph.row_snapshot = load_format3_row_map(
+            &graph.repository,
+            graph.algorithm,
+            store_root.clone(),
+            graph.database_id,
+            graph.snapshot_id,
+            relation_id,
+        )
+        .expect("reload the published typed row map");
+        graph.store_root = store_root;
+        drop(scope);
+        (directory, graph)
+    }
+
+    /// Reads every row back in key order, by range and by point lookup, and
+    /// checks each against `expected` and the table descriptor.
+    fn assert_typed_rows(
+        graph: &NativeGraphContext,
+        relation_id: [u8; 16],
+        descriptor: &SchemaDescriptor,
+        expected: &[(TypedKey, Vec<u8>)],
+    ) {
+        let scope = graph.open_read_scope().expect("typed read scope");
+        let all = crate::row_store::KeyRange::new(None, None, 64).expect("full typed range");
+        let rows = graph
+            .range_rows(&all, &scope)
+            .expect("range the typed rows");
+        assert_eq!(rows.len(), expected.len());
+        for (row, (key, fields)) in rows.iter().zip(expected) {
+            assert_eq!(row.key(), key, "rows come back in logical key order");
+            assert_eq!(row.value().encoded_fields(), Some(fields.as_slice()));
+            let canonical_key = row.key().canonical_bytes().expect("canonical typed key");
+            descriptor
+                .validate_stored_row(relation_id, &canonical_key, fields)
+                .expect("the stored row keeps its schema types");
+            let found = graph
+                .lookup_row(key, &scope)
+                .expect("look up a typed key")
+                .expect("the typed key is present");
+            assert_eq!(found.value().encoded_fields(), Some(fields.as_slice()));
+        }
+        let last = expected.len() - 1;
+        let inner = crate::row_store::KeyRange::new(
+            Some(expected[1].0.clone()),
+            Some(expected[last].0.clone()),
+            64,
+        )
+        .expect("bounded typed range");
+        assert_eq!(
+            graph
+                .range_row_keys(&inner, &scope)
+                .expect("range the inner typed keys"),
+            expected[1..last]
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-001: rows holding Decimal, Date, Instant,
+    /// Duration, Uuid, enum, record, tuple, Option and wide Int values are
+    /// stored, published and read back unchanged from a Uuid-keyed table.
+    #[test]
+    fn typed_row_values_round_trip_through_a_published_row_map() {
+        const MOOD: [u8; 16] = [0xe0; 16];
+        const CALM: [u8; 16] = [0xe1; 16];
+        const WILD: [u8; 16] = [0xe2; 16];
+        const POINT: [u8; 16] = [0xf0; 16];
+        let relation_id = [0x52; 16];
+        let stored = |byte: u8, name: &str, ty: Raw| field_descriptor([byte; 16], name, ty, 1);
+        let nominal = |id: [u8; 16]| Raw::Array(vec![Raw::Int(5.into()), uuid_raw(id)]);
+        let descriptor = typed_schema(
+            relation_id,
+            &[[0x01; 16]],
+            vec![
+                field_descriptor([0x01; 16], "id", primitive_type("Uuid"), 0),
+                stored(0x02, "amount", primitive_type("Decimal")),
+                stored(0x03, "day", primitive_type("Date")),
+                stored(0x04, "at", primitive_type("Instant")),
+                stored(0x05, "span", primitive_type("Duration")),
+                stored(0x06, "owner", primitive_type("Uuid")),
+                stored(0x07, "mood", nominal(MOOD)),
+                stored(0x08, "point", nominal(POINT)),
+                stored(
+                    0x09,
+                    "pair",
+                    Raw::Array(vec![
+                        Raw::Int(3.into()),
+                        Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+                    ]),
+                ),
+                stored(
+                    0x0a,
+                    "discount",
+                    Raw::Array(vec![Raw::Int(2.into()), primitive_type("Decimal")]),
+                ),
+                stored(0x0b, "count", primitive_type("Int")),
+            ],
+            vec![
+                Raw::Array(vec![
+                    uuid_raw(MOOD),
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![
+                        Raw::Array(vec![
+                            uuid_raw(CALM),
+                            Raw::Text("calm".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                        Raw::Array(vec![
+                            uuid_raw(WILD),
+                            Raw::Text("wild".to_owned()),
+                            Raw::Array(Vec::new()),
+                        ]),
+                    ]),
+                ]),
+                Raw::Array(vec![
+                    uuid_raw(POINT),
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![
+                        field_descriptor([0xf1; 16], "x", primitive_type("Int"), 1),
+                        field_descriptor([0xf2; 16], "label", primitive_type("Str"), 1),
+                    ]),
+                ]),
+            ],
+        );
+        let decimal = |coefficient: i64, exponent: i64| {
+            Raw::Tag(
+                60_000,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(coefficient.into()),
+                    Raw::Int(exponent.into()),
+                ])),
+            )
+        };
+        let time = |tag: u64, seconds: i64, nanos: u32| {
+            Raw::Tag(
+                tag,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(seconds.into()),
+                    Raw::Int(nanos.into()),
+                ])),
+            )
+        };
+        let fields = |index: u8, mood: [u8; 16]| {
+            let ordinal = i64::from(index);
+            let discount = if index == 0 {
+                Raw::Array(vec![Raw::Int(0.into())])
+            } else {
+                Raw::Array(vec![Raw::Int(1.into()), decimal(5, -2)])
+            };
+            canonical_raw(Raw::Array(vec![
+                decimal(1_999 + 2 * ordinal, -2),
+                Raw::Tag(
+                    60_001,
+                    Box::new(Raw::Text(format!("2026-10-{}", 20 + index))),
+                ),
+                time(60_002, -86_400 * ordinal - 1, 500),
+                time(60_005, 90 + ordinal, 250_000_000),
+                uuid_raw([0x60 + index; 16]),
+                Raw::Tag(
+                    60_008,
+                    Box::new(Raw::Array(vec![uuid_raw(MOOD), uuid_raw(mood), Raw::Null])),
+                ),
+                Raw::Tag(
+                    60_009,
+                    Box::new(Raw::Array(vec![
+                        uuid_raw(POINT),
+                        Raw::Array(vec![
+                            Raw::Array(vec![uuid_raw([0xf1; 16]), Raw::Int((-3 - ordinal).into())]),
+                            Raw::Array(vec![
+                                uuid_raw([0xf2; 16]),
+                                Raw::Text(format!("north-{index}")),
+                            ]),
+                        ]),
+                    ])),
+                ),
+                Raw::Tag(
+                    60_015,
+                    Box::new(Raw::Array(vec![
+                        Raw::Int(ordinal.into()),
+                        Raw::Text("pair".to_owned()),
+                    ])),
+                ),
+                Raw::Tag(60_013, Box::new(discount)),
+                // Beyond u64: a tag-2 bignum.
+                Raw::Int(num_bigint::BigInt::from(u128::MAX) - ordinal),
+            ]))
+        };
+        let rows = [
+            (canonical_raw(uuid_raw([0x9a; 16])), fields(0, CALM)),
+            (canonical_raw(uuid_raw([0x15; 16])), fields(1, WILD)),
+            (canonical_raw(uuid_raw([0x47; 16])), fields(2, CALM)),
+        ];
+        let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+        let expected = [1, 2, 0].map(|index| {
+            let (key, fields) = &rows[index];
+            (
+                TypedKey::decode_canonical(key).expect("Uuid key decodes"),
+                fields.clone(),
+            )
+        });
+        assert!(matches!(&expected[0].0, TypedKey::Value(_)));
+        assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-002: tables keyed by Date, Instant,
+    /// Decimal, a tuple value and a composite (Date, Int) key keep their rows
+    /// in logical key order, which differs from CBOR byte order.
+    #[test]
+    fn tables_keyed_by_tagged_values_round_trip_in_logical_key_order() {
+        let relation_id = [0x53; 16];
+        let date = |text: &str| Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned())));
+        let pair = |tag: u64, first: Raw, second: Raw| {
+            Raw::Tag(tag, Box::new(Raw::Array(vec![first, second])))
+        };
+        let instant = |seconds: i64, nanos: u32| {
+            pair(60_002, Raw::Int(seconds.into()), Raw::Int(nanos.into()))
+        };
+        let decimal = |coefficient: i64, exponent: i64| {
+            pair(
+                60_000,
+                Raw::Int(coefficient.into()),
+                Raw::Int(exponent.into()),
+            )
+        };
+        let tuple = |number: i64, text: &str| {
+            pair(60_015, Raw::Int(number.into()), Raw::Text(text.to_owned()))
+        };
+        let composite =
+            |day: &str, number: i64| Raw::Array(vec![date(day), Raw::Int(number.into())]);
+        let tuple_type = Raw::Array(vec![
+            Raw::Int(3.into()),
+            Raw::Array(vec![primitive_type("Int"), primitive_type("Str")]),
+        ]);
+        // Key field types, keys in insertion order, the same keys in logical
+        // order, and one absent key of the same type.
+        let cases = [
+            (
+                vec![primitive_type("Date")],
+                vec![date("2026-10-20"), date("1999-12-31"), date("2026-01-05")],
+                vec![date("1999-12-31"), date("2026-01-05"), date("2026-10-20")],
+                date("2000-01-01"),
+            ),
+            (
+                vec![primitive_type("Instant")],
+                vec![instant(5, 0), instant(-3, 500), instant(0, 1)],
+                vec![instant(-3, 500), instant(0, 1), instant(5, 0)],
+                instant(1, 0),
+            ),
+            (
+                vec![primitive_type("Decimal")],
+                vec![decimal(1, 1), decimal(2, 0), decimal(-5, -1), decimal(0, 0)],
+                vec![decimal(-5, -1), decimal(0, 0), decimal(2, 0), decimal(1, 1)],
+                decimal(3, 0),
+            ),
+            (
+                vec![tuple_type],
+                vec![tuple(1, "b"), tuple(-2, "z"), tuple(1, "a"), tuple(10, "a")],
+                vec![tuple(-2, "z"), tuple(1, "a"), tuple(1, "b"), tuple(10, "a")],
+                tuple(2, "a"),
+            ),
+            (
+                vec![primitive_type("Date"), primitive_type("Int")],
+                vec![
+                    composite("2026-01-01", 5),
+                    composite("2026-01-01", -1),
+                    composite("2025-12-31", 7),
+                ],
+                vec![
+                    composite("2025-12-31", 7),
+                    composite("2026-01-01", -1),
+                    composite("2026-01-01", 5),
+                ],
+                composite("2026-01-01", 0),
+            ),
+        ];
+        for (key_types, inserted, ordered, absent) in cases {
+            let key_ids = (1..=key_types.len() as u8)
+                .map(|byte| [byte; 16])
+                .collect::<Vec<_>>();
+            let mut fields = key_ids
+                .iter()
+                .zip(key_types)
+                .map(|(id, ty)| field_descriptor(*id, &format!("key-{}", id[0]), ty, 0))
+                .collect::<Vec<_>>();
+            fields.push(field_descriptor(
+                [0x09; 16],
+                "note",
+                primitive_type("Str"),
+                1,
+            ));
+            let descriptor = typed_schema(relation_id, &key_ids, fields, Vec::new());
+            let rows = inserted
+                .into_iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    let note = canonical_raw(Raw::Array(vec![Raw::Text(format!("row-{index}"))]));
+                    (canonical_raw(key), note)
+                })
+                .collect::<Vec<_>>();
+            let (_directory, graph) = store_typed_rows(relation_id, &descriptor, &rows);
+            let expected = ordered
+                .into_iter()
+                .map(|key| {
+                    let key = canonical_raw(key);
+                    let (_, note) = rows
+                        .iter()
+                        .find(|(inserted, _)| inserted == &key)
+                        .expect("every ordered key was inserted");
+                    (
+                        TypedKey::decode_canonical(&key).expect("typed key decodes"),
+                        note.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_typed_rows(&graph, relation_id, &descriptor, &expected);
+            let scope = graph.open_read_scope().expect("absent key scope");
+            let absent =
+                TypedKey::decode_canonical(&canonical_raw(absent)).expect("absent key decodes");
+            assert!(
+                graph
+                    .lookup_row(&absent, &scope)
+                    .expect("look up an absent typed key")
+                    .is_none()
+            );
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -10974,7 +12032,7 @@ fn validate_canonical_value(bytes: &[u8]) -> Result<(), GraphError> {
     decode_canonical_cbor(bytes).map(|_| ())
 }
 
-fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
+pub(crate) fn canonical_value_bytes(value: &CborValue) -> Vec<u8> {
     let mut bytes = Vec::new();
     value.encode(&mut bytes);
     bytes
@@ -11137,10 +12195,7 @@ fn option_payload_value(value: &CborValue) -> Result<Option<&CborValue>, GraphEr
 /// Option None contributes nothing; Some recursively visits its value.
 fn collect_blob_value_fields(
     value: &CborValue,
-    output: &mut Vec<(
-        crate::blob_store::BlobAnnotation,
-        crate::blob_store::ContentIdentity,
-    )>,
+    output: &mut Vec<(MediaAnnotation, crate::blob_store::ContentIdentity)>,
 ) -> Result<(), GraphError> {
     match value {
         CborValue::Tag(60013, _) => match option_payload_value(value)? {
@@ -11170,13 +12225,12 @@ fn collect_blob_value_fields(
                 Some(CborValue::Text(suffix)) => Some(suffix.as_str()),
                 _ => return Err(GraphError::NonCanonicalData),
             };
-            validate_canonical_mime1_annotation(media_type, suffix)?;
+            let annotation = MediaAnnotation::new(media_type, suffix)
+                .map_err(|_| GraphError::InvalidBlobAnnotation)?;
             let mut digest_bytes = [0u8; 32];
             digest_bytes.copy_from_slice(digest);
             let identity = crate::blob_store::ContentIdentity::new(*length, digest_bytes)
                 .map_err(|_| GraphError::InvalidLength(*length))?;
-            let annotation = crate::blob_store::BlobAnnotation::new(media_type.clone(), suffix)
-                .map_err(|_| GraphError::InvalidBlobAnnotation)?;
             output.push((annotation, identity));
             Ok(())
         }
@@ -11196,7 +12250,10 @@ fn collect_blob_value_fields(
         // A canonical overflow value cannot appear here: `to_sov_value`
         // dereferences it before this walk sees the value.
         CborValue::Tag(60113, _) => Err(GraphError::UnsupportedRowValueForm),
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        // A semantic value carries only SOV-3 Blob tags.
+        CborValue::Tag(60110 | 60111, _) => Err(GraphError::NonCanonicalData),
+        // Records, enum payloads, tuples and other typed values can hold Blobs.
+        CborValue::Tag(_, payload) => collect_blob_value_fields(payload, output),
         _ => Ok(()),
     }
 }
@@ -11316,7 +12373,9 @@ fn collect_overflow_oids(
             output.insert(overflow_tag_oid(payload, algorithm)?);
         }
         CborValue::Tag(60111 | 60021, _) => {}
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
+        CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => collect_overflow_oids(payload, algorithm, output)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_overflow_oids(value, algorithm, output)?;
@@ -11333,16 +12392,15 @@ fn collect_overflow_oids(
     Ok(())
 }
 
+/// `MediaAnnotation::new` admits only the canonical wire pair, so its success
+/// is the whole MIME-1 check.
 fn validate_canonical_mime1_annotation(
     media_type: &str,
     suffix: Option<&str>,
 ) -> Result<(), GraphError> {
-    let annotation =
-        MediaAnnotation::new(media_type, suffix).map_err(|_| GraphError::InvalidBlobAnnotation)?;
-    if annotation.media_type() != media_type || annotation.suffix() != suffix {
-        return Err(GraphError::InvalidBlobAnnotation);
-    }
-    Ok(())
+    MediaAnnotation::new(media_type, suffix)
+        .map(drop)
+        .map_err(|_| GraphError::InvalidBlobAnnotation)
 }
 
 /// Binds the annotation of a candidate row to the annotation its pin was
@@ -11465,8 +12523,11 @@ fn collect_row_dependencies(
             crate::row_store::TypedKey::decode_canonical(&canonical_value_bytes(key))
                 .map_err(|_| GraphError::NonCanonicalData)?;
         }
+        // OVB-2 and SOV-3 Blob tags never appear in a stored ROV-3 value.
         CborValue::Tag(60110 | 60112, _) => return Err(GraphError::NonCanonicalData),
-        CborValue::Tag(_, _) => return Err(GraphError::NonCanonicalData),
+        // Every other admitted tag is a typed value; its references, if any,
+        // are nested in its payload (store-format-3 §2, final_model.py).
+        CborValue::Tag(_, payload) => collect_row_dependencies(payload, dependencies)?,
         CborValue::Array(values) => {
             for value in values {
                 collect_row_dependencies(value, dependencies)?;
@@ -11505,7 +12566,8 @@ fn direct_blob_reference_count(value: &CborValue) -> Result<usize, GraphError> {
                 _ => Err(GraphError::NonCanonicalData),
             }
         },
-        CborValue::Tag(_, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
+        CborValue::Tag(_, payload) => direct_blob_reference_count(payload),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
             count
                 .checked_add(direct_blob_reference_count(value)?)
@@ -11649,7 +12711,8 @@ impl<'a> CborReader<'a> {
         let length = self.argument(additional)?;
         match major {
             0 => Ok(CborValue::Unsigned(length)),
-            1 if length <= i64::MAX as u64 => Ok(CborValue::Negative(length)),
+            // Every negative head is an Orna Int; values below -2^64 use tag 3.
+            1 => Ok(CborValue::Negative(length)),
             2 => {
                 let length = usize::try_from(length).map_err(|_| GraphError::NonCanonicalData)?;
                 let end = self
@@ -11714,10 +12777,18 @@ impl<'a> CborReader<'a> {
                 Ok(CborValue::Map(entries))
             }
             6 => {
-                if !matches!(length, 37 | 60013 | 60021 | 60110..=60113) {
+                if !orna_value_v1::is_format3_node_tag(length) {
                     return Err(GraphError::NonCanonicalData);
                 }
-                Ok(CborValue::Tag(length, Box::new(self.value()?)))
+                let payload = self.value()?;
+                // A bignum spells only an Int beyond the 64-bit heads: at least
+                // nine big-endian bytes without a leading zero.
+                if matches!(length, 2 | 3)
+                    && !matches!(&payload, CborValue::Bytes(bytes) if bytes.len() >= 9 && bytes[0] != 0)
+                {
+                    return Err(GraphError::NonCanonicalData);
+                }
+                Ok(CborValue::Tag(length, Box::new(payload)))
             }
             _ => Err(GraphError::NonCanonicalData),
         }
@@ -12075,6 +13146,36 @@ mod option_value_tests {
         );
         collect_blob_value_fields(&option_some, &mut metadata).unwrap();
         assert_eq!(metadata.len(), 1);
+    }
+
+    /// ORNA-MIME-002/-004 (A08-09): every annotation MIME-1 admits when a row is
+    /// written stays readable from the stored row, including a quoted
+    /// parameter, an `_` hint and a hint on octet-stream.
+    #[test]
+    fn stored_blob_metadata_keeps_every_canonical_mime1_annotation() {
+        for (media_type, suffix) in [
+            ("text/plain;title=\"a b\"", None),
+            ("application/x-example", Some("my_ext")),
+            ("application/octet-stream", Some("dat")),
+        ] {
+            let stored = CborValue::Tag(
+                60112,
+                Box::new(CborValue::Array(vec![
+                    CborValue::Unsigned(7),
+                    CborValue::Bytes(vec![0x22; 32]),
+                    CborValue::Text(media_type.into()),
+                    suffix.map_or(CborValue::Null, |suffix| CborValue::Text(suffix.into())),
+                ])),
+            );
+            let mut metadata = Vec::new();
+            collect_blob_value_fields(&stored, &mut metadata).unwrap();
+            let [(annotation, identity)] = metadata.as_slice() else {
+                panic!("one Blob value yields one annotation");
+            };
+            assert_eq!(annotation.media_type(), media_type);
+            assert_eq!(annotation.suffix(), suffix);
+            assert_eq!(identity.length(), 7);
+        }
     }
 
     #[test]

@@ -1,0 +1,7 @@
+pub table Document(id: Str) {
+    body: Blob,
+    attachments: [Blob],
+    preview: Blob?,
+}
+
+pub fn size(body: Blob): Int = sys.blob.length(body);

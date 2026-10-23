@@ -1,4 +1,4 @@
-//! Authoritative loader and execution harness for the frozen Orna 1.0.0 corpus.
+//! Authoritative loader and execution harness for the frozen Orna 1.1.0 corpus.
 //!
 //! The harness owns no copy of the corpus.  It reads a reference directory at
 //! runtime, validates its cross-file contracts, then delegates source stages to
@@ -24,23 +24,24 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const SPECIFICATION_VERSION: &str = "1.0.0";
-const NORMATIVE_PAYLOAD_COUNT: usize = 46;
 const EXPECTED_DIAGNOSTIC_STATUS: &str = "expected-not-executed";
 
 mod admitted_repl;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
+mod vector_suites;
 #[cfg(test)]
 mod test_support;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
-    BoundedEvaluator, DurableTransactionalEvaluator, RunningTableRequestDisposition,
-    RuntimeAdapter, RuntimeEvaluator, RuntimeTarget, SemanticAdapter, TransactionalEvaluator,
-    transactional_loaded_project_candidate_validator, transactional_table_candidate_validator,
+    BoundedEvaluator, DurableTransactionalEvaluator, PendingPublicationError,
+    RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
+    SemanticAdapter, TransactionalEvaluator, transactional_loaded_project_candidate_validator,
+    transactional_table_candidate_validator,
 };
 pub use syntax_adapter::SyntaxAdapter;
+pub use vector_suites::{VectorSuiteEvidence, run_vector_suites};
 
 /// The only shared diagnostic carrier accepted by new Orna 1.0 integration.
 /// Existing generic adapters remain source-compatible during migration, but
@@ -231,7 +232,7 @@ pub struct ReferenceProjectNegativeEvidence {
 fn expected_reference_failure_code(expectation: &str) -> Option<&'static str> {
     match expectation {
         "cross-table assertion failure; no new loan" => Some("ORNA-EVAL-MODULE-ASSERT"),
-        "assertion failure; both stock rows unchanged" => Some("ORNA-EVAL-ASSERT"),
+        "assertion failure; both stock rows unchanged" => Some("ORNA-A091-008"),
         "duplicate key; existing loan unchanged" => Some("ORNA-EVAL-TABLE-DUPLICATE"),
         _ => None,
     }
@@ -267,6 +268,8 @@ pub struct Scenario {
     pub when: Vec<String>,
     pub then: Vec<String>,
     pub requirements: Vec<String>,
+    /// Absent on 1.1.0 scenarios that carry only `implementation_status`.
+    #[serde(default)]
     pub evidence_level: String,
 }
 
@@ -412,7 +415,8 @@ pub struct Requirement {
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequirementEvidence {
-    pub meaning: String,
+    pub version: String,
+    pub scope: String,
     pub requirements: Vec<RequirementEvidenceEntry>,
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -477,7 +481,7 @@ impl Corpus {
                 diagnostics.insert(fixture.path.clone(), diagnostic);
             }
         }
-        let publication_digests = release_digests(&root)?;
+        let publication_digests = release_digests(&root, &manifest.version)?;
         let corpus = Self {
             root,
             manifest,
@@ -494,10 +498,10 @@ impl Corpus {
         Ok(corpus)
     }
     pub fn validate(&self) -> Result<(), CorpusError> {
-        if self.manifest.version != SPECIFICATION_VERSION
-            || self.invalid_metadata.version != SPECIFICATION_VERSION
-        {
-            return Err(CorpusError("expected Orna reference version 1.0.0".into()));
+        if self.invalid_metadata.version != self.manifest.version {
+            return Err(CorpusError(
+                "invalid metadata version disagrees with the conformance manifest".into(),
+            ));
         }
         let kinds = self
             .manifest
@@ -507,23 +511,13 @@ impl Corpus {
                 *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
                 counts
             });
-        if self.manifest.fixtures.len() != 167
-            || self.manifest.counts.total != self.manifest.fixtures.len()
+        if self.manifest.counts.total != self.manifest.fixtures.len()
             || self.manifest.counts.valid != kinds.get("valid").copied().unwrap_or(0)
             || self.manifest.counts.invalid != kinds.get("invalid").copied().unwrap_or(0)
             || self.manifest.counts.project != kinds.get("project").copied().unwrap_or(0)
         {
             return Err(CorpusError(
                 "conformance manifest counts disagree with its fixtures".into(),
-            ));
-        }
-        if kinds.get("valid") != Some(&86)
-            || kinds.get("invalid") != Some(&80)
-            || kinds.get("project") != Some(&1)
-        {
-            return Err(CorpusError(
-                "manifest fixture kind counts do not match 86 valid / 80 invalid / 1 project"
-                    .into(),
             ));
         }
         if self.invalid_metadata.count != self.invalid_metadata.fixtures.len()
@@ -669,7 +663,7 @@ impl Corpus {
                 let expected = self.diagnostics.get(&fixture.path).ok_or_else(|| {
                     CorpusError(format!("expected diagnostic missing: {}", fixture.path))
                 })?;
-                if expected.version != SPECIFICATION_VERSION
+                if expected.version != self.manifest.version
                     || expected.status != EXPECTED_DIAGNOSTIC_STATUS
                     || fixture.failing_phase.as_deref() != Some(&metadata.failing_phase)
                     || fixture.diagnostic.as_deref() != Some(&metadata.diagnostic)
@@ -733,7 +727,9 @@ impl Corpus {
             .get("scenarios")
             .and_then(Value::as_array)
             .ok_or_else(|| CorpusError("scenarios must contain a scenarios array".into()))?;
-        if scenarios.len() != 144
+        let declared = self.scenarios.get("count").and_then(Value::as_u64);
+        if declared != Some(scenarios.len() as u64)
+            || scenarios.is_empty()
             || scenarios.iter().any(|scenario| {
                 scenario.get("id").and_then(Value::as_str).is_none()
                     || scenario
@@ -743,7 +739,7 @@ impl Corpus {
             })
         {
             return Err(CorpusError(
-                "scenario corpus must contain 144 identified requirement-linked scenarios".into(),
+                "scenario corpus must declare its exact scenario count and identify every scenario".into(),
             ));
         }
         if self.vectors.len() != VECTOR_FILES.len() || self.vectors.values().any(Value::is_null) {
@@ -776,7 +772,7 @@ impl Corpus {
         if self.project_expectations.steps.is_empty()
             || self.project_expectations.environment.network
             || self.project_expectations.environment.credentials
-            || self.project_expectations.environment.intrinsics != "Orna 1.0.0 core"
+            || self.project_expectations.environment.intrinsics != format!("Orna {} core", self.manifest.version)
         {
             return Err(CorpusError(
                 "project expectations have an invalid offline intrinsic environment".into(),
@@ -1665,16 +1661,17 @@ fn read_json<T: for<'a> Deserialize<'a>>(root: &Path, relative: &str) -> Result<
     serde_json::from_str(&body)
         .map_err(|_| CorpusError(format!("invalid reference JSON: {relative}")))
 }
-fn release_digests(root: &Path) -> Result<BTreeMap<String, String>, CorpusError> {
+fn release_digests(
+    root: &Path,
+    expected_version: &str,
+) -> Result<BTreeMap<String, String>, CorpusError> {
     #[derive(Deserialize)]
     struct Release {
         version: String,
         normative_payload_sha256: BTreeMap<String, String>,
     }
     let release: Release = read_json(root, "release.json")?;
-    if release.version != SPECIFICATION_VERSION
-        || release.normative_payload_sha256.len() != NORMATIVE_PAYLOAD_COUNT
-    {
+    if release.version != expected_version || release.normative_payload_sha256.is_empty() {
         return Err(CorpusError(
             "release version or digest inventory is invalid".into(),
         ));
@@ -1744,6 +1741,10 @@ pub struct RunReport {
     pub semantic_evidence: Vec<Evidence>,
     pub runtime_evidence: Vec<Evidence>,
     pub skipped_evidence: Vec<Evidence>,
+    /// Every published vector suite, executed through its production codec or
+    /// recorded as a known gap with its tracking bead. Kept apart from the
+    /// adapter's runtime evidence: no adapter produces these results.
+    pub vector_suites: Vec<VectorSuiteEvidence>,
     pub coverage: CoverageReport,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -2081,7 +2082,7 @@ impl Harness {
         self
     }
     pub fn run<A: ConformanceAdapter>(&self, adapter: &mut A) -> RunReport {
-        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference vectors and scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no vector/scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
+        let mut report = RunReport { specification_version: self.corpus.manifest.version.clone(), implementation_claim: self.claim.clone(), publication_digests: self.corpus.publication_digests.clone(), fixtures: Vec::new(), scenarios: Vec::new(), static_evidence: vec![Evidence { subject: "reference corpus".into(), stage: None, class: EvidenceClass::Static, status: EvidenceStatus::Passed, detail: "manifest, diagnostics, vectors, scenarios, requirements and normative member digests verified".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no corpus-validation fixture link".into() } }], model_evidence: vec![Evidence { subject: "reference scenarios".into(), stage: None, class: EvidenceClass::Model, status: EvidenceStatus::Specified, detail: "loaded unchanged; reference models are not implementation execution".into(), expectation_satisfied: false, diagnostic: None, requirements: vec![], requirement_mapping: RequirementMapping::Unmapped { reason: "authoritative requirement-evidence has no scenario fixture link".into() } }], semantic_evidence: vec![], runtime_evidence: vec![], skipped_evidence: vec![], vector_suites: run_vector_suites(&self.corpus), coverage: CoverageReport { mapped_stage_evidence: 0, unmapped_stage_evidence: 0 } };
         for fixture in &self.corpus.manifest.fixtures {
             let result = self.run_fixture(fixture, adapter);
             for stage in &result.stages {
@@ -2766,12 +2767,28 @@ fn validate_requirement_evidence_test(
     let object = test
         .as_object()
         .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
-    if let Some(subject) = object.get("subject") {
-        if subject.as_str() != Some(requirement) {
+    let kind = object.get("kind").and_then(Value::as_str);
+    let subject = object.get("subject").and_then(Value::as_str);
+    let subject_is_malformed = object.get("subject").is_some_and(|value| !value.is_string());
+    if subject_is_malformed {
+        return Err(CorpusError(
+            "requirement evidence test subject must match requirement".into(),
+        ));
+    }
+    match kind {
+        // 1.1.0: implementation suites are bound to their requirement; scenario
+        // tests are bound to the scenario ID they execute.
+        Some("implementation-suite") if subject != Some(requirement) => {
             return Err(CorpusError(
                 "requirement evidence test subject must match requirement".into(),
             ));
         }
+        Some("scenario") if subject.is_none_or(str::is_empty) => {
+            return Err(CorpusError(
+                "scenario evidence test must name its scenario subject".into(),
+            ));
+        }
+        _ => {}
     }
     evidence_test_stages(test)
         .map(|_| ())
@@ -2906,26 +2923,32 @@ mod authority_tests {
     }
 
     #[test]
-    fn release_metadata_is_pinned_to_the_authoritative_1_0_0_inventory() {
+    fn release_metadata_is_pinned_to_the_vendored_manifest_version() {
         let root = tempfile::tempdir().expect("temporary authority root");
-        write_release(root.path(), "0.9.0", NORMATIVE_PAYLOAD_COUNT);
+        let pinned = serde_json::from_str::<Value>(include_str!(
+            "../tests/fixtures/reference/tests/conformance-manifest.json"
+        ))
+        .expect("vendored manifest parses")["version"]
+            .as_str()
+            .expect("vendored manifest declares a version")
+            .to_owned();
+        write_release(root.path(), "0.9.0", 1);
         assert_eq!(
-            release_digests(root.path())
+            release_digests(root.path(), &pinned)
                 .expect_err("wrong release version")
                 .to_string(),
             "release version or digest inventory is invalid"
         );
 
-        write_release(
-            root.path(),
-            SPECIFICATION_VERSION,
-            NORMATIVE_PAYLOAD_COUNT - 1,
-        );
+        write_release(root.path(), &pinned, 0);
         assert_eq!(
-            release_digests(root.path())
-                .expect_err("incomplete digest inventory")
+            release_digests(root.path(), &pinned)
+                .expect_err("empty digest inventory")
                 .to_string(),
             "release version or digest inventory is invalid"
         );
+
+        write_release(root.path(), &pinned, 1);
+        assert_eq!(release_digests(root.path(), &pinned).expect("pinned release").len(), 1);
     }
 }

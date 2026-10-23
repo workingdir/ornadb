@@ -1,13 +1,12 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
-use orna_repository_v1::{CapturedBlobCandidate, OrpBlobBinding, RepositoryCaptureCapability};
+use orna_repository_v1::{
+    CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
+};
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
     CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
@@ -16,11 +15,12 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
-use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
+use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
-
-use crate::explain_bindings::ExplainCatalogue;
+use crate::{
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    SysHostAttachment, SysHostContext,
+};
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
@@ -39,7 +39,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
-    explain_catalogue: Option<Arc<dyn ExplainCatalogue>>,
+    sys_host_context: Option<SysHostAttachment>,
 }
 
 #[derive(Debug)]
@@ -58,11 +58,7 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
-            && match (&self.explain_catalogue, &other.explain_catalogue) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
+            && self.sys_host_context == other.sys_host_context
     }
 }
 
@@ -82,7 +78,7 @@ impl SysHostBindingRegistry {
             capture_candidates: Arc::default(),
             http: None,
             system_random: false,
-            explain_catalogue: None,
+            sys_host_context: None,
         }
     }
 
@@ -100,10 +96,12 @@ impl SysHostBindingRegistry {
         self
     }
 
-    /// Installs the host catalogue that pins `sys.explain(Query)` sources.
+    /// Installs the attached repository and activation facts that
+    /// `sys.rt.info()` reports. Without them the call reports
+    /// `sys.version.incompatible`.
     #[must_use]
-    pub fn with_explain_catalogue(mut self, catalogue: Arc<dyn ExplainCatalogue>) -> Self {
-        self.explain_catalogue = Some(catalogue);
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host_context = Some(SysHostAttachment::new(context));
         self
     }
 
@@ -878,8 +876,8 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
-    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
-        self.explain_catalogue.as_deref()
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
@@ -917,9 +915,15 @@ impl EffectHandler for SysHostBindingRegistry {
 }
 
 impl Ovb2EffectHandler for SysHostBindingRegistry {
+    /// Captures return lazy ROV-3 values in the repository capture context;
+    /// every other value keeps the OVB-2 profile.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "system-host-bindings")]
-    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
-        self.explain_catalogue.as_deref()
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
@@ -967,7 +971,7 @@ impl SysHostBindingRegistry {
         arguments: &[ContextValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        let operation = system_host_operation_registry()
+        system_host_operation_registry()
             .operation(operation_name)
             .filter(|operation| {
                 operation.name == "sys.blob.capture_file"
@@ -985,57 +989,69 @@ impl SysHostBindingRegistry {
         let OvbRaw::Int(max_bytes) = max_bytes.raw() else {
             return Err(redacted_error("ORNA-EVAL-TYPE"));
         };
+        // A negative or unrepresentable byte bound is an out-of-range length.
         let max_bytes = max_bytes
             .to_u64()
-            .ok_or_else(|| redacted_error(CaptureFileError::LimitExceeded.code()))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::BoundOutOfRange))?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
+        // A host without a filesystem provider authorises no root, so the
+        // selected source is not permitted (ORNA-INGEST-002).
         let filesystem = self
             .filesystem
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::UnauthorizedRoot))?;
+        // Without a repository Blob writer the host does not offer capture, and
+        // the call fails before any write (ORNA-SYS-008).
         let repository = self
             .repository_capture
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| redacted_error("sys.version.incompatible"))?;
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
-            .map_err(|failure| capture_file_failure(operation, failure))?;
-        let candidate = repository.capture_blob_candidate(&mut source, max_bytes);
-        source
-            .verify_unchanged()
-            .map_err(|failure| capture_file_failure(operation, failure))?;
+            .map_err(capture_file_failure)?;
+        // The stream already holds the source within `max_bytes` and the
+        // provider limit, so its observed length is the writer's ceiling;
+        // growth past it is reported below as a changed source.
+        let length = source.length();
+        let candidate = repository.capture_blob_candidate(&mut source, length);
+        source.verify_unchanged().map_err(capture_file_failure)?;
         if source.exceeded() {
-            return Err(capture_file_failure(
-                operation,
-                CaptureFileError::LimitExceeded,
-            ));
+            return Err(capture_file_failure(CaptureFileError::LimitExceeded));
         }
-        let candidate = candidate
-            .map_err(|_| capture_file_failure(operation, CaptureFileError::SourceUnavailable))?;
+        let candidate = candidate.map_err(|error| {
+            capture_file_failure(match error {
+                GraphError::ReadQuotaExceeded | GraphError::InvalidLength(_) => {
+                    CaptureFileError::LimitExceeded
+                }
+                _ => CaptureFileError::SourceUnavailable,
+            })
+        })?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let (media_type, suffix) = mime1_for_path(path);
-        let blob = Blob::from_bytes_with_annotation(
-            source.into_captured_bytes(),
-            media_type,
-            suffix.as_deref(),
-        )
-        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
-            .map(Some)
+        // Capture is one of the old constructors: it supplies the
+        // octet-stream/null annotation whatever the file is called, and an
+        // importer declares the media type afterwards with `sys.blob.annotate`
+        // (ORNA-MIME-001). The value names the candidate's descriptor in the
+        // capture context, so no captured byte is held in memory
+        // (ORNA-BLOB-007; store-format-3 ROV-3).
+        let value = repository
+            .candidate_value(&candidate)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        let blob = value
+            .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         self.capture_candidates
             .lock()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
             .push(CapturedBlobForRow {
                 candidate,
-                media_type: media_type.to_owned(),
-                suffix,
+                media_type: blob.media_type().to_owned(),
+                suffix: blob.suffix().map(str::to_owned),
             });
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -1256,11 +1272,25 @@ pub(crate) fn dispatch_blob_annotation(
             };
             decoded.map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
         }
-        Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(redacted_code(code.as_str())),
+        Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(blob_annotation_failure(&code)),
         Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
-            Err(redacted_code(code.as_str()))
+            Err(blob_annotation_failure(&code))
         }
-        Err(_) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+        // The host does not link the generated provider for this operation:
+        // the required coordinate is unavailable (ORNA-SYS-008).
+        Err(_) => Err(redacted_error("sys.version.incompatible")),
+    }
+}
+
+/// A declared portable code is the call's primary failure (ORNA-SYS-097). The
+/// shared `sys.abi.*` provider-boundary codes never surface: the provider
+/// reports them only for arguments that are not the typed values its contract
+/// declares, which the ordinary argument type diagnostic covers.
+fn blob_annotation_failure(code: &FailureCode) -> EvaluationError {
+    if code.as_str().starts_with("sys.abi.") {
+        redacted_error("ORNA-EVAL-TYPE")
+    } else {
+        redacted_code(code.as_str())
     }
 }
 
@@ -1273,18 +1303,18 @@ fn blob_suffix_argument(raw: &OvbRaw) -> Result<Option<&str>, FailureCode> {
     }
 }
 
-/// Maps an `orna_value_v1` failure onto the portable Blob failure vocabulary.
+/// Maps an `orna_value_v1` annotation failure onto the declared portable
+/// failures of `sys.blob.annotate` (MIME-1 declaration codes, and the global
+/// value-profile code for an OVB-1 value without an annotation slot).
 ///
-/// A code outside the operation's generated declarations is rejected by the
-/// registry, so this mapping cannot invent an undeclared portable failure.
+/// Any other value error means the argument was not an annotated Blob value,
+/// which the shared provider-boundary code reports.
 fn blob_value_failure(error: ValueError) -> FailureCode {
     static_failure(match error {
         ValueError::InvalidMediaType => "sys.blob.invalid_media_type",
         ValueError::InvalidSuffix => "sys.blob.invalid_suffix",
         ValueError::IncompatibleSuffix => "sys.blob.incompatible_suffix",
-        ValueError::ContentDigestMismatch => "sys.blob.collision",
-        ValueError::ContentUnavailable => "sys.blob.unavailable",
-        ValueError::InvalidRange | ValueError::Limit => "sys.blob.bounds",
+        ValueError::InvalidProfile => "sys.codec.unsupported_value_profile",
         _ => "sys.abi.provider_failed",
     })
 }
@@ -1298,50 +1328,10 @@ fn static_call_name(expression: &Expr) -> Option<String> {
     }
 }
 
-fn capture_file_failure(
-    operation: &HostOperationDescriptor,
-    failure: CaptureFileError,
-) -> EvaluationError {
-    if operation
-        .failures
-        .iter()
-        .any(|code| code == failure.failure_code())
-    {
-        redacted_error(failure.code())
-    } else {
-        redacted_error("ORNA-EVAL-UNSUPPORTED")
-    }
-}
-
-fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "json" => ("application/json", None),
-        "pdf" => ("application/pdf", None),
-        "wasm" => ("application/wasm", None),
-        "zip" => ("application/zip", None),
-        "gz" | "tgz" => ("application/gzip", (extension != "gz").then_some(extension)),
-        "flac" => ("audio/flac", None),
-        "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
-        "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
-        "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
-        "wav" => ("audio/wav", None),
-        "gif" => ("image/gif", None),
-        "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
-        "png" => ("image/png", None),
-        "svg" => ("image/svg+xml", None),
-        "webp" => ("image/webp", None),
-        "css" => ("text/css", None),
-        "mjs" | "js" => ("text/javascript", (extension != "js").then_some(extension)),
-        "text" | "txt" => ("text/plain", (extension != "txt").then_some(extension)),
-        "m4v" | "mp4" => ("video/mp4", (extension != "mp4").then_some(extension)),
-        "webm" => ("video/webm", None),
-        _ => ("application/octet-stream", None),
-    }
+/// Surfaces a capture failure with its portable code (ORNA-SYS-097); the
+/// generated host operation declares exactly these codes.
+fn capture_file_failure(failure: CaptureFileError) -> EvaluationError {
+    redacted_error(failure.failure_code())
 }
 
 fn redacted_error(code: &'static str) -> EvaluationError {
@@ -1351,6 +1341,7 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_value_v1::Blob;
 
     #[test]
     fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
@@ -1429,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_file_selects_only_mime1_annotations() {
+    fn capture_file_declares_only_its_generated_failures() {
         let operation = system_host_operation_registry()
             .operation("sys.blob.capture_file")
             .expect("capture_file is present in the generated host ABI");
@@ -1440,25 +1431,104 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             [
-                "sys.blob.capture.unauthorized_root",
-                "sys.blob.capture.invalid_path",
-                "sys.blob.capture.source_unavailable",
-                "sys.blob.capture.limit_exceeded",
-                "sys.blob.capture.source_changed",
+                "sys.blob.source_denied",
+                "sys.blob.bounds",
+                "sys.blob.limit",
+                "sys.blob.source_changed",
             ]
         );
-        assert_eq!(
-            mime1_for_path("records/data.json"),
-            ("application/json", None)
+        // Every capture outcome surfaces a code the operation declares.
+        for failure in [
+            CaptureFileError::UnauthorizedRoot,
+            CaptureFileError::InvalidPath,
+            CaptureFileError::SourceUnavailable,
+            CaptureFileError::LimitExceeded,
+            CaptureFileError::SourceChanged,
+            CaptureFileError::BoundOutOfRange,
+        ] {
+            assert!(
+                operation
+                    .failures
+                    .iter()
+                    .any(|declared| declared == failure.failure_code()),
+                "{failure:?}"
+            );
+            assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
+        }
+        // The provider takes a `u64` bound. A bound the binding cannot narrow
+        // to it is `sys.blob.bounds`, which the portable operation declares.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        assert!(
+            portable
+                .failures
+                .iter()
+                .any(|declared| declared.as_str() == "sys.blob.bounds")
         );
+        let negative_bound = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int((-1).into())).unwrap(),
+        ];
         assert_eq!(
-            mime1_for_path("records/photo.jpeg"),
-            ("image/jpeg", Some("jpeg".to_owned()))
+            SysHostBindingRegistry::default()
+                .capture_file_ovb2("sys.blob.capture_file", &negative_bound, None)
+                .expect_err("a negative byte bound is out of range")
+                .code(),
+            "sys.blob.bounds"
         );
+        assert!(
+            operation
+                .failures
+                .iter()
+                .any(|failure| failure == "sys.blob.bounds"),
+            "capture_file must declare the negative-bound failure"
+        );
+    }
+
+    /// ORNA-INGEST-002 and ORNA-SYS-008: a host that lacks part of the capture
+    /// capability reports a portable code, never an evaluator code.
+    #[test]
+    fn capture_file_without_host_capability_reports_portable_codes() {
+        let arguments = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int(16.into())).unwrap(),
+        ];
+        let without_filesystem = SysHostBindingRegistry::default();
         assert_eq!(
-            mime1_for_path("records/unknown.custom"),
-            ("application/octet-stream", None)
+            without_filesystem
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a filesystem provider authorises no root")
+                .code(),
+            "sys.blob.source_denied"
         );
+        let without_writer =
+            SysHostBindingRegistry::default().with_filesystem_provider(FilesystemProvider::new());
+        assert_eq!(
+            without_writer
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a repository Blob writer cannot capture")
+                .code(),
+            "sys.version.incompatible"
+        );
+        // Each branch code the binding can emit must be in the portable
+        // operation's vocabulary. `sys.version.incompatible` is a global code
+        // that the portable table chains into every callable operation, so it
+        // is not declared per operation on the host side.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        for code in ["sys.blob.source_denied", "sys.version.incompatible"] {
+            assert!(
+                portable
+                    .failures
+                    .iter()
+                    .any(|declared| declared.as_str() == code),
+                "capture_file must declare `{code}`"
+            );
+        }
     }
 
     #[test]
