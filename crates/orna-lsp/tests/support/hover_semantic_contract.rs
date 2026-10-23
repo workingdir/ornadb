@@ -14,6 +14,9 @@ const SEMANTIC_TOKEN_TYPES: &[&str] = &[
     "interface",
     "function",
     "parameter",
+    "namespace",
+    "enumMember",
+    "property",
 ];
 
 pub fn assert_hover_contract(hover: &Value, editor: &str) {

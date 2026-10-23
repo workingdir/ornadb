@@ -5263,7 +5263,7 @@ impl Context<'_, '_> {
                 Statement::Assert { value, .. } => {
                     match self.evaluate(value, &mut local, depth + 1)? {
                         Value::Bool(true) => {}
-                        Value::Bool(false) => return Err(error("ORNA-EVAL-ASSERT")),
+                        Value::Bool(false) => return Err(error("ORNA-A091-008")),
                         _ => return Err(error("ORNA-EVAL-TYPE")),
                     }
                 }
@@ -16955,6 +16955,19 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         assert_eq!(failure.code(), "ORNA-EVAL-ERROR");
         assert_eq!(failure.to_string(), "ORNA-EVAL-ERROR");
         assert_eq!(failure.diagnostic().message(), "<redacted>");
+    }
+
+    #[test]
+    fn false_executable_assertion_carries_spec_code() {
+        let failure = evaluate_expression(
+            "if true { assert false; 1 }",
+            &Environment::new(),
+            Limits::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.diagnostic().code(), "ORNA-A091-008");
+        assert_eq!(failure.code(), "ORNA-A091-008");
     }
 
     #[test]
