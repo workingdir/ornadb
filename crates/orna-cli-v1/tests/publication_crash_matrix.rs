@@ -346,6 +346,75 @@ async fn format3_publication_recovers_when_gc_prunes_candidate_before_publish() 
     assert_eq!(recovered.pending_count().await.unwrap(), 0);
 }
 
+/// ORNA-GIT-010: a Prepared journal is a recovery authority for the candidate commit and the base
+/// index tree it names. The publisher is SIGKILLed after the journal is durable and before the ref
+/// moves, so neither object is reachable from any ref. Coordinated `git gc --prune=now` and
+/// `git repack -a -d` run under the Orna coordination lock. Both journal objects must survive, and
+/// recovery must complete from the journal without pruning them. HEAD never moved, so recovery
+/// discards the pre-ref journal and republishes a fresh candidate; it does not reuse the candidate.
+#[tokio::test]
+async fn cli_publication_prepared_journal_objects_survive_coordinated_gc() {
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+    git(root, &["add", "--", "unrelated-tracked.txt"]);
+    git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+    let base = repository.head().unwrap().unwrap();
+    // A staged change makes the captured base index tree differ from HEAD's tree, so that tree is
+    // referenced only by the journal.
+    std::fs::write(root.join("unrelated-staged.txt"), b"staged before crash\n").unwrap();
+    git(root, &["add", "--", "unrelated-staged.txt"]);
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch(root, "prepared", crash.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(marker.exists(), "child never reached prepared; status: {:?}", child.try_wait().unwrap());
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed child");
+    assert!(!status.success(), "child unexpectedly returned at prepared");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "prepared");
+    std::fs::remove_file(&marker).unwrap();
+    drop(state);
+
+    let journal = repository
+        .read_publication_journal()
+        .unwrap()
+        .expect("the Prepared journal is durable before the kill");
+    let candidate = journal.new_head().as_str().to_owned();
+    let base_tree = journal
+        .base_index_tree()
+        .expect("publication journal names the base index tree")
+        .as_str()
+        .to_owned();
+    assert_eq!(head(&repository), base.as_str(), "ref moved before the kill");
+    assert_ne!(candidate, base.as_str());
+
+    repository
+        .with_coordination_lock(|| {
+            git(root, &["gc", "--prune=now", "--quiet"]);
+            git(root, &["repack", "-a", "-d", "--quiet"]);
+            Ok::<(), orna_repository_v1::RepositoryError>(())
+        })
+        .expect("coordination lock is free once the publisher is killed");
+    assert!(object_exists(root, &candidate), "gc pruned the journal's candidate commit");
+    assert!(object_exists(root, &base_tree), "gc pruned the journal's base index tree");
+
+    let resumed = cli(root, &["--debug", "publish"]);
+    assert!(
+        resumed.status.success(),
+        "recovery after gc failed: {}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after recovery");
+    assert_ne!(head(&repository), base.as_str(), "batch was not republished after recovery");
+    assert!(publication_pin_refs(root).is_empty(), "publication pins remain after recovery");
+}
+
 /// Recovery row "Ref still at H" (ORNA-PUB-006): a prepared journal whose
 /// candidate `HEAD` never reached names nothing that was published.
 /// Coordinator recovery discards it and keeps the frozen batch pending, so
