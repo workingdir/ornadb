@@ -7666,6 +7666,9 @@ impl Context<'_, '_> {
                 let Value::List(items) = value else {
                     return Err(error("ORNA-EVAL-TYPE"));
                 };
+                if items.len() as u64 > crate::sys_bindings::MAX_BLOB_CALL_BYTES {
+                    return Err(error("sys.blob.limit"));
+                }
                 let integers = items
                     .iter()
                     .map(|item| match item {
@@ -7692,9 +7695,6 @@ impl Context<'_, '_> {
             return match crate::sys_bindings::dispatch_blob_read(operation, source, &bounds)? {
                 crate::sys_bindings::BlobReadValue::Int(length) => {
                     Ok(Value::Int(BigInt::from(length)))
-                }
-                crate::sys_bindings::BlobReadValue::Digest(digest) => {
-                    Ok(Value::Blob(digest.to_vec()))
                 }
                 crate::sys_bindings::BlobReadValue::Blob(value) => {
                     Value::from_context_value(&value, self, 0)
