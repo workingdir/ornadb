@@ -11374,3 +11374,22 @@ mod base64_accept_table {
         assert_eq!(decode_base64(&invalid), None);
     }
 }
+
+#[cfg(test)]
+mod websocket_key_alphabet {
+    use super::{decode_base64, websocket_accept};
+
+    #[test]
+    fn rfc6455_sample_key_is_accepted_with_the_standard_accept() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        assert!(decode_base64(key).is_some());
+        assert_eq!(websocket_accept(key), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn url_safe_key_is_rejected_at_the_handshake() {
+        // 24 characters, URL alphabet '_' in the final group.
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA_w==").is_none());
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA-w==").is_none());
+    }
+}
