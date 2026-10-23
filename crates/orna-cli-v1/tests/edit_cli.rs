@@ -27,7 +27,7 @@ fn editor(directory: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
 }
 
 fn edit(repository: &TempDir, editor: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(repository.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("EDITOR", editor)

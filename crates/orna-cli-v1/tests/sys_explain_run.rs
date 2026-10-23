@@ -12,7 +12,7 @@ use orna_runtime_v1::RuntimeState;
 mod format3;
 
 fn orna(directory: &std::path::Path, arguments: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .arg("--db")
         .arg(directory)
@@ -55,7 +55,7 @@ async fn orna_run_explains_queries_against_the_activation_catalogue() {
         include_str!("fixtures/sys-explain-run.orna"),
     )
     .expect("explain fixture");
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .arg("init")
         .arg(directory.path())
