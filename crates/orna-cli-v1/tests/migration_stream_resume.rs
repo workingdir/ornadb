@@ -176,7 +176,7 @@ fn checkpoint_after_reopen(root: &Path) -> StreamCheckpoint {
 }
 
 fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
