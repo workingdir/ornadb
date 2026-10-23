@@ -8,7 +8,7 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CitationBaseline {
     pub max_uncited: usize,
-    /// Crate directory names under `crates/` whose Rust sources are scanned. Crates absent here cannot supply citations.
+    /// Crate directory names under `crates/` whose Rust sources are scanned. This must equal the shipped-binary closure (enforced by tests/scan_scope_closure.rs); crates absent here cannot supply citations.
     pub scanned_crates: BTreeSet<String>,
     pub cited_ids: BTreeSet<String>,
 }
