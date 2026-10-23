@@ -185,12 +185,52 @@ fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
         .any(|reason| stderr.contains(reason))
 }
 
+/// Decodes the octal escapes (`\040`, `\011`, `\012`, `\134`) the kernel applies to a
+/// /proc/self/mountinfo path field, so a mountpoint containing spaces, tabs, newlines or
+/// backslashes compares equal to its real path. Any other backslash is kept as written.
+fn unescape_mountinfo_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let is_octal_escape = bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1..index + 4].iter().all(|digit| (b'0'..=b'7').contains(digit));
+        if is_octal_escape {
+            let value = bytes[index + 1..index + 4]
+                .iter()
+                .fold(0u32, |acc, digit| acc * 8 + u32::from(digit - b'0'));
+            out.push(value as u8);
+            index += 4;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn mountinfo_contains(mountpoint: &Path) -> bool {
+    // The kernel records the resolved mountpoint, so a symlinked TMPDIR must be resolved too.
+    let mountpoint =
+        std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     let mountpoint = mountpoint.to_str().expect("mountpoint is UTF-8");
     std::fs::read_to_string("/proc/self/mountinfo")
         .expect("read Linux mount table")
         .lines()
-        .any(|line| line.split_whitespace().nth(4) == Some(mountpoint))
+        .any(|line| {
+            line.split_whitespace()
+                .nth(4)
+                .is_some_and(|field| unescape_mountinfo_field(field) == mountpoint)
+        })
+}
+
+#[test]
+fn unescape_mountinfo_field_decodes_octal_escapes() {
+    assert_eq!(unescape_mountinfo_field("/tmp/a\\040b"), "/tmp/a b");
+    assert_eq!(unescape_mountinfo_field("x\\011y\\012z\\134w"), "x\ty\nz\\w");
+    assert_eq!(unescape_mountinfo_field("plain/path"), "plain/path");
+    assert_eq!(unescape_mountinfo_field("trailing\\04"), "trailing\\04");
 }
 
 #[tokio::test]
