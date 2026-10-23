@@ -475,7 +475,7 @@ fn editor_script(directory: &TempDir, document: &str) -> PathBuf {
 
 
 fn run_row_edit(repository_directory: &TempDir, editor: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(repository_directory.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("EDITOR", editor)

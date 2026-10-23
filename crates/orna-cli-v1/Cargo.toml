@@ -6,7 +6,7 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [[bin]]
-name = "orna-cli-v1"
+name = "orna"
 path = "src/main.rs"
 
 [features]
