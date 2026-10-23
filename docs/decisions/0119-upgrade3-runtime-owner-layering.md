@@ -40,9 +40,8 @@ so the upgrade path reaches recovery only once that surface is enabled.
 * `migration_copy.rs` in `orna-repository-v1` receives already-decoded tables,
   rows and relations as input. It decodes no legacy row and calls no project or
   conformance code.
-* Conformance row admission is reached through `orna-application-v1`, which may
-  gain a production dependency on `orna-conformance-v1`. That edge closes no
-  cycle: `orna-cli-v1` is the only crate that depends on `orna-application-v1`.
+* Row admission has no `orna-conformance-v1` edge from `orna-application-v1`.
+  It lives in `orna-evaluator-v1::row_admission`; see the addendum below.
 * `orna-repository-v1` gains no production dependency on `orna-project-v1` or
   `orna-conformance-v1`. Both already depend on `orna-repository-v1` in
   production, so such an edge would close a cycle.
@@ -117,3 +116,16 @@ treats the decoded rows as the complete authoritative set.
 * A crash after the publication journal is durable, but before runtime
   completion, is finished by `recover_publication`. No new recovery command is
   added.
+
+## Addendum: row admission boundary (ornadb-5il1.309)
+
+This addendum supersedes the Layering bullet that allowed
+`orna-application-v1` to depend on `orna-conformance-v1`. Nothing else in this
+ADR changes.
+
+* Loose-row admission rules live in `orna_evaluator_v1::row_admission`
+  (`preflight_row_sources`, `admit_row_sources`). `orna-application-v1` already
+  depends on `orna-evaluator-v1` in production, so it needs no new edge.
+* `orna-conformance-v1::row_admission` only adapts conformance project units
+  onto that boundary, so the conformance corpus exercises the production code.
+* `orna-application-v1` gains no production dependency on `orna-conformance-v1`.
