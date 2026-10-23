@@ -2993,6 +2993,10 @@ impl Repository {
             oid(candidate.as_str())?,
             oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
         ]);
+        self.objects().check_expansion(candidate.as_str(), "")?;
+        if let Some(base) = base {
+            self.objects().check_expansion(base.as_str(), "")?;
+        }
         let changes = match base {
             Some(base) => self.git_bytes_no_lazy_fetch([
                 "diff-tree",
@@ -3989,6 +3993,10 @@ impl Repository {
             || self.current_branch()? != cwd.branch().map(str::to_owned)
         {
             return Err(RepositoryError::StaleCwd);
+        }
+        self.objects().check_expansion(index_tree.as_str(), "")?;
+        if let Some(head) = cwd.head() {
+            self.objects().check_expansion(head.as_str(), "")?;
         }
         let mut path_diff = self.command();
         match cwd.head() {
