@@ -380,8 +380,9 @@ pub async fn repository_with_music_rows(
     (repository_directory, repository, relation_id)
 }
 
-/// The contents of every record in the repository's VFS recovery storage,
-/// where the mount retains candidates it did not accept.
+/// The contents of every retained candidate record in the repository's VFS
+/// recovery storage. Records are the top-level regular files; the private
+/// `editor-drafts` subdirectory holds explicit edit drafts, not records.
 pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     let directory = repository
         .runtime_paths()
@@ -389,8 +390,9 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
         .join("vfs-retained-drafts-v1");
     match std::fs::read_dir(&directory) {
         Ok(entries) => entries
-            .map(|entry| {
-                let path = entry.expect("list retained drafts").path();
+            .map(|entry| entry.expect("list retained drafts").path())
+            .filter(|path| path.is_file())
+            .map(|path| {
                 String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
                     .into_owned()
             })

@@ -82,25 +82,22 @@ struct VfsScratchStore {
 impl VfsScratchStore {
     fn open(runtime_root: &Path) -> Result<Self, String> {
         let directory = runtime_root.join(VFS_SCRATCH_DIRECTORY);
-        let created = match fs::create_dir(&directory) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-            Err(error) => {
-                return Err(format!(
-                    "temporary scratch directory could not be created: {error}"
-                ));
+        let created = {
+            use std::os::unix::fs::DirBuilderExt as _;
+            match fs::DirBuilder::new().mode(0o700).create(&directory) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => {
+                    return Err(format!(
+                        "temporary scratch directory could not be created: {error}"
+                    ));
+                }
             }
         };
         if created {
             Self::sync_directory(runtime_root)?;
-        } else {
-            let metadata = fs::symlink_metadata(&directory).map_err(|error| {
-                format!("temporary scratch directory could not be inspected: {error}")
-            })?;
-            if !metadata.file_type().is_dir() {
-                return Err("temporary scratch directory is not a real directory".into());
-            }
         }
+        ensure_private_directory(&directory, "temporary scratch directory")?;
         Self::sync_directory(&directory)?;
         Ok(Self { directory })
     }
@@ -393,6 +390,90 @@ const VFS_RETAINED_DRAFT_HEADER: &str = "orna-vfs-retained-draft 1";
 /// Recovery storage refuses new records past this count. Every record holds
 /// one draft within the draft file bound, so the store stays bounded.
 const VFS_RETAINED_DRAFT_LIMIT: usize = 256;
+/// Editor drafts hold full candidate bytes, so they live in this private
+/// subdirectory of the recovery store rather than the shared temp directory.
+const VFS_EDITOR_DRAFT_DIRECTORY: &str = "editor-drafts";
+
+/// Creates the explicit editor draft for `edit` (ORNA-VFS-024 recovery). The
+/// file is created exclusively (O_EXCL) at mode 0600 under an unpredictable
+/// name, inside a 0700 directory of the runtime recovery store. It is kept on
+/// disk so a failed edit can be retained and reported by path.
+fn create_editor_draft(runtime_root: &Path) -> Result<(File, PathBuf), String> {
+    fs::create_dir_all(runtime_root)
+        .map_err(|error| format!("runtime recovery root could not be created: {error}"))?;
+    let retained = runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY);
+    ensure_private_directory(&retained, "retained draft directory")?;
+    let directory = retained.join(VFS_EDITOR_DRAFT_DIRECTORY);
+    ensure_private_directory(&directory, "editor draft directory")?;
+    let leftovers = count_editor_drafts(&directory)?;
+    if leftovers >= VFS_RETAINED_DRAFT_LIMIT {
+        return Err(format!(
+            "editor draft store is full ({leftovers} leftover drafts, limit {VFS_RETAINED_DRAFT_LIMIT}); remove stale orna-edit-*.draft files"
+        ));
+    }
+    let staged = tempfile::Builder::new()
+        .prefix("orna-edit-")
+        .suffix(".draft")
+        .rand_bytes(16)
+        .tempfile_in(&directory)
+        .map_err(|error| error.to_string())?;
+    staged.keep().map_err(|error| error.error.to_string())
+}
+
+/// Creates `directory` (mode 0700) when absent, then requires an existing
+/// entry to be a real directory (symlinks refused), owned by the effective
+/// uid. A group/other-accessible directory owned by us is tightened to 0700.
+fn ensure_private_directory(directory: &Path, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    match fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("{label} could not be created: {error}")),
+    }
+    let metadata = fs::symlink_metadata(directory)
+        .map_err(|error| format!("{label} could not be inspected: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!("{label} is not a real directory"));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err(format!("{label} is not owned by the current user"));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("{label} could not be restricted to 0700: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Counts leftover `orna-edit-*.draft` files so the recovery store stays
+/// bounded: creation refuses once the count reaches the retained-draft limit.
+fn count_editor_drafts(directory: &Path) -> Result<usize, String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("editor draft directory could not be read: {error}"))?;
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("editor draft entry could not be read: {error}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("orna-edit-") && name.ends_with(".draft") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Denies ownership, mode and flag changes. A mount carries no POSIX
+/// permission model (access is owner-only by mount policy), so chmod/chown and
+/// chflags are refused with EPERM. Read-only views never reach this check: the
+/// kernel refuses their attribute writes with EROFS first.
+fn denied_attribute_change(
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    flags: Option<fuser::BsdFileFlags>,
+) -> Option<Errno> {
+    (mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some()).then_some(Errno::EPERM)
+}
 
 /// One candidate kept in recovery storage.
 struct RetainedDraft {
@@ -1513,15 +1594,7 @@ pub(super) fn edit_path(
     } else {
         None
     };
-    let draft_path = std::env::temp_dir().join(format!(
-        "orna-edit-{}-{}.draft",
-        std::process::id(),
-        super::cli_request_nonce()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&draft_path)
+    let (mut file, draft_path) = create_editor_draft(repository.runtime_paths().root())
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
     file.write_all(&initial_bytes)
@@ -3341,8 +3414,8 @@ impl Filesystem for WorkspaceFilesystem {
         flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
-            reply.error(Errno::EIO);
+        if let Some(errno) = denied_attribute_change(mode, uid, gid, flags) {
+            reply.error(errno);
             return;
         }
         if let Some(size) = size {
@@ -3526,6 +3599,9 @@ impl FsBuilder {
         }
     }
 
+    /// Attributes report uid/gid 0 and advisory permission bits. chmod and
+    /// chown are refused with EPERM by `denied_attribute_change`, so the bits
+    /// here never grant or revoke access.
     fn attr(&self, inode: u64) -> Option<FileAttr> {
         let node = self.nodes.get(&inode)?;
         let (kind, size, permissions, links) = match &node.kind {
@@ -5551,5 +5627,99 @@ mod tests {
                 .unwrap(),
             Some(indexed_inode),
         );
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::{
+        Errno, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY, create_editor_draft,
+        denied_attribute_change,
+    };
+
+    #[test]
+    fn editor_draft_is_private_exclusive_and_unpredictable() {
+        let runtime = tempfile::tempdir().unwrap();
+        let (first, first_path) = create_editor_draft(runtime.path()).unwrap();
+        let (_second, second_path) = create_editor_draft(runtime.path()).unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        assert_eq!(first_path.parent(), Some(directory.as_path()));
+        assert_eq!(second_path.parent(), Some(directory.as_path()));
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn ownership_mode_and_flag_changes_are_denied_with_eperm() {
+        assert_eq!(denied_attribute_change(None, None, None, None), None);
+        assert_eq!(
+            denied_attribute_change(Some(0o600), None, None, None),
+            Some(Errno::EPERM)
+        );
+        assert_eq!(
+            denied_attribute_change(None, Some(0), None, None),
+            Some(Errno::EPERM)
+        );
+        assert_eq!(
+            denied_attribute_change(None, None, Some(0), None),
+            Some(Errno::EPERM)
+        );
+    }
+
+    #[test]
+    fn editor_draft_directory_pre_created_symlink_is_refused() {
+        let runtime = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let retained = runtime.path().join(VFS_RETAINED_DRAFT_DIRECTORY);
+        std::fs::create_dir(&retained).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), retained.join(VFS_EDITOR_DRAFT_DIRECTORY))
+            .unwrap();
+        let error = create_editor_draft(runtime.path()).unwrap_err();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn editor_draft_directory_pre_created_world_writable_is_tightened() {
+        let runtime = tempfile::tempdir().unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (_draft, _path) = create_editor_draft(runtime.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn editor_draft_creation_refuses_when_leftover_store_is_full() {
+        let runtime = tempfile::tempdir().unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..super::VFS_RETAINED_DRAFT_LIMIT {
+            std::fs::write(directory.join(format!("orna-edit-{index}.draft")), b"").unwrap();
+        }
+        let error = create_editor_draft(runtime.path()).unwrap_err();
+        assert!(error.contains("editor draft store is full"), "{error}");
     }
 }
