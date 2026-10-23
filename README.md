@@ -6,7 +6,7 @@ runtime, and command-line workflows. The workspace package version is still 1.0.
 
 ## Current local CLI
 
-The active local binary is `orna-cli-v1`. It works with a local Git-backed
+The active local binary is `orna`. It works with a local Git-backed
 project and keeps source checking, execution, and interactive evaluation on
 the same Orna 1.1.0 path.
 
