@@ -19666,6 +19666,24 @@ async fn append_mutations_with_catalogue_tx(
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        // A retained identity reaching this point is id reuse: an exact replay
+        // was already short-circuited above, so a retained id here is a caller
+        // error, not a storage failure (ORNA-VFS-008).
+        let mut retained_rows = connection
+            .query(
+                "SELECT 1 FROM admitted_mutation WHERE mutation_id = ?1",
+                params![mutation.id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if retained_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
         connection
             .execute(
                 "INSERT INTO admitted_mutation (mutation_id, digest) VALUES (?1, ?2)",
@@ -22111,10 +22129,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(
-            replayed,
-            vfs::TemporaryRenameOutcome::Applied { generation: 2, .. }
-        ));
+        // The cache-level outcome of a post-publication replay is not asserted:
+        // the save path still reports `Applied` for it, which ORNA-VFS-008
+        // forbids at the outcome level. That gap is open (see the PR body);
+        // only the durable invariants below are claimed.
+        let _ = replayed;
         assert_eq!(
             state
                 .latest_checkpoint()
@@ -22133,6 +22152,107 @@ mod tests {
             admitted_row(&state, &identity, &[1]).await.as_deref(),
             Some(accepted_row.as_slice()),
             "the replay leaves the accepted row in place"
+        );
+    }
+
+    /// Reusing a retained mutation identity after publication with different
+    /// bytes is caller error: it must be rejected as invalid input, not reported
+    /// as storage unavailability, and must leave the accepted row unchanged.
+    #[tokio::test]
+    async fn reusing_a_published_mutation_id_with_new_bytes_is_invalid() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], accepted: Vec<u8>| {
+            let identity = identity.clone();
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, b"saved").await.unwrap();
+        target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), b"saved".to_vec()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+
+        let reused_draft = target.open_draft(1 << 20).await;
+        reused_draft.truncate(0).await.unwrap();
+        reused_draft.write_at(0, b"changed").await.unwrap();
+        let reused = target
+            .commit_durable_document_save(
+                &reused_draft,
+                &state,
+                durable_save(),
+                admit(id(7), b"changed".to_vec()),
+                &NoFault,
+            )
+            .await;
+        assert!(
+            matches!(
+                reused,
+                Err(vfs::VfsSaveError::Activation(TableActivationError::Runtime(
+                    RuntimeError::InvalidTableMutation
+                )))
+            ),
+            "id reuse with different bytes must be InvalidTableMutation"
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(b"saved".as_slice()),
+            "the rejected reuse leaves the accepted row in place"
         );
     }
 
