@@ -22,8 +22,8 @@ use orna_project_v1::{
 };
 use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
-    HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding, Repository,
-    RowMapSnapshot, RuntimeGeneration, TypedKey,
+    GraphError, HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding,
+    Repository, RepositoryReadScope, RowMapSnapshot, RuntimeGeneration, TypedKey,
     MountRowBaselines,
 };
 use orna_runtime_v1::{
@@ -38,7 +38,9 @@ use orna_runtime_v1::{
 };
 use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
-use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
+use orna_value_v1::{
+    Format3Context, Raw, SchemaDescriptor, blob_metadata_from_raw, decode_canonical_storage_value,
+};
 use sha2::{Digest, Sha256};
 
 /// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
@@ -1925,6 +1927,17 @@ impl WorkspaceFilesystem {
             writer.capture_mount_activation(&activation_tables)?;
         }
 
+        // A mount runs under the lease owner its writer holds, so accepted pins
+        // the runtime captured resolve through this graph. A read-only mount takes
+        // the owner the runtime would take; a repository without a runtime
+        // identity keeps the repository-derived owner.
+        let graph_owner_id = match &writer {
+            Some(writer) => Some(writer.owner_id),
+            None => super::runtime_identity(repository)
+                .ok()
+                .map(|(identity, _)| super::invocation_owner_id(identity)),
+        };
+
         for (relation_id, qualified_name) in tables {
             let schema = loader
                 .resolve_committed_source_table_schema(
@@ -1941,10 +1954,13 @@ impl WorkspaceFilesystem {
             let rows = context
                 .load_row_map(relation_id)
                 .map_err(|error| format!("committed row map could not be opened: {error}"))?;
-            let graph =
-                Arc::new(context.open_native_graph(&rows).map_err(|error| {
-                    format!("committed native graph could not be opened: {error}")
-                })?);
+            let graph = Arc::new(
+                match graph_owner_id {
+                    Some(owner_id) => context.open_native_graph_for_owner(&rows, owner_id),
+                    None => context.open_native_graph(&rows),
+                }
+                .map_err(|error| format!("committed native graph could not be opened: {error}"))?,
+            );
             let value_context = context.open_value_context(relation_id).map_err(|error| {
                 format!("committed row value context could not be opened: {error:?}")
             })?;
@@ -4243,8 +4259,20 @@ impl FsBuilder {
                 .pinned_field_layout
                 .field_type(field.field_id())
                 .ok_or_else(|| "committed field has no schema type".to_owned())?;
-            if let Some(metadata) = field.blob_metadata() {
-                let value_oid = metadata
+            // A selected Blob takes this branch even when the pinned field is a null
+            // optional, so a CWD replacement renders. A committed Blob keeps the branch for
+            // every non-null selection, so a selection that is not a Blob is still refused.
+            if selects_blob(&value)
+                || (field.blob_metadata().is_some() && !stored_value_is_null(&value))
+            {
+                // The selected value is the Blob the mount shows: the CWD value when
+                // the runtime holds the row, otherwise the pinned value. A null
+                // selection shows no Blob and takes the null branch below.
+                let payload = selected_blob_payload(&value);
+                let selected = blob_metadata_from_raw(payload).map_err(|error| {
+                    format!("committed Blob field {field_name} holds no Blob value: {error:?}")
+                })?;
+                let value_oid = selected
                     .descriptor_oid()
                     .ok_or_else(|| "committed Blob field has no descriptor identity".to_owned())?;
                 let algorithm = match value_oid.len() {
@@ -4254,18 +4282,57 @@ impl FsBuilder {
                 };
                 let descriptor = NativeOid::new(algorithm, value_oid.as_bytes())
                     .map_err(|error| format!("committed Blob descriptor is invalid: {error:?}"))?;
-                let stored = source
+                let read = source
                     .graph
-                    .read_stored_blob_value(&row, &descriptor, &row_scope)
-                    .map_err(|error| {
-                        format!("committed Blob reference could not be admitted: {error:?}")
-                    })?;
-                let annotation = stored.annotation();
-                let suffix = annotation.suffix().or(metadata.suffix()).map(str::to_owned);
-                let media_type = annotation.media_type().to_owned();
+                    .read_stored_blob_value(&row, &descriptor, &row_scope);
+                let (media_type, suffix, reference) = match read {
+                    Ok(stored) => {
+                        // The pinned row names this descriptor, so its reference is the
+                        // committed Blob. The media type and suffix are the selected value's:
+                        // the descriptor carries no annotation, so a CWD row may annotate the
+                        // same content differently from the pinned row. The descriptor fixes
+                        // the content identity, so the selected length and digest must agree.
+                        let identity = ContentIdentity::new(selected.length(), selected.sha256())
+                            .map_err(|error| {
+                                format!("committed Blob identity is invalid: {error:?}")
+                            })?;
+                        if stored.reference().content_identity() != identity {
+                            return Err(format!(
+                                "committed Blob field {field_name} does not match its selected identity"
+                            ));
+                        }
+                        (
+                            selected.media_type().to_owned(),
+                            selected.suffix().map(str::to_owned),
+                            stored.reference().clone(),
+                        )
+                    }
+                    // A CWD replacement stores a descriptor the pinned row does not
+                    // name. Only an accepted pin the runtime holds may supply it.
+                    Err(GraphError::DescriptorNotInRow) => {
+                        let reference = admit_accepted_replacement(
+                            self.writer.as_deref(),
+                            &source.graph,
+                            &descriptor,
+                            selected.length(),
+                            selected.sha256(),
+                            &row_scope,
+                        )?;
+                        (
+                            selected.media_type().to_owned(),
+                            selected.suffix().map(str::to_owned),
+                            reference,
+                        )
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "committed Blob reference could not be admitted: {error:?}"
+                        ));
+                    }
+                };
                 let file_name = orna_runtime_v1::vfs::project_content_name(
                     field_name,
-                    annotation.media_type(),
+                    media_type.as_str(),
                     suffix.as_deref(),
                 )
                 .map_err(|error| {
@@ -4276,16 +4343,16 @@ impl FsBuilder {
                 let projected = if is_optional_field(field_type) {
                     VfsStoredField::content_optional(
                         field_name.clone(),
-                        annotation.media_type(),
+                        media_type.as_str(),
                         suffix.clone(),
-                        metadata.length(),
+                        selected.length(),
                     )
                 } else {
                     VfsStoredField::content(
                         field_name.clone(),
-                        annotation.media_type(),
+                        media_type.as_str(),
                         suffix.clone(),
-                        metadata.length(),
+                        selected.length(),
                     )
                 };
                 projected_fields.push(projected);
@@ -4294,10 +4361,10 @@ impl FsBuilder {
                     file_name: file_name.clone(),
                     media_type,
                     suffix,
-                    reference: stored.reference().clone(),
+                    reference: reference.clone(),
                     replacement_bytes: None,
                 });
-                blob_files.push((file_name, stored.reference().clone()));
+                blob_files.push((file_name, reference));
             } else if stored_value_is_null(&value) {
                 projected_fields.push(VfsStoredField::null(field_name.clone()));
             } else {
@@ -4809,6 +4876,58 @@ fn is_optional_field(field_type: &Raw) -> bool {
 fn stored_value_is_null(value: &Raw) -> bool {
     matches!(value, Raw::Null)
         || matches!(value, Raw::Tag(60013, option) if matches!(option.as_ref(), Raw::Array(parts) if matches!(parts.as_slice(), [Raw::Int(index)] if index.to_string() == "0")))
+}
+
+/// The Blob payload a row field value selects: a present optional's payload, or the bare Blob.
+fn selected_blob_payload(value: &Raw) -> &Raw {
+    match value {
+        Raw::Tag(60013, option) => match option.as_ref() {
+            Raw::Array(parts) => match parts.as_slice() {
+                [Raw::Int(index), payload] if index.to_string() == "1" => payload,
+                _ => value,
+            },
+            _ => value,
+        },
+        _ => value,
+    }
+}
+
+/// Whether a selected row value shows a Blob: a bare Blob or a present optional's Blob.
+fn selects_blob(value: &Raw) -> bool {
+    matches!(selected_blob_payload(value), Raw::Tag(orna_value_v1::ROV3_BLOB_TAG, _))
+}
+
+/// Admits the accepted pin that holds the selected replacement content for a descriptor the
+/// pinned row does not name. Every pin matching the selected length and SHA-256 is tried in
+/// turn; when none is admitted the Blob is refused rather than served from the committed row.
+fn admit_accepted_replacement(
+    writer: Option<&MountWriter>,
+    graph: &NativeGraphContext,
+    descriptor: &NativeOid,
+    length: u64,
+    sha256: [u8; 32],
+    scope: &RepositoryReadScope,
+) -> Result<AdmittedBlobReference, String> {
+    let writer = writer.ok_or_else(|| {
+        "committed Blob content is absent from the row and no CWD runtime holds it".to_owned()
+    })?;
+    let pins = writer
+        .runtime
+        .block_on(writer.state.accepted_content_pins_for_descriptor(descriptor))
+        .map_err(|error| format!("accepted content pins could not be listed: {error:?}"))?;
+    let identity = ContentIdentity::new(length, sha256)
+        .map_err(|error| format!("committed Blob identity is invalid: {error:?}"))?;
+    let mut refusal = "no accepted pin holds the selected Blob content".to_owned();
+    for pin in pins
+        .iter()
+        .filter(|pin| pin.content_length() == length && *pin.content_sha256() == sha256)
+    {
+        match graph.admit_accepted_blob_pin(pin.pin_id(), descriptor, identity, scope) {
+            Ok(reference) => return Ok(reference),
+            Err(error) => refusal = format!("accepted Blob pin could not be admitted: {error:?}"),
+        }
+    }
+    Err(refusal)
 }
 
 fn render_stored_source_value(value: &Raw) -> Result<String, String> {

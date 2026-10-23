@@ -2013,10 +2013,17 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
     if reader.at != bytes.len() {
         return Err(Error::TrailingBytes);
     }
+    blob_metadata_from_raw(&raw)
+}
+
+/// Projects an already-decoded ROV-3 Blob value to payload-free metadata: the
+/// same projection `decode_rov3_blob_metadata` applies to stored bytes. Callers
+/// that hold a decoded field value use this rather than re-encoding it.
+pub fn blob_metadata_from_raw(raw: &Raw) -> Result<BlobMetadata> {
     let Raw::Tag(ROV3_BLOB_TAG, payload) = raw else {
         return Err(Error::InvalidProfile);
     };
-    let fields = array(&payload)?;
+    let fields = array(payload)?;
     let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
