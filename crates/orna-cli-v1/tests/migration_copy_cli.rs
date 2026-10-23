@@ -72,6 +72,21 @@ fn run_copy(
         .unwrap()
 }
 
+fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            source.to_str().unwrap(),
+            "--debug",
+            "migrate",
+            "abort",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let parent = TempDir::new().unwrap();
@@ -549,4 +564,391 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
             Some(journal)
         );
     }
+}
+
+#[test]
+fn cli_migration_copy_runtime_intent_is_identical_across_preparations() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    for destination in [&first, &second] {
+        let output = run_copy(&source, destination, "0", &git_trace);
+        assert!(
+            output.status.success(),
+            "migration copy: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let runtime_intent = |destination: &Path| {
+        Repository::discover(destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .expect("prepared migration journal")
+            .runtime_intent_id()
+            .expect("prepared migration runtime intent")
+    };
+    assert_eq!(
+        runtime_intent(first.as_path()),
+        runtime_intent(second.as_path())
+    );
+}
+
+#[test]
+fn cli_migration_copy_abort_discards_only_the_prepared_candidate() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let source_head = git_output(&source, &["rev-parse", "HEAD"]);
+    let source_format = fs::read(source.join(".orna/format.orna")).unwrap();
+
+    // The source worktree, and the directory that contains it, are never a
+    // discard target.
+    for refused in [source.as_path(), parent.path()] {
+        let output = run_abort(&source, refused);
+        assert!(!output.status.success(), "abort of {}", refused.display());
+    }
+    assert!(source.join("main.orna").is_file());
+
+    // An unrelated directory is refused and keeps its contents.
+    let unrelated = parent.path().join("unrelated");
+    fs::create_dir(&unrelated).unwrap();
+    fs::write(unrelated.join("keep.txt"), b"keep\n").unwrap();
+    let output = run_abort(&source, &unrelated);
+    assert!(!output.status.success(), "abort of an unrelated directory");
+    assert_eq!(fs::read(unrelated.join("keep.txt")).unwrap(), b"keep\n");
+
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!destination.exists());
+    assert_eq!(git_output(&source, &["rev-parse", "HEAD"]), source_head);
+    assert_eq!(
+        fs::read(source.join(".orna/format.orna")).unwrap(),
+        source_format
+    );
+
+    let recopied = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        recopied.status.success(),
+        "migration copy after abort: {}",
+        String::from_utf8_lossy(&recopied.stderr)
+    );
+    assert!(
+        Repository::discover(&destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .is_some()
+    );
+}
+
+/// The reserved sibling a discard renames a prepared copy to.
+fn quarantine_of(destination: &Path) -> std::path::PathBuf {
+    orna_repository_v1::migration_copy::discard_quarantine_path(destination).unwrap()
+}
+
+/// Whether `copy` still holds the publication journal of a prepared migration.
+fn journal_is_present(copy: &Path) -> bool {
+    Repository::discover(copy)
+        .unwrap()
+        .read_publication_journal()
+        .unwrap()
+        .is_some()
+}
+
+/// Asserts that a migration command refused without panicking: exit status 1
+/// and the E2100 diagnostic titled `title`.
+fn assert_refused(output: &std::process::Output, title: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains(title), "{stderr}");
+}
+
+#[test]
+fn cli_migration_copy_abort_finishes_a_discard_interrupted_after_the_quarantine_rename() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    // The rename is the commit point: the source may move on afterwards.
+    let quarantine = quarantine_of(&destination);
+    fs::rename(&destination, &quarantine).unwrap();
+    fs::write(source.join("notes.txt"), b"committed after the commit point\n").unwrap();
+    git_output(&source, &["add", "notes.txt"]);
+    git_output(&source, &["commit", "-m", "source moved after the commit point"]);
+
+    let finished = run_abort(&source, &destination);
+    assert!(
+        finished.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&finished.stdout)
+            .contains("discarded prepared format-3 migration copy")
+    );
+    assert!(!quarantine.exists());
+    assert!(!destination.exists());
+
+    let repeated = run_abort(&source, &destination);
+    assert!(
+        repeated.status.success(),
+        "repeated migration abort: {}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&repeated.stdout).contains("nothing to discard"));
+}
+
+#[test]
+fn cli_migration_copy_abort_finishes_a_quarantine_whose_git_metadata_is_gone() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let quarantine = quarantine_of(&destination);
+    fs::rename(&destination, &quarantine).unwrap();
+    // A quarantine is removed without being validated again.
+    fs::remove_dir_all(quarantine.join(".git")).unwrap();
+
+    let finished = run_abort(&source, &destination);
+    assert!(
+        finished.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    assert!(!quarantine.exists());
+}
+
+#[test]
+fn cli_migration_copy_abort_of_a_never_prepared_destination_changes_nothing() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let destination = parent.path().join("candidate");
+    let entries = |directory: &Path| {
+        let mut names: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = entries(parent.path());
+    let output = run_abort(&source, &destination);
+    assert!(
+        output.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("nothing to discard"));
+    assert_eq!(entries(parent.path()), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_migration_copy_abort_refuses_a_symlink_to_the_prepared_candidate() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let link = parent.path().join("link");
+    std::os::unix::fs::symlink(&destination, &link).unwrap();
+
+    let output = run_abort(&source, &link);
+    assert_refused(&output, "migration copy could not be discarded");
+    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(destination.is_dir());
+    assert!(journal_is_present(&destination));
+}
+
+#[test]
+fn cli_migration_copy_abort_refuses_an_unstaged_source_edit_until_it_is_undone() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let original = fs::read(source.join("main.orna")).unwrap();
+    fs::write(source.join("main.orna"), b"unstaged edit after prepare\n").unwrap();
+
+    let refused = run_abort(&source, &destination);
+    assert_refused(&refused, "migration copy could not be discarded");
+    assert!(destination.is_dir());
+    assert!(journal_is_present(&destination));
+
+    fs::write(source.join("main.orna"), &original).unwrap();
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn cli_migration_copy_abort_refuses_a_source_commit_made_after_prepare() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    fs::write(source.join("notes.txt"), b"committed after prepare\n").unwrap();
+    git_output(&source, &["add", "notes.txt"]);
+    git_output(&source, &["commit", "-m", "source moved after prepare"]);
+
+    let refused = run_abort(&source, &destination);
+    assert_refused(&refused, "migration copy could not be discarded");
+    assert!(destination.is_dir());
+    assert!(journal_is_present(&destination));
+}
+
+#[test]
+fn cli_migration_copy_leaves_the_source_refs_unchanged() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let refs_before = git_output(&source, &["for-each-ref"]);
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let refs_prepared = git_output(&source, &["for-each-ref"]);
+    assert_eq!(refs_prepared, refs_before);
+    assert!(!String::from_utf8_lossy(&refs_prepared).contains("refs/orna/migration-"));
+
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert_eq!(git_output(&source, &["for-each-ref"]), refs_before);
+}
+
+#[test]
+fn cli_migration_copy_unstaged_source_edit_changes_the_runtime_intent() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let first = parent.path().join("first");
+    let prepared = run_copy(&source, &first, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    fs::write(source.join("main.orna"), b"unstaged edit after the first prepare\n").unwrap();
+    let second = parent.path().join("second");
+    let prepared = run_copy(&source, &second, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let runtime_intent = |destination: &Path| {
+        Repository::discover(destination)
+            .unwrap()
+            .read_publication_journal()
+            .unwrap()
+            .expect("prepared migration journal")
+            .runtime_intent_id()
+            .expect("prepared migration runtime intent")
+    };
+    assert_ne!(runtime_intent(first.as_path()), runtime_intent(second.as_path()));
+}
+
+#[test]
+fn cli_migration_copy_refuses_while_a_discard_quarantine_is_pending() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    initialize_legacy_source(&source);
+    let git_trace = parent.path().join("git-trace.log");
+    let destination = parent.path().join("candidate");
+    let prepared = run_copy(&source, &destination, "0", &git_trace);
+    assert!(
+        prepared.status.success(),
+        "migration copy: {}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let quarantine = quarantine_of(&destination);
+    fs::rename(&destination, &quarantine).unwrap();
+
+    let refused = run_copy(&source, &destination, "0", &git_trace);
+    assert_refused(&refused, "migration copy could not be prepared or recovered");
+    assert!(!destination.exists());
+    assert!(journal_is_present(&quarantine));
+
+    let discarded = run_abort(&source, &destination);
+    assert!(
+        discarded.status.success(),
+        "migration abort: {}",
+        String::from_utf8_lossy(&discarded.stderr)
+    );
+    assert!(!quarantine.exists());
 }
