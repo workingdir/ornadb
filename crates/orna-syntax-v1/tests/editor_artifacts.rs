@@ -343,5 +343,5 @@ fn semantic_legend_counts_match_the_listed_legend() {
     let (token_types, token_modifiers) = editor::semantic_legend_counts();
     assert_eq!(token_types, editor::legend_token_types().count());
     assert_eq!(token_modifiers, editor::TOKEN_MODIFIERS.len());
-    assert_eq!((token_types, token_modifiers), (11, 3));
+    assert_eq!((token_types, token_modifiers), (14, 4));
 }
