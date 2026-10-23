@@ -231,6 +231,7 @@ fn ui_value_type_name(value: &Value) -> String {
         Value::Date(_) => "std.date".into(),
         Value::Uuid(_) => "std.uuid".into(),
         Value::Reference(_) => "std.reference".into(),
+        Value::TableReference(_) => "std.reference".into(),
         Value::Instant { .. } => "std.timestamp".into(),
         Value::Duration { .. } => "std.duration".into(),
         Value::Period { .. } => "std.period".into(),
