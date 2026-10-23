@@ -1005,7 +1005,7 @@ fn committed_snapshot_loader_rejects_shared_subtree_tree_bomb_before_expansion()
 
     assert!(matches!(
         loader.load_committed_snapshot(&repository, &commit),
-        Err(ProjectLoadError::RepositoryLimit)
+        Err(ProjectLoadError::SourceTreeLimit)
     ));
 }
 
