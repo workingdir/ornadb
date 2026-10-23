@@ -37,10 +37,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y emacs-nox
 
+      # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
+      # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
       - name: Test the orna-cli-v1 integration suite
         env:
           ORNA_REQUIRE_FUSE: "1"
-        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata
 
       - name: Test the publication crash-barrier matrix
         run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
