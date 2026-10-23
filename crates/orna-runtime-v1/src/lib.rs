@@ -19660,11 +19660,11 @@ async fn append_mutations_with_catalogue_tx(
         .unwrap_or(0)
         .checked_add(1)
         .ok_or(RuntimeError::RecoveryInvalid)?;
+    // Scan the whole batch before the first write: a mixed batch that carries a
+    // retained identity must leave no pending or admitted row behind. A retained
+    // id here is id reuse (an exact replay was short-circuited by the caller),
+    // reported as a caller error, not as storage failure (ORNA-VFS-008).
     for mutation in mutations {
-        // A retained identity reaching this point is id reuse: an exact replay
-        // was already short-circuited above, so a retained id here is a caller
-        // error, not a storage failure (ORNA-VFS-008). The check runs before any
-        // write so a rejected batch leaves no pending row behind.
         let mut retained_rows = connection
             .query(
                 "SELECT 1 FROM admitted_mutation WHERE mutation_id = ?1",
@@ -19680,6 +19680,8 @@ async fn append_mutations_with_catalogue_tx(
         {
             return Err(RuntimeError::InvalidTableMutation);
         }
+    }
+    for mutation in mutations {
         connection
             .execute(
                 "INSERT INTO pending_mutation (mutation_id, payload, digest) VALUES (?1, ?2, ?3)",
@@ -22138,10 +22140,10 @@ mod tests {
             )
             .await
             .unwrap();
-        // The cache-level outcome of a post-publication replay is not asserted:
-        // the save path still reports `Applied` for it, which ORNA-VFS-008
-        // forbids at the outcome level. That gap is open (see the PR body);
-        // only the durable invariants below are claimed.
+        // The outcome of a post-publication replay is deliberately not asserted
+        // here. The outcome property lives in the ignored twin
+        // `replaying_a_published_vfs_save_reports_the_idempotent_outcome`
+        // (ornadb-5il1.354). Only the durable invariants below are claimed.
         let _ = replayed;
         assert_eq!(
             state
@@ -22164,11 +22166,11 @@ mod tests {
         );
     }
 
-    /// ORNA-VFS-008 outcome shape (open): a post-publication replay must report
-    /// the already-durable generation, not a second acceptance.
-    /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
-    /// replay of an already-accepted candidate after publication must still
-    /// not append a second mutation or checkpoint.
+    /// ORNA-VFS-008 outcome property (open gap, bead ornadb-5il1.354): publication
+    /// prunes the pending mutation record, and an exact replay of an accepted
+    /// candidate after publication must report the already-durable generation,
+    /// not a second acceptance. Ignored until the outcome shape is fixed; the
+    /// active test above asserts only durable state.
     #[ignore = "ornadb-5il1.354: ORNA-VFS-008 outcome shape (SPEC-QUESTIONS Q2)"]
     #[tokio::test]
     async fn replaying_a_published_vfs_save_reports_the_idempotent_outcome() {
@@ -22398,6 +22400,73 @@ mod tests {
             pending_before,
             "a rejected retained id must not write a pending row first"
         );
+    }
+
+    /// A mixed batch carrying a retained identity is rejected before any write:
+    /// the fresh mutation in the same batch must not be admitted.
+    #[tokio::test]
+    async fn append_path_mixed_batch_with_retained_id_writes_nothing() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let retained_payload = b"retained-append".to_vec();
+        let retained = Mutation {
+            id: id(51),
+            digest: Sha256::digest(&retained_payload).into(),
+            payload: retained_payload,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(
+            &transaction,
+            context.capture(),
+            std::slice::from_ref(&retained),
+            retained.digest,
+            &NoFault,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let fresh_payload = b"fresh-append".to_vec();
+        let fresh = Mutation {
+            id: id(52),
+            digest: Sha256::digest(&fresh_payload).into(),
+            payload: fresh_payload,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let pending_before = pending_count(&transaction).await;
+        assert_eq!(
+            append_mutations_tx(
+                &transaction,
+                context.capture(),
+                &[fresh.clone(), retained.clone()],
+                fresh.digest,
+                &NoFault,
+            )
+            .await
+            .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+        assert_eq!(pending_count(&transaction).await, pending_before);
+        let mut rows = transaction
+            .query(
+                "SELECT COUNT(*) FROM admitted_mutation WHERE mutation_id = ?1",
+                params![fresh.id.to_vec()],
+            )
+            .await
+            .unwrap();
+        let admitted: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(admitted, 0, "the fresh mutation of a rejected batch is not admitted");
     }
 
     async fn pending_count(connection: &Connection) -> i64 {
