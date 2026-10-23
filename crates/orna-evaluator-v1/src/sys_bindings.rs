@@ -1302,7 +1302,7 @@ const BLOB_READ_OPERATIONS: [&str; 5] = [
 ];
 
 /// Largest byte count one read-side call may return or materialise (ORNA-BLOB-011).
-const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
 
 /// True when `operation` is one of the portable read-side Blob operations.
 pub(crate) fn is_blob_read_operation(operation: &str) -> bool {
@@ -1335,7 +1335,6 @@ pub(crate) fn dispatch_blob_from_bytes(values: &[BigInt]) -> Result<ContextValue
 /// Typed result of one read-side Blob call, before evaluator value conversion.
 pub(crate) enum BlobReadValue {
     Int(u64),
-    Digest([u8; 32]),
     Blob(ContextValue),
     Bytes(Vec<u8>),
     Unit,
@@ -1348,8 +1347,32 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
         ValueError::InvalidContext => "sys.blob.reference_context",
         ValueError::ContentUnavailable => "sys.blob.unavailable",
         ValueError::InvalidRange => "sys.blob.bounds",
-        ValueError::Limit => "sys.blob.limit",
-        _ => "sys.blob.corrupt",
+        ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
+        ValueError::Truncated
+        | ValueError::TrailingBytes
+        | ValueError::Unsupported
+        | ValueError::NonCanonical
+        | ValueError::InvalidUtf8
+        | ValueError::InvalidTag
+        | ValueError::InvalidValue
+        | ValueError::DuplicateOrUnorderedMapKey
+        | ValueError::ProtectedValue
+        | ValueError::InvalidPath
+        | ValueError::InvalidSchema
+        | ValueError::DecimalLimit
+        | ValueError::DivisionByZero
+        | ValueError::NonFiniteDecimal
+        | ValueError::InvalidMediaType
+        | ValueError::InvalidSuffix
+        | ValueError::IncompatibleSuffix
+        | ValueError::InvalidProfile
+        | ValueError::InvalidOid
+        | ValueError::ContentDigestMismatch
+        | ValueError::MissingDescriptor
+        | ValueError::RoleMismatch { .. }
+        | ValueError::OwnerExpired
+        | ValueError::Cancelled
+        | ValueError::SinkFailed => "sys.blob.corrupt",
     };
     redacted_error(code)
 }
@@ -1365,9 +1388,11 @@ pub(crate) fn dispatch_blob_read(
     let blob = source.blob().map_err(blob_read_failure)?;
     match (operation, bounds) {
         ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
-        ("sys.blob.digest", []) => Ok(BlobReadValue::Digest(blob.content_identity().sha256())),
+        // The declared Digest result has no evaluator value representation yet,
+        // so it is a typed failure rather than a Blob-shaped stand-in.
+        ("sys.blob.digest", []) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
         ("sys.blob.verify", []) => {
-            blob.read_to_end().map_err(blob_read_failure)?;
+            blob.verify().map_err(blob_read_failure)?;
             Ok(BlobReadValue::Unit)
         }
         ("sys.blob.to_bytes", []) => {
@@ -1792,11 +1817,12 @@ mod tests {
             panic!("length must return Int");
         };
         assert_eq!(length, 10);
-        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
-        else {
-            panic!("digest must return Digest");
-        };
-        assert_eq!(digest, Blob::from_bytes(payload.to_vec()).content_identity().sha256());
+        assert_eq!(
+            dispatch_blob_read("sys.blob.digest", &source, &[])
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("ORNA-EVAL-UNSUPPORTED".to_owned())
+        );
         assert!(matches!(
             dispatch_blob_read("sys.blob.verify", &source, &[]),
             Ok(BlobReadValue::Unit)
