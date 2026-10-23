@@ -4418,13 +4418,21 @@ fn admin_reference_descriptor(
     }
 }
 
+/// Replays a stored failure or outcome for an admitted invocation.
+///
+/// A `failure:stale_capture` row stores only the admitted generation and the
+/// class (ORNA-ADMIN-001), not the rejected capture. Replay therefore returns
+/// `StaleCapture` with the CWD capture current at replay time. Callers and
+/// tests MUST compare that rejection by class, not by its `current` payload,
+/// which may differ after later commits. A capture failure at replay surfaces
+/// its own error instead of the recorded class.
 async fn replay_admin_stream_result(
     connection: &Connection,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
     if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
         if failure == "stale_capture" {
-            // The stored row proves the admission was stale; the rejection carries the capture current at replay.
+            // Replay-time payload: see the doc comment above.
             return Err(RuntimeError::StaleCapture {
                 current: Box::new(capture_tx(connection).await?),
             });
@@ -4446,7 +4454,8 @@ async fn replay_admin_stream_result(
 }
 
 /// Stable failure class stored in admin audit rows. Exhaustive: every new
-/// variant must choose its class here.
+/// variant must choose its class here. Payload-carrying variants store only
+/// the class; their payload is not persisted (see `admin_failure_from_class`).
 fn admin_failure_class(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::InvalidIdentity => "invalid_identity",
@@ -4493,19 +4502,25 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::SessionWorkActive => "session_work_active",
         RuntimeError::TerminalOutcomeTooLarge => "terminal_outcome_too_large",
         RuntimeError::RecoveryInvalid => "recovery_invalid",
+        // Payload-carrying: the injected point is not stored, so it replays as RecoveryInvalid.
         RuntimeError::FaultInjected(_) => "fault_injected",
         RuntimeError::SystemProviderAbiInvalid => "system_provider_abi_invalid",
         RuntimeError::StorageUnavailable => "storage_unavailable",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
         RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
     }
 }
 
-/// Rebuilds the runtime error for a stored failure class. Payload-carrying
-/// classes keep no payload in the row, so they and unknown names surface as
-/// `RecoveryInvalid`; the legacy `unavailable` class predates stable names.
+/// Rebuilds the runtime error for a stored failure class.
+///
+/// Classes whose variant carries a payload that the row does not store
+/// (`fault_injected`, `legacy_head_read_only`) and unknown names surface as
+/// `RecoveryInvalid`. `stale_capture` is handled in `replay_admin_stream_result`
+/// because its payload is captured at replay. The legacy `unavailable` and
+/// the pre-PR outcome names still map to their original variants.
 fn admin_failure_from_class(class: &str) -> RuntimeError {
     match class {
-        "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+        "admin_busy" => RuntimeError::AdminBusy,
         "invalid_identity" => RuntimeError::InvalidIdentity,
         "invalid_digest" => RuntimeError::InvalidDigest,
         "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
@@ -6347,6 +6362,16 @@ impl RuntimeState {
         }
     }
 
+    /// Records a failed admin call with its admitted generation and class.
+    ///
+    /// Exemption (DESIGN-admin-audit.md slice A): when the attempt-path capture
+    /// failed (`admitted_generation` is `None`) and the re-capture here also
+    /// fails, the capture error is returned and no audit row is written. A
+    /// row is never written with generation 0 or any other placeholder, since
+    /// that would fabricate the observed generation. ORNA-ADMIN-001 requires
+    /// a failed call to record its failure; a capture-failure row needs a
+    /// nullable-generation schema decision (SPEC-QUESTIONS Q13, tracked by a
+    /// bead). Covered by `admin_capture_failure_writes_no_audit_row`.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
@@ -40057,6 +40082,127 @@ mod tests {
         assert_eq!(
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_capture_failure_writes_no_audit_row() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-capture", "admin-capture-next").checkpoint_key();
+        // Dropping the singleton makes capture_tx fail on the attempt path and
+        // again on the re-capture. Owner checks read writer_lease, not runtime_meta.
+        state
+            .connection
+            .execute("DELETE FROM runtime_meta", ())
+            .await
+            .unwrap();
+        let error = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key,
+                "maintenance boundary".into(),
+                id(72),
+            )
+            .await
+            .expect_err("capture failure must fail the call");
+        assert_eq!(error, RuntimeError::RecoveryInvalid);
+        assert!(
+            state.admin_invocation_audits().await.unwrap().is_empty(),
+            "a capture failure must not write a row, least of all with generation 0",
+        );
+    }
+
+    #[test]
+    fn admin_failure_class_round_trips_every_payload_free_variant() {
+        // The 45 payload-free variants. StaleCapture, FaultInjected and
+        // LegacyHeadReadOnly carry payloads the row does not store; they are
+        // checked by the class-only assertions below.
+        let table: &[(RuntimeError, &str)] = &[
+            (RuntimeError::InvalidIdentity, "invalid_identity"),
+            (RuntimeError::InvalidDigest, "invalid_digest"),
+            (RuntimeError::InvalidObservationReference, "invalid_observation_reference"),
+            (RuntimeError::ObservationCoordinateMismatch, "observation_coordinate_mismatch"),
+            (RuntimeError::ProcedureMaterializationConflict, "procedure_materialization_conflict"),
+            (RuntimeError::InvocationObservationConflict, "invocation_observation_conflict"),
+            (RuntimeError::InvocationStateConflict, "invocation_state_conflict"),
+            (RuntimeError::QueryObservationConflict, "query_observation_conflict"),
+            (RuntimeError::QueryStateConflict, "query_state_conflict"),
+            (RuntimeError::InvocationChildrenActive, "invocation_children_active"),
+            (RuntimeError::InvocationOwnerInvalid, "invocation_owner_invalid"),
+            (RuntimeError::InvocationTailInvalid, "invocation_tail_invalid"),
+            (RuntimeError::InvocationTailLimit, "invocation_tail_limit"),
+            (RuntimeError::StreamIdentityMismatch, "stream_identity_mismatch"),
+            (RuntimeError::StreamSourceNotReplayable, "stream_source_not_replayable"),
+            (RuntimeError::StreamCheckpointStale, "stream_checkpoint_stale"),
+            (RuntimeError::CheckpointNotReplayable, "checkpoint_not_replayable"),
+            (RuntimeError::SnapshotNotFound, "snapshot_not_found"),
+            (RuntimeError::SnapshotIncomplete, "snapshot_incomplete"),
+            (RuntimeError::SnapshotContextMismatch, "snapshot_context_mismatch"),
+            (RuntimeError::LeaseHeld, "lease_held"),
+            (RuntimeError::AdminBusy, "admin_busy"),
+            (RuntimeError::AdminInvocationConflict, "admin_invocation_conflict"),
+            (RuntimeError::OwnerLost, "owner_lost"),
+            (RuntimeError::RecoveryPending, "recovery_pending"),
+            (RuntimeError::InvalidCapture, "invalid_capture"),
+            (RuntimeError::EmptyMutationBatch, "empty_mutation_batch"),
+            (RuntimeError::InvalidTableMutation, "invalid_table_mutation"),
+            (RuntimeError::ConflictingPublicationIntent, "conflicting_publication_intent"),
+            (RuntimeError::ConflictingPublicationCommit, "conflicting_publication_commit"),
+            (RuntimeError::InvalidPublicationCommit, "invalid_publication_commit"),
+            (RuntimeError::InvalidPublicationPolicy, "invalid_publication_policy"),
+            (RuntimeError::CompactPublicationRequired, "compact_publication_required"),
+            (RuntimeError::CompactReceiptKeyMismatch, "compact_receipt_key_mismatch"),
+            (RuntimeError::InvalidCompactReceipt, "invalid_compact_receipt"),
+            (RuntimeError::RequestUnknown, "request_unknown"),
+            (RuntimeError::RequestFingerprintMismatch, "request_fingerprint_mismatch"),
+            (RuntimeError::RequestOwnerConflict, "request_owner_conflict"),
+            (RuntimeError::RequestStateConflict, "request_state_conflict"),
+            (RuntimeError::SessionClosed, "session_closed"),
+            (RuntimeError::SessionWorkActive, "session_work_active"),
+            (RuntimeError::TerminalOutcomeTooLarge, "terminal_outcome_too_large"),
+            (RuntimeError::RecoveryInvalid, "recovery_invalid"),
+            (RuntimeError::SystemProviderAbiInvalid, "system_provider_abi_invalid"),
+            (RuntimeError::StorageUnavailable, "storage_unavailable"),
+        ];
+        assert_eq!(table.len(), 45);
+        for (variant, class) in table {
+            assert_eq!(admin_failure_class(variant), *class);
+            assert_eq!(admin_failure_from_class(class), *variant, "{class}");
+        }
+        // Payload-carrying classes replay as RecoveryInvalid: the payload is not stored.
+        assert_eq!(
+            admin_failure_class(&RuntimeError::FaultInjected(FaultPoint::AfterCommit)),
+            "fault_injected",
+        );
+        assert_eq!(
+            admin_failure_from_class("fault_injected"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("legacy_head_read_only"),
+            RuntimeError::RecoveryInvalid,
+        );
+    }
+
+    #[test]
+    fn admin_failure_replays_pre_pr_class_names() {
+        // Stored by earlier builds (origin/main admin_failure_outcome): these
+        // must keep mapping to their original variants.
+        assert_eq!(admin_failure_from_class("unavailable"), RuntimeError::StorageUnavailable);
+        assert_eq!(admin_failure_from_class("admin_busy"), RuntimeError::AdminBusy);
+        assert_eq!(
+            admin_failure_from_class("invalid_observation_reference"),
+            RuntimeError::InvalidObservationReference,
+        );
+        assert_eq!(
+            admin_failure_from_class("checkpoint_not_replayable"),
+            RuntimeError::CheckpointNotReplayable,
+        );
+        assert_eq!(
+            admin_failure_from_class("stream_checkpoint_stale"),
+            RuntimeError::StreamCheckpointStale,
         );
     }
 
