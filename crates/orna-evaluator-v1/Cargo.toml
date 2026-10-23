@@ -16,7 +16,6 @@ system-host-bindings = ["dep:orna-sys-v1", "dep:orna-repository-v1"]
 browser-wasm = ["getrandom/wasm_js", "dep:uuid", "uuid/js"]
 
 [dependencies]
-base64 = "0.22.1"
 num-bigint = "0.4.6"
 num-integer = "0.1.47"
 num-traits = "0.2.19"
