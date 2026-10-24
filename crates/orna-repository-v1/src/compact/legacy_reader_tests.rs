@@ -33,6 +33,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
+use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use crate::{
     CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole, GitCommitRef,
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange,
@@ -182,9 +183,9 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&compact_schema(table).encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&compact_schema(table).encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -276,9 +277,9 @@ fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -513,9 +514,9 @@ fn compact_primitive_parquet(
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -586,9 +587,9 @@ fn compact_ovb_parquet(
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(base64(&schema.encode().unwrap())),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -697,29 +698,6 @@ fn compact_ovb_segment_for_schema(
         false,
     )
     .unwrap()
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let word = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        encoded.push(ALPHABET[((word >> 18) & 0x3f) as usize] as char);
-        encoded.push(ALPHABET[((word >> 12) & 0x3f) as usize] as char);
-        encoded.push(if chunk.len() > 1 {
-            ALPHABET[((word >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            ALPHABET[(word & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    encoded
 }
 
 fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
@@ -2607,8 +2585,9 @@ fn compact_manifest_recovery_rejects_a_same_shape_descriptor_with_the_wrong_iden
             ),
         ],
     );
-    let expected_columns = base64(&compact_columns());
-    let malformed_columns = base64(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
+    let expected_columns = orna_value_v1::base64_encode(&compact_columns());
+    let malformed_columns =
+        orna_value_v1::base64_encode(&compact_columns_for_field(Uuid::from_u64_pair(7, 40)));
     let malformed_shard = String::from_utf8(shard)
         .unwrap()
         .replacen(&expected_columns, &malformed_columns, 1)
@@ -2891,4 +2870,148 @@ fn ordinary_commit_preserves_verified_compact_manifest_and_segment_identities() 
         fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
         "untracked ordinary\n"
     );
+}
+
+fn canonical_int(value: u64) -> CanonicalValue {
+    CanonicalValue::new(OvbRaw::Int(value.into())).unwrap()
+}
+
+fn encoded_int(value: u64) -> Vec<u8> {
+    canonical_int(value).encode().unwrap()
+}
+
+fn legacy_row(key: u64, value: Option<u64>) -> CompactCommittedRow {
+    CompactCommittedRow {
+        key: canonical_int(key),
+        value: value.map(canonical_int),
+    }
+}
+
+#[test]
+fn legacy_resolution_keeps_the_greatest_generation_and_drops_deleted_keys() {
+    let rows = resolve_legacy_authoritative_rows(vec![
+        (1, vec![legacy_row(1, Some(10)), legacy_row(2, Some(20))]),
+        (3, vec![legacy_row(1, Some(30))]),
+        (2, vec![legacy_row(1, Some(40)), legacy_row(3, Some(50))]),
+        (4, vec![legacy_row(2, None)]),
+    ])
+    .unwrap();
+    let resolved: Vec<(CanonicalValue, CanonicalValue)> = rows
+        .iter()
+        .map(|row| (row.key().clone(), row.value().clone()))
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![
+            (canonical_int(1), canonical_int(30)),
+            (canonical_int(3), canonical_int(50)),
+        ]
+    );
+}
+
+#[test]
+fn legacy_resolution_rejects_two_mutations_of_one_key_at_one_generation() {
+    let duplicate = resolve_legacy_authoritative_rows(vec![
+        (7, vec![legacy_row(1, Some(1))]),
+        (7, vec![legacy_row(1, Some(2))]),
+    ]);
+    assert!(matches!(
+        duplicate,
+        Err(RepositoryError::InvalidCompactManifest)
+    ));
+}
+
+#[test]
+fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without_mutation() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0801);
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0802);
+    let schema = compact_schema_with_roles(table, &[(key, "key", 0)]);
+    let head = repo.head().unwrap().unwrap();
+    let data = compact_ovb_segment_for_schema(
+        table,
+        801,
+        CompactSegmentRole::Data,
+        &schema,
+        key,
+        compact_columns_for_mapping(key, "Int", "ovb"),
+        &[encoded_int(1), encoded_int(2), encoded_int(3)],
+        encoded_int(1),
+        encoded_int(3),
+        None,
+    );
+    let first = repo
+        .prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&schema)),
+            [80; 16],
+            [80; 32],
+            &[data],
+            "publish legacy key-only generation one",
+        )
+        .unwrap();
+    adopt_compact_fixture(&repo, &first);
+
+    let head = repo.head().unwrap().unwrap();
+    let base = repo.read_compact_manifest(&head, table).unwrap().unwrap();
+    let deletion = compact_ovb_segment_for_schema(
+        table,
+        802,
+        CompactSegmentRole::Deletion,
+        &schema,
+        key,
+        compact_columns_for_mapping(key, "Int", "ovb"),
+        &[encoded_int(2)],
+        encoded_int(2),
+        encoded_int(2),
+        None,
+    );
+    let second = repo
+        .prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            base,
+            [81; 16],
+            [81; 32],
+            &[deletion],
+            "publish legacy key-only deletion",
+        )
+        .unwrap();
+    adopt_compact_fixture(&repo, &second);
+
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+    let tables = repo.read_legacy_authoritative_tables(&head).unwrap();
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].table(), table);
+    assert_eq!(tables[0].schema(), schema_fingerprint(&schema));
+    let keys: Vec<CanonicalValue> = tables[0]
+        .rows()
+        .iter()
+        .map(|row| row.key().clone())
+        .collect();
+    assert_eq!(keys, vec![canonical_int(1), canonical_int(3)]);
+}
+
+#[test]
+fn legacy_authoritative_read_refuses_format_two_commits_without_mutation() {
+    let root = repository();
+    fs::write(
+        root.path().join(".orna/format.orna"),
+        "{repository_format: 2, row_profile: \"ORR-2\", blob_profile: \"OGB-1\", semantic_profile: \"SOV-2\", compact_profile: \"compact-storage-v2\"}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", ".orna/format.orna"]);
+    git(root.path(), &["commit", "-m", "record format two"]);
+    let repo = Repository::discover(root.path()).unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+    assert!(matches!(
+        repo.read_legacy_authoritative_tables(&head),
+        Err(RepositoryError::InvalidFormatMigration)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
 }

@@ -4342,7 +4342,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
 }
 
 #[test]
-fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
+fn std_collection_float_aggregates_fail_on_bad_inputs_and_yield_ieee_infinity() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
@@ -4374,12 +4374,8 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            include_str!("fixtures/evaluator_source_4513747d05260e45.orna"),
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-DIVIDE-BY-ZERO"
+        evaluate(include_str!("fixtures/evaluator_source_4513747d05260e45.orna")),
+        Value::new(Raw::Float(f64::INFINITY.to_bits())).unwrap()
     );
 
     for (expression, limits) in [
@@ -6156,7 +6152,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 
 #[test]
 fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
-    let collection_source = orna_standard::reference_standard_sources_v1()
+    let collection_source = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/collection.orna")
         .expect("the collection module is in the pinned standard profile")
@@ -7595,7 +7591,7 @@ fn supports_comparison_boolean_and_allowlisted_math() {
 
 #[test]
 fn pinned_standard_math_source_executes_every_public_function() {
-    let (path, source) = orna_standard::reference_standard_sources_v1()
+    let (path, source) = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .next()
         .expect("pinned standard source");
@@ -7718,7 +7714,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
             &Environment::new(),
             Limits::default(),
         )),
-        "ORNA-EVAL-ASSERT"
+        "ORNA-A091-008"
     );
     assert_eq!(
         code(evaluate_expression(

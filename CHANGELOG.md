@@ -5,6 +5,128 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A format-3 snapshot that tracks a loose row file (an unreached
+  `<table>/<key>.orna`) no longer loads with the row silently skipped:
+  loading the committed snapshot or a commit candidate fails with
+  `ORNA-REPO-CONTEXT-004` naming the file (ORNA-REPO-004, ORNA-UPGRADE-003).
+  A module a `use` reaches under a table's directory is still a module.
+  `orna commit` now also refuses a row file that `HEAD` already tracks, not
+  only one the commit adds or changes. The CLI test fixtures no longer commit
+  loose rows into format-3 repositories; row sources go straight into the
+  store.
+- Format-3 schema nodes record the Orna 1.1.0 schema identity, SHA-256 of
+  `orna.schema.v3`, NUL and the closed storage descriptor, and every row map
+  binds it. Earlier development builds recorded the descriptor's plain
+  SHA-256, so the row maps of format-3 stores they wrote no longer open;
+  re-create such a store with `orna init`, `orna commit` and `orna publish`.
+  The repository API also gives each admitted row its `orna.row.v3`
+  identity, which binds content and Blob annotations but no descriptor, page
+  or overflow object ID.
+- `orna publish` rewrites only the row pages a change touches. Maintenance
+  reads the path to each changed key and the pages beside it, rewrites those
+  pages and the branches above them, and keeps every other page by object ID
+  without reading it; the result is the same root a complete rebuild gives.
+  Earlier builds read and decoded every row of the table on each publish. A
+  row written back with the value it already holds is no change, so such a
+  publish reports nothing to publish.
+- `orna publish` stores rows larger than a row page holds inline. A value
+  whose stored encoding is over 8 KiB, or that holds more than 32 Blob
+  references of its own, is written to the shared overflow graph (a kind-3
+  node over an OGB-2 byte index, with a kind-7 index of the objects it
+  references) and its row names it with tag 60113. Large fields are lowered
+  first, so a row with one long text field keeps its other fields inline.
+  The committed rekey log lowers its rows the same way, so a rekey between
+  long keys stores each long address on its own instead of the whole row.
+  `orna query`, `orna history`, mounts and the REPL read such rows back as
+  ordinary values; earlier builds refused to publish them.
+- Format-3 row maps and the relation map cut pages by the exact ORP-1 rule:
+  the encoded node bytes, including the domain and entry-count heads, and the
+  page's distinct native refs. The same rows now give the same root as the
+  Orna 1.1.0 reference model. Earlier builds estimated sizes and summed refs,
+  so they cut pages early for large rows and for rows sharing Blob
+  descriptors.
+- A format-3 project whose `main.orna` is larger than 64 KiB can query,
+  publish, show history and mount its rows. Opening a row map pins the
+  committed `main.orna` by its blob OID instead of reading the source under a
+  64 KiB cap that store format 3 sets only for `database.orna`.
+- `orna mv OLD NEW` works in a database made by `orna init` once its first
+  `orna commit` exists. Like `git mv`, it stages the rename and commits
+  nothing. The table's declaration is renamed in the worktree module and in
+  its staged copy, and the store's identity inventory is restaged in the same
+  index update, so the table and its fields keep their IDs. Other unstaged
+  edits to the module stay unstaged. `orna commit` right after `mv` keeps the
+  table's relation and its published rows (ORNA-OBJECT-003, ORNA-CLI-001).
+  `orna mv` no longer reads or writes `.orna/object-identities.cbor` and no
+  longer moves loose-row directories, which format 3 does not have. Before the
+  first commit it refuses with E2101 because no identity is staged yet. If the
+  index update is refused, the source edit is rolled back. The Rust API adds
+  `Repository::stage_object_identities`,
+  `RelationAdmissionError::SourceNotStaged` and
+  `ObjectIdentityManifest::with_renames`.
+- Deleted the old-stack island crates `orna-client`, `orna-artifact`, `orna-protocol`, `orna-standard` and `orna-runtime-tty` (deletion programme step 7). None had a production caller: their only remaining dependents were the `orna-application-v1` dev-dependency (now removed) and each other. The `orna-standard` snapshot oracle `v1_profile.rs` is ported to `crates/orna-evaluator-v1/tests/standard_profile_v1.rs` (imports rewired to `orna-standard-sources`, fixtures moved alongside); `orna-standard-sources` remains the canonical source. The `just` recipes for the removed demos, Qt runtime and Studio shell (`runtime-tty-demo`, `client-*-demo`, `demo-suite`, `runtime-qt-*`, `studio-qt-*`, `runtime-suite`, `runtime-display-suite`, `runtime-abi-header-check`, `runtime-abi-parity`) were removed with them.
+- The `orna` CLI no longer links `orna-client` (and its HTTP, WebSocket and Qt-ABI dependencies) for the `:watch` types. `live_presentation` moved unchanged from `orna-client` into `orna-live-v1`, which the CLI already depends on (deletion programme step 4). The public API of `orna-client` no longer exports `live_presentation`; import it from `orna-live-v1` instead.
+- A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
+- Managed paths refuse a `.git` component at any depth and in any letter case,
+  including the Windows and macOS spellings Git refuses (trailing dot or space,
+  `git~1`, a `:` stream suffix and HFS ignorable characters), on write and when
+  a committed tree is loaded or listed. Before, only an exact `.git` first
+  component was refused. Path length is not capped, because Git stores names of
+  any length. Untracked user paths such as `Sub/.GIT/notes` still appear in
+  status and checkout plans, and a forced checkout leaves them in place.
+  `orna export --check` and `--restore` refuse an archive whose dependency path
+  names Git metadata before anything is restored. Managed paths also refuse a
+  backslash, a NUL byte, an empty component (`a//b`, `a/`), and `..`, absolute
+  and other non-normal components, on write, in publication and checkout
+  journals, and in compact manifests. The system worktree listing skips a
+  Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
+  as a user path.
+- `scripts/orna_extract.py` is an independent extractor. It reads a format-3
+  repository's Git objects at a commit through `git cat-file --batch`, without
+  the engine's readers, and writes the modules, the schema, the rows and each
+  Blob's bytes. It refuses any tracked `.orna/` entry other than `database.orna`
+  and `store` (ORNA-META-001).
+- Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
+  archived under `docs/decisions/archive/1.0/` with an evidence table in
+  `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
+  0119 (was 0059) and the CLIENT VM trust boundary ADR is 0120 (was 0101).
+- The live WebSocket handshake no longer accepts URL-alphabet or mixed-alphabet `Sec-WebSocket-Key` values; only padded standard base64 is accepted (RFC 6455).
+- `orna --help` names the command `orna`. It says that `unmount DIR` detaches
+  the kernel mount, including an orphaned Orna mount, and releases its view
+  record. `annotate` help no longer names a wire encoding (ORNA-UX-002). The
+  `migrate copy` help says that `--no-persistent-consumers` confirms that
+  consumer checkpoints are carried, not reset (ORNA-UPGRADE-008).
+- The Linux package archive holds only `usr/bin/orna` and its distribution
+  manifest. The retired embedded-engine manifest, its builder image and its
+  predecessor-engine fields are gone, so a default `packaging/linux/package.sh
+  build` no longer needs an input that nothing produces.
+- `orna commit` stages the format-3 store: a database made by `orna init`
+  gets its `.orna/store` on the first commit, which creates the branch on an
+  unborn HEAD. Each newly declared table is admitted with its schema node, an
+  empty row map and a relation entry. Stable object IDs live in the store as a
+  sealed identity relation keyed by UUID rather than
+  `.orna/object-identities.cbor`, which is read only from older commits. A
+  commit that fails leaves its newly staged tables free to change or drop, and
+  `orna commit` refuses to stage while an interrupted publication awaits
+  recovery. `orna publish` refuses rows whose table has no relation in the
+  committed store. Identity rows record each object's kind as the
+  specification's `sys.ObjectKind` ordinal (table 2, field 3, unit 15, type 8,
+  variant 10, type and variant fields 9), not a private integer. Stores written
+  with the private integers are not readable, and the sidecar's version 1 codes
+  are mapped only when reading an older commit.
+- `orna commit` refuses a staged index whose `.orna/store` is partial after `git rm --cached .orna/store`, leaving skip-worktree payload entries behind, with `E2302` naming the unstaged committed relation and its `git restore --staged .orna/store` remedy, instead of a generic staging failure.
+- A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
+- A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
+- `orna serve` hosts the clone's durable runtime. A live eval that inserts
+  into a project table commits the row together with its terminal outcome,
+  and resending the same request ID returns the recorded outcome without
+  running again; before, every writing eval was refused. Each eval is one
+  REPL input: a declaration, binding or import answers with typed Unit and
+  persists for the session, and an input that declares a function named
+  `serve` or `main` is an ordinary declaration rather than a one-shot module
+  run. An explicit resync is answered with the watch's latest full snapshot
+  under its own request ID; before, a changed value produced a delta with no
+  request ID.
+- `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
 - A table key whose type annotation does not resolve reports only the unresolved name, without a second primary-key encoding error.
@@ -31,13 +153,15 @@ been published.
   structured `sys.Plan`. A `sys.Diagnostic` returns a `sys.Explanation`: the
   row's own message as the summary (the explicit marker only when the row is
   redacted), its causes, its help as suggestions and the objects it names.
-  `sys.explain(FunctionRef)` is dispatched, but no catalogue records function
-  object identities yet, so every function reference reports
-  `sys.object.not_found`.
+  `sys.explain(FunctionRef)` is dispatched. The production explain catalogue
+  does not resolve function references (`resolves_functions` defaults to
+  false), so every function reference reports `sys.version.incompatible`.
+  `sys.object.not_found` applies to an unknown source, or to an unknown function
+  only when the catalogue resolves functions.
 - Changed failure codes, all now taken from the portable failure table:
   - `sys.explain`: `sys.abi.unavailable` becomes `sys.version.incompatible`.
     `sys.abi.provider_failed` becomes `sys.object.not_found` for an unknown
-    source or function, `sys.version.incompatible` for a stage or source the
+    source, `sys.version.incompatible` for a stage or source the
     planner cannot represent, and `sys.object.wrong_kind` for a reference to
     another relation. `ORNA-EVAL-TYPE` no longer rejects function and
     diagnostic arguments.
@@ -69,6 +193,26 @@ been published.
   The build checks that every published code is declared by an operation, is
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
+- A failed stream administration call (pause, resume or checkpoint reset)
+  records a stable failure class in its invocation audit row, with the
+  generation its writer fence observed. A retry under the same invocation ID
+  returns the recorded error instead of a storage-unavailable error. A stale
+  capture stores the capture that rejected the call and replays that same
+  error, even after later commits advance the CWD. A rejected stream-reference
+  resume now records its failure like a rejected pause.
+- When the CWD generation cannot be read, the row records no generation (NULL)
+  with a `failure:unobservable:<class>` outcome, and the first call still
+  returns its original error. A retry replays `<class>` as the same error when
+  the class is payload-free. The payload-carrying classes `stale_capture`,
+  `fault_injected` and `legacy_head_read_only`, and a bare legacy
+  `failure:unobservable` row, replay as `RecoveryInvalid`, because their
+  payload was never stored. The observed generation is nullable in the audit
+  schema, migrated in place for existing stores; unobservable rows are
+  excluded from the checkpoint-reset generation ordering.
+- A skip lease refused because the
+  failure is no longer open is `sys.failure.state_conflict`, not
+  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
+  no longer takes a lease purpose.
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and
@@ -78,6 +222,13 @@ been published.
   and `SystemDiagnosticAdapterError`). Also removed
   `SysHostBindingRegistry::with_explain_catalogue` and
   `CaptureFileError::code`.
+- Removed the unreachable `orna-core` catalogue bridge from `orna-runtime-v1`:
+  `CatalogueAdmission::from_artifact`,
+  `RuntimeState::commit_validated_catalogue_table_request_activation_with_revision_pair`
+  and `RuntimeState::catalogue_revision_pair_at`. Nothing called them, so every
+  catalogue admission already recorded no revision pair. `orna-runtime-v1` no
+  longer depends on `orna-core`. The `runtime_catalogue_revision_binding` table
+  stays in the state schema, so existing `state.db` files open unchanged.
 - Opening a repository format context reads only the root tree, the `.orna`
   tree and its metadata blobs, through one long-lived `git cat-file
   --batch-command` reader per repository handle. It no longer lists the whole
@@ -164,6 +315,8 @@ been published.
   `orna run` and the other write verbs exit with `E2200`. The one exception is
   a prepared migration copy (ORNA-UPGRADE-001).
 
+- `orna migrate copy` reports a source whose format context cannot be admitted as `E2100` titled `migration source could not be admitted: <cause>`, with the cause's `ORNA-REPO-CONTEXT-*` code, and creates no destination.
+
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
 
@@ -194,9 +347,12 @@ been published.
   unrelated edits so the exact result is not observed, that step is not persisted
   (fail closed); reusing a renamed-away name before save may lose identity continuity.
 - The `mv` CLI command renames committed tables and retains their table and
-  child-field IDs in uncommitted source and identity-manifest changes. It moves
-  the associated loose-row directory and can resume after a source rename is
-  interrupted before the manifest update.
+  child-field IDs in uncommitted source and identity-manifest changes. It can
+  resume after a source rename is interrupted before the manifest update. The
+  format-3 store keeps rows under the retained table ID, so `mv` moves no row
+  files. If a legacy format-1/2 loose-row directory exists, `mv` still renames
+  it. That is legacy-layout handling, not a format-3 feature: Orna 1.1.0
+  forbids loose-row writes for the new format (ORNA-UPGRADE-003).
 
 - Optional Blob fields preserve `Some` bindings through source-row admission,
   metadata queries, history diffs and offline export; overflow verification counts
@@ -314,8 +470,66 @@ been published.
   `return`, including inside anonymous functions, is checked against the
   declared result or joined into the inferred one. Blocks without a final
   expression, bare `return;`, bare `break` and `T.delete` have type `Unit`.
+- `sys.rt.info()` is linked into the production sys provider, so it evaluates
+  to a `sys.RuntimeInfo` value carrying the runtime's real coordinates instead
+  of an unlinked callable. Admission no longer reports a version diagnostic for
+  it (ORNA-SYS-006).
+- The CLI's `migrate abort DEST` discards a prepared format-3 migration copy only
+  after verifying that DEST is the copy prepared from the current source. The
+  source is unchanged. Until the verified copy is renamed to its reserved
+  sibling quarantine, a change to the source commit, index, or working tree
+  since preparation makes the command refuse and remove nothing. That rename is
+  the commit point: a repeated `migrate abort DEST` finishes an interrupted
+  removal without rechecking the source, reports nothing to discard once nothing
+  remains, and `migrate copy` refuses the destination while the quarantine
+  exists.
+- The command-line executable is now `orna`; the package and crate remain
+  `orna-cli-v1`. The former `orna-cli-v1` executable name is removed with no
+  alias or shim. Build output is `target/<profile>/orna`, and the Linux package
+  and release paths, CI, and the command examples in the README and docs name
+  `orna`.
+- `TransactionalEvaluator` and `DurableTransactionalEvaluator` now admit
+  transactions against the production catalogue by default, so a user module
+  whose path matches a conformance fixture namespace, such as
+  `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
+  conformance fixture catalogue is an explicit harness opt-in only, through
+  `TransactionalEvaluator::with_fixture_catalogue`.
 
 ## 1.0.0 — release inventory (publication pending)
+
+> **Historical inventory (note added 2026-10-21).** This section was written
+> for an Orna 1.0.0 release that was never published. Most surfaces that it
+> lists were removed from the tree before any release. Do not read it as a
+> description of the current product. The current target is Orna 1.1.0
+> (publication `final-2026-10-05`, repository writer format 3). Its reference
+> bundle `../reference/Orna-1.1.0` has 947 requirements. The Unreleased section
+> above describes current behaviour.
+>
+> These surfaces were removed. No release shipped them.
+>
+> - The previous `orna` binary of the `orna-server` package. It provided
+>   `orna source check`, `source diff` and `source apply`, daemon and server
+>   administration, runtime description, raw calls, USER state, inspection,
+>   security administration, the Inspector, `--explain`, argument files,
+>   canonical output, the JSON, table and CSV presenters, invocation tracing
+>   and the managed Unix-socket `invoke` route. Commit `4777f6213` removed it
+>   (issue #603). The current `orna` command is the `orna-cli-v1` binary. It
+>   rejects `orna+unix://` and TLS endpoints.
+> - The direct SQLite adapter that a filesystem `--db` path selected. Commits
+>   `b0f4c4f76` (issue #285) and `3dc8360b5` (issue #603) removed it. `--db
+>   PATH` now selects a local Git worktree. SQLite remains only as private
+>   runtime state.
+> - The PostgreSQL engine, its generated SQL migrations and the `_orna_kernel`
+>   tables. Commits `3dc8360b5` (issue #603) and `f1fb5684c` (issue #889)
+>   removed them.
+> - The accepted demo inventory `examples/accepted-demos.toml`. Commit
+>   `d0dbd7a59` removed it.
+> - ORV5 and ORV6 as value contracts. Orna 1.1.0 defines OVB-1, OVB-2, ROV-3
+>   and SOV-3. The CLI does not depend on the `orna-runtime-tty` crate.
+>
+> Four bullets below describe surfaces that are still in the tree. They were
+> corrected in place on 2026-10-21: `mount --at`, the system API publication
+> fields, `migrate copy`, and loose-row paths.
 
 **Status:** The Cargo workspace currently identifies itself as `1.0.0`, but this
 checkout is not a published production release. The audited immutable
@@ -330,7 +544,7 @@ decision does not declare the product baseline complete. This checkout now has
 a minimal `packaging/linux/` provenance/install artifact recipe and focused
 tests, but it has no Debian changelog, signed artifact, or clean-host
 production-package evidence.
-See the [release-mechanics decision](docs/decisions/0047-first-one-zero-release.md)
+See the [release-mechanics decision](docs/decisions/archive/1.0/0047-first-one-zero-release.md)
 for the required release authority and the
 [maintainer runbook](docs/maintainer-runbook.md) for evidence rules.
 
@@ -387,17 +601,18 @@ release gate has passed.
   editors that open with `O_TRUNC`. Existing rows are validated and replaced
   before durable data changes; sibling temporary files renamed over `data.orna`
   remain supported. `orna unmount DIR` releases the kernel mount and its view
-  record; `orna mount DIR --at SELECTOR` remains a read-only, record-only
-  snapshot view.
+  record. `orna mount DIR --at SELECTOR` starts a read-only FUSE session pinned
+  to one resolved commit; see the Unreleased section.
 - Committed snapshot loading preserves nested module import candidates while
   keeping format-3 row documents out of loose-row source discovery.
 - USER state is principal-scoped and typed. Local peer authentication supplies
   the principal; optimistic revision conflicts and invalid expected types fail
   closed. State values use the canonical ORV5 value representation.
-- The system API exposes publication metadata as typed records. `sys.Storage` and
-  `sys.MaintenanceJob` include pending and published row and byte counts.
-  `sys.PublicationPolicy` declares the size and age limits. Its schema supports
-  field access under Orna 1.1.0 Section 29.
+- The system API exposes publication metadata as typed records. `sys.Storage`
+  declares `pending_rows`, `pending_bytes`, `last_publication` and a
+  `publication_policy` field of type `sys.Value`. Orna 1.1.0 defines no
+  `sys.PublicationPolicy` type, and `sys.MaintenanceJob` has no row or byte
+  counts.
 - The Inspector exposes immutable invocation epochs, eight closed projections,
   redacted-by-default records, privilege checks, and sequence-addressable
   traces. Local SQLite inspection is narrower and stores only bounded,
@@ -427,10 +642,15 @@ release gate has passed.
   rows is unsupported.
 - The CLI's `migrate copy` command prepares or recovers a journalled candidate
   in a separate directory from a local format-1/2 repository, leaving the
-  source commit and workspace unchanged. It requires an explicit decoded
-  annotation-default count and no-persistent-consumers choice. This preparation
-  step does not convert legacy rows into a format-3 store or activate a writable
-  format-3 repository.
+  source commit and workspace unchanged. It requires a decoded annotation-default
+  count (`--annotation-defaults N`) and the `--no-persistent-consumers` flag.
+  Despite its name, that flag confirms that persistent consumer checkpoints are
+  carried, not reset. Each carried checkpoint must match a consumer identity
+  correspondence recorded in the candidate before any row is imported. A source
+  that holds live stream state (leases, claims, failures or receipts) is
+  refused. This follows ORNA-UPGRADE-008. This preparation step does not
+  convert legacy rows into a format-3 store or activate a writable format-3
+  repository.
 - Format-3 committed Blob rows require exact canonical MIME-1 media types and
   suffixes. Readers reject noncanonical stored annotations instead of
   normalizing them during metadata projection or SOV-3 conversion.
@@ -439,9 +659,10 @@ release gate has passed.
   not canonical MIME-1, or that differs from the admitted pair, so a transfer
   record cannot report an annotation the pin never admitted.
 - The CLI publication boundary validates format-3 rows against the pinned
-  committed table binding and derives portable loose-row paths from typed
-  keys; legacy formats retain committed-source path resolution. Invalid rows
-  fail closed while preserving the pending range.
+  committed table binding and writes them to the committed format-3 store. It
+  derives no loose-row paths. Loose-row paths are a format-1/2 layout only;
+  Orna 1.1.0 forbids them for new-format writes (ORNA-UPGRADE-003). Invalid
+  rows fail closed while preserving the pending range.
 - `orna history <relation> --diff <from> <to>` decodes source-owned Object row
   fields against each endpoint's committed schema and compares stored Blob
   annotations without fetching payloads.

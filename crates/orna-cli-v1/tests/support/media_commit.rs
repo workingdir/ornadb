@@ -6,13 +6,20 @@
 //! publication projects rows into the native store by it, so a harness that
 //! omits it stages a row no store root can address.
 
-use orna_conformance_v1::DurableTransactionalEvaluator;
+use std::{collections::BTreeMap, sync::Arc};
+
+use orna_conformance_v1::{
+    DurableTransactionalEvaluator, transactional_loaded_project_candidate_validator,
+};
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
-use orna_repository_v1::Repository;
+use orna_project_v1::{
+    ObjectIdentityManifest, ObjectKind, ProjectLoader, admit_source_row_with_owner_fields,
+};
+use orna_repository_v1::{Repository, RuntimeGeneration};
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
-    TerminalOutcome, WriterLease,
+    NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
+    TableObjectId, TerminalOutcome, WriterLease,
+    vfs::{VfsDurableSave, VfsSaveAdmission, VfsSaveCandidate, VfsTableRowReplacement},
 };
 use orna_storage_v1::LoosePath;
 use orna_value_v1::Format3Context;
@@ -172,16 +179,19 @@ async fn commit_capture_inner(
     }
 }
 /// One source row's named Blob captures and whether publication inserts or replaces it.
+///
+/// `source_row` is the row's complete source document. Format 3 keeps rows
+/// only in `.orna/store` (ORNA-REPO-004), so no committed file supplies it.
 #[derive(Clone, Copy)]
 pub struct SourceCaptureRow<'a> {
     pub key: &'a str,
     pub blob_fields: &'a [(&'a str, &'a str)],
-    pub source_row: Option<&'a str>,
+    pub source_row: &'a str,
     pub ordinal: u8,
     pub insert_only: bool,
 }
 
-/// Publishes every source row by its canonical mutation key and committed path.
+/// Publishes every source row by its canonical mutation key and table path.
 pub async fn commit_source_captures(
     repository: &Repository,
     state: &RuntimeState,
@@ -231,17 +241,7 @@ pub async fn commit_source_captures_for_table(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
         let logical_path = format!("{table_name}/{}.orna", capture.key);
-        let row_source = match capture.source_row {
-            Some(row_source) => row_source.to_owned(),
-            None => {
-                let committed_row = repository
-                    .read_committed_file(&commit, &logical_path, 1 << 20)
-                    .expect("the committed project contains this source row");
-                std::str::from_utf8(&committed_row)
-                    .expect("the committed source row is valid UTF-8")
-                    .to_owned()
-            }
-        };
+        let row_source = capture.source_row;
         let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
         for (field_name, expression) in capture.blob_fields {
             let value = evaluate_expression_ovb2_with_effects(
@@ -365,4 +365,153 @@ pub async fn commit_source_captures_for_table(
     )
     .await;
     drop(retained_sources);
+}
+
+/// Replaces one captured source row through the save admission the mount's
+/// durable save uses, and leaves it unpublished: the runtime holds the
+/// replacement while the repository head still commits the previous row.
+pub async fn commit_source_replacement_through_save_admission(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    relation_id: [u8; 16],
+    format_context: &Format3Context,
+    table_name: &str,
+    capture: &SourceCaptureRow<'_>,
+) {
+    assert!(!capture.insert_only, "a save admission replaces an existing row");
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(repository, &commit)
+        .expect("load the committed source project");
+    let identities = ObjectIdentityManifest::read_committed(repository, &commit)
+        .expect("read the committed identity manifest");
+    let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
+        identities
+            .records()
+            .iter()
+            .filter(|identity| identity.kind() == ObjectKind::Table && !identity.is_retired())
+            .map(|identity| {
+                (
+                    identity.qualified_name().to_owned(),
+                    TableObjectId::new(*identity.id()),
+                )
+            })
+            .collect(),
+    );
+    let schema = loader
+        .resolve_committed_source_table_schema(repository, &commit, TableObjectId::new(relation_id))
+        .expect("resolve the table from its committed identity manifest");
+    assert_eq!(schema.declaration_name(), table_name);
+    assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
+    let runtime_capture = state.capture().await.expect("capture the runtime CWD");
+    let generation = u64::try_from(runtime_capture.generation())
+        .expect("the runtime generation fits a repository generation");
+    let cwd_generation = repository
+        .cwd_generation(RuntimeGeneration::new(generation))
+        .expect("the repository CWD generation is available");
+    let table = RuntimeTableIdentity::new(table_name, TableObjectId::new(relation_id))
+        .expect("the captured table has a runtime identity");
+    let save = VfsDurableSave::new(
+        writer.owner_id,
+        cwd_generation,
+        table,
+        capture.key.as_bytes().to_vec(),
+    );
+    let admission = VfsSaveAdmission::<()>::begin(state, save, &NoFault)
+        .await
+        .expect("begin the save admission for the captured row");
+    let coordinates = admission.coordinates();
+    let logical_path = format!("{table_name}/{}.orna", capture.key);
+    let row_source = capture.source_row;
+    let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
+    for (field_name, expression) in capture.blob_fields {
+        let value = evaluate_expression_ovb2_with_effects(
+            expression,
+            &Default::default(),
+            Limits::default(),
+            bindings,
+        )
+        .expect("capture the source payload");
+        let blob_binding = bindings
+            .accept_captured_blob_for_row(&value)
+            .expect("accept the captured Blob for this row");
+        blob_fields.push(((*field_name).to_owned(), blob_binding));
+    }
+    // Keep source ids non-zero while preserving every 8-bit fixture ordinal.
+    let mut source_row_id = [capture.ordinal; 16];
+    source_row_id[0] = 1;
+    let admitted = admit_source_row_with_owner_fields(
+        &project,
+        &logical_path,
+        &row_source,
+        &schema,
+        format_context,
+        blob_fields,
+        vec![],
+        source_row_id,
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "admit source row ordinal {} ({row_source}): {error:?}",
+            capture.ordinal
+        )
+    });
+    let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+    assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
+    assert_eq!(source_mutation.table(), table_name);
+    assert_eq!(source_mutation.table_object_id(), Some(TableObjectId::new(relation_id)));
+    assert_eq!(source_mutation.key(), capture.key.as_bytes());
+    // Source-row admission creates insert-only mutations; this save writes the
+    // replacement over the stored row instead.
+    let replacement_value = source_mutation
+        .value()
+        .expect("admitted source row has a value")
+        .to_vec();
+    let mut mutation = TableMutation::new(
+        source_mutation.id(),
+        source_mutation.table().to_owned(),
+        coordinates.key().to_vec(),
+        Some(replacement_value),
+    )
+    .expect("the replacement is a valid table mutation")
+    .with_table_object_id(coordinates.table().object_id());
+    let mut pins = Vec::with_capacity(source_bindings.len());
+    for binding in source_bindings {
+        let (_, _, pin) = binding.into_parts();
+        mutation = mutation
+            .with_protected_content_pin(&pin)
+            .expect("retain the admitted Blob pin on the replacement");
+        pins.push(pin);
+    }
+    let content_transfers = pins
+        .iter()
+        .map(|pin| pin.transfer_record())
+        .collect::<Vec<_>>();
+    let replacement_bytes = mutation
+        .value()
+        .expect("the replacement row has a value")
+        .to_vec();
+    let replacement = VfsTableRowReplacement::from_admitted_mutation(
+        coordinates.table().clone(),
+        mutation,
+        pins,
+    )
+    .expect("the admitted replacement is a valid table row");
+    let validator = transactional_loaded_project_candidate_validator(
+        &project,
+        &identities,
+        coordinates.cwd_generation().clone(),
+        Arc::clone(&table_object_ids),
+        Limits::default(),
+    )
+    .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
+    let candidate = VfsSaveCandidate::new(replacement, validator)
+        .with_protected_content_transfers(replacement_bytes, content_transfers);
+    admission
+        .commit(candidate)
+        .await
+        .expect("the replacement row commits through the save admission");
 }

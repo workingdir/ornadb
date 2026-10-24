@@ -230,6 +230,16 @@ impl AdmittedReplSession {
         self
     }
 
+    /// Attaches the activation facts `sys.rt.info()` reports to this session's
+    /// pure submissions. A session without a context reports
+    /// `sys.version.incompatible` rather than inventing host facts.
+    #[cfg(feature = "system-host-bindings")]
+    #[must_use]
+    pub fn with_sys_host_context(mut self, context: crate::SysHostContext) -> Self {
+        self.runtime = self.runtime.with_sys_host_context(context);
+        self
+    }
+
     /// Returns the repository scope this session was bound to, if any.
     #[must_use]
     pub const fn repository_scope(&self) -> Option<RepositoryScope> {

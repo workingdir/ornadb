@@ -9,7 +9,7 @@ use tempfile::TempDir;
 fn project(source: &str) -> TempDir {
     let directory = tempfile::tempdir().expect("sys admission fixture project");
     std::fs::write(directory.path().join("main.orna"), source).expect("write fixture source");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -23,7 +23,7 @@ fn project(source: &str) -> TempDir {
 }
 
 fn check(project: &TempDir) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -39,7 +39,6 @@ fn check(project: &TempDir) -> Output {
 #[test]
 fn check_rejects_unlinked_sys_callables_with_version_incompatible() {
     for (source, member) in [
-        ("pub fn info() = sys.rt.info();\n", "`sys.rt.info`"),
         (
             "pub fn head() = sys.snapshot(\"HEAD~1\");\n",
             "`sys.snapshot(Str)`",
@@ -59,6 +58,20 @@ fn check_admits_the_linked_blob_annotation() {
     let project = project(
         "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");\n",
     );
+    let output = check(&project);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `sys.rt.info()` has a linked production provider, so the project checks clean:
+/// ORNA-SYS-006 requires the runtime to expose the RuntimeInfo coordinates
+/// (source/15-system.md:46).
+#[test]
+fn check_admits_the_linked_runtime_info() {
+    let project = project("pub fn info() = sys.rt.info();\n");
     let output = check(&project);
     assert!(
         output.status.success(),

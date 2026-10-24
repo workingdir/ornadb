@@ -1,0 +1,6 @@
+pub fn bad() = Contact.insert({
+    id: "alice-smith",
+    first: "Alice",
+    last: "Smith",
+    full_name: "Wrong",
+});

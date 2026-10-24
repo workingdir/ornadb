@@ -19,6 +19,7 @@ test = false
 bench = false
 
 [dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-sys-macros = { path = "../orna-sys-macros" }
 serde = { version = "1.0.229", features = ["derive"] }

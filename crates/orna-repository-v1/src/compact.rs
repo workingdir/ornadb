@@ -2167,7 +2167,7 @@ fn required_physical_metadata(
         ("orna.profile".to_owned(), COMPACT_PROFILE.to_owned()),
         ("orna.table".to_owned(), table.to_string()),
         ("orna.schema.sha256".to_owned(), hex(&schema)),
-        ("orna.columns.ovb".to_owned(), base64(columns)),
+        ("orna.columns.ovb".to_owned(), orna_value_v1::base64_encode(columns)),
         ("orna.encoder".to_owned(), encoder_version.to_owned()),
     ])
 }
@@ -2913,6 +2913,125 @@ impl Repository {
     }
 }
 
+/// One live row of a format-1 compact table after generation resolution.
+///
+/// Only rows whose winning mutation carries a value are materialized. A
+/// winning deletion leaves its key absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeRow {
+    key: CanonicalValue,
+    value: CanonicalValue,
+}
+
+impl LegacyAuthoritativeRow {
+    pub fn key(&self) -> &CanonicalValue {
+        &self.key
+    }
+
+    pub fn value(&self) -> &CanonicalValue {
+        &self.value
+    }
+}
+
+/// The authoritative live rows of one format-1 compact table, ordered by the
+/// encoded key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyAuthoritativeTable {
+    table: Uuid,
+    schema: [u8; 32],
+    rows: Vec<LegacyAuthoritativeRow>,
+}
+
+impl LegacyAuthoritativeTable {
+    pub fn table(&self) -> Uuid {
+        self.table
+    }
+
+    pub fn schema(&self) -> [u8; 32] {
+        self.schema
+    }
+
+    pub fn rows(&self) -> &[LegacyAuthoritativeRow] {
+        &self.rows
+    }
+}
+
+/// Resolves committed mutations to authoritative state. For each encoded key
+/// the mutation with the greatest generation wins, and a winning deletion
+/// leaves the key absent. Two mutations of one key at one generation are
+/// corruption.
+fn resolve_legacy_authoritative_rows(
+    mutations: Vec<(u64, Vec<CompactCommittedRow>)>,
+) -> Result<Vec<LegacyAuthoritativeRow>, RepositoryError> {
+    let mut winners: BTreeMap<Vec<u8>, (u64, CompactCommittedRow)> = BTreeMap::new();
+    for (generation, rows) in mutations {
+        for row in rows {
+            let key = row
+                .key()
+                .encode()
+                .map_err(|_| RepositoryError::InvalidCompactManifest)?;
+            if let Some((winner, _)) = winners.get(&key) {
+                if *winner == generation {
+                    return Err(RepositoryError::InvalidCompactManifest);
+                }
+                if *winner > generation {
+                    continue;
+                }
+            }
+            winners.insert(key, (generation, row));
+        }
+    }
+    Ok(winners
+        .into_values()
+        .filter_map(|(_, row)| {
+            let CompactCommittedRow { key, value } = row;
+            value.map(|value| LegacyAuthoritativeRow { key, value })
+        })
+        .collect())
+}
+
+impl Repository {
+    /// Reads the authoritative live rows of every compact table in a
+    /// format-1 commit without mutating the repository.
+    ///
+    /// The commit must open as `RepositoryFormat::Legacy1`; format-2 and
+    /// format-3 commits are refused with `InvalidFormatMigration`. Each table
+    /// is read through the verified committed-manifest boundary, so every
+    /// segment is checked before its rows take part in resolution.
+    pub fn read_legacy_authoritative_tables(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<LegacyAuthoritativeTable>, RepositoryError> {
+        let snapshot = self
+            .pin_snapshot(commit.as_str())
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        let context = self
+            .open_format_context_at(&snapshot)
+            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+        if context.repository_format() != crate::RepositoryFormat::Legacy1 {
+            return Err(RepositoryError::InvalidFormatMigration);
+        }
+        let inventory = self.read_compact_manifest_inventory(commit)?;
+        let mut tables = Vec::with_capacity(inventory.len());
+        for (table, manifest) in inventory {
+            let schema = manifest.schema();
+            let mutations = self.read_compact_committed_base_from_commit(
+                commit,
+                table,
+                schema,
+                COMPACT_PROFILE,
+                |entry, projection| Ok((entry.generation(), projection.rows().to_vec())),
+            )?;
+            tables.push(LegacyAuthoritativeTable {
+                table,
+                schema,
+                rows: resolve_legacy_authoritative_rows(mutations)?,
+            });
+        }
+        Ok(tables)
+    }
+}
+
 impl Repository {
     /// Reads every compact manifest tracked by `commit` as one committed
     /// snapshot inventory.
@@ -2929,6 +3048,8 @@ impl Repository {
         &self,
         commit: &GitCommitRef,
     ) -> Result<BTreeMap<Uuid, CompactManifest>, RepositoryError> {
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.command();
         command.args([
             "ls-tree",
@@ -3284,6 +3405,8 @@ impl Repository {
         ) {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.observer_command();
         command.env("GIT_NO_LAZY_FETCH", "1").args([
             "ls-tree",
@@ -3992,7 +4115,7 @@ fn canonical_shard(entries: &[&CompactManifestEntry]) -> Result<Vec<u8>, Reposit
             entry.max_event_time.as_ref().map(|value| format!("\"{value}\"")).unwrap_or_else(|| "null".into()),
             entry.row_count,
             entry.compressed_bytes,
-            base64(&entry.columns),
+            orna_value_v1::base64_encode(&entry.columns),
             entry.row_group_index,
             entry.bloom,
         ));
@@ -4331,72 +4454,8 @@ fn parse_hex_32(value: &str) -> Result<[u8; 32], RepositoryError> {
         .map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for group in bytes.chunks(3) {
-        let first = group[0];
-        let second = group.get(1).copied().unwrap_or(0);
-        let third = group.get(2).copied().unwrap_or(0);
-        output.push(ALPHABET[usize::from(first >> 2)] as char);
-        output.push(ALPHABET[usize::from((first & 0x03) << 4 | second >> 4)] as char);
-        output.push(if group.len() > 1 {
-            ALPHABET[usize::from((second & 0x0f) << 2 | third >> 6)] as char
-        } else {
-            '='
-        });
-        output.push(if group.len() > 2 {
-            ALPHABET[usize::from(third & 0x3f)] as char
-        } else {
-            '='
-        });
-    }
-    output
-}
-
 fn decode_base64(value: &str) -> Result<Vec<u8>, RepositoryError> {
-    if !value.len().is_multiple_of(4) {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    let mut output = Vec::with_capacity(value.len() / 4 * 3);
-    let (groups, []) = value.as_bytes().as_chunks::<4>() else {
-        return Err(RepositoryError::InvalidCompactManifest);
-    };
-    for (index, group) in groups.iter().enumerate() {
-        let last = index + 1 == value.len() / 4;
-        let first = base64_value(group[0])?;
-        let second = base64_value(group[1])?;
-        let (third, fourth) = match (group[2], group[3]) {
-            (b'=', b'=') if last => (None, None),
-            (third, b'=') if last => (Some(base64_value(third)?), None),
-            (third, fourth) if third != b'=' && fourth != b'=' => {
-                (Some(base64_value(third)?), Some(base64_value(fourth)?))
-            }
-            _ => return Err(RepositoryError::InvalidCompactManifest),
-        };
-        output.push(first << 2 | second >> 4);
-        if let Some(third) = third {
-            output.push(second << 4 | third >> 2);
-            if let Some(fourth) = fourth {
-                output.push(third << 6 | fourth);
-            }
-        }
-    }
-    if base64(&output) != value {
-        return Err(RepositoryError::InvalidCompactManifest);
-    }
-    Ok(output)
-}
-
-fn base64_value(byte: u8) -> Result<u8, RepositoryError> {
-    match byte {
-        b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
-        _ => Err(RepositoryError::InvalidCompactManifest),
-    }
+    orna_value_v1::base64_decode(value).map_err(|_| RepositoryError::InvalidCompactManifest)
 }
 
 fn is_hex(byte: u8) -> bool {
@@ -4779,9 +4838,9 @@ mod tests {
             ),
             KeyValue::new(
                 "orna.schema.ovb".into(),
-                Some(base64(&schema.encode().unwrap())),
+                Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".into(), Some(base64(columns))),
+            KeyValue::new("orna.columns.ovb".into(), Some(orna_value_v1::base64_encode(columns))),
             KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
@@ -4950,9 +5009,9 @@ mod tests {
             ),
             KeyValue::new(
                 "orna.schema.ovb".to_owned(),
-                Some(base64(&schema.encode().unwrap())),
+                Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".to_owned(), Some(base64(columns))),
+            KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
             KeyValue::new(
                 "orna.encoder".to_owned(),
                 Some("test-encoder-v1".to_owned()),
@@ -6153,5 +6212,67 @@ mod tests {
             Some(&&OvbRaw::Text("GB".into()))
         );
         assert!(!projected_values.contains_key(&computed));
+    }
+
+    #[test]
+    fn compact_manifest_witness_decodes_and_refuses_hostile_entry_paths() {
+        let table = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let witness = CompactManifestWitness {
+            table,
+            selected_ref: "refs/heads/x".into(),
+            runtime_intent_id: [1; 16],
+            cleanup_watermark: [2; 32],
+            manifest_path: managed_child(&compact_root(table), "manifest.orna").unwrap(),
+            base_sha256: [4; 32],
+            manifest_sha256: [5; 32],
+            generation: 1,
+            entries: vec![CompactManifestObject {
+                path: managed_child(&compact_data_root(table), "a.orna").unwrap(),
+                object_id: "a".repeat(40),
+                sha256: [3; 32],
+            }],
+        };
+        let mut bytes = Vec::new();
+        witness.encode(&mut bytes).unwrap();
+        assert_eq!(
+            CompactManifestWitness::decode(&bytes, &mut 0, 40).unwrap(),
+            witness
+        );
+        let data_path = witness.entries[0].path.as_path().to_str().unwrap().to_owned();
+        for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
+            let spliced = crate::tests::splice_length_prefixed(
+                &bytes,
+                &data_path,
+                hostile,
+                u32::to_be_bytes,
+            );
+            assert!(
+                CompactManifestWitness::decode(&spliced, &mut 0, 40).is_err(),
+                "compact entry path {hostile:?} must not decode"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    #[test]
+    fn manifest_base64_follows_the_workspace_strict_profile() {
+        let cases: &[(&str, bool)] = &[
+            ("", true),
+            ("Zm8=", true),
+            ("+/8=", true),
+            ("-_8=", false),
+            ("Zm8", false),
+            ("Zm9v=", false),
+            ("Zh==", false),
+            ("Zm8= ", false),
+            ("Zg==Zm9v", false),
+        ];
+        for &(input, accepted) in cases {
+            assert_eq!(decode_base64(input).is_ok(), accepted, "input {input:?}");
+        }
     }
 }

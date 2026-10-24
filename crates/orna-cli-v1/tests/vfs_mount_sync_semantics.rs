@@ -20,10 +20,9 @@ mod media_commit;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{EditorMount, require_fuse_or_skip, start_editor_mount};
+use editor_mount::{EditorMount, require_fuse_or_skip, retained_drafts, start_editor_mount};
 
 const EINVAL: i32 = 22;
-const EBUSY: i32 = 16;
 
 fn row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -97,7 +96,7 @@ async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
     }
 }
 
-/// Sets the mount root's unmount-quiesce attribute, as `orna-cli-v1` does
+/// Sets the mount root's unmount-quiesce attribute, as `orna` does
 /// before unmount.
 fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
     let root = mount_root(fixture);
@@ -481,8 +480,9 @@ async fn open_unlink_then_write_leaves_no_ghost_draft() {
 }
 
 /// ORNA-VFS-009: a temporary whose rename onto data.orna is rejected keeps the
-/// old row and the scratch; the scratch cannot be unlinked away, and the guard
-/// stays set until a corrected rename is accepted.
+/// old row and the scratch, and the guard stays set until a corrected rename is
+/// accepted. Removing a rejected scratch instead first retains its candidate in
+/// recovery storage, so the name goes away without discarding the draft.
 #[tokio::test]
 async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
     if !require_fuse_or_skip() {
@@ -514,11 +514,6 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
         "a failed rename leaves the old row",
     );
     await_draft_guard(&fixture, b'1', "the rejected scratch holds the draft guard").await;
-    let unlink =
-        std::fs::remove_file(&temporary).expect_err("unlink must not discard a rejected scratch");
-    assert_eq!(unlink.raw_os_error(), Some(EBUSY), "{unlink}");
-    assert!(temporary.exists());
-    await_draft_guard(&fixture, b'1', "a rejected unlink leaves the guard set").await;
 
     let mut corrected = OpenOptions::new()
         .read(true)
@@ -538,6 +533,37 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
         "an accepted rename resolves the rejected scratch",
     )
     .await;
+
+    let removed = fixture.row_directory.join(".data.orna.rejected-removed");
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&removed)
+        .expect("create a second temporary sibling");
+    scratch
+        .write_all(invalid_row("Rejected then removed").as_bytes())
+        .expect("write invalid temporary");
+    scratch
+        .sync_all()
+        .expect("fsync(temp) preserves the bytes and is not acceptance");
+    drop(scratch);
+    assert_errno(
+        std::fs::rename(&removed, &fixture.data_path),
+        EINVAL,
+        "rename of an invalid temporary must fail with EINVAL",
+    );
+    await_draft_guard(&fixture, b'1', "the rejected scratch holds the draft guard").await;
+    std::fs::remove_file(&removed)
+        .expect("a rejected scratch can be removed once its candidate is retained");
+    assert!(!removed.exists());
+    await_draft_guard(&fixture, b'0', "removing the rejected scratch resolves it").await;
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Rejected then removed")),
+        "the removed scratch candidate is retained in recovery storage"
+    );
+    assert!(fresh_view(&fixture).contains("Rejected corrected"));
 }
 
 /// ORNA-VFS-008: a clean handle opened before another writer's accepted save

@@ -27,7 +27,7 @@ fn editor(directory: &TempDir, name: &str, body: &str) -> std::path::PathBuf {
 }
 
 fn edit(repository: &TempDir, editor: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(repository.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("EDITOR", editor)
@@ -87,9 +87,7 @@ fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
 async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            NOTES_SOURCE, "Music", "Music/london.orna", initial,
-        );
+        format3::format3_repository_with_context(NOTES_SOURCE, "Music");
     let (identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
@@ -105,7 +103,7 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x90,
             insert_only: true,
         }],
@@ -139,11 +137,9 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
     const ORIGINAL_PIXEL: &[u8] = include_bytes!("fixtures/media/pixel.png");
 
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             include_str!("fixtures/media/empty-media-main.orna"),
             "media",
-            "media/image.orna",
-            "{ }\n",
         );
     let source = TempDir::new().unwrap();
     let original_path = Path::new(MEDIA_FIXTURES).join("pixel.png");
@@ -177,7 +173,7 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         &[media_commit::SourceCaptureRow {
             key: "image",
             blob_fields: &[("content", &capture)],
-            source_row: None,
+            source_row: "{ }\n",
             ordinal: 0xb0,
             insert_only: true,
         }],

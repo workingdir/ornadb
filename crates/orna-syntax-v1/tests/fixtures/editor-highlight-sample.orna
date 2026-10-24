@@ -1,0 +1,18 @@
+// line comment: let true 42 "quote" http://example.com/a
+/* block comment http://example.com/b with let */ pub fn after_block(): Int = 1;
+/* outer /* inner */ still outer let */ pub fn after_nested(): Int = 2;
+/** doc comment **/ pub fn after_stars(): Int = 3;
+pub fn greet(name: Str): Str = "hello {name} and {label(name)} done";
+pub fn nested(): Str = "a {f("x")} b {g({n: 1}.n)} c";
+pub fn escapes(name: Str): Str = "tab\t quote\" slash\\{name} brace\u{7b} end";
+pub fn numbers() = [42, 1_000, 0x1F, 0b1010, 3.1415, 2.5e-3, 6.02E+23f, 7f, 2026-09-01, 2026-09-01T14:30:00Z, 2026-09-01T14:30:00.123+02:00];
+pub fn money() = 12.34.decimal;
+pub fn member() = sys.ObjectKind.table;
+pub fn labelled(raw: Str) = codec.decode(raw, as: Message);
+pub fn record() = { type: 1, offset: 2 };
+pub fn literals(flag: Bool): Int = case flag { true: 1, false: 0 };
+pub fn range() = 0..self;
+pub fn unicode() = café + café;
+pub fn not_numbers() = [x42, 0x, 1__2, 1e, 2026-09-01T10:00:00.Z];
+pub fn prefixes() = formatting + letter + iffy;
+pub fn operators() = a ..= b ?? c |? d || e != f => g;

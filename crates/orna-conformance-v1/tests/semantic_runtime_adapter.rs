@@ -65,7 +65,7 @@ fn cancellation_project() -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -207,7 +207,7 @@ fn semantic_project_resolution_uses_project_relative_module_names() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -250,7 +250,7 @@ fn semantic_adapter_typechecks_imported_generic_sys_meta_with_declared_metadata(
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -328,7 +328,7 @@ fn semantic_adapter_rejects_invalid_imported_generic_sys_meta_argument() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -361,7 +361,7 @@ fn runtime_info_project(source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -386,7 +386,7 @@ fn snapshot_project(source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -411,7 +411,7 @@ fn database_project(source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -436,7 +436,7 @@ fn resolve_project(source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -721,7 +721,7 @@ fn typed_invoke_project(source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -980,7 +980,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1117,7 +1117,7 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1231,7 +1231,7 @@ async fn project_stream_admission_rejects_multiple_applicable_module_assertions(
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1468,7 +1468,7 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1519,7 +1519,7 @@ fn project_row_admission_rejects_unsupported_key_types_without_string_fallback()
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1606,7 +1606,7 @@ fn project_row_admission_rejects_path_key_and_schema_failures() {
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },
@@ -1653,7 +1653,7 @@ fn project_row_admission_admits_automatic_and_composite_keys() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -1690,7 +1690,7 @@ fn project_row_admission_rejects_computed_fields() {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -2098,7 +2098,7 @@ fn pure_project(modules: Vec<SourceUnit>) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -2124,7 +2124,7 @@ fn admission_project(module_source: &str, loose_rows: Vec<SourceUnit>) -> Projec
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -2376,9 +2376,19 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
         evaluator.load_standard_sources(&profile, [("std/math.orna".into(), source.into())],),
         StageOutcome::Passed
     );
-    assert_eq!(
+    // Standard functions are retained under their module identity, so an
+    // unqualified name is deliberately not bound here: unqualified names resolve
+    // only through an explicit `use std.<module>.{name}` in a project.
+    assert!(matches!(
         evaluator.invoke_with(
             "increment",
+            &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())),)])
+        ),
+        StageOutcome::Skipped { .. }
+    ));
+    assert_eq!(
+        evaluator.invoke_with(
+            "std.math.increment",
             &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())),)])
         ),
         StageOutcome::Passed
@@ -2658,7 +2668,7 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
                 environment: ProjectEnvironment {
                     network: false,
                     credentials: false,
-                    intrinsics: "Orna 1.0.0 core".into(),
+                    intrinsics: "Orna 1.1.0 core".into(),
                     stdlib: None,
                     initial_tables: "empty".into(),
                 },

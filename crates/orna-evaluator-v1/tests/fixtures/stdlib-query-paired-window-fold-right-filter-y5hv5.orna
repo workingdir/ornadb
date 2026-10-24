@@ -1,4 +1,4 @@
-let right_sparse: [Int] = collection_ops.filter(
+let right_sparse: [Int] = filter(
     [2, 0, 2, 1, 0, 2, 1, 0],
     value => value > 0
 );

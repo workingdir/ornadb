@@ -2211,7 +2211,7 @@ mod tests {
             Ok(())
         );
         assert!(api.provider_linked(SystemMember::Callable("sys.blob.annotate")));
-        assert!(!api.provider_linked(SystemMember::Callable("sys.rt.info")));
+        assert!(api.provider_linked(SystemMember::Callable("sys.rt.info")));
         for member in [
             SystemSurfaceMember::Callable("sys.blob.annotate_all"),
             SystemSurfaceMember::Callable("sys.snapshot"),

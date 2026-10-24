@@ -157,7 +157,7 @@ fn durable_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -358,7 +358,7 @@ fn harness_distinguishes_executed_rebinding_from_unimplemented_scenarios() {
             .iter()
             .filter(|scenario| scenario.status == EvidenceStatus::Skipped)
             .count(),
-        140
+        275
     );
 }
 
@@ -402,7 +402,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
         .await
         .expect("durable rollback execution");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+        matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
     );
     assert_failed_request_left_no_rows(&repository, identity, "Note", [44; 32]).await;
 
@@ -460,7 +460,7 @@ async fn partial_mutation_rollback_keeps_the_empty_batch_for_a_failed_request() 
         .await
         .expect("durable partial rollback execution");
     assert!(
-        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+        matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
     );
     assert_failed_request_left_no_rows(&repository, identity, "Note", [64; 32]).await;
 }
@@ -839,7 +839,7 @@ fn published_report_declares_bounded_runtime_adapter_scenarios_without_an_orna_e
     let scenarios = report["scenarios"]
         .as_array()
         .expect("scenario results are an array");
-    assert_eq!(scenarios.len(), 144);
+    assert_eq!(scenarios.len(), 279);
     for result in scenarios {
         if matches!(
             result["scenario"].as_str(),

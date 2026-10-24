@@ -6,6 +6,8 @@
 //! All public failures are stable redacted codes and inbound protocol bytes
 //! are decoded canonically.
 
+pub mod live_presentation;
+
 use futures::{
     channel::oneshot,
     executor::block_on,
@@ -104,6 +106,7 @@ pub enum Error {
     /// fenced owner.
     ApplicationDeferred,
     RuntimeUnavailable,
+    SnapshotExpired,
 }
 
 impl Error {
@@ -125,6 +128,7 @@ impl Error {
             Self::AdminBusy => "sys.admin.busy",
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
+            Self::SnapshotExpired => "wire.snapshot_expired",
         }
     }
 }
@@ -1672,6 +1676,7 @@ impl HttpResponse {
                 | Error::UnsupportedOperation
                 | Error::RequestMismatch
                 | Error::ApplicationRejected
+                | Error::SnapshotExpired
                 | Error::AdminBusy => 400,
                 Error::ApplicationDeferred | Error::RuntimeUnavailable => 503,
             },
@@ -2700,6 +2705,20 @@ impl LiveHost {
         } else {
             None
         };
+        if let Err(error) = self.verify_snapshot_pin(&envelope.message).await {
+            work.complete();
+            // Durable admission has already begun this request, so the pin
+            // rejection is a terminal correlated diagnostic, not a bare failure.
+            if let Some(outcome) =
+                self.operational_error_outcome(Some(session), &envelope, error, true)?
+            {
+                return Ok(ApplicationPreparation::Completed(
+                    self.complete(session, request, &envelope, outcome).await?,
+                ));
+            }
+            self.retain_failure(session, request, fingerprint).await?;
+            return Err(error);
+        }
         let eval_context = if self.runtime.is_some()
             && matches!(
                 envelope.message,
@@ -3069,6 +3088,7 @@ impl LiveHost {
         let (code, watch) = match error {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
+            Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3593,6 +3613,10 @@ impl LiveHost {
         message: &Message,
         fingerprint: [u8; 32],
     ) -> Result<Envelope> {
+        // A CWD pin must resolve before any activation or application effect.
+        // The caller's rejection path turns SnapshotExpired into the retained
+        // correlated diagnostic; no lease or activation may be taken first.
+        self.verify_snapshot_pin(message).await?;
         let activation_runtime = self.runtime.clone();
         let activation_lease = if activation_runtime.is_some() {
             Some(self.writer_lease().await?)
@@ -4014,8 +4038,11 @@ impl LiveHost {
                 orna_serving_v1::RequestState::Cancelled | orna_serving_v1::RequestState::Completed,
             ) => Ok(false),
             Err(ServingError::RequestUnknown) => {
+                // An id the host has never admitted is not an active target.
+                // 30-protocol.md: a cancel that names no live request is still a
+                // correlated control operation and acknowledges with Unit.
                 let Some(runtime) = &self.runtime else {
-                    return Err(Error::Denied);
+                    return Ok(false);
                 };
                 let status = runtime
                     .request_status_for_identity(RequestIdentity {
@@ -4023,9 +4050,8 @@ impl LiveHost {
                         request_id: request,
                     })
                     .await
-                    .map_err(|error| map_runtime(&error))?
-                    .ok_or(Error::Denied)?;
-                Ok(!status.state.is_terminal())
+                    .map_err(|error| map_runtime(&error))?;
+                Ok(status.is_some_and(|status| !status.state.is_terminal()))
             }
             Err(error) => Err(map_serving(error)),
         }
@@ -4671,10 +4697,10 @@ impl LiveHost {
         Ok(())
     }
 
-    /// A resync is a complete-root replacement fallback. Keep the server
-    /// watch identity stable, reject revision regressions, and permit same-
-    /// revision replay only when the complete visible tree and pinned snapshot
-    /// are unchanged.
+    /// A resync is answered with the watch's latest full snapshot. Keep the
+    /// server watch identity stable, reject revision regressions, and permit
+    /// same-revision replay only when the complete visible tree and pinned
+    /// snapshot are unchanged.
     fn prepare_watch_snapshot_replacement(
         &self,
         session: [u8; 16],
@@ -4685,37 +4711,8 @@ impl LiveHost {
             .watch_snapshots
             .get(&(session, watch))
             .ok_or(Error::ApplicationRejected)?;
-        let candidate = match &response.message {
-            Message::Snapshot { .. } | Message::Diagnostic { .. } => {
-                let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
-                    return Ok(None);
-                };
-                candidate
-            }
-            Message::Delta {
-                base_revision,
-                new_revision,
-                patches,
-                snapshot,
-            } => {
-                if response.request.is_some()
-                    || response.watch != Some(watch)
-                    || *base_revision != current.revision
-                    || *new_revision <= *base_revision
-                {
-                    return Err(Error::ApplicationRejected);
-                }
-                let present = current
-                    .present
-                    .apply_patches(patches, self.limits.protocol)
-                    .map_err(|_| Error::ApplicationRejected)?;
-                AcceptedWatchSnapshot {
-                    revision: *new_revision,
-                    present,
-                    snapshot: snapshot.clone(),
-                }
-            }
-            _ => return Err(Error::ApplicationRejected),
+        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+            return Ok(None);
         };
         if candidate.revision < current.revision
             || candidate.revision == current.revision && candidate != *current
@@ -4774,6 +4771,56 @@ impl LiveHost {
             }
         }
         Ok(())
+    }
+
+    /// Resolves a client-supplied CWD pin before any application effect runs.
+    /// Only the admitted writable generation is exact here. Any other
+    /// generation is never evaluated against current state: a generation the
+    /// runtime cannot resolve is expired, and a retained historical generation
+    /// is unsupported because read-only historical evaluation is not wired.
+    /// Commit pins are unsupported on durable hosts because the runtime cannot
+    /// read their objects.
+    async fn verify_snapshot_pin(&self, message: &Message) -> Result<()> {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return Ok(());
+        };
+        let snapshot = match message {
+            Message::Eval { database, .. } | Message::Watch { database, .. } => {
+                database.snapshot.as_ref()
+            }
+            _ => None,
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let CanonicalSnapshot::Cwd {
+            database,
+            runtime: pinned_runtime,
+            generation,
+            ..
+        } = snapshot
+        else {
+            return Err(Error::UnsupportedOperation);
+        };
+        let current = runtime
+            .capture()
+            .await
+            .map_err(|error| map_runtime(&error))?;
+        if current.database_id() == *database
+            && current.runtime_id() == *pinned_runtime
+            && current.generation() == generation
+        {
+            return Ok(());
+        }
+        match runtime.resolve_historical_snapshot(snapshot).await {
+            Ok(_) => Err(Error::UnsupportedOperation),
+            Err(
+                RuntimeError::SnapshotNotFound
+                | RuntimeError::SnapshotIncomplete
+                | RuntimeError::SnapshotContextMismatch,
+            ) => Err(Error::SnapshotExpired),
+            Err(error) => Err(map_runtime(&error)),
+        }
     }
 
     /// The execution host calls these around work it has accepted from a
@@ -5085,10 +5132,13 @@ fn validate_snapshot_response(
     })
 }
 
-/// Watch requests may be rejected with a structured host diagnostic. An
-/// initial watch has no server-issued identity yet, while resync must retain
-/// its existing watch identity so a client can correlate the failure without
-/// treating it as a new watch admission.
+/// Watch requests are answered with a full snapshot carrying their request
+/// ID, or rejected with a structured host diagnostic. An initial watch has no
+/// server-issued identity yet, while resync must retain its existing watch
+/// identity so a client can correlate the answer without treating it as a
+/// new watch admission. A delta never answers a resync: the client resyncs
+/// because it lost its base revision, so it receives the latest full snapshot
+/// under its own request ID (30-protocol message registry, type 2).
 fn validate_watch_response(
     request: [u8; 16],
     watch: Option<[u8; 16]>,
@@ -5103,8 +5153,6 @@ fn validate_watch_response(
             if response.request == Some(request)
                 && response.watch.is_some()
                 && watch.is_none_or(|expected| response.watch == Some(expected)) => {}
-        Message::Delta { .. }
-            if watch.is_some() && response.request.is_none() && response.watch == watch => {}
         Message::Diagnostic { .. }
             if response.request == Some(request) && response.watch == watch => {}
         _ => return Err(Error::ApplicationRejected),
@@ -8272,19 +8320,7 @@ fn decode_token(value: &str) -> Option<[u8; 32]> {
         .and_then(|bytes| bytes.try_into().ok())
 }
 fn decode_base64(value: &str) -> Option<Vec<u8>> {
-    let unpadded = value.trim_end_matches('=');
-    let padding = value.len() - unpadded.len();
-    let expected_padding = match unpadded.len() % 4 {
-        0 => 0,
-        2 => 2,
-        3 => 1,
-        _ => return None,
-    };
-    if padding != expected_padding {
-        return None;
-    }
-    let normalized = unpadded.replace('+', "-").replace('/', "_");
-    decode_base64url(&normalized)
+    orna_value_v1::base64_decode(value).ok()
 }
 #[allow(clippy::cast_possible_truncation)]
 fn decode_base64url(value: &str) -> Option<Vec<u8>> {
@@ -8523,32 +8559,9 @@ fn ws_frame(bytes: &[u8], limit: usize) -> Result<Option<ParsedFrame>> {
     Ok(Some((total, fin, opcode, payload)))
 }
 fn websocket_accept(key: &str) -> String {
-    base64_standard(&sha1(
+    orna_value_v1::base64_encode(&sha1(
         format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
     ))
-}
-fn base64_standard(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for part in bytes.chunks(3) {
-        out.push(TABLE[(part[0] >> 2) as usize] as char);
-        out.push(
-            TABLE[(((part[0] & 3) << 4) | (part.get(1).copied().unwrap_or(0) >> 4)) as usize]
-                as char,
-        );
-        out.push(if part.len() > 1 {
-            TABLE[(((part[1] & 15) << 2) | (part.get(2).copied().unwrap_or(0) >> 6)) as usize]
-                as char
-        } else {
-            '='
-        });
-        out.push(if part.len() > 2 {
-            TABLE[(part[2] & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 #[allow(clippy::many_single_char_names)]
 fn sha1(input: &[u8]) -> [u8; 20] {
@@ -9017,11 +9030,17 @@ mod tests {
         subscribed_host_with_credential(runtime).0
     }
 
+    /// 30-protocol message registry, type 2 (A13-live-serving-08): a resync is
+    /// answered with the latest full snapshot under its own request ID. A
+    /// request-less delta assumes the base revision the resyncing client has
+    /// lost, so the host refuses it; the correlated snapshot advances the
+    /// accepted watch tree.
     #[test]
-    fn resync_delta_advances_the_accepted_watch_tree() {
+    fn resync_is_answered_by_a_correlated_full_snapshot_not_a_delta() {
         let mut host = subscribed_host(None);
         let session = [91; 16];
         let watch = [92; 16];
+        let request = [93; 16];
         let snapshot = CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
         let previous = orna_protocol_v1::PresentNode::from_value(
             CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
@@ -9039,24 +9058,47 @@ mod tests {
                 snapshot: snapshot.clone(),
             },
         );
-        let patches = orna_protocol_v1::PatchList::replace_root(&next).unwrap();
-        let response = Envelope {
+        let delta = Envelope {
             request: None,
             watch: Some(watch),
             message: Message::Delta {
                 base_revision: 0,
                 new_revision: 1,
-                patches,
+                patches: orna_protocol_v1::PatchList::replace_root(&next).unwrap(),
+                snapshot: snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert!(matches!(
+            validate_watch_response(
+                request,
+                Some(watch),
+                delta.clone(),
+                ProtocolLimits::default()
+            ),
+            Err(Error::ApplicationRejected)
+        ));
+        assert!(matches!(
+            host.prepare_watch_snapshot_replacement(session, watch, &delta),
+            Err(Error::ApplicationRejected)
+        ));
+
+        let refreshed = Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 1,
+                present: next.clone(),
                 snapshot: snapshot.clone(),
             },
             extensions: BTreeMap::new(),
         };
         let accepted =
-            validate_watch_response([93; 16], Some(watch), response, ProtocolLimits::default())
-                .expect("a correlated watch delta is accepted by its watch identity");
+            validate_watch_response(request, Some(watch), refreshed, ProtocolLimits::default())
+                .expect("the correlated full snapshot answers the resync");
         let candidate = host
             .prepare_watch_snapshot_replacement(session, watch, accepted.response.as_ref().unwrap())
-            .expect("the accepted delta advances its base revision")
+            .expect("the snapshot advances the accepted revision")
             .unwrap();
         assert_eq!(candidate.revision, 1);
         assert_eq!(candidate.present, next);
@@ -11170,6 +11212,63 @@ mod tests {
     }
 
     #[test]
+    fn url_safe_sec_websocket_key_is_rejected_by_the_real_handshake() {
+        let (host, origin, _) = subscribed_host_with_credential(None);
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential: SessionCredential {
+                    security: OpaqueCredential::from_bytes([7; 32]),
+                    serving: ServingCredential::new([7; 32]),
+                },
+                origin,
+            },
+        );
+        let request = |key: &str| WireRequest {
+            method: "GET".into(),
+            path: format!("/orna/live/{}", uuid([1; 16])),
+            headers: vec![
+                ("Host".into(), "app.example".into()),
+                ("Origin".into(), "https://app.example".into()),
+                ("Connection".into(), "Upgrade".into()),
+                ("Upgrade".into(), "websocket".into()),
+                ("Sec-WebSocket-Version".into(), "13".into()),
+                ("Sec-WebSocket-Key".into(), key.into()),
+                ("Sec-WebSocket-Protocol".into(), SUBPROTOCOL.into()),
+                (
+                    "Cookie".into(),
+                    format!("orna_session={}", encode_token([7; 32])),
+                ),
+            ],
+            body: Vec::new(),
+        };
+        // The standard-alphabet key is the control: the same request is
+        // admitted, so the rejections below are caused by the key alone.
+        assert!(
+            transport
+                .begin_websocket_upgrade(&request("dGhlIHNhbXBsZSBub25jZQ=="), [5; 16], 0)
+                .is_ok()
+        );
+        for key in ["AAAAAAAAAAAAAAAAAAAA_w==", "AAAAAAAAAAAAAAAAAAAA-w=="] {
+            assert_eq!(
+                transport
+                    .begin_websocket_upgrade(&request(key), [6; 16], 0)
+                    .err(),
+                Some(wire_error(400, "live.malformed_request")),
+                "key {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn delivery_barrier_rejects_expired_delivery_and_late_commit() {
         let mut transport = LiveTransport::new(subscribed_host(None), TransportLimits::default())
             .expect("transport is configured");
@@ -11293,5 +11392,64 @@ mod tests {
         ] {
             assert_eq!(admin_failure_code(&error), code, "{error:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod base64_accept_table {
+    use super::decode_base64;
+
+    /// Same inputs as the value, evaluator and compact decoder tables.
+    const CASES: &[(&str, bool)] = &[
+        ("", true),
+        ("Zm8=", true),
+        ("Zm9v", true),
+        ("+/8=", true),
+        ("-_8=", false),
+        ("+_8=", false),
+        ("-/8=", false),
+        ("Zm8", false),
+        ("Zm9v=", false),
+        ("Zm9v==", false),
+        ("Zm8= ", false),
+        (" Zm8=", false),
+        ("Zh==", false),
+        ("Zm9=", false),
+        ("====", false),
+        ("Zg==Zm9v", false),
+    ];
+
+    #[test]
+    fn sec_websocket_key_decoder_accepts_only_the_standard_alphabet() {
+        for &(input, accepted) in CASES {
+            assert_eq!(decode_base64(input).is_some(), accepted, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn long_inputs_follow_the_same_rules() {
+        let valid = "Zm9v".repeat(65_536);
+        assert_eq!(decode_base64(&valid).map(|bytes| bytes.len()), Some(196_608));
+        let invalid = format!("{}-_8=", "Zm9v".repeat(65_536));
+        assert_eq!(decode_base64(&invalid), None);
+    }
+}
+
+#[cfg(test)]
+mod websocket_key_alphabet {
+    use super::{decode_base64, websocket_accept};
+
+    #[test]
+    fn rfc6455_sample_key_is_accepted_with_the_standard_accept() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        assert!(decode_base64(key).is_some());
+        assert_eq!(websocket_accept(key), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn url_safe_key_alphabet_is_rejected_by_the_decoder() {
+        // 24 characters, URL alphabet '_' in the final group.
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA_w==").is_none());
+        assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA-w==").is_none());
     }
 }

@@ -25,12 +25,15 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 mod effects;
+mod located;
 mod repl;
 mod semantic_payload;
 mod system_api;
 pub use effects::EffectKind;
 pub use system_api::system_enum_constant;
 mod source_row;
+
+pub use located::{DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located};
 
 pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
 
@@ -1692,9 +1695,9 @@ fn summarize_standard_function_effects(
     // classifications and the summaries of the source functions it calls. The
     // path of the function itself is not a classification, so a pure function
     // in a host-named module such as `std.net.*` stays effect-free.
-    let mut summary: BTreeMap<Vec<String>, BTreeSet<EffectKind>> = functions
+    let mut summary: BTreeMap<Vec<String>, EffectSummary> = functions
         .keys()
-        .map(|key| (key.clone(), BTreeSet::new()))
+        .map(|key| (key.clone(), EffectSummary::default()))
         .collect();
     loop {
         let mut changed = false;
@@ -1702,8 +1705,8 @@ fn summarize_standard_function_effects(
             let mut effects = summary[key].clone();
             for path in paths {
                 match summary.get(path) {
-                    Some(known) => effects.extend(known.iter().copied()),
-                    None => effects.extend(standard_path_effects(path)),
+                    Some(known) => effects.join(known),
+                    None => effects.join(&standard_path_effects(path)),
                 }
             }
             if effects != summary[key] {
@@ -1716,17 +1719,12 @@ fn summarize_standard_function_effects(
         }
     }
 
-    for (key, effects) in summary {
+    for (key, effect_summary) in summary {
         let Some((name, namespace)) = key.split_last() else {
             continue;
         };
         let Some(header) = modules.get_mut(&Namespace(namespace.to_vec())) else {
             continue;
-        };
-        let effect_summary = EffectSummary {
-            may_fail: !effects.is_empty(),
-            effects,
-            opaque: false,
         };
         for symbols in [&mut header.symbols, &mut header.exports] {
             if let Some(symbol) = symbols.get_mut(name) {
@@ -1736,11 +1734,20 @@ fn summarize_standard_function_effects(
     }
 }
 
-/// Effects of a full path by its host classification alone, used for paths
-/// that are not source-declared standard functions.
-fn standard_path_effects(path: &[String]) -> BTreeSet<EffectKind> {
+/// Effects of a full path that is not a source-declared standard function: its
+/// host classification, joined with the descriptor effect of the `sys`
+/// operation it names. A `sys` callee carries the descriptor effect it has
+/// when called directly, so an opaque `sys.invoke`, `sys.start`, `sys.await` or
+/// `sys.cancel` marks its wrapper opaque too (SYS-077, SYS-039).
+fn standard_path_effects(path: &[String]) -> EffectSummary {
     let segments = path.iter().map(String::as_str).collect::<Vec<_>>();
-    standard_function_effects(&segments).effects
+    let mut summary = standard_function_effects(&segments);
+    if let Some(functions) = system_api::embedded_system_api().function(&path.join(".")) {
+        for function in functions {
+            summary.join(&descriptor_effects(function.effect));
+        }
+    }
+    summary
 }
 
 fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
@@ -2474,6 +2481,17 @@ fn analyze_retaining_context_with_providers(
     retain_context: bool,
     providers: SystemProviders,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
+    let mut origins = located::OriginRecorder::disabled();
+    analyze_recording_origins(inputs, catalogue, retain_context, providers, &mut origins)
+}
+
+fn analyze_recording_origins(
+    inputs: &[ModuleInput],
+    catalogue: &Catalogue,
+    retain_context: bool,
+    providers: SystemProviders,
+    origins: &mut located::OriginRecorder,
+) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
@@ -2484,6 +2502,7 @@ fn analyze_retaining_context_with_providers(
     let mut source_unit_items = Vec::new();
     let mut siblings: BTreeMap<Vec<String>, BTreeMap<String, String>> = BTreeMap::new();
     for input in inputs {
+        origins.enter_module(&result.diagnostics, &input.logical_path);
         let Some(namespace) = namespace_for_path(&input.logical_path, &mut result.diagnostics)
         else {
             continue;
@@ -2536,6 +2555,7 @@ fn analyze_retaining_context_with_providers(
             matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })
                 .then(|| (namespace.clone(), input.logical_path.clone(), item.clone()))
         }));
+        origins.bind_namespace(&namespace, &input.logical_path);
         parsed.push((namespace, parse.value));
     }
     let (source_units, source_dimensions) = analyze_source_units(&source_unit_items);
@@ -2567,6 +2587,7 @@ fn analyze_retaining_context_with_providers(
     // unlinked `sys` member is reported once.
     let unlinked_system_members = providers.admission_record();
     for (namespace, tree) in &parsed {
+        origins.enter_namespace(&result.diagnostics, namespace);
         let Some(header) = result.modules.get(namespace).cloned() else {
             continue;
         };
@@ -2614,6 +2635,7 @@ fn analyze_retaining_context_with_providers(
             .collect::<BTreeMap<_, _>>();
         let mut plans = Vec::new();
         for item in &tree.items {
+            origins.enter_item(&result.diagnostics, namespace, &item.span);
             check_item(
                 item,
                 &mut symbols,
@@ -2641,6 +2663,9 @@ fn analyze_retaining_context_with_providers(
         }
     }
     result.source_enums = source_enums;
+    origins.finish(&result.diagnostics);
+    // Admission-wide diagnostics belong to no item, so they are reported after
+    // the recorder has attributed the per-item diagnostics.
     if let Some(record) = &unlinked_system_members {
         report_unlinked_system_members(record, &mut result.diagnostics);
     }
@@ -25600,6 +25625,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     };
     standard_function_effects(&path)
 }
+
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
     match expr {
         Expr::Name { text, .. } => Some(vec![text]),
@@ -28474,13 +28500,11 @@ mod tests {
         }
     }
 
+    /// Portable `sys` members without a linked production provider are rejected with
+    /// `sys.version.incompatible` before evaluation can perform writes (ORNA-SYS-008).
     #[test]
     fn unlinked_sys_members_are_rejected_with_version_incompatible() {
         for (source, member) in [
-            (
-                "pub fn info() = sys.rt.info();",
-                "portable system callable `sys.rt.info`",
-            ),
             (
                 "pub fn head() = sys.snapshot(\"HEAD~1\");",
                 "portable system callable `sys.snapshot(Str)`",
@@ -28520,6 +28544,9 @@ mod tests {
         }
     }
 
+    /// Linked `sys` members are admitted. `sys.rt.info()` is one of them: ORNA-SYS-006
+    /// requires the runtime to expose the RuntimeInfo coordinates, which the production
+    /// host links (source/15-system.md:46).
     #[test]
     fn linked_sys_members_are_admitted() {
         let analysis = admitted(&[ModuleInput::new(
@@ -28530,6 +28557,7 @@ mod tests {
             pub fn resume(stream: sys.StreamRef): Bool = sys.admin.resume_stream(stream);
             pub fn storage() = sys.Storage;
             pub fn maintenance() = sys.MaintenanceJob;
+            pub fn info() = sys.rt.info();
             pub fn plan() = sys.Storage | sys.explain();",
         )]);
         assert!(
@@ -28544,23 +28572,26 @@ mod tests {
         let analysis = admitted(&[
             ModuleInput::new(
                 "a.orna",
-                "pub fn first() = sys.rt.info(); pub fn second() = sys.rt.info();",
+                "pub fn first() = sys.snapshot(\"HEAD~1\"); pub fn second() = sys.snapshot(\"HEAD~1\");",
             ),
-            ModuleInput::new("b.orna", "pub fn third() = sys.rt.info();"),
+            ModuleInput::new("b.orna", "pub fn third() = sys.snapshot(\"HEAD~1\");"),
         ]);
         assert_eq!(
             diagnostic_texts(&analysis.diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
     }
 
     #[test]
     fn provider_linkage_leaves_type_checking_unchanged() {
-        let source = [ModuleInput::new("typed.orna", "pub fn info(): Int = sys.rt.info();")];
+        let source = [ModuleInput::new(
+            "typed.orna",
+            "pub fn head(): Int = sys.snapshot(\"HEAD~1\");",
+        )];
         let declared = diagnostic_texts(&checked(&source).diagnostics);
         let mut production = diagnostic_texts(&admitted(&source).diagnostics);
         assert!(declared.iter().any(|text| text.starts_with(DIAG_TYPE)), "{declared:#?}");
-        let unlinked_member = unlinked("portable system callable `sys.rt.info`");
+        let unlinked_member = unlinked("portable system callable `sys.snapshot(Str)`");
         assert!(production.contains(&unlinked_member), "{production:#?}");
         production.retain(|text| *text != unlinked_member);
         assert_eq!(production, declared);
@@ -28568,14 +28599,14 @@ mod tests {
 
     #[test]
     fn repl_admission_rejects_unlinked_sys_members() {
-        let rejected = orna_syntax_v1::parse_repl("sys.rt.info()");
+        let rejected = orna_syntax_v1::parse_repl("sys.snapshot(\"HEAD~1\")");
         assert!(rejected.is_ok());
         let diagnostics = ReplContext::with_providers(SystemProviders::Production)
             .stage(&rejected.value)
-            .expect_err("no production provider is linked for sys.rt.info");
+            .expect_err("no production provider is linked for sys.snapshot(Str)");
         assert_eq!(
             diagnostic_texts(&diagnostics),
-            [unlinked("portable system callable `sys.rt.info`")]
+            [unlinked("portable system callable `sys.snapshot(Str)`")]
         );
 
         assert!(ReplContext::empty().stage(&rejected.value).is_ok());

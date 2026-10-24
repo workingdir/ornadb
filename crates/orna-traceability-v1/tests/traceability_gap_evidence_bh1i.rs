@@ -11,6 +11,8 @@
 //! `.orna` fixture. The report must keep each requirement partially executed
 //! because this stage does not prove the full requirement.
 
+
+mod support;
 use orna_conformance_v1::{
     BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage,
 };
@@ -26,8 +28,7 @@ const IMPLEMENTATION_REF: &str =
     "crates/orna-conformance-v1/src/lib.rs::Harness::run_fixture";
 const TEST_REF: &str =
     "crates/orna-traceability-v1/tests/traceability_gap_evidence_bh1i.rs::ten_fixture_typecheck_boundaries_remain_per_requirement";
-const PUBLICATION_DIGEST: &str =
-    "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
+
 
 // These are exact frozen-reference examples, compiled into this new test and
 // loaded by the conformance Harness after being copied byte-for-byte.
@@ -252,14 +253,11 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
     let copied = ReferenceCopy::new();
     assert_superseded_requirements(copied.path());
     let corpus = Corpus::load(copied.path()).expect("copied frozen corpus loads");
-    assert_eq!(
-        corpus
-            .publication_digests
-            .get("Orna-1.0.0.md")
-            .map(String::as_str),
-        Some(PUBLICATION_DIGEST),
-        "fixture-backed evidence stays pinned to the frozen publication"
+    assert!(
+        !corpus.publication_digests.keys().any(|key| key.starts_with("Orna-")),
+        "1.1.0 normative map pins no markdown publication key"
     );
+    support::assert_markdown_publication_digest(copied.path());
 
     let harness = Harness::new(corpus);
     let mut adapter = RuntimeAdapter::new(BoundedEvaluator::default());
@@ -289,7 +287,7 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
         assert_eq!(requirement.status, Status::PartiallyExecuted);
         assert!(requirement.boundaries.iter().any(|boundary| {
             boundary.status == Status::JustifiedGap
-                && boundary.kind == "implementation-conformance obligation"
+                && matches!(boundary.kind.as_str(), "scenario" | "implementation-suite")
         }));
         assert!(requirement.boundaries.iter().any(|boundary| {
             boundary.kind == "engine-witness"

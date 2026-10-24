@@ -9,7 +9,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pattern_module_import_is_bound_to_its_captured_snapshot() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/pattern.orna")
         .collect::<Vec<_>>();

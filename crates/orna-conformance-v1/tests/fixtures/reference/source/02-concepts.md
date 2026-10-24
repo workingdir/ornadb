@@ -45,4 +45,3 @@ A relation's `as_of` selects historical data and its decoding schema. Whole-prog
 **Inspect** provides structural developer output. **Display** provides human-facing text. **Present** provides a typed presentation tree for tables, trees, charts and other renderings. A **codec** encodes or decodes values in a specified format. Changing a formatter does not change equality, stored values, canonical bytes or Git identity. See [presentation](#presentation) and [canonical values](#formats).
 
 The `sys` namespace is the mandatory typed introspection and control plane. The `std` namespace is optional ordinary library code, selected and pinned like other dependencies. The [intrinsic environment](#standard-library) remains sufficient for core integrity and execution without an optional library package.
-

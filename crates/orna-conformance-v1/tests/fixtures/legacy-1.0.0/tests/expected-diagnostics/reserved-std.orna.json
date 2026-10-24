@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/reserved-std.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E1009",
+  "message_contains": "`std` is reserved",
+  "status": "expected-not-executed"
+}
