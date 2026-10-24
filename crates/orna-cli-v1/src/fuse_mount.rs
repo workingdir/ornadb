@@ -1241,6 +1241,7 @@ impl RowSaveContext {
     fn commit_document(
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save().map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
@@ -1271,7 +1272,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(accepted_row);
+                if record_baseline {
+                    self.record_accepted_row(accepted_row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1288,6 +1291,7 @@ impl RowSaveContext {
         scratch: &TemporarySave<RowMapSnapshot>,
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let replacement_bytes = self.writer.runtime.block_on(scratch.candidate_bytes());
         let length = u64::try_from(replacement_bytes.len())
@@ -1354,7 +1358,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(row);
+                if record_baseline {
+                    self.record_accepted_row(row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1369,6 +1375,7 @@ impl RowSaveContext {
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
         expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row)?;
         let row_context = Arc::clone(self);
@@ -1399,7 +1406,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(accepted_row);
+                if record_baseline {
+                    self.record_accepted_row(accepted_row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1483,13 +1492,14 @@ impl From<&str> for EditError {
 /// editor draft, and `commit` admits the editor's candidate exactly once.
 pub(super) struct PreparedEdit {
     initial_bytes: Vec<u8>,
-    commit: Box<dyn FnOnce(&[u8], &Path) -> Result<(), EditError>>,
+    commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>>,
 }
 
 impl PreparedEdit {
     /// Admits `candidate` for the draft at `draft_path`; the draft is removed once accepted.
-    fn commit(self, candidate: &[u8], draft_path: &Path) -> Result<(), EditError> {
-        (self.commit)(candidate, draft_path)
+    /// `record_baseline` false leaves the mounted captured baseline unchanged (ORNA-VFS-015).
+    fn commit(self, candidate: &[u8], draft_path: &Path, record_baseline: bool) -> Result<(), EditError> {
+        (self.commit)(candidate, draft_path, record_baseline)
     }
 }
 
@@ -1665,8 +1675,8 @@ impl WorkspaceFilesystem {
                 }
             }
         };
-        let commit: Box<dyn FnOnce(&[u8], &Path) -> Result<(), EditError>> = match blob_edit {
-            Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path| {
+        let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
+            Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path, record_baseline| {
                 writer
                     .runtime
                     .block_on(async {
@@ -1679,7 +1689,7 @@ impl WorkspaceFilesystem {
                     })
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
-                    save.commit_blob_temporary(&target, &scratch, &field, expected),
+                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline),
                     draft_path,
                 )
             }),
@@ -1689,7 +1699,7 @@ impl WorkspaceFilesystem {
                         .runtime
                         .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
                 );
-                Box::new(move |candidate, draft_path| {
+                Box::new(move |candidate, draft_path, record_baseline| {
                     writer
                         .runtime
                         .block_on(async {
@@ -1701,7 +1711,7 @@ impl WorkspaceFilesystem {
                             })
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    admit_edit_result(save.commit_document(&draft), draft_path)
+                    admit_edit_result(save.commit_document(&draft, record_baseline), draft_path)
                 })
             }
         };
@@ -1755,7 +1765,8 @@ impl WorkspaceFilesystem {
         let candidate = fs::read(draft)
             .map_err(|error| format!("edited candidate could not be read: {error}"))?;
         self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
-            .commit(&candidate, draft)
+            // ORNA-VFS-015: an owner-routed edit is another writer's change; the mount keeps its captured baseline so its next save is stale.
+            .commit(&candidate, draft, false)
     }
 }
 
@@ -1782,7 +1793,7 @@ pub(super) fn edit_path(
             draft_path.display()
         ))
     })?;
-    prepared.commit(&candidate, &draft_path)
+    prepared.commit(&candidate, &draft_path, true)
 }
 #[derive(Debug)]
 pub(super) enum UnmountPreparationError {
@@ -3022,8 +3033,8 @@ impl Filesystem for WorkspaceFilesystem {
             )
         };
         let committed = match &blob_field {
-            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
-            None => save.commit_temporary(&scratch, baseline),
+            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
+            None => save.commit_temporary(&scratch, baseline, true),
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
@@ -3421,7 +3432,7 @@ impl Filesystem for WorkspaceFilesystem {
         };
         let result: Result<(), DocumentCommitError> = match open_file {
             Some(OpenFile::Document(save, draft)) => {
-                let result = save.commit_document(&draft);
+                let result = save.commit_document(&draft, true);
                 if result.is_ok() {
                     let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
                     if let Some(NodeKind::Document {
