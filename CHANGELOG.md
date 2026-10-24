@@ -18,11 +18,17 @@ been published.
   used to succeed or be ignored, and the later write failed with `EBADF`
   (profiles/vfs-1.md:104-106). Tools that write a Blob in place, such as `cp`
   onto `content.mp3` or an editor with `backupcopy=yes`, now see the error at
-  open. Unlinking a Blob, renaming it within its row, and truncating it by path
-  also return `EPERM`. Other non-writable nodes in the mount still return
-  `EROFS`; the split is not fully unified (profiles/vfs-1.md:139). This is an
-  interim errno, not Gate E Blob candidate support: zero-length and sparse-hole
-  Blob coverage remains open.
+  open.
+- The errno rule for the live writable mount is now uniform: every refused
+  mutation there returns `EPERM` (41-vfs.md:103-105; profiles/vfs-1.md:139).
+  This covers Blob write-open, Blob unlink and same-row rename, create in a
+  table directory or in a row with a non-blob name, unlink of a row's
+  `data.orna`, rename with flags, rename to a name other than the row's
+  `data.orna` or Blob field, and rename of a non-temporary node. A rename across
+  rows returns `EXDEV`. `EROFS` is reserved for the kernel read-only
+  historical mount (`mount --at`), which never reaches these handlers.
+  Path-truncate of a Blob returns `EPERM` by code inspection only; no test covers
+  it yet. Zero-length and sparse-hole Blob coverage remains open.
 - A malformed format-3 native graph now reports a typed `GraphMalformed` cause
   under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
   faults such as overlapping child ranges, broken counts, over-wide fanout, and
