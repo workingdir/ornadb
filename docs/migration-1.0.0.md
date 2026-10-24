@@ -225,9 +225,14 @@ Open gaps (not proven by this fixture):
 - ORNA-UPGRADE-008 fail-closed behaviour for Blob-containing persistent-consumer
   arguments: NOT asserted by any test.
 - Loose-row path codec: deferred.
-- Key-bound encoding: manifest and shard `min_key`/`max_key` are hex of the
-  canonical key bytes. The 1.0.0 text at
-  `crates/orna-conformance-v1/tests/fixtures/legacy-1.0.0/source/23-storage.md:214,216`
-  says key values use the table key schema. Whether this hex encoding conforms
-  is unresolved.
+- Key-bound encoding: manifest and shard `min_key`/`max_key` hold the OVB-1
+  canonical encoding of the typed key value (Int, Str or Date), written as hex
+  text. The reader (`compact.rs`, `decode_hex` then `CanonicalValue::decode`)
+  accepts only this hex form. The 1.0.0 spec types these fields as `sys.Value`
+  (`source/34-system-reference.md` lines 2242-2243; OVB-1 envelope per
+  `source/29-formats.md` line 48), and `source/23-storage.md:214,216` says key
+  values use the table key schema. The spec does not pin a text-literal form,
+  so typed literals (`min_key: 42`, `min_key: "abc"`) are not what the reader
+  accepts. This is an unresolved reader/spec ambiguity recorded for follow-up,
+  not changed in this slice. Str bounds are OVB text bytes, not hex of raw UTF-8.
 - Byte-compatibility with 1.0.0 golden output: not verified.
