@@ -804,16 +804,17 @@ impl EvaluationError {
     }
 
     fn from_canonical(value: CanonicalErrorValue) -> Self {
+        let mut diagnostic = Diagnostic::new(
+            SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),
+            DiagnosticSeverity::Error,
+            SafeText::redacted(),
+        )
+        .expect("safe diagnostic code");
+        for cause in value.causes() {
+            diagnostic = diagnostic.with_cause(canonical_cause_diagnostic(&cause));
+        }
         Self {
-            diagnostic: Box::new(
-                Diagnostic::new(
-                    SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),
-                    DiagnosticSeverity::Error,
-                    SafeText::redacted(),
-                )
-                .expect("safe diagnostic code")
-                .redacted(),
-            ),
+            diagnostic: Box::new(diagnostic.redacted()),
             canonical: Some(value),
             deliberate: true,
         }
@@ -840,6 +841,50 @@ impl fmt::Display for EvaluationError {
     }
 }
 impl std::error::Error for EvaluationError {}
+
+/// Diagnostic codes the evaluator itself emits. A nested canonical cause keeps
+/// its code only when it is one of these; every other code, including a
+/// user-authored `ORNA-` code, is redacted at the evaluator boundary.
+const EVALUATOR_CAUSE_CODES: &[&str] = &[
+    "ORNA-EVAL-AMBIGUOUS",
+    "ORNA-EVAL-ARGUMENT",
+    "ORNA-EVAL-BROWSER",
+    "ORNA-EVAL-BROWSER-ENTRY",
+    "ORNA-EVAL-CANCELLED",
+    "ORNA-EVAL-DIVIDE-BY-ZERO",
+    "ORNA-EVAL-ERROR",
+    "ORNA-EVAL-FIELD",
+    "ORNA-EVAL-IMMUTABLE-CAPTURE",
+    "ORNA-EVAL-INDEX",
+    "ORNA-EVAL-LIMIT",
+    "ORNA-EVAL-NAME",
+    "ORNA-EVAL-NO-MATCH",
+    "ORNA-EVAL-PARSE",
+    "ORNA-EVAL-RELATION-ONE-MULTIPLE",
+    "ORNA-EVAL-RELATION-ONE-ZERO",
+    "ORNA-EVAL-TIMEOUT",
+    "ORNA-EVAL-TYPE",
+    "ORNA-EVAL-UNSUPPORTED",
+    "ORNA-EVAL-VALUE",
+];
+
+/// Projects a nested canonical cause to a code-only diagnostic. Only a code in
+/// [`EVALUATOR_CAUSE_CODES`] is kept; every message and span stays redacted.
+fn canonical_cause_diagnostic(cause: &CanonicalErrorValue) -> Diagnostic {
+    let code = cause.code();
+    let safe_code = if EVALUATOR_CAUSE_CODES.contains(&code) {
+        SafeText::new(code).expect("catalogue code is safe text")
+    } else {
+        SafeText::redacted()
+    };
+    let mut diagnostic =
+        Diagnostic::new(safe_code, DiagnosticSeverity::Error, SafeText::redacted())
+            .expect("safe diagnostic code");
+    for nested in cause.causes() {
+        diagnostic = diagnostic.with_cause(canonical_cause_diagnostic(&nested));
+    }
+    diagnostic.redacted()
+}
 
 /// Executes an admitted effect after its arguments have been evaluated exactly
 /// once into canonical values. Returning `Ok(None)` leaves the call to the
@@ -15704,6 +15749,44 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn canonical_causes_keep_catalogue_codes_and_redact_other_codes() {
+        let inner = CanonicalErrorValue::new(
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "private message",
+            [],
+            BTreeMap::new(),
+        )
+        .expect("canonical inner error");
+        let user =
+            CanonicalErrorValue::new("userSuppliedCode", "private message", [], BTreeMap::new())
+                .expect("canonical user error");
+        let private_orna =
+            CanonicalErrorValue::new("ORNA-PRIVATE-TOKEN", "private message", [], BTreeMap::new())
+                .expect("canonical ORNA-prefixed user error");
+        let outer = CanonicalErrorValue::new(
+            "ORNA-EVAL-SURFACE",
+            "private message",
+            [inner, user, private_orna],
+            BTreeMap::new(),
+        )
+        .expect("canonical outer error");
+
+        let error = EvaluationError::from_canonical(outer);
+        let causes = error.diagnostic().causes();
+        assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+        assert_eq!(causes.len(), 3);
+        assert_eq!(causes[0].code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
+        assert_eq!(causes[1].code(), "<redacted>");
+        assert_eq!(causes[2].code(), "<redacted>");
+        assert!(
+            causes
+                .iter()
+                .all(|cause| cause.code() != "ORNA-PRIVATE-TOKEN")
+        );
+        assert!(causes.iter().all(|cause| cause.message() == "<redacted>"));
+    }
 
     /// `std.collection.map_from` at the historical pin a987024 (recursive).
     const HISTORICAL_MAP_FROM: &str = "fn map_from<T, U>(
