@@ -2143,4 +2143,57 @@ mod tests {
                 if relation_id == music
         ));
     }
+
+    #[test]
+    fn a_missing_node_names_the_relation_that_lacks_it() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let (first, second) = (relation(1), relation(2));
+        stage(&repository, &[first, second]).expect("stage two relations");
+        review_and_commit(&repository, "first");
+
+        let committed = repository.capture_staged_candidate().unwrap();
+        let store_root = committed.store_root.clone().expect("committed store root");
+        let entries = NativeGraphContext::read_store_relations(
+            &repository,
+            store_root.algorithm(),
+            *committed.database_id.as_bytes(),
+            &store_root,
+        )
+        .expect("read committed relations");
+        let second_root = entries
+            .iter()
+            .find(|entry| entry.relation_id == second)
+            .expect("second relation is committed")
+            .primary_root
+            .to_hex();
+
+        // Dropping the second relation's node `data` blob from the index
+        // leaves that node without data while the first relation survives.
+        let listing = git(root, &["ls-tree", "-r", "-t", "HEAD:.orna/store"]);
+        let node_path = listing
+            .lines()
+            .find_map(|line| {
+                let (meta, path) = line.split_once('\t')?;
+                (meta.split_whitespace().nth(2) == Some(second_root.as_str()))
+                    .then(|| path.to_owned())
+            })
+            .expect("second relation node is in the store");
+        git(
+            root,
+            &["rm", "--cached", "--quiet", &format!(".orna/store/{node_path}/data")],
+        );
+
+        let staged = repository.capture_staged_candidate().unwrap();
+        let edited = [
+            StagedRelation::new(first, table_descriptor(first, "Str")),
+            StagedRelation::new(second, table_descriptor(second, "Str")),
+        ];
+        let outcome =
+            repository.stage_store_admission(&staged, &edited, &identities_for(&[first, second]));
+        assert!(
+            matches!(outcome, Err(RelationAdmissionError::CommittedRelationUnstaged { relation_id }) if relation_id == second),
+            "actual outcome: {outcome:?}"
+        );
+    }
 }
