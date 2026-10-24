@@ -1181,9 +1181,10 @@ fn table_reference_rejects_each_non_permitted_key_clause() {
     );
     assert!(Value::table_reference([1; 16], [2; 16], nested_float).is_err());
     // Pinned reference (60010) carries a snapshot: identity would depend on it.
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
     let pinned = Raw::Tag(
         60010,
-        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), Raw::Null])),
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
     );
     assert!(Value::table_reference([1; 16], [2; 16], pinned).is_err());
     // Enum-like (60008) payload must be exactly [type uuid, variant uuid, Null].
@@ -1229,10 +1230,11 @@ fn table_reference_accepts_each_permitted_key_shape() {
 fn tuple_primary_key_with_pinned_reference_keeps_base_behaviour() {
     // Base accepts and compares 60010 components inside tuple primary keys;
     // only Value::table_reference applies the strict snapshot-free rule.
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
     let pinned = |n: i32| {
         Raw::Tag(
             60010,
-            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(n.into()), Raw::Null])),
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(n.into()), snapshot.clone()])),
         )
     };
     let one = Value::new(Raw::Array(vec![pinned(1)])).unwrap();
