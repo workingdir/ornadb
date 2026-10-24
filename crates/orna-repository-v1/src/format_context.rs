@@ -1938,6 +1938,42 @@ mod graph_bridge_tests {
         }
     }
 
+    /// `.orna/packages` (the package pin manifest, written by `orna-project-v1`
+    /// attachments) and `.orna/checkpoints` (the runtime checkpoint snapshot
+    /// directory) are tracked by pre-META-001 writers. ORNA-META-001 admits only
+    /// `database.orna` and `store` under format-3 `.orna/`, so a tracked snapshot
+    /// carrying either is refused with the offending entry named, not widened
+    /// into the transitional allow-list.
+    #[test]
+    fn format3_snapshot_with_packages_or_checkpoints_is_rejected() {
+        for (entry, file) in [
+            ("packages", "packages"),
+            ("checkpoints", "checkpoints/snapshot.orna"),
+        ] {
+            let directory = repository();
+            let root = directory.path();
+            let path = root.join(".orna").join(file);
+            fs::create_dir_all(path.parent().expect("entry parent")).expect("create entry parent");
+            fs::write(&path, b"not format-3 metadata").expect("write the extra entry");
+            commit(root);
+            let repository = Repository::discover(root).expect("discover fixture");
+            let refused = repository
+                .open_format_context()
+                .expect_err("HEAD mixes formats");
+            assert_eq!(
+                refused,
+                FormatContextError::MixedFormats {
+                    path: format!(".orna/{entry}"),
+                }
+            );
+            assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-004");
+            assert!(
+                refused.to_string().contains(&format!(".orna/{entry}")),
+                "the message names the entry: {refused}"
+            );
+        }
+    }
+
     /// The transitional `.orna/` entries are exactly the two this build still
     /// writes, each removed by the work named in `TRANSITIONAL_FORMAT3_ENTRIES`.
     /// A snapshot carrying one stays readable, but the commit gate refuses it,
