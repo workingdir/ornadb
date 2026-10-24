@@ -1729,7 +1729,6 @@ dependencies = [
  "ed25519-dalek",
  "libsql",
  "num-bigint 0.4.8",
- "orna-core",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-repository-v1",
