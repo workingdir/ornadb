@@ -2238,6 +2238,29 @@ mod confinement_tests {
     }
 
     #[test]
+    fn copies_keep_permission_bits_but_drop_setuid_setgid_and_sticky() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let root = fixture.root_name();
+        let source = fixture.root().join("tool.bin");
+        fs::write(&source, "binary").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o7755)).unwrap();
+
+        assert_eq!(
+            fixture
+                .provider
+                .copy_file(&root, "tool.bin", "copy.bin", false),
+            Ok(())
+        );
+
+        let mode = fs::metadata(fixture.root().join("copy.bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755);
+    }
+
+    #[test]
     fn moves_without_rename_noreplace_fall_back_to_an_exclusive_link() {
         let fixture = Fixture::new();
         let root_path = fixture.root();
