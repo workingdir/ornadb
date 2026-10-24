@@ -9,7 +9,7 @@ publication under `reference/Orna-1.1.0/`. Historical design records remain in
 ## Before you start
 
 Work from the repository root. The command is `orna`. In a checkout, Cargo
-builds it as the `orna-cli-v1` binary. The Linux package installs it as
+builds it as the `orna` binary. The Linux package installs it as
 `/usr/bin/orna`. Run it from a checked-out repository with the locked
 dependency graph:
 

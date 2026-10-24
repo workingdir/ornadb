@@ -187,7 +187,7 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Starts `mount --cwd` on an existing mountpoint directory without waiting for
 /// the FUSE mount to appear.
 pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_path.to_str().unwrap(),
@@ -258,7 +258,7 @@ pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedP
 
 /// Runs `orna unmount` for a mount started from `repository`.
 pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", repository.to_str().unwrap(), "unmount"])
         .arg(mountpoint)
         .output()
@@ -380,8 +380,9 @@ pub async fn repository_with_music_rows(
     (repository_directory, repository, relation_id)
 }
 
-/// The contents of every record in the repository's VFS recovery storage,
-/// where the mount retains candidates it did not accept.
+/// The contents of every retained candidate record in the repository's VFS
+/// recovery storage. Records are the top-level regular files; the private
+/// `editor-drafts` subdirectory holds explicit edit drafts, not records.
 pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     let directory = repository
         .runtime_paths()
@@ -389,8 +390,9 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
         .join("vfs-retained-drafts-v1");
     match std::fs::read_dir(&directory) {
         Ok(entries) => entries
-            .map(|entry| {
-                let path = entry.expect("list retained drafts").path();
+            .map(|entry| entry.expect("list retained drafts").path())
+            .filter(|path| path.is_file())
+            .map(|path| {
                 String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
                     .into_owned()
             })

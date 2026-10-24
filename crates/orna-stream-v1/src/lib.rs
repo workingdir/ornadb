@@ -1038,7 +1038,9 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 let Some(record) = self.failures.get(&failure) else {
                     return CommitResult::Rejected(RejectReason::FailureMissing);
                 };
-                if record.version != expected_version {
+                if record.version != expected_version
+                    || record.identity.0.successor != failure.0.successor
+                {
                     return CommitResult::Rejected(RejectReason::StaleFailure);
                 }
                 if record.status != FailureStatus::Failed {
@@ -1099,6 +1101,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
                 };
                 if record.version != expected_failure_version
                     || record.status != FailureStatus::Failed
+                    || record.identity.0.successor != lease.delivery.successor
                 {
                     return CommitResult::Rejected(RejectReason::StaleFailure);
                 }
@@ -2424,7 +2427,7 @@ mod tests {
         let failed = acquire_and_fail(&mut backend, first.clone());
         let same_delivery = delivery("receipt:stable", "resume:changed");
         let retry = match backend.apply(CommitIntent::Retry {
-            failure: FailureIdentity(same_delivery.clone()),
+            failure: failed.identity.clone(),
             expected_version: failed.version,
             expected: expected(&backend, &same_delivery),
         }) {
@@ -2444,6 +2447,46 @@ mod tests {
         assert_eq!(succeeded.identity, failed.identity);
         assert_eq!(succeeded.attempts, retry.attempts);
         assert_eq!(succeeded.status, FailureStatus::Succeeded);
+    }
+
+    #[test]
+    fn retry_rejects_a_successor_the_failure_did_not_record() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let first = delivery("receipt:retry-successor", "resume:recorded");
+        let failed = acquire_and_fail(&mut backend, first.clone());
+        let forged = delivery("receipt:retry-successor", "resume:forged");
+        assert_eq!(
+            backend.apply(CommitIntent::Retry {
+                failure: FailureIdentity(forged.clone()),
+                expected_version: failed.version,
+                expected: expected(&backend, &forged),
+            }),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let record = backend.failure(&failed.identity).unwrap();
+        assert_eq!(record.version, failed.version);
+        assert_eq!(record.status, FailureStatus::Failed);
+        assert_eq!(backend.checkpoint(&first.checkpoint_key()).version, 0);
+    }
+
+    #[test]
+    fn skip_rejects_a_successor_the_failure_did_not_record() {
+        let mut backend = InMemoryCheckpointBackend::default();
+        let first = delivery("receipt:skip-successor", "resume:recorded");
+        let failed = acquire_and_fail(&mut backend, first.clone());
+        let forged = delivery("receipt:skip-successor", "resume:forged");
+        let lease = acquire_skip(&mut backend, forged.clone());
+        assert_eq!(
+            backend.apply(CommitIntent::Skip {
+                lease,
+                expected: expected(&backend, &forged),
+                expected_failure_version: failed.version,
+            }),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let record = backend.failure(&failed.identity).unwrap();
+        assert_eq!(record.status, FailureStatus::Failed);
+        assert_eq!(backend.checkpoint(&first.checkpoint_key()).committed, None);
     }
 
     #[test]
