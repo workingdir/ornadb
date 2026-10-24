@@ -3204,16 +3204,8 @@ impl Repository {
         let candidate_index = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!(
-                "index-candidate-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                    .as_nanos()
-            ));
-        fs::write(&candidate_index, base_index)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            .join(format!("index-candidate-{}", Uuid::new_v4()));
+        write_new_index_candidate(&candidate_index, base_index)?;
         let result = (|| {
             for path in paths {
                 let encoded = path
@@ -3379,17 +3371,9 @@ impl Repository {
         let index = self.git_path("index")?;
         let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let parent = index.parent().ok_or(RepositoryError::LocalStateUnavailable)?;
-        let candidate_index = parent.join(format!(
-            ".orna-index-recovery-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                .as_nanos()
-        ));
+        let candidate_index = parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4()));
         let result = (|| {
-            fs::write(&candidate_index, &base_index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            write_new_index_candidate(&candidate_index, &base_index)?;
             let mut update = self.command();
             update
                 .env("GIT_INDEX_FILE", &candidate_index)
@@ -8173,7 +8157,13 @@ impl Repository {
 
     fn commit_optional(&self, expression: &str) -> Result<Option<GitCommitRef>, RepositoryError> {
         let mut command = self.command();
-        command.args(["rev-parse", "--verify", "--quiet", expression]);
+        command.args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            expression,
+        ]);
         let output = command
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -8563,15 +8553,8 @@ impl Repository {
         let candidate = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!(
-                "index-candidate-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                    .as_nanos()
-            ));
-        fs::write(&candidate, &base_index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            .join(format!("index-candidate-{}", Uuid::new_v4()));
+        write_new_index_candidate(&candidate, &base_index)?;
         let permissions = fs::metadata(&index)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?
             .permissions();
@@ -8953,6 +8936,19 @@ fn persist_runtime_owner_state(
     fs::rename(&temporary, path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)
+}
+
+/// Writes a brand-new index candidate. `create_new` refuses any existing file
+/// or symlink at the path, so a candidate is never written through a link or
+/// over an attacker-prepared name.
+fn write_new_index_candidate(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    file.write_all(bytes)
         .map_err(|_| RepositoryError::LocalStateUnavailable)
 }
 
