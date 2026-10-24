@@ -16965,22 +16965,18 @@ fn stream_pause_key(result: &CommitResult) -> Result<&CheckpointKey, RuntimeErro
 /// Maps a rejected failure transition to its public system outcome.
 ///
 /// A version or successor the stored failure did not record is
-/// `sys.failure.stale_version`. A resolve that is blocked by an open or
-/// retrying failure, or a retry that the stored state does not admit, is
-/// `sys.failure.state_conflict`. A skip over a failure that is not skippable
-/// is `sys.failure.skip_unsupported`. Other rejections keep their internal
-/// classification and return `None`.
-pub fn failure_transition_error(
-    reason: RejectReason,
-    purpose: Option<LeasePurpose>,
-) -> Option<RuntimeError> {
-    match (reason, purpose) {
-        (RejectReason::StaleFailure, _) => Some(RuntimeError::StreamFailureStale),
-        (RejectReason::ResolveBlocked, _) => Some(RuntimeError::StreamFailureStateConflict),
-        (RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)) => {
-            Some(RuntimeError::StreamFailureSkipUnsupported)
+/// `sys.failure.stale_version`. A transition the stored failure status does
+/// not admit, such as resolving an open failure or skipping one that is no
+/// longer open, is `sys.failure.state_conflict`. Other rejections keep their
+/// internal classification and return `None`. No rejection maps to
+/// `sys.failure.skip_unsupported`: that code reports a provider that cannot
+/// safely advance past a delivery, not a failure-state check.
+pub fn failure_transition_error(reason: RejectReason) -> Option<RuntimeError> {
+    match reason {
+        RejectReason::StaleFailure => Some(RuntimeError::StreamFailureStale),
+        RejectReason::ResolveBlocked | RejectReason::RetryNotAllowed => {
+            Some(RuntimeError::StreamFailureStateConflict)
         }
-        (RejectReason::RetryNotAllowed, _) => Some(RuntimeError::StreamFailureStateConflict),
         _ => None,
     }
 }
@@ -40809,26 +40805,13 @@ mod tests {
 
     #[test]
     fn failure_transition_rejections_map_to_public_failure_codes() {
-        let code = |reason, purpose| {
-            failure_transition_error(reason, purpose).and_then(|error| error.public_code())
-        };
-        assert_eq!(
-            code(RejectReason::StaleFailure, Some(LeasePurpose::Skip)),
-            Some("sys.failure.stale_version")
-        );
-        assert_eq!(
-            code(RejectReason::ResolveBlocked, None),
-            Some("sys.failure.state_conflict")
-        );
-        assert_eq!(
-            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Deliver)),
-            Some("sys.failure.state_conflict")
-        );
-        assert_eq!(
-            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)),
-            Some("sys.failure.skip_unsupported")
-        );
-        assert_eq!(code(RejectReason::StreamBusy, None), None);
+        let code = |reason| failure_transition_error(reason).and_then(|error| error.public_code());
+        assert_eq!(code(RejectReason::StaleFailure), Some("sys.failure.stale_version"));
+        assert_eq!(code(RejectReason::ResolveBlocked), Some("sys.failure.state_conflict"));
+        // Skip acquisition rejects a failure that is no longer open with
+        // RetryNotAllowed: a state conflict, not an unsupported skip.
+        assert_eq!(code(RejectReason::RetryNotAllowed), Some("sys.failure.state_conflict"));
+        assert_eq!(code(RejectReason::StreamBusy), None);
     }
 
     #[tokio::test]
