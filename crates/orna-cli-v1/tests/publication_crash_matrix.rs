@@ -628,11 +628,11 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         // accepted pending pin must survive the kill and recovery (ORNA-PUB-018).
         let seeded_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(String::from_utf8_lossy(&seeded_pins).lines().count(), 1, "fixture pin set changed before {boundary}");
-        let abandoned = state
+        let seeded_lease = state
             .current_lease()
             .await
             .unwrap()
-            .expect("seeded project leaves a writer lease for the abandoned owner");
+            .expect("seeded project leaves a writer lease");
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
@@ -699,16 +699,24 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
         assert!(publication_pin_refs(root).is_empty(), "publication pins remain after second publish at {boundary}");
-        // Fence last: takeover_lease may leave takeover_recovery_pending set.
-        let fresh = [0x5a; 16];
-        let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
-        assert_eq!(replacement.owner_id, fresh);
-        assert_eq!(replacement.epoch, abandoned.epoch + 1);
-        assert!(matches!(
-            reopened.takeover_lease(abandoned, [0x5b; 16]).await,
-            Err(orna_runtime_v1::RuntimeError::OwnerLost)
-        ), "abandoned lease took over twice after {boundary}");
-        assert!(reopened.acquire_lease(abandoned.owner_id).await.is_err(), "abandoned owner regained writer lease after {boundary}");
+        // Lock and lease-release evidence only. This block does NOT prove Gate D P5 ("no abandoned
+        // owner retains write permission"): no token is rejected here, and the publisher never held
+        // the seeded writer lease. P5 stays open until production fencing lands (W76 F1; beads
+        // .127 and .220). `orna publish` acquires no writer lease, so the seeded lease must be
+        // untouched by the killed publish or its recovery, and the publisher's own runtime-owner
+        // and coordination locks must be released and acquirable afterwards.
+        assert_eq!(
+            reopened.current_lease().await.unwrap(),
+            Some(seeded_lease),
+            "publication changed the writer lease at {boundary}"
+        );
+        assert!(
+            reopened.holds_runtime_owner_lock(),
+            "runtime owner lock still held by the killed publisher at {boundary}"
+        );
+        repository
+            .with_coordination_lock(|| Ok::<(), orna_repository_v1::RepositoryError>(()))
+            .unwrap_or_else(|error| panic!("coordination lock still held after {boundary}: {error:?}"));
         println!(
             "{boundary}: SIGKILL recovery_publish_exit={}, second_publish_exit={}",
             resumed.status.code().unwrap(),
