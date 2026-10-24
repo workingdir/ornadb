@@ -11,14 +11,13 @@ use std::{
 };
 
 use orna_foundation_v1::CanonicalValue;
+use orna_live_v1::live_presentation::{
+    LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
+    WatchPresentation,
+};
 use orna_protocol_v1::{
     CanonicalSnapshot, Envelope, Limits, Message, PresentNode, RequestState, ResultBody,
     ResultStatus,
-};
-
-use crate::live_presentation::{
-    LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
-    WatchPresentation,
 };
 
 type LiveReceiveFuture<'a, E> = Pin<Box<dyn Future<Output = Result<Vec<u8>, E>> + 'a>>;
