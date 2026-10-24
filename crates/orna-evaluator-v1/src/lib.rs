@@ -842,18 +842,38 @@ impl fmt::Display for EvaluationError {
 }
 impl std::error::Error for EvaluationError {}
 
-/// Projects a nested canonical cause to a code-only diagnostic. A user-authored
-/// Error code is trusted only when it has the catalogue shape; any other code,
-/// and every message and span, stays redacted at the evaluator boundary.
+/// Diagnostic codes the evaluator itself emits. A nested canonical cause keeps
+/// its code only when it is one of these; every other code, including a
+/// user-authored `ORNA-` code, is redacted at the evaluator boundary.
+const EVALUATOR_CAUSE_CODES: &[&str] = &[
+    "ORNA-EVAL-AMBIGUOUS",
+    "ORNA-EVAL-ARGUMENT",
+    "ORNA-EVAL-BROWSER",
+    "ORNA-EVAL-BROWSER-ENTRY",
+    "ORNA-EVAL-CANCELLED",
+    "ORNA-EVAL-DIVIDE-BY-ZERO",
+    "ORNA-EVAL-ERROR",
+    "ORNA-EVAL-FIELD",
+    "ORNA-EVAL-IMMUTABLE-CAPTURE",
+    "ORNA-EVAL-INDEX",
+    "ORNA-EVAL-LIMIT",
+    "ORNA-EVAL-NAME",
+    "ORNA-EVAL-NO-MATCH",
+    "ORNA-EVAL-PARSE",
+    "ORNA-EVAL-RELATION-ONE-MULTIPLE",
+    "ORNA-EVAL-RELATION-ONE-ZERO",
+    "ORNA-EVAL-TIMEOUT",
+    "ORNA-EVAL-TYPE",
+    "ORNA-EVAL-UNSUPPORTED",
+    "ORNA-EVAL-VALUE",
+];
+
+/// Projects a nested canonical cause to a code-only diagnostic. Only a code in
+/// [`EVALUATOR_CAUSE_CODES`] is kept; every message and span stays redacted.
 fn canonical_cause_diagnostic(cause: &CanonicalErrorValue) -> Diagnostic {
     let code = cause.code();
-    let catalogue_shaped = code.len() <= 64
-        && code.starts_with("ORNA-")
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-');
-    let safe_code = if catalogue_shaped {
-        SafeText::new(code).expect("catalogue-shaped code is safe text")
+    let safe_code = if EVALUATOR_CAUSE_CODES.contains(&code) {
+        SafeText::new(code).expect("catalogue code is safe text")
     } else {
         SafeText::redacted()
     };
@@ -15742,10 +15762,13 @@ mod tests {
         let user =
             CanonicalErrorValue::new("userSuppliedCode", "private message", [], BTreeMap::new())
                 .expect("canonical user error");
+        let private_orna =
+            CanonicalErrorValue::new("ORNA-PRIVATE-TOKEN", "private message", [], BTreeMap::new())
+                .expect("canonical ORNA-prefixed user error");
         let outer = CanonicalErrorValue::new(
             "ORNA-EVAL-SURFACE",
             "private message",
-            [inner, user],
+            [inner, user, private_orna],
             BTreeMap::new(),
         )
         .expect("canonical outer error");
@@ -15753,9 +15776,15 @@ mod tests {
         let error = EvaluationError::from_canonical(outer);
         let causes = error.diagnostic().causes();
         assert_eq!(error.code(), "ORNA-EVAL-ERROR");
-        assert_eq!(causes.len(), 2);
+        assert_eq!(causes.len(), 3);
         assert_eq!(causes[0].code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
         assert_eq!(causes[1].code(), "<redacted>");
+        assert_eq!(causes[2].code(), "<redacted>");
+        assert!(
+            causes
+                .iter()
+                .all(|cause| cause.code() != "ORNA-PRIVATE-TOKEN")
+        );
         assert!(causes.iter().all(|cause| cause.message() == "<redacted>"));
     }
 
