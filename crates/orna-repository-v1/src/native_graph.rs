@@ -11158,6 +11158,166 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         assert_eq!(rewrite_scope.payload_bytes_read(), 0);
     }
 
+    /// ORNA-GRAPH-005: a shared child is validated under each parent's own
+    /// expected length and height, so a conflicting second parent is rejected.
+    #[test]
+    fn shared_byte_index_child_is_rejected_under_conflicting_parent_constraints() {
+        let (directory, graph) = capture_test_context();
+        let bytes = b"ab";
+        let identity = crate::blob_store::digest_bytes(bytes);
+        let chunk = fixture_git_object(directory.path(), "blob", bytes);
+        let span = crate::blob_store::ChunkSpan::new(0, bytes.len() as u64, identity.sha256())
+            .expect("valid chunk span");
+        let shared_child = fixture_git_node(
+            directory.path(),
+            &NodeData::ByteIndex {
+                height: 0,
+                total_length: bytes.len() as u64,
+                entries: vec![ByteIndexEntry {
+                    span_length: span.length(),
+                    target: chunk,
+                    chunk_sha256: Some(span.sha256()),
+                }],
+            },
+        );
+        let scope = graph.open_read_scope().expect("shared child scope");
+        let mut walk = |expected_length: u64, expected_height: Option<u8>| {
+            let mut objects = graph.stats_budget(&scope);
+            let mut digest = crate::blob_store::ContentDigest::new();
+            let mut boundaries = GearBoundaryVerifier::new();
+            graph.walk_full_index(
+                &shared_child,
+                expected_length,
+                expected_height,
+                &scope,
+                &mut objects,
+                &mut digest,
+                &mut boundaries,
+            )
+        };
+        assert_eq!(walk(2, None).expect("first parent agrees with the shared child"), 0);
+        assert!(matches!(walk(3, None), Err(GraphError::InvalidByteIndex)));
+        assert!(matches!(walk(2, Some(1)), Err(GraphError::InvalidByteIndex)));
+    }
+
+    /// ORNA-GRAPH-007: after history is written the store root's relation map
+    /// holds exactly the current snapshot relation, never historical entries.
+    #[test]
+    fn store_root_relation_map_holds_only_the_current_relation_after_history() {
+        let (_directory, mut graph) = capture_test_context();
+        let relation_id = *graph.row_snapshot.version().relation_id();
+        let empty_value = RowValue::decode_canonical_fields(vec![0x80])
+            .expect("empty canonical fixture row");
+        let mut latest_primary = None;
+        for generation in 0..3 {
+            let scope = graph.open_read_scope().expect("history write scope");
+            let built = graph
+                .maintain_row_index(
+                    &[RowIndexMutation::Insert {
+                        key: TypedKey::Text(format!("history-{generation}")),
+                        value: empty_value.clone(),
+                    }],
+                    &scope,
+                )
+                .expect("maintain row index for a new history generation");
+            let version = graph.row_snapshot.version();
+            let published = graph
+                .replace_relation_primary_root(
+                    version.store_root(),
+                    version,
+                    built.primary_root(),
+                    built.row_count(),
+                    &scope,
+                )
+                .expect("publish history generation");
+            latest_primary = Some(built.primary_root().clone());
+            graph.row_snapshot = load_format3_row_map(
+                &graph.repository,
+                graph.algorithm,
+                published.clone(),
+                graph.database_id,
+                graph.snapshot_id,
+                relation_id,
+            )
+            .expect("reload format-3 row map");
+            graph.store_root = published;
+        }
+
+        let scope = graph.open_read_scope().expect("root inspection scope");
+        let mut objects = graph.stats_budget(&scope);
+        let store_root = graph.store_root.clone();
+        let NodeData::StoreRoot { relation_map } = graph
+            .read_native_node(&store_root, &scope, &mut objects)
+            .expect("read current store root")
+        else {
+            panic!("current store root must be a StoreRoot node");
+        };
+        let NodeData::OrderedLeaf { entries, .. } = graph
+            .read_native_node(&relation_map, &scope, &mut objects)
+            .expect("read relation map")
+        else {
+            panic!("single-relation map must be an OrderedLeaf");
+        };
+        let keys: Vec<_> = entries.iter().map(|entry| entry.key.clone()).collect();
+        let expected = vec![
+            TypedKey::Bytes(relation_id.to_vec())
+                .canonical_bytes()
+                .expect("canonical relation key"),
+        ];
+        assert_eq!(keys, expected);
+        let [entry] = entries.as_slice() else {
+            panic!("single-relation map must hold exactly one relation entry");
+        };
+        let (_, primary, _, _) = decode_relation_value(&entry.value, graph.algorithm)
+            .expect("decode the current relation entry");
+        assert_eq!(
+            Some(primary),
+            latest_primary,
+            "relation entry must name the latest published primary root"
+        );
+    }
+
+    /// ORNA-OGB-007: a 16-byte Blob field persists as a BlobDescriptor
+    /// reference, and the row bytes carry no inline payload.
+    #[test]
+    fn sixteen_byte_blob_field_persists_as_descriptor_reference_without_inline_payload() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("blob field scope");
+        let payload = b"sixteen bytes!!!";
+        assert_eq!(payload.len(), 16);
+        let captured = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture 16-byte Blob");
+        let pin = graph
+            .protect_captured_blob(captured, &scope)
+            .expect("protect 16-byte Blob closure");
+        let binding = graph
+            .accept_protected_blob_pin(pin)
+            .expect("admit 16-byte Blob for a row field");
+        let mut objects = graph.stats_budget(&scope);
+        let descriptor_oid = binding.descriptor_oid().clone();
+        let NodeData::BlobDescriptor {
+            length, byte_root, ..
+        } = graph
+            .read_native_node(&descriptor_oid, &scope, &mut objects)
+            .expect("read persisted Blob descriptor")
+        else {
+            panic!("row Blob field must reference a BlobDescriptor");
+        };
+        assert_eq!(length, 16);
+        assert!(byte_root.is_some(), "non-empty Blob keeps a reference root");
+        let row = binding.encoded_value();
+        assert!(
+            row.windows(descriptor_oid.as_bytes().len())
+                .any(|window| window == descriptor_oid.as_bytes()),
+            "row must carry the descriptor reference"
+        );
+        assert!(
+            !row.windows(payload.len()).any(|window| window == &payload[..]),
+            "row must not inline the 16-byte payload"
+        );
+    }
+
     fn fixture_git_stdout(directory: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .current_dir(directory)
