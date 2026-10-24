@@ -445,7 +445,7 @@ CREATE TABLE IF NOT EXISTS admin_invocation_audit (
     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
-    observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+    observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
@@ -454,6 +454,13 @@ CREATE TABLE IF NOT EXISTS admin_invocation_checkpoint_result (
     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
     version INTEGER NOT NULL CHECK (version >= 0),
     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+);
+CREATE TABLE IF NOT EXISTS admin_invocation_stale_capture (
+    invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
 );
 
 CREATE TABLE IF NOT EXISTS sys_run_observation (
@@ -4299,7 +4306,8 @@ pub struct AdminInvocationAudit {
     pub function: String,
     pub safe_arguments: String,
     pub owner: WriterLease,
-    pub observed_generation: u64,
+    /// Admitted generation; `None` when the failed call could not observe the CWD.
+    pub observed_generation: Option<u64>,
     pub terminal_outcome: String,
     /// Typed runtime effect decoded from the durable terminal outcome.
     pub effect: AdminLifecycleEffect,
@@ -4468,20 +4476,23 @@ fn admin_reference_descriptor(
 
 /// Replays a stored failure or outcome for an admitted invocation.
 ///
-/// A `failure:stale_capture` row stores only the admitted generation and the
-/// class (ORNA-ADMIN-001), not the rejected capture. Replay therefore returns
-/// `StaleCapture` with the CWD capture current at replay time, which equals
-/// the original rejection until a later commit advances the CWD. A capture
-/// failure at replay surfaces its own error instead of the recorded class.
+/// A `failure:stale_capture` row replays the capture that rejected the call,
+/// stored in `admin_invocation_stale_capture`, so the replayed error equals the
+/// recorded one after later commits advance the CWD. Rows written before that
+/// table replay the CWD capture current at replay time. A `failure:unobservable`
+/// row replays as `RecoveryInvalid`: its CWD capture could not be read.
 async fn replay_admin_stream_result(
     connection: &Connection,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
     if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
         if failure == "stale_capture" {
-            // Replay-time payload: see the doc comment above.
+            let current = match load_admin_stale_capture(connection, receipt.invocation_id).await? {
+                Some(current) => current,
+                None => capture_tx(connection).await?,
+            };
             return Err(RuntimeError::StaleCapture {
-                current: Box::new(capture_tx(connection).await?),
+                current: Box::new(current),
             });
         }
         return Err(admin_failure_from_class(failure));
@@ -4618,6 +4629,7 @@ fn admin_failure_from_class(class: &str) -> RuntimeError {
         "terminal_outcome_too_large" => RuntimeError::TerminalOutcomeTooLarge,
         "system_provider_abi_invalid" => RuntimeError::SystemProviderAbiInvalid,
         "storage_unavailable" | "unavailable" => RuntimeError::StorageUnavailable,
+        "unobservable" => RuntimeError::RecoveryInvalid,
         _ => RuntimeError::RecoveryInvalid,
     }
 }
@@ -4811,6 +4823,7 @@ impl RuntimeState {
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
+        state.migrate_admin_failure_unobservable().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
@@ -6228,7 +6241,7 @@ impl RuntimeState {
                 &transaction,
                 &descriptor,
                 lease,
-                observed_generation,
+                Some(observed_generation),
                 admin_operation_outcome(&result),
                 admin_operation_succeeded(&result),
                 match &result {
@@ -6318,9 +6331,10 @@ impl RuntimeState {
     /// failure class (ORNA-ADMIN-001). `admitted_generation` is the generation
     /// captured under the lock that admitted the call; a call rejected before
     /// any capture records the generation current when its failure is
-    /// recorded. If that capture fails too, the capture error is returned and
-    /// no row is written: a row never carries a placeholder generation, and a
-    /// failure row without one would need a nullable generation column.
+    /// recorded. A `failure:stale_capture` row also stores the rejecting
+    /// capture. If that capture cannot be read, the row records a NULL
+    /// generation with `failure:unobservable`; the caller still returns the
+    /// original error.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
@@ -6351,19 +6365,32 @@ impl RuntimeState {
             };
         }
         let observed_generation = match admitted_generation {
-            Some(generation) => generation,
-            None => admin_observed_generation(&capture_tx(&transaction).await?)?,
+            Some(generation) => Some(generation),
+            None => capture_tx(&transaction)
+                .await
+                .and_then(|capture| admin_observed_generation(&capture))
+                .ok(),
+        };
+        let (terminal_outcome, stale_capture) = match (observed_generation, error) {
+            (None, _) => ("failure:unobservable".to_owned(), None),
+            (Some(_), RuntimeError::StaleCapture { current }) => {
+                ("failure:stale_capture".to_owned(), Some(&**current))
+            }
+            (Some(_), error) => (format!("failure:{}", admin_failure_class(error)), None),
         };
         store_admin_invocation_audit(
             &transaction,
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{}", admin_failure_class(error)),
+            terminal_outcome,
             false,
             None,
         )
         .await?;
+        if let Some(current) = stale_capture {
+            store_admin_stale_capture(&transaction, descriptor.invocation_id, current).await?;
+        }
         transaction
             .commit()
             .await
@@ -9712,6 +9739,78 @@ impl RuntimeState {
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('nullable-stream-partition-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Makes the admin audit's `observed_generation` nullable, so a failed
+    /// invocation whose CWD cannot be read is still recorded as
+    /// `failure:unobservable`. The audit table and its checkpoint-result child
+    /// are rebuilt in one transaction; existing rows keep their values.
+    async fn migrate_admin_failure_unobservable(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut columns = transaction
+            .query("PRAGMA table_info(admin_invocation_audit)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut generation_required = None;
+        while let Some(column) = columns
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let name: String = column.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if name == "observed_generation" {
+                let notnull: i64 = column.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                generation_required = Some(notnull == 1);
+            }
+        }
+        if generation_required.ok_or(RuntimeError::RecoveryInvalid)? {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE admin_invocation_audit_nullable (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                        function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                        safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                        owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                        owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                        observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
+                        terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                        succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                        redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                    );
+                    CREATE TABLE admin_invocation_checkpoint_result_nullable (
+                        invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit_nullable(invocation_id),
+                        version INTEGER NOT NULL CHECK (version >= 0),
+                        committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                    );
+                    INSERT INTO admin_invocation_audit_nullable SELECT * FROM admin_invocation_audit;
+                    INSERT INTO admin_invocation_checkpoint_result_nullable
+                        SELECT * FROM admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_audit;
+                    ALTER TABLE admin_invocation_audit_nullable RENAME TO admin_invocation_audit;
+                    ALTER TABLE admin_invocation_checkpoint_result_nullable
+                        RENAME TO admin_invocation_checkpoint_result;",
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('admin-failure-unobservable-v1')",
                 (),
             )
             .await
@@ -16426,7 +16525,7 @@ async fn store_admin_invocation_audit(
     connection: &Connection,
     descriptor: &AdminInvocationDescriptor,
     owner: WriterLease,
-    observed_generation: u64,
+    observed_generation: Option<u64>,
     terminal_outcome: String,
     succeeded: bool,
     checkpoint_result: Option<&StreamCheckpoint>,
@@ -16443,7 +16542,10 @@ async fn store_admin_invocation_audit(
                 descriptor.safe_arguments.clone(),
                 owner.owner_id.to_vec(),
                 i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                observed_generation
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 terminal_outcome,
                 if succeeded { 1_i64 } else { 0_i64 },
                 if descriptor.redacted { 1_i64 } else { 0_i64 },
@@ -16470,6 +16572,55 @@ async fn store_admin_invocation_audit(
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+async fn store_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+    capture: &CwdCapture,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO admin_invocation_stale_capture
+             (invocation_id, database_id, runtime_id, generation, generation_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invocation_id.to_vec(),
+                capture.database_id().to_vec(),
+                capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?,
+                capture.generation_digest().to_vec(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+) -> Result<Option<CwdCapture>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT database_id, runtime_id, generation, generation_digest
+             FROM admin_invocation_stale_capture WHERE invocation_id = ?1",
+            params![invocation_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest).map(Some)
 }
 
 async fn load_admin_invocation_audits(
@@ -16520,10 +16671,11 @@ async fn load_admin_invocation_audits_through(
             )?,
         };
         validate_writer_lease(owner)?;
-        let observed_generation = decode_u64(
-            row.get::<i64>(6)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        )?;
+        let observed_generation = row
+            .get::<Option<i64>>(6)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .map(decode_u64)
+            .transpose()?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -16597,10 +16749,11 @@ async fn load_admin_invocation_receipt(
         )?,
     };
     validate_writer_lease(owner)?;
-    let observed_generation = decode_u64(
-        row.get::<i64>(6)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )?;
+    let observed_generation = row
+        .get::<Option<i64>>(6)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(decode_u64)
+        .transpose()?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
     let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -18890,6 +19043,15 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest)
+}
+
+fn cwd_capture_from_parts(
+    database_id: [u8; 16],
+    runtime_id: [u8; 16],
+    generation: i64,
+    digest: [u8; 32],
+) -> Result<CwdCapture, RuntimeError> {
     if generation < 0 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -41057,7 +41219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_capture_failure_writes_no_audit_row() {
+    async fn admin_capture_failure_records_unobservable_row() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
@@ -41079,10 +41241,11 @@ mod tests {
             .await
             .expect_err("capture failure must fail the call");
         assert_eq!(error, RuntimeError::RecoveryInvalid);
-        assert!(
-            state.admin_invocation_audits().await.unwrap().is_empty(),
-            "a capture failure must not write a row, least of all with generation 0",
-        );
+        let audits = state.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 1, "the failed call still gets one row: {audits:?}");
+        assert_eq!(audits[0].observed_generation, None);
+        assert_eq!(audits[0].terminal_outcome, "failure:unobservable");
+        assert!(!audits[0].succeeded);
     }
 
     #[test]
@@ -41224,7 +41387,7 @@ mod tests {
                 &state.connection,
                 &admin_invocation_descriptor_with_id(&operation, invocation_id),
                 writer,
-                generation,
+                Some(generation),
                 format!("failure:{outcome}"),
                 false,
                 None,
@@ -41452,7 +41615,7 @@ mod tests {
         assert!(failed.safe_arguments.contains("reason_digest="));
         assert_eq!(failed.terminal_outcome, "failure:admin_busy");
         let generation = admin_observed_generation(&capture_before).unwrap();
-        assert_eq!(failed.observed_generation, generation);
+        assert_eq!(failed.observed_generation, Some(generation));
         let receipt = reopened
             .admin_invocation_receipt(invocation_id)
             .await
@@ -41472,7 +41635,7 @@ mod tests {
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
         assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
-        assert_eq!(rejected_receipt.observed_generation, generation);
+        assert_eq!(rejected_receipt.observed_generation, Some(generation));
     }
 
     #[tokio::test]

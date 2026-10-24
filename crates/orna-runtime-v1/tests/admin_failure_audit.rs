@@ -179,16 +179,15 @@ async fn assert_stale_capture_row(
     assert_eq!(row.invocation_id, invocation_id);
     assert_eq!(row.function, function);
     assert_eq!(row.terminal_outcome, "failure:stale_capture");
-    assert_eq!(row.observed_generation, fixture.current_generation);
+    assert_eq!(row.observed_generation, Some(fixture.current_generation));
     assert!(!row.succeeded);
 }
 
 /// Runs one stale administrative call and replays it under the same
-/// invocation ID (ORNA-ADMIN-003). While the CWD is unchanged the replay is
-/// the original error, payload included. The row stores the class and the
-/// admitted generation, not the rejected capture, so after a later commit
-/// the replay is still `StaleCapture` and carries the capture current at
-/// replay. No replay appends a row or rewrites the recorded one.
+/// invocation ID (ORNA-ADMIN-003). The replay is the recorded error, payload
+/// included, even after a later commit advances the CWD: the row stores the
+/// rejecting capture, not the capture current at replay. No replay appends a
+/// row or rewrites the recorded one.
 async fn assert_stale_call_replays_recorded_failure<F, Fut>(
     fixture: &StaleStreamReference,
     invocation_id: [u8; 16],
@@ -212,7 +211,7 @@ async fn assert_stale_call_replays_recorded_failure<F, Fut>(
     assert_eq!(replay, error, "replay must return the recorded failure");
     assert_stale_capture_row(fixture, invocation_id, function).await;
 
-    let later = fixture
+    fixture
         .state
         .commit(
             fixture.writer,
@@ -225,11 +224,8 @@ async fn assert_stale_call_replays_recorded_failure<F, Fut>(
         .expect("a later commit advances the CWD generation");
     let replay = call().await.expect_err("replayed stale capture must fail");
     assert_eq!(
-        replay,
-        RuntimeError::StaleCapture {
-            current: Box::new(later),
-        },
-        "the replayed rejection carries the capture current at replay",
+        replay, error,
+        "the replay returns the recorded rejection after a later commit",
     );
     assert_stale_capture_row(fixture, invocation_id, function).await;
 }
