@@ -529,6 +529,117 @@ fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
     );
 }
 
+/// A committed `HEAD` whose `.orna/database.orna` is `head_database`, beside a
+/// valid format-3 record and store in the worktree.
+fn head_database_with_worktree_format_three(head_database: &str) -> TempDir {
+    let directory = repository(Some(head_database), None, true);
+    fs::write(
+        directory.path().join(".orna/database.orna"),
+        CANONICAL_DATABASE,
+    )
+    .unwrap();
+    directory
+}
+
+#[test]
+fn refuses_unclassifiable_committed_database_records_whatever_the_worktree_holds() {
+    let string_value =
+        CANONICAL_DATABASE.replace("repository_format: 3,", "repository_format: \"3\",");
+    let overflow = CANONICAL_DATABASE.replace(
+        "repository_format: 3,",
+        "repository_format: 99999999999999999999999999,",
+    );
+    let syntax_broken = CANONICAL_DATABASE.replace("}\n", "");
+    let extra_field =
+        CANONICAL_DATABASE.replace("    database_id:", "    extra: 1,\n    database_id:");
+    for (label, head) in [
+        ("string value", &string_value),
+        ("overflowing integer", &overflow),
+        ("syntax-broken record", &syntax_broken),
+        ("extra field", &extra_field),
+    ] {
+        assert_ne!(head, CANONICAL_DATABASE, "{label}: the shape must differ");
+        let directory = head_database_with_worktree_format_three(head);
+        let repository = Repository::discover(directory.path()).unwrap();
+        assert!(
+            orna_repository_v1::inspect_metadata(&repository)
+                .unwrap()
+                .is_some(),
+            "{label}: the worktree metadata alone admits a format-3 runtime"
+        );
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "{label}");
+    }
+}
+
+#[test]
+fn refuses_unclassifiable_committed_legacy_records_whatever_the_worktree_holds() {
+    for head_legacy in [
+        "{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n",
+        "{repository_format: 99, storage_profile: \"compact-storage-v1\", extra: 1}\n",
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\", extra: 1}\n",
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"\n",
+        "{repository_format: \"1\", storage_profile: \"compact-storage-v1\"}\n",
+    ] {
+        let directory = repository(None, Some(head_legacy), true);
+        fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+        fs::write(
+            directory.path().join(".orna/database.orna"),
+            CANONICAL_DATABASE,
+        )
+        .unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "{head_legacy}");
+    }
+}
+
+/// Pins the L1 behaviour: a `database.orna` that names format 1 or 2 beside its
+/// `database_id` is refused as an unknown format at `HEAD`. Legacy layouts are
+/// read only from `.orna/format.orna`, never from `database.orna`.
+#[test]
+fn refuses_legacy_format_numbers_inside_a_database_record() {
+    for number in ["1", "2"] {
+        let head = CANONICAL_DATABASE.replace(
+            "repository_format: 3,",
+            &format!("repository_format: {number},"),
+        );
+        let directory = repository(Some(&head), None, true);
+        let repository = Repository::discover(directory.path()).unwrap();
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "format {number}");
+    }
+}
+
+#[test]
+fn head_gate_admits_known_unborn_and_recordless_heads() {
+    let format_three = repository(Some(CANONICAL_DATABASE), None, true);
+    assert_eq!(
+        Repository::discover(format_three.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+    let recordless = repository(None, None, true);
+    assert_eq!(
+        Repository::discover(recordless.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+    let unborn = TempDir::new().unwrap();
+    git(
+        unborn.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    assert_eq!(
+        Repository::discover(unborn.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+}
+
 #[test]
 fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
     let directory = repository(Some(INVALID_DATABASE), Some(ORNADB_1_0_FORMAT_ONE), false);
