@@ -40,8 +40,8 @@ use orna_runtime_v1::{
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
-    AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
-    StandardDependencyProfile, SystemProviders, analyze_with_providers,
+    AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders, analyze_with_providers,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
@@ -1060,7 +1060,9 @@ impl RuntimeEvaluator for BoundedEvaluator {
 
 /// Binds unqualified names from `use std.<module>.{name}` declarations in the
 /// project's modules to the retained standard functions. User functions keep
-/// their own names; conflicting standard aliases are rejected.
+/// their own names. Glob and module-alias imports are refused explicitly, a
+/// braced name absent from the pinned module is an import error, and two
+/// modules binding one unqualified name to different targets are ambiguous.
 fn bind_standard_function_aliases(
     functions: &mut BTreeMap<String, RetainedFunction>,
     project: &ProjectUnit,
@@ -1069,11 +1071,7 @@ fn bind_standard_function_aliases(
     for unit in &project.modules {
         let parsed = parse_module(&unit.source);
         for item in parsed.value.items {
-            let Declaration::Use {
-                path,
-                tail: orna_syntax_v1::UseTail::Names(names),
-            } = item.declaration
-            else {
+            let Declaration::Use { path, tail } = item.declaration else {
                 continue;
             };
             if path.first().map(|segment| segment.name.as_str()) != Some("std") {
@@ -1084,14 +1082,37 @@ fn bind_standard_function_aliases(
                 .map(|segment| segment.name.as_str())
                 .collect::<Vec<_>>()
                 .join(".");
+            let names = match tail {
+                orna_syntax_v1::UseTail::None => continue,
+                orna_syntax_v1::UseTail::Names(names) => names,
+                orna_syntax_v1::UseTail::Glob { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard glob imports are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+                orna_syntax_v1::UseTail::Alias { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard module aliases are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+            };
             for name in names {
                 let target = format!("{namespace}.{}", name.name);
+                if !functions.contains_key(&target) {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "imported name is not exported by the pinned standard module",
+                    )));
+                }
                 if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
                     && previous != target
                 {
-                    return Err(StageOutcome::Skipped {
-                        reason: "standard imports have conflicting unqualified function names".into(),
-                    });
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_AMBIGUOUS,
+                        "standard imports bind one unqualified name to different functions",
+                    )));
                 }
             }
         }
@@ -1102,6 +1123,16 @@ fn bind_standard_function_aliases(
         }
     }
     Ok(())
+}
+
+fn standard_import_diagnostic(code: &str, message: &str) -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new(code).expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new(message).expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
 }
 
 

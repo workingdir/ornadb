@@ -2382,6 +2382,16 @@ fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
         evaluator.load_standard_sources(&profile, [("std/math.orna".into(), source.into())],),
         StageOutcome::Passed
     );
+    // Standard functions are retained under their module identity, so an
+    // unqualified name is deliberately not bound here: unqualified names resolve
+    // only through an explicit `use std.<module>.{name}` in a project.
+    assert!(matches!(
+        evaluator.invoke_with(
+            "increment",
+            &BTreeMap::from([("value".into(), value(OvbRaw::Int(41.into())),)])
+        ),
+        StageOutcome::Skipped { .. }
+    ));
     assert_eq!(
         evaluator.invoke_with(
             "std.math.increment",

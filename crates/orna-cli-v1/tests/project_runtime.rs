@@ -1656,6 +1656,51 @@ fn binary_invoke_rejects_a_negative_take_count_from_the_pinned_standard_list() {
 }
 
 #[test]
+fn binary_invoke_refuses_a_standard_glob_import_with_its_import_code() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math.*;\npub fn answer(): Int = increment(41);\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[ORNA-S010-IMPORT]"), "stderr: {stderr}");
+}
+
+#[test]
+fn binary_invoke_refuses_a_standard_module_alias_import_with_its_import_code() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math as m;\npub fn answer(): Int = increment(41);\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E2101]"), "stderr: {stderr}");
+}
+
+#[test]
+fn binary_invoke_rejects_a_braced_standard_name_missing_from_the_pinned_module() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math.{no_such_function};\npub fn answer(): Int = 1;\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.is_empty(), "missing braced name must be diagnosed");
+}
+
+#[test]
 fn binary_repl_imports_a_captured_standard_module() {
     use std::io::Write as _;
 
