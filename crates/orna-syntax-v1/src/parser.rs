@@ -48,6 +48,13 @@ impl SourceSpan {
         self
     }
 }
+/// Reference coordinate walk for one span: counts complete scalars from byte 0.
+///
+/// Two helpers compute the same coordinates on purpose. `SourceSpan::located`
+/// annotates a single span, so this walk stays allocation-free (O(offset), no
+/// line index). Bulk annotation of a whole tree uses [`SourceLines`], which
+/// builds the index once. `source_line_index_matches_position_at_for_crlf_and_multibyte_text`
+/// pins that the two agree, so changing either one requires changing both.
 fn position_at(source: &str, at: usize) -> SourcePosition {
     // Offsets produced by the lexer and parser are always UTF-8 boundaries,
     // but `SourceSpan` is public and callers can construct an unchecked span.
