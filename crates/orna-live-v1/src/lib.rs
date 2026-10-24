@@ -4695,10 +4695,10 @@ impl LiveHost {
         Ok(())
     }
 
-    /// A resync is a complete-root replacement fallback. Keep the server
-    /// watch identity stable, reject revision regressions, and permit same-
-    /// revision replay only when the complete visible tree and pinned snapshot
-    /// are unchanged.
+    /// A resync is answered with the watch's latest full snapshot. Keep the
+    /// server watch identity stable, reject revision regressions, and permit
+    /// same-revision replay only when the complete visible tree and pinned
+    /// snapshot are unchanged.
     fn prepare_watch_snapshot_replacement(
         &self,
         session: [u8; 16],
@@ -4709,37 +4709,8 @@ impl LiveHost {
             .watch_snapshots
             .get(&(session, watch))
             .ok_or(Error::ApplicationRejected)?;
-        let candidate = match &response.message {
-            Message::Snapshot { .. } | Message::Diagnostic { .. } => {
-                let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
-                    return Ok(None);
-                };
-                candidate
-            }
-            Message::Delta {
-                base_revision,
-                new_revision,
-                patches,
-                snapshot,
-            } => {
-                if response.request.is_some()
-                    || response.watch != Some(watch)
-                    || *base_revision != current.revision
-                    || *new_revision <= *base_revision
-                {
-                    return Err(Error::ApplicationRejected);
-                }
-                let present = current
-                    .present
-                    .apply_patches(patches, self.limits.protocol)
-                    .map_err(|_| Error::ApplicationRejected)?;
-                AcceptedWatchSnapshot {
-                    revision: *new_revision,
-                    present,
-                    snapshot: snapshot.clone(),
-                }
-            }
-            _ => return Err(Error::ApplicationRejected),
+        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+            return Ok(None);
         };
         if candidate.revision < current.revision
             || candidate.revision == current.revision && candidate != *current
@@ -5159,10 +5130,13 @@ fn validate_snapshot_response(
     })
 }
 
-/// Watch requests may be rejected with a structured host diagnostic. An
-/// initial watch has no server-issued identity yet, while resync must retain
-/// its existing watch identity so a client can correlate the failure without
-/// treating it as a new watch admission.
+/// Watch requests are answered with a full snapshot carrying their request
+/// ID, or rejected with a structured host diagnostic. An initial watch has no
+/// server-issued identity yet, while resync must retain its existing watch
+/// identity so a client can correlate the answer without treating it as a
+/// new watch admission. A delta never answers a resync: the client resyncs
+/// because it lost its base revision, so it receives the latest full snapshot
+/// under its own request ID (30-protocol message registry, type 2).
 fn validate_watch_response(
     request: [u8; 16],
     watch: Option<[u8; 16]>,
@@ -5177,8 +5151,6 @@ fn validate_watch_response(
             if response.request == Some(request)
                 && response.watch.is_some()
                 && watch.is_none_or(|expected| response.watch == Some(expected)) => {}
-        Message::Delta { .. }
-            if watch.is_some() && response.request.is_none() && response.watch == watch => {}
         Message::Diagnostic { .. }
             if response.request == Some(request) && response.watch == watch => {}
         _ => return Err(Error::ApplicationRejected),
@@ -9056,11 +9028,17 @@ mod tests {
         subscribed_host_with_credential(runtime).0
     }
 
+    /// 30-protocol message registry, type 2 (A13-live-serving-08): a resync is
+    /// answered with the latest full snapshot under its own request ID. A
+    /// request-less delta assumes the base revision the resyncing client has
+    /// lost, so the host refuses it; the correlated snapshot advances the
+    /// accepted watch tree.
     #[test]
-    fn resync_delta_advances_the_accepted_watch_tree() {
+    fn resync_is_answered_by_a_correlated_full_snapshot_not_a_delta() {
         let mut host = subscribed_host(None);
         let session = [91; 16];
         let watch = [92; 16];
+        let request = [93; 16];
         let snapshot = CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
         let previous = orna_protocol_v1::PresentNode::from_value(
             CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
@@ -9078,24 +9056,47 @@ mod tests {
                 snapshot: snapshot.clone(),
             },
         );
-        let patches = orna_protocol_v1::PatchList::replace_root(&next).unwrap();
-        let response = Envelope {
+        let delta = Envelope {
             request: None,
             watch: Some(watch),
             message: Message::Delta {
                 base_revision: 0,
                 new_revision: 1,
-                patches,
+                patches: orna_protocol_v1::PatchList::replace_root(&next).unwrap(),
+                snapshot: snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert!(matches!(
+            validate_watch_response(
+                request,
+                Some(watch),
+                delta.clone(),
+                ProtocolLimits::default()
+            ),
+            Err(Error::ApplicationRejected)
+        ));
+        assert!(matches!(
+            host.prepare_watch_snapshot_replacement(session, watch, &delta),
+            Err(Error::ApplicationRejected)
+        ));
+
+        let refreshed = Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 1,
+                present: next.clone(),
                 snapshot: snapshot.clone(),
             },
             extensions: BTreeMap::new(),
         };
         let accepted =
-            validate_watch_response([93; 16], Some(watch), response, ProtocolLimits::default())
-                .expect("a correlated watch delta is accepted by its watch identity");
+            validate_watch_response(request, Some(watch), refreshed, ProtocolLimits::default())
+                .expect("the correlated full snapshot answers the resync");
         let candidate = host
             .prepare_watch_snapshot_replacement(session, watch, accepted.response.as_ref().unwrap())
-            .expect("the accepted delta advances its base revision")
+            .expect("the snapshot advances the accepted revision")
             .unwrap();
         assert_eq!(candidate.revision, 1);
         assert_eq!(candidate.present, next);
