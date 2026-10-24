@@ -407,9 +407,7 @@ fn legacy_marker_beside_store_is_mixed_formats() {
             assert!(error.to_string().contains(".orna/store"), "{error}");
             let head = git_line(relabelled.path(), &["rev-parse", "HEAD"]);
             assert_eq!(
-                opened
-                    .open_format_context_at_selector(&head)
-                    .unwrap_err(),
+                opened.open_format_context_at_selector(&head).unwrap_err(),
                 expected
             );
 
