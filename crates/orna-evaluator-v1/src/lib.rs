@@ -2726,6 +2726,9 @@ enum Value {
     Uuid([u8; 16]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
     Reference(CanonicalValue),
+    /// A stored table reference (tag 60021): database identity, table and key.
+    /// It embeds no row copy or snapshot; equality and ordering are by identity.
+    TableReference(CanonicalValue),
     Instant {
         unix_seconds: i64,
         nanosecond: u32,
@@ -3206,6 +3209,7 @@ impl Value {
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
             Self::Reference(value) => value.raw().clone(),
+            Self::TableReference(value) => value.raw().clone(),
             Self::Instant {
                 unix_seconds,
                 nanosecond,
@@ -3390,6 +3394,7 @@ impl Value {
                 Ok(Self::Uuid(bytes))
             }
             Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
+            Raw::Tag(60021, _) => Ok(Self::TableReference(value.clone())),
             Raw::Tag(60002, boxed) => Self::instant_from_raw(boxed, context),
             Raw::Tag(60005, boxed) => Self::duration_from_raw(boxed, context),
             Raw::Array(values) => {
@@ -3513,7 +3518,7 @@ impl Value {
                 context.depth(depth)?;
                 Self::range_from_raw(boxed, context, depth)
             }
-            Raw::Tag(37 | 60000 | 60001 | 60002 | 60005 | 60007 | 60010 | 60014, _) => {
+            Raw::Tag(37 | 60000 | 60001 | 60002 | 60005 | 60007 | 60010 | 60014 | 60021, _) => {
                 let value =
                     CanonicalValue::new(raw.clone()).map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Self::from_canonical(&value, context, depth)
@@ -12925,6 +12930,7 @@ fn write_json_value(
         | Value::Date(_)
         | Value::Uuid(_)
         | Value::Reference(_)
+        | Value::TableReference(_)
         | Value::Instant { .. }
         | Value::Duration { .. }
         | Value::Period { .. }
@@ -13056,6 +13062,9 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
+        Value::TableReference(value) => encode_orna_string(&orna_value_v1::base64_encode(
+            &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
+        )),
         Value::Reference(value) => encode_orna_string(&orna_value_v1::base64_encode(
             &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
         )),
@@ -18322,6 +18331,66 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         let failure = evaluate_expression(source, &Environment::new(), limits)
             .expect_err("the same loop must stop when its activation budget is exhausted");
         assert_eq!(failure.code(), "ORNA-EVAL-LIMIT");
+    }
+}
+
+#[cfg(test)]
+mod table_reference_value_tests {
+    use super::*;
+
+    fn context(functions: &Functions) -> Context<'_, '_> {
+        Context {
+            limits: Limits::default(),
+            steps: 0,
+            calls: 0,
+            functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: false,
+            restrict_function_names: false,
+            reject_unhandled_field_calls: false,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            reuse: CallReuse::default(),
+            sys_host: None,
+            cancellation: None,
+        }
+    }
+
+    #[test]
+    fn stored_table_reference_is_an_equality_only_identity_value() {
+        let functions = Functions::new();
+        let mut context = context(&functions);
+        let reference = orna_value_v1::Value::table_reference(
+            [1; 16],
+            [2; 16],
+            Raw::Text("ada".into()),
+        )
+        .unwrap();
+
+        let value = Value::from_canonical(&reference, &mut context, 0).unwrap();
+        assert!(matches!(&value, Value::TableReference(identity) if identity == &reference));
+        assert_eq!(Value::from_raw(reference.raw(), &mut context, 0).unwrap(), value);
+
+        let same = orna_value_v1::Value::table_reference([1; 16], [2; 16], Raw::Text("ada".into()))
+            .unwrap();
+        let same = Value::from_canonical(&same, &mut context, 0).unwrap();
+        assert_eq!(value, same);
+        let other_key =
+            orna_value_v1::Value::table_reference([1; 16], [2; 16], Raw::Text("grace".into()))
+                .unwrap();
+        let other_key = Value::from_canonical(&other_key, &mut context, 0).unwrap();
+        assert_ne!(value, other_key);
+        // References are equality-only: ordering is rejected with a typed error.
+        assert!(compare_values(&value, &other_key).is_err());
+        assert!(compare_values(&value, &same).is_err());
+
+        let other_table =
+            orna_value_v1::Value::table_reference([1; 16], [3; 16], Raw::Text("ada".into()))
+                .unwrap();
+        let other_table = Value::from_canonical(&other_table, &mut context, 0).unwrap();
+        assert_ne!(value, other_table);
     }
 }
 
