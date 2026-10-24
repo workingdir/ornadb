@@ -11,7 +11,7 @@ fn table_source(field: &str) -> String {
 }
 
 #[test]
-// Specified: ORNA-FIELD-010 and 29-formats serialisable subset; a stored field without an
+// Specified: 29-formats.md:115 serialisable subset; a stored field without an
 // initialiser is type-validated like every other table field.
 fn stored_field_without_initialiser_rejects_unknown_type() {
     let analysis = analysis_for(&table_source("token: Bogus<Str>"));
@@ -78,6 +78,54 @@ fn stored_field_rejects_live_stream_type() {
         analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.code() == DIAG_TYPE
                 && diagnostic.message() == "stored table field type must be serialisable"
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a nominal record whose member is a secret is
+// a stored secret, so a stored field of that nominal is rejected like a bare `Secret<Str>`.
+fn stored_field_rejects_nominal_record_containing_secret() {
+    let source = "pub type Credential {\n    token: Secret<Str>,\n}\npub table Account(id: Uuid) {\n    cred: Credential,\n}\n";
+    let analysis = analysis_for(source);
+    assert!(!analysis.is_ok());
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == SECRET_STORED_MESSAGE
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a transparent alias of a nominal that holds a
+// secret stores that secret.
+fn stored_field_rejects_alias_of_nominal_containing_secret() {
+    let source = "pub type Credential {\n    token: Secret<Str>,\n}\ntype Login = Credential;\npub table Account(id: Uuid) {\n    login: Login,\n}\n";
+    let analysis = analysis_for(source);
+    assert!(!analysis.is_ok());
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == SECRET_STORED_MESSAGE
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; a self-referential nominal must not loop while it is checked, and
+// its secret member is still found.
+fn stored_field_rejects_recursive_nominal_containing_secret() {
+    let source = "pub type Node {\n    next: List<Node>,\n    token: Secret<Str>,\n}\npub table Account(id: Uuid) {\n    node: Node,\n}\n";
+    let analysis = analysis_for(source);
+    assert!(!analysis.is_ok());
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == SECRET_STORED_MESSAGE
         }),
         "{:#?}",
         analysis.diagnostics
