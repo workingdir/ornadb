@@ -582,10 +582,10 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
     snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
     FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
 );
--- No runtime path creates or reads a runtime_catalogue_revision_binding row.
--- The table is kept so existing and new state.db files share one schema, and
--- catalogue carry-forward still copies a predecessor's row to the successor
--- snapshot. Dropping the table requires a state-schema migration.
+-- No runtime path binds a new revision pair or reads a binding back; catalogue
+-- carry-forward only copies an existing predecessor row to its successor
+-- snapshot. The table stays so existing and new state.db files share one
+-- schema; dropping it requires a state-schema migration.
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision_binding (
     snapshot BLOB PRIMARY KEY REFERENCES runtime_catalogue_admission(snapshot),
     source_revision_id BLOB NOT NULL CHECK (length(source_revision_id) = 16),
