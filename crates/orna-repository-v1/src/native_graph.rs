@@ -6234,7 +6234,8 @@ impl NodeData {
                 check_domain(domain)?;
                 check_height(*height)?;
                 check_count(entries.len())?;
-                check_branch_fence_order(domain, entries)?;
+                check_branch_fence_order(domain, entries)
+                    .map_err(|_| GraphError::NonCanonicalData)?;
                 array(&mut output, 5);
                 uint(&mut output, 1);
                 uint(&mut output, 2);
@@ -6368,6 +6369,12 @@ impl NodeData {
             return Err(GraphError::NonCanonicalData);
         }
         let data = decode_node(value, algorithm)?;
+        if let NodeData::OrderedBranch {
+            domain, entries, ..
+        } = &data
+        {
+            check_branch_fence_order(domain, entries)?;
+        }
         if data.encode_canonical()?.as_slice() != bytes {
             return Err(GraphError::NonCanonicalData);
         }
@@ -6723,6 +6730,7 @@ impl PinnedNativeGraphReader {
                 if domain != expected_domain {
                     return Err(GraphError::InvalidDomain);
                 }
+                check_branch_fence_order(&domain, &entries)?;
                 if entries.len() == 1 {
                     return Err(GraphError::UncollapsedRoot);
                 }
@@ -7532,6 +7540,7 @@ fn validate_ordered_root_node(
             if domain != expected_domain || entries.len() < 2 {
                 return Err(GraphError::InvalidDomain);
             }
+            check_branch_fence_order(domain, entries)?;
             let count = entries.iter().try_fold(0u64, |sum, entry| {
                 sum.checked_add(entry.row_count)
                     .filter(|count| *count <= MAX_SIGNED_LENGTH)
