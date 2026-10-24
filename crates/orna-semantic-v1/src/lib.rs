@@ -7087,7 +7087,12 @@ fn validate_stored_field_type(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let resolved = resolved_type_of(type_expr, scope);
-    if contains_secret_value_type_in(&resolved, &scope.nominal_rows, &mut BTreeSet::new()) {
+    if contains_secret_value_type_in(
+        &resolved,
+        &scope.nominal_rows,
+        &scope.type_aliases,
+        &mut BTreeSet::new(),
+    ) {
         diagnostics.push(diag(
             DIAG_TYPE,
             "secret values cannot be stored in table fields",
@@ -25497,56 +25502,70 @@ fn is_money_rate(ty: &Type) -> bool {
 }
 
 fn contains_secret_value_type(ty: &Type) -> bool {
-    contains_secret_value_type_in(ty, &BTreeMap::new(), &mut BTreeSet::new())
+    contains_secret_value_type_in(ty, &BTreeMap::new(), &BTreeMap::new(), &mut BTreeSet::new())
+}
+
+/// Finds a nominal row by canonical identity, or by a short name that exactly
+/// one row carries; an ambiguous short name yields no row.
+fn nominal_row_by_name<'a>(rows: &'a BTreeMap<String, Type>, name: &str) -> Option<&'a Type> {
+    rows.get(name).or_else(|| {
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let mut matching = rows
+            .iter()
+            .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(short));
+        let first = matching.next().map(|(_, row)| row);
+        if matching.next().is_some() {
+            None
+        } else {
+            first
+        }
+    })
 }
 
 /// Reports whether a value of `ty` can hold a `Secret`. A nominal reference is
-/// followed through `nominal_rows` (its canonical record members), so a nominal
-/// with a secret member stores that secret. `visiting` holds every nominal
-/// already entered; a self-referential nominal therefore terminates, and any
-/// reachable secret is still found on the first walk that reaches it.
+/// followed through `nominal_rows` (its canonical record members) and an alias
+/// through `aliases` (its target), so a nominal or alias whose member reaches a
+/// secret stores that secret. `visiting` holds every name already entered; a
+/// self-referential name therefore terminates, and any reachable secret is
+/// still found on the first walk that reaches it.
 fn contains_secret_value_type_in(
     ty: &Type,
     nominal_rows: &BTreeMap<String, Type>,
+    aliases: &BTreeMap<String, Type>,
     visiting: &mut BTreeSet<String>,
 ) -> bool {
+    let secret = |ty: &Type, visiting: &mut BTreeSet<String>| {
+        contains_secret_value_type_in(ty, nominal_rows, aliases, visiting)
+    };
     match ty {
         Type::Applied { base, arguments } => {
-            base == "Secret"
-                || arguments
-                    .iter()
-                    .any(|argument| contains_secret_value_type_in(argument, nominal_rows, visiting))
+            base == "Secret" || arguments.iter().any(|argument| secret(argument, visiting))
         }
         Type::List(value)
         | Type::Range(value)
         | Type::Relation(value)
         | Type::Stream(value)
-        | Type::Optional(value) => contains_secret_value_type_in(value, nominal_rows, visiting),
-        Type::Record(fields) => fields
-            .values()
-            .any(|field| contains_secret_value_type_in(field, nominal_rows, visiting)),
-        Type::Tuple(values) => values
-            .iter()
-            .any(|value| contains_secret_value_type_in(value, nominal_rows, visiting)),
+        | Type::Optional(value) => secret(value, visiting),
+        Type::Record(fields) => fields.values().any(|field| secret(field, visiting)),
+        Type::Tuple(values) => values.iter().any(|value| secret(value, visiting)),
         Type::MoneyPerUnit { currency, unit } => {
-            contains_secret_value_type_in(currency, nominal_rows, visiting)
-                || contains_secret_value_type_in(unit, nominal_rows, visiting)
+            secret(currency, visiting) || secret(unit, visiting)
         }
-        Type::Quantity { numeric, .. } => contains_secret_value_type_in(numeric, nominal_rows, visiting),
+        Type::Quantity { numeric, .. } => secret(numeric, visiting),
         Type::Function {
             parameters, result, ..
         } => {
             parameters
                 .iter()
-                .any(|parameter| contains_secret_value_type_in(parameter, nominal_rows, visiting))
-                || contains_secret_value_type_in(result, nominal_rows, visiting)
+                .any(|parameter| secret(parameter, visiting))
+                || secret(result, visiting)
         }
         Type::Named(name) => {
             name == "Secret"
                 || (visiting.insert(name.clone())
-                    && nominal_rows.get(name).is_some_and(|row| {
-                        contains_secret_value_type_in(row, nominal_rows, visiting)
-                    }))
+                    && nominal_row_by_name(nominal_rows, name)
+                        .or_else(|| aliases.get(name))
+                        .is_some_and(|target| secret(target, visiting)))
         }
         Type::Int
         | Type::Decimal
