@@ -2,7 +2,7 @@
 //! refs an ordinary push synchronizes, and never exposes a private edit or
 //! capture pin or any other private Orna ref (`ORNA-GIT-008`).
 //!
-//! Every push here is the real `orna-cli-v1` binary against a real bare remote,
+//! Every push here is the real `orna` binary against a real bare remote,
 //! so this proves the verb's exit status and the refs that actually moved,
 //! rather than a library call.
 use std::{
@@ -46,10 +46,10 @@ fn git_status(directory: &Path, arguments: &[&str]) -> bool {
         .success()
 }
 
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
