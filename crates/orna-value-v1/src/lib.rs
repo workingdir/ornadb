@@ -60,6 +60,7 @@ pub enum Error {
     InvalidOid,
     ContentUnavailable,
     ContentDigestMismatch,
+    ContentCollision,
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
@@ -1099,6 +1100,7 @@ impl Blob {
         })
     }
 
+
     pub fn from_semantic_commitment(
         identity: ContentIdentity,
         media_type: &str,
@@ -1287,8 +1289,36 @@ impl Blob {
         Ok(result)
     }
 
+    /// Two descriptor-backed blobs in one admitted context with equal layout OID
+    /// and equal identity are treated as equal content without streaming
+    /// (ORNA-BLOB-005). A layout OID identifies an encoding, not logical content,
+    /// so this is a trust assumption on the admitted context's resolver: the
+    /// shortcut skips the digest check, and the identity equality is the only
+    /// binding between the two references.
+    fn shares_descriptor_witness(&self, other: &Self) -> bool {
+        match (&self.content, &other.content, &self.context, &other.context) {
+            (
+                BlobContent::Descriptor(left),
+                BlobContent::Descriptor(right),
+                Some(left_context),
+                Some(right_context),
+            ) => left == right && Arc::ptr_eq(&left_context.inner, &right_context.inner),
+            _ => false,
+        }
+    }
+
     /// Compare exact bytes while ignoring annotation metadata.
     pub fn same_content(&self, other: &Self) -> Result<bool> {
+        self.same_content_checked(other, || Ok(()))
+    }
+
+    /// Like [`Blob::same_content`], but calls `checkpoint` before each streamed
+    /// chunk so callers can enforce cancellation and budgets (ORNA-BLOB-015).
+    pub fn same_content_checked(
+        &self,
+        other: &Self,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<bool> {
         if self.identity != other.identity {
             return Ok(false);
         }
@@ -1300,28 +1330,43 @@ impl Blob {
                 Err(Error::ContentDigestMismatch)
             };
         }
-        if same_content_source(&self.content, &other.content) {
+        if same_content_source(&self.content, &other.content) || self.shares_descriptor_witness(other) {
             return Ok(true);
         }
         let mut left_digest = Sha256::new();
         let mut right_digest = Sha256::new();
+        let mut differs = false;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
+            checkpoint()?;
             let size = (self.length() - offset).min(chunk_limit);
             let left = read_content_range(self, offset, size)?;
             let right = read_content_range(other, offset, size)?;
             if left != right {
-                return Err(Error::ContentDigestMismatch);
+                // Keep streaming: a single tampered side must be reported as
+                // corruption, not as a collision, so classification waits for
+                // both full digests (see `exact_content_outcome`).
+                differs = true;
             }
             left_digest.update(&left);
             right_digest.update(&right);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
-        let left = left_digest.finalize();
-        let right = right_digest.finalize();
-        if left[..] != self.identity.sha256 || right[..] != self.identity.sha256 {
+        let left_verified = left_digest.finalize()[..] == self.identity.sha256;
+        let right_verified = right_digest.finalize()[..] == self.identity.sha256;
+        Self::exact_content_outcome(differs, left_verified, right_verified)
+    }
+
+    /// Classify a full streamed comparison. A digest failure on either side is
+    /// corruption and wins over byte differences; only two verified digests with
+    /// differing bytes prove a collision (ORNA-BLOB-005).
+    fn exact_content_outcome(differs: bool, left_verified: bool, right_verified: bool) -> Result<bool> {
+        if !left_verified || !right_verified {
             return Err(Error::ContentDigestMismatch);
+        }
+        if differs {
+            return Err(Error::ContentCollision);
         }
         Ok(true)
     }
@@ -8356,6 +8401,38 @@ mod logical_primary_key_order_tests {
         assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
     }
 }
+#[cfg(test)]
+mod exact_content_outcome_tests {
+    use super::*;
+
+    // A collision needs two digest-valid sides with differing bytes, which
+    // SHA-256 forbids in practice; the classification is therefore exercised
+    // through this pure seam rather than through `same_content_checked`.
+    #[test]
+    fn verified_digests_with_differing_bytes_are_a_collision() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, true),
+            Err(Error::ContentCollision)
+        ));
+    }
+
+    #[test]
+    fn digest_failure_wins_over_differing_bytes() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, false, true),
+            Err(Error::ContentDigestMismatch)
+        ));
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, false),
+            Err(Error::ContentDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn verified_equal_bytes_are_equal() {
+        assert!(Blob::exact_content_outcome(false, true, true).unwrap());
+    }
+}
 
 #[cfg(test)]
 mod resolver_integrity_tests {
@@ -8509,6 +8586,43 @@ mod resolver_integrity_tests {
         assert_eq!(replaced.read(0, 0), Err(Error::MissingDescriptor));
         assert_eq!(resolver.reads.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(resolver.bytes_read.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn same_content_over_admitted_references_compares_exact_bytes() {
+        let descriptor = NativeOid::from_bytes(&[6; 20]).unwrap();
+        let identity = ContentIdentity::from_bytes(b"abcdef");
+        let resolver = resolver(descriptor.clone(), identity, b"abcdef", b"abcdef");
+        let context = context(resolver);
+        let left = Blob::from_reference(context.reference(identity, descriptor.clone()).unwrap())
+            .unwrap();
+        let right = Blob::from_reference(context.reference(identity, descriptor).unwrap()).unwrap();
+
+        assert!(left.same_content(&right).unwrap());
+        assert!(left.same_content(&left).unwrap());
+    }
+
+    #[test]
+    fn same_content_rejects_tampered_bytes_under_an_admitted_identity() {
+        let identity = ContentIdentity::from_bytes(b"abc");
+        let good_descriptor = NativeOid::from_bytes(&[4; 20]).unwrap();
+        let tampered_descriptor = NativeOid::from_bytes(&[5; 20]).unwrap();
+        let good_resolver = resolver(good_descriptor.clone(), identity, b"abc", b"abc");
+        let tampered_resolver = resolver(tampered_descriptor.clone(), identity, b"axc", b"abc");
+        let good = Blob::from_reference(
+            context(good_resolver)
+                .reference(identity, good_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+        let tampered = Blob::from_reference(
+            context(tampered_resolver)
+                .reference(identity, tampered_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(good.same_content(&tampered), Err(Error::ContentDigestMismatch));
     }
 
     #[test]
