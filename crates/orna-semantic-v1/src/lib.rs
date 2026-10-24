@@ -16569,11 +16569,10 @@ fn infer_success_pipeline(
         return input;
     };
     let Expr::Name { text, .. } = callee.as_ref() else {
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "pipeline stage is outside this semantic slice",
-        ));
-        return input;
+        // ORNA-PIPE-004: any callable may be a stage. A qualified callee such
+        // as `alias.op` is checked as a named callable with the piped value as
+        // its first argument, the same path the list pipeline uses.
+        return infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics);
     };
     let (element, is_stream) = match &input.ty {
         Type::Relation(element) => (element.as_ref().clone(), false),
@@ -17139,6 +17138,7 @@ fn infer_named_pipeline_stage(
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
     effects.join(&callee.effects);
+    let callee_is_error = matches!(callee.ty, Type::Error);
     let Type::Function {
         parameters,
         parameter_names,
@@ -17157,10 +17157,12 @@ fn infer_named_pipeline_stage(
             };
             effects.join(&value.effects);
         }
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "pipeline stage is not a supported named callable",
-        ));
+        if !callee_is_error {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "pipeline stage is not a supported named callable",
+            ));
+        }
         return Inferred {
             ty: Type::Error,
             effects,
