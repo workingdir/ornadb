@@ -7632,7 +7632,7 @@ fn check_function(
         let mut inferred =
             infer_function_body(body, Some(&expected), &function_scope, &local, diagnostics);
         inferred.effects.join(&default_effects);
-        require_same(&expected, &inferred.ty, diagnostics);
+        require_same_in(&function_scope, &expected, &inferred.ty, diagnostics);
         if let Some(symbol) = symbols.get_mut(&signature.name) {
             symbol.effects = inferred.effects;
         }
@@ -18058,15 +18058,76 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
         && !matches!(expected, Type::Error)
         && !matches!(actual, Type::Error)
     {
-        let (code, message) = match (expected, actual) {
-            (Type::Named(expected), Type::Named(actual)) if expected != actual => (
-                DIAG_CONVERSION_CHAIN,
-                "implicit conversion chains are not searched; name each conversion explicitly",
-            ),
-            _ => (DIAG_TYPE, "static types are incompatible"),
-        };
-        diagnostics.push(type_mismatch(code, message, expected, actual));
+        diagnostics.push(type_mismatch(
+            DIAG_TYPE,
+            "static types are incompatible",
+            expected,
+            actual,
+        ));
     }
+}
+
+/// Like `require_same`, but reports `ORNA091-E-CONVERSION-CHAIN` when the
+/// actual nominal type reaches the expected one only through a multi-step
+/// `From` chain (ORNA-CONVERT-007). A plain mismatch stays `ORNA-S021-TYPE`.
+fn require_same_in(
+    scope: &Scope,
+    expected: &Type,
+    actual: &Type,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let (Type::Named(target), Type::Named(source)) = (expected, actual)
+        && target != source
+        && !types_match(expected, actual)
+        && has_multi_step_conversion(scope, target, source)
+    {
+        diagnostics.push(type_mismatch(
+            DIAG_CONVERSION_CHAIN,
+            "implicit conversion chains are not searched; name each conversion explicitly",
+            expected,
+            actual,
+        ));
+        return;
+    }
+    require_same(expected, actual, diagnostics);
+}
+
+/// True when `source` is reachable from `target` by following `From` edges
+/// through at least one intermediate nominal type.
+fn has_multi_step_conversion(scope: &Scope, target: &str, source: &str) -> bool {
+    let mut seen = BTreeSet::new();
+    // Start from the sources of each direct source: `source` must be reached
+    // at depth two or more, so a single direct `From` is not a chain.
+    let mut pending: Vec<&str> = scope
+        .nominal_conversions
+        .get(target)
+        .into_iter()
+        .flatten()
+        .filter_map(|ty| match ty {
+            Type::Named(name) => scope.nominal_conversions.get(name.as_str()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|ty| match ty {
+            Type::Named(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        if current == source {
+            return true;
+        }
+        if let Some(next) = scope.nominal_conversions.get(current) {
+            pending.extend(next.iter().filter_map(|ty| match ty {
+                Type::Named(name) => Some(name.as_str()),
+                _ => None,
+            }));
+        }
+    }
+    false
 }
 
 /// A static type mismatch that names both types, so the person can see which
