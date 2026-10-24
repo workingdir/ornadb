@@ -12272,6 +12272,109 @@ mod persisted_orp_tests {
         assert_eq!(appended.primary_root(), &complete);
     }
 
+    /// store-format-3 §3 ("Writers may rebuild incrementally but must match
+    /// the canonical complete build"), ORNA-ROW-006 and ORNA-OGB-005 (W75
+    /// F2/H1): one insert into a generated 100,000-row store reads and
+    /// writes a bounded number of nodes per level of the map, never the
+    /// table, and its root is the complete build of the new row set.
+    #[test]
+    fn one_insert_into_a_100k_row_store_touches_a_bounded_path() {
+        const ROWS: usize = 100_000;
+        // Nodes a pass may read or write per level: the node on the path and
+        // one neighbour on each side where a page boundary moves.
+        const NODES_PER_LEVEL: u64 = 3;
+        // A node is a tree, its data blob and, when it names refs, a refs tree.
+        const OBJECTS_PER_NODE: u64 = 3;
+        let (_directory, mut graph) = capture_test_context();
+        let key = |name: &str| TypedKey::Text(name.to_owned());
+        let name = |index: usize| format!("row-{index:06}");
+        let fields = |name: &str| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Text(format!(
+                "value of {name}"
+            ))]))
+        };
+        let scope = graph.open_read_scope().expect("seed scope");
+        let seeded = graph
+            .maintain_row_index(
+                &(0..ROWS)
+                    .map(|index| RowIndexMutation::Insert {
+                        key: key(&name(index)),
+                        fields: fields(&name(index)),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("seed 100,000 rows");
+        let nodes = seeded.index_objects_created().len() as u64;
+        adopt_maintenance(&mut graph, &seeded);
+
+        let scope = graph.open_read_scope().expect("height scope");
+        let mut root_objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let height = match graph
+            .read_native_node(seeded.primary_root(), &scope, &mut root_objects)
+            .expect("read the seeded root")
+        {
+            NodeData::OrderedBranch { height, .. } => u64::from(height),
+            NodeData::OrderedLeaf { .. } => 0,
+            other => panic!("the seeded root is an ordered node, not {other:?}"),
+        };
+        assert!(height >= 2, "100,000 rows need at least two branch levels");
+        let levels = height + 1;
+
+        // An insert between two existing rows, in the middle of a page.
+        let inserted = format!("{}-inserted", name(54_321));
+        let scope = graph.open_read_scope().expect("insert scope");
+        let insert = graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: key(&inserted),
+                    fields: fields(&inserted),
+                }],
+                &scope,
+            )
+            .expect("insert one row");
+        let insert_reads = scope.objects_read();
+        assert_eq!(insert.previous_root(), seeded.primary_root());
+        assert_eq!(insert.row_count(), ROWS as u64 + 1);
+        assert!(
+            insert_reads <= NODES_PER_LEVEL * OBJECTS_PER_NODE * levels,
+            "one insert read {insert_reads} objects; the map has {levels} levels and {nodes} nodes"
+        );
+        let created = insert.index_objects_created().len() as u64;
+        assert!(
+            (1..=NODES_PER_LEVEL * levels).contains(&created),
+            "one insert wrote {created} index nodes; the map has {levels} levels"
+        );
+        assert!(!insert.index_objects_reused().is_empty());
+
+        let mut names: Vec<String> = (0..ROWS).map(name).collect();
+        names.push(inserted);
+        names.sort();
+        let entries: Vec<_> = names
+            .iter()
+            .map(|name| {
+                crate::row_store::RowEntry::new(
+                    key(name),
+                    RowValue::decode_canonical_fields(fields(name)).expect("inline row"),
+                )
+            })
+            .collect();
+        let mut sink = BTreeSet::new();
+        let complete = NativeGraphContext::build_canonical_ordered_map(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &entries,
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        )
+        .expect("complete build");
+        assert_eq!(insert.primary_root(), &complete);
+    }
+
     /// store-format-3 section 5 (A07-storage-rows-07): the row identity is
     /// `orna.row.v3` over the SOV-3 row `[database_uuid, table_uuid,
     /// typed_key, stored_fields]`. A Blob enters by length, SHA-256 and
