@@ -43,7 +43,7 @@ BASELINE = WORKSPACE_ROOT / "scripts/known-test-failures.toml"
 ITEMS = WORKSPACE_ROOT / "scripts/gate-evidence-items.toml"
 SCHEMA = "ornadb-gate-evidence/1"
 # Bump when flags, record fields or output formats change, so CI logs show which interface ran.
-RECORDER_VERSION = "1"
+RECORDER_VERSION = "2"
 STATES = ("passed", "failed", "not-executed", "unavailable")
 # Worst first: a gate or item takes the first state any of its parts has.
 STATE_PRECEDENCE = ("failed", "unavailable", "not-executed", "passed")
@@ -52,6 +52,8 @@ BEAD_PATTERN = re.compile(r"ornadb-[0-9a-z]+(?:\.[0-9]+)*")
 TARGET_PATTERN = re.compile(r"(?:lib|doc|(?:bin|test|example|bench):[A-Za-z0-9_-]+|check:[a-z0-9-]+)")
 RECORD_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 CHECK_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# A GitHub Actions job ID.
+JOB_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 DEFAULT_INPUT_ENV = (
     "CARGO_BUILD_JOBS",
     "CARGO_INCREMENTAL",
@@ -199,6 +201,14 @@ def parse_timeout_override(text: str) -> tuple[str, float]:
     if value <= 0:
         raise argparse.ArgumentTypeError(f"{text!r}: minutes must be positive")
     return label, value
+
+
+def parse_covered_by(text: str) -> tuple[str, str]:
+    """Parse TARGET=JOB, for example test:publication_crash_matrix=publication-crash-matrix."""
+    label, separator, job = text.rpartition("=")
+    if not separator or not TARGET_PATTERN.fullmatch(label) or not JOB_PATTERN.fullmatch(job):
+        raise argparse.ArgumentTypeError(f"{text!r} is not TARGET=JOB, for example test:NAME=job-id")
+    return label, job
 
 
 def timeout_for(target: str, default: float | None, overrides: dict[str, float]) -> float | None:
@@ -1222,6 +1232,59 @@ def select_test_targets(metadata: dict, packages: list[str], targets: list[str],
     return selected
 
 
+def enabled_features(package: dict, requested: str | None) -> set[str]:
+    """Return the features of one `cargo metadata` package that `--features requested` turns on.
+
+    These are the requested features, `default`, and every feature they enable in turn. Entries that
+    enable a dependency or a dependency's feature (`dep:NAME`, `NAME/FEATURE`) are not followed.
+    """
+    declared = package.get("features") or {}
+    pending = [name for name in re.split(r"[\s,]+", requested or "") if name]
+    if "default" in declared:
+        pending.append("default")
+    enabled: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name not in enabled:
+            enabled.add(name)
+            pending.extend(entry for entry in declared.get(name, []) if ":" not in entry and "/" not in entry)
+    return enabled
+
+
+def feature_gates(
+    metadata: dict, selected: list[tuple[str, str]], requested: str | None, covered: dict[str, str]
+) -> dict[tuple[str, str], str]:
+    """Return why each selected target whose `required-features` this run leaves off is skipped.
+
+    Cargo refuses to build such a target, so it must run in another job that enables the features.
+    `covered` maps its target label to that job. A gated target without a job, or a job for a label
+    that is not gated, is an error, so no target drops out of CI unnoticed.
+    """
+    members = {str(package["name"]): package for package in metadata.get("packages", [])}
+    reasons: dict[tuple[str, str], str] = {}
+    for package, label in selected:
+        member = members[package]
+        targets = {
+            target_label(list(target.get("kind") or []), str(target["name"])): target
+            for target in member.get("targets", [])
+            if target.get("test")
+        }
+        enabled = enabled_features(member, requested)
+        missing = [name for name in targets[label].get("required-features") or [] if name not in enabled]
+        if not missing:
+            continue
+        if label not in covered:
+            raise EvidenceError(
+                f"{package} {label} requires features {', '.join(missing)}, which this run does not enable: "
+                f"pass --features {','.join(missing)}, or name the job that runs it with them as --covered-by {label}=JOB"
+            )
+        reasons[(package, label)] = f"requires features {', '.join(missing)}, covered by {covered[label]}"
+    stale = sorted(set(covered) - {label for _, label in reasons})
+    if stale:
+        raise EvidenceError(f"--covered-by {', '.join(stale)}: no selected target needs features this run leaves off")
+    return reasons
+
+
 def known_failures_for(baseline: list[KnownFailure], package: str, target: str) -> tuple[list[str], bool]:
     """Return the libtest names to skip in one target, and whether a whole-binary failure removes the target.
 
@@ -1244,9 +1307,14 @@ def command_test(arguments: argparse.Namespace) -> int:
             raise EvidenceError(f"target {target!r} is not lib, doc or KIND:NAME")
     baseline = load_baseline(Path(arguments.baseline))
     overrides = dict(arguments.timeout_override)
-    selected = select_test_targets(cargo_metadata(), arguments.package, arguments.target, arguments.integration)
+    metadata = cargo_metadata()
+    selected = select_test_targets(metadata, arguments.package, arguments.target, arguments.integration)
+    gated = feature_gates(metadata, selected, arguments.features, dict(arguments.covered_by))
     failed: list[str] = []
     for package, target in selected:
+        if (package, target) in gated:
+            print(f"ornadb: skipped {package} {target}: {gated[(package, target)]}", file=sys.stderr)
+            continue
         names, whole = known_failures_for(baseline, package, target)
         if whole:
             print(f"ornadb: skipped {package} {target}: a known failure aborts the whole binary", file=sys.stderr)
@@ -1342,6 +1410,14 @@ def main(argv: list[str] | None = None) -> int:
         type=parse_timeout_override,
         metavar="TARGET=MINUTES",
         help="watchdog minutes for one target label, for example test:media_import_query=150 (repeatable)",
+    )
+    tests.add_argument(
+        "--covered-by",
+        action="append",
+        default=[],
+        type=parse_covered_by,
+        metavar="TARGET=JOB",
+        help="TARGET needs features this run does not enable and job JOB runs it with them; skip it here (repeatable)",
     )
     tests.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
 
