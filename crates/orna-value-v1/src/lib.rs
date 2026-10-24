@@ -2013,10 +2013,17 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
     if reader.at != bytes.len() {
         return Err(Error::TrailingBytes);
     }
+    blob_metadata_from_raw(&raw)
+}
+
+/// Projects an already-decoded ROV-3 Blob value to payload-free metadata: the
+/// same projection `decode_rov3_blob_metadata` applies to stored bytes. Callers
+/// that hold a decoded field value use this rather than re-encoding it.
+pub fn blob_metadata_from_raw(raw: &Raw) -> Result<BlobMetadata> {
     let Raw::Tag(ROV3_BLOB_TAG, payload) = raw else {
         return Err(Error::InvalidProfile);
     };
-    let fields = array(&payload)?;
+    let fields = array(payload)?;
     let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
@@ -4350,7 +4357,11 @@ pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
+/// Encodes one value as the canonical CBOR a repository row stores, the
+/// inverse of [`decode_canonical_storage_value`]. Repository-profile tags pass
+/// through unvalidated; callers must validate the bytes against their
+/// authenticated row schema.
+pub fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_raw(raw, &mut bytes)?;
     Ok(bytes)
@@ -5540,7 +5551,7 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         }
         validate_raw(value, depth + 1)?;
     }
-    let mut keys = Vec::new();
+    let mut keys = BTreeSet::new();
     for child in array(&a[3])? {
         let Raw::Tag(60012, node) = child else {
             return Err(Error::InvalidTag);
@@ -5549,10 +5560,9 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         let child_fields = array(node)?;
         if !matches!(child_fields[1], Raw::Null) {
             let k = encode_raw(&child_fields[1])?;
-            if keys.contains(&k) {
+            if !keys.insert(k) {
                 return Err(Error::DuplicateOrUnorderedMapKey);
             }
-            keys.push(k)
         }
     }
     Ok(())
@@ -5787,7 +5797,7 @@ fn validate_schema(raw: &Raw) -> Result<()> {
     let mut key_id_set = BTreeSet::new();
     for key in keys {
         let key = uuid_array(key)?;
-        if !ids.contains(&key) || !key_id_set.insert(key) {
+        if ids.binary_search(&key).is_err() || !key_id_set.insert(key) {
             return Err(Error::InvalidSchema);
         }
         key_ids.push(key);
@@ -5839,7 +5849,7 @@ fn validate_type_refs(
     let a = array(node)?;
     match int_u64(&a[0])? {
         5 | 8 => {
-            if !definitions.contains(&uuid_array(&a[1])?) {
+            if definitions.binary_search(&uuid_array(&a[1])?).is_err() {
                 return Err(Error::InvalidSchema);
             }
         }
@@ -5860,7 +5870,7 @@ fn validate_type_refs(
             }
         }
         7 => {
-            if !unit_definitions.contains(&uuid_array(&a[2])?) {
+            if unit_definitions.binary_search(&uuid_array(&a[2])?).is_err() {
                 return Err(Error::InvalidSchema);
             }
             validate_type_refs(&a[1], definitions, unit_definitions)?;

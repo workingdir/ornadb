@@ -314,6 +314,7 @@ pub struct NativeGraphContext {
     identity: ContextIdentity,
     database_id: [u8; 16],
     owner_id: [u8; 16],
+    accepted_pin_fallback_owner_id: Option<[u8; 16]>,
     snapshot_id: [u8; 32],
     algorithm: GitHashAlgorithm,
     store_root: NativeOid,
@@ -642,6 +643,7 @@ impl NativeGraphContext {
             identity: ContextIdentity(identity),
             database_id,
             owner_id,
+            accepted_pin_fallback_owner_id: None,
             snapshot_id,
             algorithm,
             store_root,
@@ -651,6 +653,15 @@ impl NativeGraphContext {
         };
         context.validate_sealed_schema_node()?;
         Ok(context)
+    }
+
+    /// Makes accepted pins held by `owner_id` admissible through this graph
+    /// when this graph's own owner holds no ref for them.
+    pub(crate) fn with_accepted_pin_fallback_owner(mut self, owner_id: [u8; 16]) -> Self {
+        if owner_id != self.owner_id {
+            self.accepted_pin_fallback_owner_id = Some(owner_id);
+        }
+        self
     }
 
     fn validate_sealed_schema_node(&self) -> Result<(), GraphError> {
@@ -1078,14 +1089,17 @@ impl NativeGraphContext {
             })
             .collect()
     }
-    /// Applies ordered mutations to the pinned primary ORP-1 root and returns
-    /// the new root together with the object accounting of the pass.
+    /// Applies a batch of row mutations to the pinned primary ORP-1 root and
+    /// returns the new root together with the object accounting of the pass.
     ///
     /// Mutations apply in the canonical order: deletes, then rekeys (a delete
     /// of the old key plus an insert of the new one), then inserts. Each
     /// mutation is checked against the pinned root, so a delete of an absent
     /// key or an insert of a present one is rejected instead of silently
-    /// changing the row set. A row whose final stored value is the exact
+    /// changing the row set. The batch may arrive in any order: publication
+    /// sends it in canonical key byte order, which for Text keys is not
+    /// logical order, and every key it names resolves to one slot applied in
+    /// logical key order. A row whose final stored value is the exact
     /// value the pinned root holds is no change at all (ORNA-ROW-010): the
     /// writer's encoding is canonical and names overflow values and Blob
     /// descriptors by content address, so equal bytes are the same row.
@@ -1106,11 +1120,6 @@ impl NativeGraphContext {
         mutations: &[RowIndexMutation],
         scope: &RepositoryReadScope,
     ) -> Result<IndexMaintenance, GraphError> {
-        use crate::orp::maintenance::{
-            RowChange, RowChanges, lookup_ordered_entries, maintain_ordered_map,
-        };
-        use crate::row_store::TypedKey;
-
         scope.authorize(self)?;
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
@@ -1137,130 +1146,20 @@ impl NativeGraphContext {
         let root_node = read_node(&root)?;
         validate_ordered_root_node(&root_node, &domain, expected_count)?;
 
-        // The pinned value of every key a mutation names, from one descent
-        // over the touched pages.
-        let touched: Vec<TypedKey> = mutations
-            .iter()
-            .flat_map(|mutation| match mutation {
-                RowIndexMutation::Delete { key } | RowIndexMutation::Insert { key, .. } => {
-                    [Some(key), None]
-                }
-                RowIndexMutation::Rekey { from, to } => [Some(from), Some(to)],
-            })
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let pinned = lookup_ordered_entries(&domain, &root_node, &touched, &mut read_node)?;
-        let mut rows: BTreeMap<TypedKey, Option<Cow<'_, [u8]>>> = touched
-            .into_iter()
-            .map(|key| {
-                let value = pinned
-                    .get(&key)
-                    .map(|value| Cow::Borrowed(value.as_slice()));
-                (key, value)
-            })
-            .collect();
-
-        for mutation in mutations {
-            let RowIndexMutation::Delete { key } = mutation else {
-                continue;
-            };
-            let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
-            if slot.take().is_none() {
-                return Err(GraphError::RowKeyAbsent);
-            }
-        }
-        let mut logical_rekeys = Vec::new();
-        for mutation in mutations {
-            let RowIndexMutation::Rekey { from, to } = mutation else {
-                continue;
-            };
-            if rows.get(from).is_none_or(Option::is_none) {
-                return Err(GraphError::RowKeyAbsent);
-            }
-            if rows.get(to).is_some_and(Option::is_some) {
-                return Err(GraphError::DuplicateRowKey);
-            }
-            let value = rows.get_mut(from).and_then(Option::take);
-            rows.insert(to.clone(), value);
-            logical_rekeys.push(LogicalRowRekey {
-                old_address: from.clone(),
-                new_address: to.clone(),
-            });
-        }
-        // Inserted rows are lowered to the shared overflow graph first, so a
-        // row or value over 8 KiB or 32 direct Blob references is stored
-        // through tag 60113 (store-format-3 section 5).
         let mut written = BTreeSet::new();
-        {
-            let mut overflow = crate::overflow::OverflowWriter::new(
-                self,
-                scope,
-                &mut written,
-                scope.max_objects,
-            );
-            for mutation in mutations {
-                let RowIndexMutation::Insert { key, fields } = mutation else {
-                    continue;
-                };
-                let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
-                if slot.is_some() {
-                    return Err(GraphError::DuplicateRowKey);
-                }
-                let value = overflow
-                    .lower_row(fields)?
-                    .canonical_page_bytes()
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                *slot = Some(Cow::Owned(value));
-            }
-        }
-
-        let mut changes = RowChanges::new();
-        let mut row_count = expected_count;
-        for (key, value) in rows {
-            let before = pinned.get(&key).map(Vec::as_slice);
-            let change = match (value, before) {
-                (None, None) => continue,
-                (Some(value), Some(before)) if *value == *before => continue,
-                (None, Some(_)) => {
-                    row_count = row_count
-                        .checked_sub(1)
-                        .ok_or(GraphError::InvalidCount(0))?;
-                    RowChange::Remove
-                }
-                (Some(value), before) => {
-                    if before.is_none() {
-                        row_count += 1;
-                    }
-                    RowChange::Put(value.into_owned())
-                }
-            };
-            let key_bytes = key
-                .canonical_bytes()
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            changes.insert(key, (key_bytes, change));
-        }
-        if row_count > MAX_SIGNED_LENGTH {
-            return Err(GraphError::InvalidCount(
-                usize::try_from(row_count).unwrap_or(usize::MAX),
-            ));
-        }
-
-        let maintained = maintain_ordered_map(
+        let RowMapPass {
+            maintained,
+            row_count,
+            logical_rekeys,
+        } = maintain_row_map(
             &domain,
             root.clone(),
             root_node,
-            &changes,
+            expected_count,
+            mutations,
             &mut read_node,
-            &mut |node| self.write_capture_node(node, &mut written, scope.max_objects),
+            &mut crate::overflow::CaptureStore::new(self, scope, &mut written, scope.max_objects),
         )?;
-        if maintained.row_count != row_count {
-            return Err(GraphError::InvalidCount(
-                usize::try_from(maintained.row_count).unwrap_or(usize::MAX),
-            ));
-        }
         // Every object the overflow writer and the page rewrite wrote joins
         // one closure for the durability barrier.
         self.sync_object_closure(&written, scope)?;
@@ -1684,7 +1583,7 @@ impl NativeGraphContext {
             .key()
             .canonical_bytes()
             .map_err(|_| GraphError::NonCanonicalData)?;
-        let canonical_fields = self.stored_row_fields(row.value(), scope)?;
+        let canonical_fields = self.stored_row_fields(row, scope)?;
 
         binding
             .descriptor()
@@ -1725,11 +1624,7 @@ impl NativeGraphContext {
         row: &crate::row_store::AdmittedRow,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<(usize, BlobMetadata)>, GraphError> {
-        scope.authorize(self)?;
-        if row.version() != self.row_snapshot.version() {
-            return Err(GraphError::ContextMismatch);
-        }
-        let fields = self.stored_row_fields(row.value(), scope)?;
+        let fields = self.stored_row_fields(row, scope)?;
         let CborValue::Array(values) = decode_canonical_content(&fields)? else {
             return Err(GraphError::NonCanonicalData);
         };
@@ -1744,17 +1639,21 @@ impl NativeGraphContext {
         Ok(projected)
     }
 
-    /// The complete logical ROV-3 field tuple of one stored row value. An
+    /// The complete logical ROV-3 field tuple of one row of this graph. An
     /// inline tuple is the row's own bytes and an overflowed row is read from
-    /// its value graph; each nested overflow reference is then replaced by
-    /// the value it stores, so the tuple has the shape its schema describes
-    /// (store-format-3 section 5). The bytes read are charged as structured
-    /// metadata; no Blob payload is read.
-    fn stored_row_fields(
+    /// its verified kind-3 node; each nested overflow reference is then
+    /// replaced by the value it stores, so the tuple has the shape its schema
+    /// describes (store-format-3 section 5). The bytes read are charged as
+    /// structured metadata; no Blob payload is read.
+    pub(crate) fn stored_row_fields(
         &self,
-        value: &crate::row_store::RowValue,
+        row: &crate::row_store::AdmittedRow,
         scope: &RepositoryReadScope,
     ) -> Result<Vec<u8>, GraphError> {
+        scope.authorize(self)?;
+        if row.version() != self.row_snapshot.version() {
+            return Err(GraphError::ContextMismatch);
+        }
         let mut objects = ObjectBudget::new(
             scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
             scope.max_objects,
@@ -1762,7 +1661,7 @@ impl NativeGraphContext {
             scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
             Arc::clone(&scope.metadata_used),
         );
-        let encoded = match value {
+        let encoded = match row.value() {
             crate::row_store::RowValue::Inline { encoded, .. } => {
                 scope.charge_structured_metadata_read(encoded.len() as u64)?;
                 encoded.clone()
@@ -1840,7 +1739,6 @@ impl NativeGraphContext {
             scalar => Ok(scalar),
         }
     }
-
     fn decode_persisted_row_value(
         &self,
         encoded: Vec<u8>,
@@ -2453,6 +2351,13 @@ impl NativeGraphContext {
         let mut revisions = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
+            self.repository
+                .objects()
+                .check_expansion(&tree, "")
+                .map_err(|error| match error {
+                    crate::RepositoryError::SourceTreeLimit => GraphError::SourceTreeLimit,
+                    _ => GraphError::GitCommandFailed,
+                })?;
             let listing = self.git_output(&["ls-tree", "-r", "-t", "--full-tree", &tree])?;
             let text = std::str::from_utf8(&listing).map_err(|_| GraphError::GitObjectMalformed)?;
             // Each entry is `<mode> SP <type> SP <oid> TAB <path>`.
@@ -2543,6 +2448,74 @@ impl NativeGraphContext {
             Arc::clone(&scope.metadata_used),
         );
         let descriptor = self.read_blob_descriptor(descriptor_oid, scope, &mut objects)?;
+        self.admit_blob(descriptor)
+    }
+
+    /// Resolves the accepted pin ref that `owner_id` holds for `pin_id`. Git is
+    /// the authority, so a missing ref is `None` rather than an error.
+    fn accepted_pin_target(
+        &self,
+        owner_id: &[u8; 16],
+        pin_id: &[u8; 16],
+    ) -> Result<Option<String>, GraphError> {
+        let reference = accepted_content_ref(owner_id, pin_id);
+        let listing = self.git_output(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            reference.as_str(),
+        ])?;
+        let listing = String::from_utf8(listing).map_err(|_| GraphError::InvalidProtectedRef)?;
+        Ok(listing.lines().find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == reference).then(|| value.to_owned())
+        }))
+    }
+
+    /// Admits the Blob that a graph-issued pin accepted. Git is the authority:
+    /// the pin's accepted ref must still resolve to `descriptor_oid`, the
+    /// descriptor must carry `identity`, and the scope must belong to this
+    /// owner and snapshot. Callers supply the pin id, descriptor and identity
+    /// from their own metadata; nothing is admitted unless Git confirms them.
+    /// The accepted ref is read under this graph's owner, and under the
+    /// fallback owner only when that owner holds no ref for the pin.
+    pub fn admit_accepted_blob_pin(
+        &self,
+        pin_id: &[u8; 16],
+        descriptor_oid: &NativeOid,
+        identity: crate::blob_store::ContentIdentity,
+        scope: &RepositoryReadScope,
+    ) -> Result<AdmittedBlobReference, GraphError> {
+        scope.authorize(self)?;
+        if descriptor_oid.algorithm() != self.algorithm {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: descriptor_oid.as_bytes().len(),
+            });
+        }
+        let resolved = match self.accepted_pin_target(&self.owner_id, pin_id)? {
+            Some(resolved) => resolved,
+            None => {
+                let fallback = self
+                    .accepted_pin_fallback_owner_id
+                    .ok_or(GraphError::InvalidProtectedRef)?;
+                self.accepted_pin_target(&fallback, pin_id)?
+                    .ok_or(GraphError::InvalidProtectedRef)?
+            }
+        };
+        if NativeOid::from_hex(self.algorithm, &resolved)? != *descriptor_oid {
+            return Err(GraphError::InvalidProtectedRef);
+        }
+        let mut objects = ObjectBudget::new(
+            scope.max_objects.min(MAX_RANGE_GRAPH_OBJECTS),
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES),
+            Arc::clone(&scope.metadata_used),
+        );
+        let descriptor = self.read_blob_descriptor(descriptor_oid, scope, &mut objects)?;
+        if descriptor.identity != identity {
+            return Err(GraphError::ContentIdentityMismatch);
+        }
         self.admit_blob(descriptor)
     }
 
@@ -4624,7 +4597,7 @@ fn git_tree_cmp(left: &ParsedGitTreeEntry, right: &ParsedGitTreeEntry) -> std::c
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -4632,6 +4605,23 @@ fn hex_encode(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+/// The inverse of [`hex_encode`]: exactly its lowercase, even-length
+/// spelling, so every byte string has one accepted form.
+pub(crate) fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let (pairs, []) = text.as_bytes().as_chunks::<2>() else {
+        return None;
+    };
+    pairs
+        .iter()
+        .map(|[high, low]| Some((digit(*high)? << 4) | digit(*low)?))
+        .collect()
 }
 
 fn scratch_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {
@@ -7557,6 +7547,165 @@ fn validate_ordered_root_node(
     Ok(())
 }
 
+/// The outcome of one row-map maintenance pass: the maintained map, the rows
+/// it holds and the logical rekeys the batch made.
+#[derive(Debug)]
+struct RowMapPass {
+    maintained: crate::orp::maintenance::Maintained,
+    row_count: u64,
+    logical_rekeys: Vec<LogicalRowRekey>,
+}
+
+/// Applies `mutations` to the pinned row map whose validated root node
+/// `root_node` holds `expected_count` rows. This is all of
+/// [`NativeGraphContext::maintain_row_index`] except where nodes are read
+/// from and written to: `read_node` reads old nodes and `store` takes every
+/// node and overflow object the pass writes.
+///
+/// Deletes apply first, then rekeys, then inserts, each kind in batch order
+/// and each checked against the rows held by then: a delete or rekey source
+/// that is absent is `RowKeyAbsent`, and a rekey onto a present key or an
+/// insert of one is `DuplicateRowKey`. The first failure in that order is
+/// the one reported. Every key the batch names resolves to one slot, so the
+/// batch may arrive in any order and a rekey may chain onto an earlier
+/// rekey's target or reuse a key the batch removed.
+fn maintain_row_map(
+    domain: &[u8],
+    root: NativeOid,
+    root_node: NodeData,
+    expected_count: u64,
+    mutations: &[RowIndexMutation],
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    store: &mut impl crate::overflow::OverflowStore,
+) -> Result<RowMapPass, GraphError> {
+    use crate::orp::maintenance::{
+        RowChange, RowChanges, lookup_ordered_entries, maintain_ordered_map,
+    };
+    use crate::row_store::TypedKey;
+
+    // The pinned value of every key a mutation names, from one descent over
+    // the touched pages.
+    let touched: Vec<TypedKey> = mutations
+        .iter()
+        .flat_map(|mutation| match mutation {
+            RowIndexMutation::Delete { key } | RowIndexMutation::Insert { key, .. } => {
+                [Some(key), None]
+            }
+            RowIndexMutation::Rekey { from, to } => [Some(from), Some(to)],
+        })
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let pinned = lookup_ordered_entries(domain, &root_node, &touched, &mut *read_node)?;
+    let mut rows: BTreeMap<TypedKey, Option<Cow<'_, [u8]>>> = touched
+        .into_iter()
+        .map(|key| {
+            let value = pinned
+                .get(&key)
+                .map(|value| Cow::Borrowed(value.as_slice()));
+            (key, value)
+        })
+        .collect();
+
+    for mutation in mutations {
+        let RowIndexMutation::Delete { key } = mutation else {
+            continue;
+        };
+        let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+        if slot.take().is_none() {
+            return Err(GraphError::RowKeyAbsent);
+        }
+    }
+    let mut logical_rekeys = Vec::new();
+    for mutation in mutations {
+        let RowIndexMutation::Rekey { from, to } = mutation else {
+            continue;
+        };
+        if rows.get(from).is_none_or(Option::is_none) {
+            return Err(GraphError::RowKeyAbsent);
+        }
+        if rows.get(to).is_some_and(Option::is_some) {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let value = rows.get_mut(from).and_then(Option::take);
+        rows.insert(to.clone(), value);
+        logical_rekeys.push(LogicalRowRekey {
+            old_address: from.clone(),
+            new_address: to.clone(),
+        });
+    }
+    // Inserted rows are lowered to the shared overflow graph first, so a row
+    // or value over 8 KiB or 32 direct Blob references is stored through tag
+    // 60113 (store-format-3 section 5).
+    let mut overflow = crate::overflow::OverflowWriter::new(&mut *store);
+    for mutation in mutations {
+        let RowIndexMutation::Insert { key, fields } = mutation else {
+            continue;
+        };
+        let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+        if slot.is_some() {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let value = overflow
+            .lower_row(fields)?
+            .canonical_page_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        *slot = Some(Cow::Owned(value));
+    }
+
+    let mut changes = RowChanges::new();
+    let mut row_count = expected_count;
+    for (key, value) in rows {
+        let before = pinned.get(&key).map(Vec::as_slice);
+        let change = match (value, before) {
+            (None, None) => continue,
+            (Some(value), Some(before)) if *value == *before => continue,
+            (None, Some(_)) => {
+                row_count = row_count
+                    .checked_sub(1)
+                    .ok_or(GraphError::InvalidCount(0))?;
+                RowChange::Remove
+            }
+            (Some(value), before) => {
+                if before.is_none() {
+                    row_count += 1;
+                }
+                RowChange::Put(value.into_owned())
+            }
+        };
+        let key_bytes = key
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        changes.insert(key, (key_bytes, change));
+    }
+    if row_count > MAX_SIGNED_LENGTH {
+        return Err(GraphError::InvalidCount(
+            usize::try_from(row_count).unwrap_or(usize::MAX),
+        ));
+    }
+
+    let maintained = maintain_ordered_map(
+        domain,
+        root,
+        root_node,
+        &changes,
+        &mut *read_node,
+        &mut |node| store.write_node(node),
+    )?;
+    if maintained.row_count != row_count {
+        return Err(GraphError::InvalidCount(
+            usize::try_from(maintained.row_count).unwrap_or(usize::MAX),
+        ));
+    }
+    Ok(RowMapPass {
+        maintained,
+        row_count,
+        logical_rekeys,
+    })
+}
+
 fn collect_ordered_range_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
@@ -7878,6 +8027,31 @@ mod persisted_orp_tests {
         let directory = tempfile::tempdir().expect("create capture repository");
         let graph = capture_context_in_with_blob_field(directory.path(), true);
         (directory, graph)
+    }
+
+    /// G2: the frozen-candidate read-tree of `expected_head` must be preceded
+    /// by the bounded expansion pre-pass, so a too-deep head is refused.
+    #[test]
+    fn frozen_candidate_refuses_a_head_tree_nested_beyond_the_walk_limit() {
+        let (directory, graph) = capture_test_context();
+        crate::test_support::configure_fixture_git_identity(directory.path());
+        let deep = crate::test_support::deep_nested_commit(directory.path(), 300);
+        crate::test_support::git_with_input(
+            directory.path(),
+            &["update-ref", "HEAD", &deep],
+            "",
+        );
+        let repository = crate::Repository::discover(directory.path()).expect("open repository");
+        let head = repository.head().expect("read head").expect("born head");
+        assert!(matches!(
+            repository.build_frozen_publication_candidate(
+                &head,
+                &graph,
+                graph.store_root(),
+                "orna: test deep head",
+            ),
+            Err(crate::RepositoryError::SourceTreeLimit)
+        ));
     }
 
     /// Builds the capture fixture context for a repository path, creating the
@@ -9326,6 +9500,757 @@ mod persisted_orp_tests {
 1c28ee1360793fb7f892a4910b04f88d701d615a 0 2 1 0 cd9e5188da52678cb40448fc11adbb91ce6ec424d3145517f14c390fbbbf71ef
 ";
 
+    /// Publication hands `maintain_row_index` its batch in canonical key byte
+    /// order, which for Text keys is length-first rather than logical, so
+    /// 20,000 inserts into a 20,000-row table land all over the pinned rows.
+    /// The pass must build the root that a complete canonical build of the
+    /// final rows builds.
+    #[test]
+    fn text_key_bulk_insert_in_canonical_byte_order_builds_the_complete_root() {
+        const ROWS: usize = 20_000;
+        let (_directory, mut graph) = capture_test_context();
+        let pinned_fields = vec![0x80];
+        let inserted_fields = vec![0x81, 0xf5];
+        // Unpadded decimal keys: "10" sorts before "9" logically, but after it
+        // as canonical bytes, whose length prefix comes first.
+        let key = |index: usize| TypedKey::Text(index.to_string());
+        let seed = (0..ROWS)
+            .map(|index| RowIndexMutation::Insert {
+                key: key(2 * index),
+                fields: pinned_fields.clone(),
+            })
+            .collect::<Vec<_>>();
+        maintain_and_repin(&mut graph, &seed);
+
+        let mut inserted_keys = (0..ROWS)
+            .map(|index| key(2 * index + 1))
+            .collect::<Vec<_>>();
+        inserted_keys.sort_by_cached_key(|key| key.canonical_bytes().expect("canonical Text key"));
+        assert!(
+            inserted_keys.windows(2).any(|pair| pair[0] > pair[1]),
+            "canonical byte order of the inserts must differ from their logical order"
+        );
+        let inserts = inserted_keys
+            .into_iter()
+            .map(|key| RowIndexMutation::Insert {
+                key,
+                fields: inserted_fields.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let maintenance = graph
+            .maintain_row_index(&inserts, &scope)
+            .expect("insert 20,000 rows among 20,000");
+        assert_eq!(maintenance.row_count(), 2 * ROWS as u64);
+
+        let final_rows = (0..2 * ROWS)
+            .map(|index| {
+                let fields = if index % 2 == 0 {
+                    &pinned_fields
+                } else {
+                    &inserted_fields
+                };
+                (key(index), fields.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut written = BTreeSet::new();
+        let full_build = complete_row_build(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &final_rows,
+            &mut |node| graph.write_native_node(node, &mut written),
+        );
+        assert_eq!(maintenance.primary_root(), &full_build);
+    }
+
+    /// The complete canonical build of `rows` (key and stored field tuple,
+    /// in any order) through `write`, as relation admission builds a map.
+    fn complete_row_build(
+        domain: &[u8],
+        rows: &[(TypedKey, Vec<u8>)],
+        write: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
+    ) -> NativeOid {
+        let mut entries = rows
+            .iter()
+            .map(|(key, fields)| {
+                crate::row_store::RowEntry::new(
+                    key.clone(),
+                    RowValue::decode_canonical_fields(fields.clone()).expect("inline row"),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.key().cmp(right.key()));
+        NativeGraphContext::build_canonical_ordered_map(domain, &entries, write)
+            .expect("complete canonical build")
+    }
+
+    /// The pass as it was first written: every delete, then every rekey, then
+    /// every insert, each applied to the ascending rows one at a time. It is
+    /// the oracle a maintenance pass must agree with, rows and error alike.
+    fn one_at_a_time_row_index_mutations(
+        rows: &mut Vec<(TypedKey, Vec<u8>)>,
+        mutations: &[RowIndexMutation],
+    ) -> Result<Vec<LogicalRowRekey>, GraphError> {
+        let search = |rows: &[(TypedKey, Vec<u8>)], key: &TypedKey| {
+            rows.binary_search_by(|(existing, _)| existing.cmp(key))
+        };
+        let mut logical_rekeys = Vec::new();
+        for mutation in mutations {
+            if let RowIndexMutation::Delete { key } = mutation {
+                let index = search(rows, key).map_err(|_| GraphError::RowKeyAbsent)?;
+                rows.remove(index);
+            }
+        }
+        for mutation in mutations {
+            if let RowIndexMutation::Rekey { from, to } = mutation {
+                let index = search(rows, from).map_err(|_| GraphError::RowKeyAbsent)?;
+                if search(rows, to).is_ok() {
+                    return Err(GraphError::DuplicateRowKey);
+                }
+                let (_, fields) = rows.remove(index);
+                let insertion = search(rows, to).unwrap_or_else(|index| index);
+                rows.insert(insertion, (to.clone(), fields));
+                logical_rekeys.push(LogicalRowRekey {
+                    old_address: from.clone(),
+                    new_address: to.clone(),
+                });
+            }
+        }
+        for mutation in mutations {
+            if let RowIndexMutation::Insert { key, fields } = mutation {
+                let insertion = search(rows, key).unwrap_or_else(|index| index);
+                if rows
+                    .get(insertion)
+                    .is_some_and(|(existing, _)| existing == key)
+                {
+                    return Err(GraphError::DuplicateRowKey);
+                }
+                rows.insert(insertion, (key.clone(), fields.clone()));
+            }
+        }
+        Ok(logical_rekeys)
+    }
+
+    /// The batches a maintenance pass is most likely to get wrong, run through
+    /// `maintain_row_index` against one pinned map, each with the outcome
+    /// applying it one mutation at a time gives: the same error, or the same
+    /// rows as the root of their complete build.
+    #[test]
+    fn maintain_row_index_keeps_one_at_a_time_outcomes() {
+        let (_directory, mut graph) = capture_test_context();
+        let text = |key: &str| TypedKey::Text(key.to_owned());
+        let fields = |value: u8| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Unsigned(value.into())]))
+        };
+        let rows = |entries: &[(&str, u8)]| {
+            entries
+                .iter()
+                .map(|&(key, value)| (text(key), fields(value)))
+                .collect::<Vec<_>>()
+        };
+        let delete = |key: &str| RowIndexMutation::Delete { key: text(key) };
+        let rekey = |from: &str, to: &str| RowIndexMutation::Rekey {
+            from: text(from),
+            to: text(to),
+        };
+        let insert = |key: &str, value: u8| RowIndexMutation::Insert {
+            key: text(key),
+            fields: fields(value),
+        };
+        // "aa" sorts between "a" and "b" logically but after "b" as bytes.
+        let pinned = rows(&[("a", 1), ("aa", 2), ("b", 3), ("ba", 4)]);
+        maintain_and_repin(
+            &mut graph,
+            &pinned
+                .iter()
+                .map(|(key, fields)| RowIndexMutation::Insert {
+                    key: key.clone(),
+                    fields: fields.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let domain = rows_domain_for_version(graph.row_snapshot.version());
+        let mut sink = BTreeSet::new();
+        let cases = [
+            (
+                vec![delete("a"), delete("a")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            // Deletes apply before inserts, so the absent delete is reported.
+            (
+                vec![insert("a", 9), delete("zz")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            // Rekeys fail in batch order.
+            (
+                vec![rekey("b", "aa"), rekey("zz", "c")],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (
+                vec![rekey("zz", "c"), rekey("b", "aa")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            (vec![rekey("a", "a")], Err(GraphError::DuplicateRowKey)),
+            // A deleted row is no rekey source.
+            (
+                vec![delete("a"), rekey("a", "c")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            (
+                vec![rekey("a", "c"), rekey("c", "bb")],
+                Ok(rows(&[("aa", 2), ("b", 3), ("ba", 4), ("bb", 1)])),
+            ),
+            // Two rows swap keys through a free one.
+            (
+                vec![rekey("a", "x"), rekey("b", "a"), rekey("x", "b")],
+                Ok(rows(&[("a", 3), ("aa", 2), ("b", 1), ("ba", 4)])),
+            ),
+            (
+                vec![delete("b"), rekey("a", "b")],
+                Ok(rows(&[("aa", 2), ("b", 1), ("ba", 4)])),
+            ),
+            // Updates as publication sends them: by canonical key bytes, each
+            // key's delete before its insert.
+            (
+                vec![delete("b"), insert("b", 9), delete("aa"), insert("aa", 8)],
+                Ok(rows(&[("a", 1), ("aa", 8), ("b", 9), ("ba", 4)])),
+            ),
+            // A removed key is inserted again.
+            (
+                vec![insert("a", 7), rekey("a", "c")],
+                Ok(rows(&[("a", 7), ("aa", 2), ("b", 3), ("ba", 4), ("c", 1)])),
+            ),
+            (
+                vec![rekey("a", "c"), insert("c", 7)],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (
+                vec![insert("c", 7), insert("ab", 6), insert("c", 5)],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (vec![insert("ba", 7)], Err(GraphError::DuplicateRowKey)),
+            (
+                vec![insert("c", 7), insert("", 6), insert("ab", 5)],
+                Ok(rows(&[
+                    ("", 6),
+                    ("a", 1),
+                    ("aa", 2),
+                    ("ab", 5),
+                    ("b", 3),
+                    ("ba", 4),
+                    ("c", 7),
+                ])),
+            ),
+        ];
+        for (mutations, expected) in cases {
+            let mut reference = pinned.clone();
+            let outcome =
+                one_at_a_time_row_index_mutations(&mut reference, &mutations).map(|_| reference);
+            assert_eq!(outcome, expected, "one-at-a-time pass over {mutations:?}");
+            let scope = graph.open_read_scope().expect("owner read scope");
+            let maintained = graph.maintain_row_index(&mutations, &scope);
+            match expected {
+                Ok(expected_rows) => {
+                    let maintenance =
+                        maintained.unwrap_or_else(|error| panic!("{mutations:?}: {error:?}"));
+                    assert_eq!(
+                        maintenance.row_count(),
+                        expected_rows.len() as u64,
+                        "{mutations:?}"
+                    );
+                    let complete = complete_row_build(&domain, &expected_rows, &mut |node| {
+                        graph.write_capture_node(node, &mut sink, u64::MAX)
+                    });
+                    assert_eq!(maintenance.primary_root(), &complete, "{mutations:?}");
+                }
+                Err(error) => assert_eq!(maintained.err(), Some(error), "{mutations:?}"),
+            }
+        }
+
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let chained = graph
+            .maintain_row_index(&[rekey("a", "c"), delete("b"), rekey("c", "b")], &scope)
+            .expect("rekey chain onto a deleted key");
+        assert_eq!(
+            chained.logical_rekeys(),
+            [
+                LogicalRowRekey {
+                    old_address: text("a"),
+                    new_address: text("c"),
+                },
+                LogicalRowRekey {
+                    old_address: text("c"),
+                    new_address: text("b"),
+                },
+            ]
+        );
+        let complete = complete_row_build(
+            &domain,
+            &rows(&[("aa", 2), ("b", 1), ("ba", 4)]),
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        );
+        assert_eq!(chained.primary_root(), &complete);
+    }
+
+    /// splitmix64, so a fixed seed replays the same cases on every run.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut mixed = self.0;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            mixed ^ (mixed >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        /// One of `keys`, a non-negative Int spelled `Int` or `UInt` at random.
+        fn key_from(&mut self, keys: &[TypedKey]) -> TypedKey {
+            let key = keys[self.below(keys.len())].clone();
+            self.spelled(key)
+        }
+
+        /// A batch key: any of `universe` `strays` times in eight, otherwise
+        /// one taken out of `pool`, or none once `pool` is empty.
+        fn draw(
+            &mut self,
+            pool: &mut Vec<TypedKey>,
+            strays: usize,
+            universe: &[TypedKey],
+        ) -> Option<TypedKey> {
+            if self.below(8) < strays {
+                return Some(self.key_from(universe));
+            }
+            if pool.is_empty() {
+                return None;
+            }
+            let key = pool.swap_remove(self.below(pool.len()));
+            Some(self.spelled(key))
+        }
+
+        /// `key`, a non-negative Int spelled `Int` or `UInt` at random.
+        fn spelled(&mut self, key: TypedKey) -> TypedKey {
+            match key {
+                TypedKey::Int(value) if value >= 0 && self.below(2) == 0 => {
+                    TypedKey::UInt(value.unsigned_abs())
+                }
+                key => key,
+            }
+        }
+    }
+
+    /// Distinct one-field row tuples, one per call.
+    fn fuzz_values() -> impl FnMut() -> Vec<u8> {
+        let mut values = 0u64;
+        move || {
+            values += 1;
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Unsigned(values)]))
+        }
+    }
+
+    /// A seeded key universe: the Text words of up to four letters over two
+    /// to four letters, whose canonical byte order is not their logical
+    /// order, or a run of Int keys around zero.
+    fn fuzz_universe(rng: &mut SplitMix64, text: bool) -> Vec<TypedKey> {
+        if !text {
+            let span = 2 + rng.below(40) as i64;
+            return (-span..span).map(TypedKey::Int).collect();
+        }
+        let letters = 2 + rng.below(3) as u8;
+        let mut level = vec![String::new()];
+        let mut keys = level.clone();
+        for _ in 0..1 + rng.below(4) {
+            level = level
+                .iter()
+                .flat_map(|prefix| {
+                    (b'a'..b'a' + letters)
+                        .map(move |letter| format!("{prefix}{}", char::from(letter)))
+                })
+                .collect();
+            keys.extend(level.iter().cloned());
+        }
+        keys.into_iter().map(TypedKey::Text).collect()
+    }
+
+    /// Pinned rows over a random share of `universe`, ascending by key, and
+    /// the keys left free.
+    fn fuzz_pinned(
+        rng: &mut SplitMix64,
+        universe: &[TypedKey],
+        value: &mut impl FnMut() -> Vec<u8>,
+    ) -> (Vec<(TypedKey, Vec<u8>)>, Vec<TypedKey>) {
+        let density = 1 + rng.below(9);
+        let mut pinned = Vec::new();
+        let mut free = Vec::new();
+        for key in universe {
+            if rng.below(10) < density {
+                let key = rng.key_from(std::slice::from_ref(key));
+                pinned.push((key, value()));
+            } else {
+                free.push(key.clone());
+            }
+        }
+        pinned.sort_by(|left, right| left.0.cmp(&right.0));
+        (pinned, free)
+    }
+
+    /// A seeded batch of deletes, rekeys, inserts and delete-plus-insert
+    /// updates against `pinned`. Deletes and rekey sources take keys still
+    /// removable: pinned keys, then each rekey's target. Inserts and rekey
+    /// targets take keys still addable: free keys, then each removed key. So
+    /// batches chain rekeys and reuse removed keys. Removals stray to any key
+    /// of `universe` never or one time in eight and additions up to five
+    /// times in eight, so batches also repeat keys (a second delete of one
+    /// row), name absent ones and collide, and no outcome crowds out the
+    /// others. Half the batches come in publication's order: canonical key
+    /// bytes, and a key's delete before its insert.
+    fn fuzz_batch(
+        rng: &mut SplitMix64,
+        universe: &[TypedKey],
+        pinned: &[(TypedKey, Vec<u8>)],
+        free: Vec<TypedKey>,
+        value: &mut impl FnMut() -> Vec<u8>,
+    ) -> Vec<RowIndexMutation> {
+        let mut removable = pinned
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut addable = free;
+        let (removal_strays, addition_strays) = (rng.below(2), rng.below(6));
+        let mut batch = Vec::new();
+        for _ in 0..rng.below(25) {
+            match rng.below(10) {
+                0..=2 => {
+                    let Some(key) = rng.draw(&mut removable, removal_strays, universe) else {
+                        continue;
+                    };
+                    addable.push(key.clone());
+                    batch.push(RowIndexMutation::Delete { key });
+                }
+                3..=4 => {
+                    let from = rng.draw(&mut removable, removal_strays, universe);
+                    let to = rng.draw(&mut addable, addition_strays, universe);
+                    let (Some(from), Some(to)) = (from, to) else {
+                        continue;
+                    };
+                    addable.push(from.clone());
+                    removable.push(to.clone());
+                    batch.push(RowIndexMutation::Rekey { from, to });
+                }
+                5..=7 => {
+                    let Some(key) = rng.draw(&mut addable, addition_strays, universe) else {
+                        continue;
+                    };
+                    batch.push(RowIndexMutation::Insert {
+                        key,
+                        fields: value(),
+                    });
+                }
+                _ => {
+                    let Some(key) = rng.draw(&mut removable, removal_strays, universe) else {
+                        continue;
+                    };
+                    batch.push(RowIndexMutation::Delete { key: key.clone() });
+                    batch.push(RowIndexMutation::Insert {
+                        key,
+                        fields: value(),
+                    });
+                }
+            }
+        }
+        if rng.below(2) == 0 {
+            batch.sort_by_cached_key(|mutation| {
+                let (RowIndexMutation::Delete { key }
+                | RowIndexMutation::Insert { key, .. }
+                | RowIndexMutation::Rekey { from: key, .. }) = mutation;
+                key.canonical_bytes().expect("canonical key")
+            });
+        }
+        batch
+    }
+
+    /// Nodes held in memory, so the maintenance pass runs without Git. An
+    /// object ID is the SHA-1 of the node's canonical data, so equal nodes
+    /// get equal IDs as Git envelopes do. The fuzz rows are a few bytes, so
+    /// no value is ever lowered to a byte index.
+    #[derive(Clone, Default)]
+    struct MemoryNodes(HashMap<NativeOid, NodeData>);
+
+    impl crate::overflow::OverflowStore for MemoryNodes {
+        fn oid_width(&self) -> usize {
+            GitHashAlgorithm::Sha1.width()
+        }
+
+        fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError> {
+            let digest = <sha1::Sha1 as sha1::Digest>::digest(node.encode_canonical()?);
+            let oid = NativeOid::new(GitHashAlgorithm::Sha1, digest.as_slice())?;
+            self.0.insert(oid.clone(), node.clone());
+            Ok(oid)
+        }
+
+        fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+            panic!(
+                "a {}-byte fuzz value was lowered to a byte index",
+                bytes.len()
+            )
+        }
+    }
+
+    /// Seeded random batches (see `fuzz_batch`) over small key universes,
+    /// 4,000 of them, run through the pass `maintain_row_index` applies,
+    /// `maintain_row_map`, against an in-memory copy of each pinned map. Text
+    /// keys order differently as canonical bytes than logically and Int keys
+    /// come spelled `Int` and `UInt`. The pass must report exactly the rekeys
+    /// (key spelling included) of the one-at-a-time reference and build the
+    /// complete build of its rows, or fail with exactly its error.
+    #[test]
+    fn row_map_pass_matches_the_one_at_a_time_reference() {
+        use crate::overflow::OverflowStore;
+
+        let domain = canonical_value_bytes(&CborValue::Array(vec![
+            CborValue::Text("rows".to_owned()),
+            CborValue::Bytes(vec![0x11; 16]),
+            CborValue::Bytes(vec![0x22; 32]),
+        ]));
+        let mut rng = SplitMix64(0x0374_5eed_0374_5eed);
+        let mut value = fuzz_values();
+        let (mut ok, mut ok_with_rekeys, mut absent, mut duplicate) = (0, 0, 0, 0);
+        for case in 0..4_000 {
+            let universe = fuzz_universe(&mut rng, case % 2 == 0);
+            let (pinned, free) = fuzz_pinned(&mut rng, &universe, &mut value);
+            let batch = fuzz_batch(&mut rng, &universe, &pinned, free, &mut value);
+
+            let mut nodes = MemoryNodes::default();
+            let root = complete_row_build(&domain, &pinned, &mut |node| nodes.write_node(node));
+            let old = nodes.clone();
+            let pass = maintain_row_map(
+                &domain,
+                root.clone(),
+                old.0[&root].clone(),
+                pinned.len() as u64,
+                &batch,
+                &mut |oid| old.0.get(oid).cloned().ok_or(GraphError::UnavailableObject),
+                &mut nodes,
+            );
+            let mut reference_rows = pinned.clone();
+            let reference = one_at_a_time_row_index_mutations(&mut reference_rows, &batch);
+            match (&pass, &reference) {
+                (Ok(pass), Ok(reference_rekeys)) => {
+                    // Debug output keeps the Int/UInt spelling equality ignores.
+                    assert_eq!(
+                        format!("{:?}", pass.logical_rekeys),
+                        format!("{reference_rekeys:?}"),
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    assert_eq!(
+                        pass.row_count,
+                        reference_rows.len() as u64,
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    let complete = complete_row_build(&domain, &reference_rows, &mut |node| {
+                        nodes.write_node(node)
+                    });
+                    assert_eq!(
+                        pass.maintained.root, complete,
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    ok += 1;
+                    ok_with_rekeys += usize::from(!pass.logical_rekeys.is_empty());
+                }
+                (Err(error), Err(reference_error)) => {
+                    assert_eq!(
+                        error, reference_error,
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    match reference_error {
+                        GraphError::RowKeyAbsent => absent += 1,
+                        GraphError::DuplicateRowKey => duplicate += 1,
+                        other => panic!("case {case}: unexpected {other:?}"),
+                    }
+                }
+                _ => panic!(
+                    "case {case}: the pass gave {pass:?} but one at a time {reference:?} \
+                     for {pinned:?} with {batch:?}"
+                ),
+            }
+        }
+        // Each outcome is exercised, not only the easy one.
+        assert!(
+            ok >= 400 && ok_with_rekeys >= 100 && absent >= 400 && duplicate >= 400,
+            "ok {ok} (with rekeys {ok_with_rekeys}), absent {absent}, duplicate {duplicate}"
+        );
+    }
+
+    /// Seeded batches as in `row_map_pass_matches_the_one_at_a_time_reference`
+    /// through `maintain_row_index` itself, against two pinned Text-keyed
+    /// maps in Git: the same error as the one-at-a-time reference, or its
+    /// rekeys and the root of the complete build of its rows.
+    #[test]
+    fn maintain_row_index_matches_the_one_at_a_time_reference() {
+        let mut rng = SplitMix64(0x0129_5eed_0129_5eed);
+        let mut value = fuzz_values();
+        let mut outcomes = BTreeSet::new();
+        for _ in 0..2 {
+            let (_directory, mut graph) = capture_test_context();
+            let universe = fuzz_universe(&mut rng, true);
+            let (pinned, free) = fuzz_pinned(&mut rng, &universe, &mut value);
+            maintain_and_repin(
+                &mut graph,
+                &pinned
+                    .iter()
+                    .map(|(key, fields)| RowIndexMutation::Insert {
+                        key: key.clone(),
+                        fields: fields.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let domain = rows_domain_for_version(graph.row_snapshot.version());
+            let mut sink = BTreeSet::new();
+            for case in 0..25 {
+                let batch = fuzz_batch(&mut rng, &universe, &pinned, free.clone(), &mut value);
+                let mut reference_rows = pinned.clone();
+                let reference = one_at_a_time_row_index_mutations(&mut reference_rows, &batch);
+                let scope = graph.open_read_scope().expect("owner read scope");
+                match (graph.maintain_row_index(&batch, &scope), reference) {
+                    (Ok(maintenance), Ok(rekeys)) => {
+                        assert_eq!(
+                            format!("{:?}", maintenance.logical_rekeys()),
+                            format!("{rekeys:?}"),
+                            "case {case}: {batch:?}"
+                        );
+                        assert_eq!(
+                            maintenance.row_count(),
+                            reference_rows.len() as u64,
+                            "case {case}: {batch:?}"
+                        );
+                        let complete = complete_row_build(&domain, &reference_rows, &mut |node| {
+                            graph.write_capture_node(node, &mut sink, u64::MAX)
+                        });
+                        assert_eq!(
+                            maintenance.primary_root(),
+                            &complete,
+                            "case {case}: {batch:?}"
+                        );
+                        outcomes.insert("ok");
+                    }
+                    (Err(error), Err(reference_error)) => {
+                        assert_eq!(error, reference_error, "case {case}: {batch:?}");
+                        outcomes.insert(match error {
+                            GraphError::RowKeyAbsent => "absent",
+                            GraphError::DuplicateRowKey => "duplicate",
+                            other => panic!("case {case}: unexpected {other:?}"),
+                        });
+                    }
+                    (outcome, reference) => panic!(
+                        "case {case}: maintain_row_index gave {outcome:?} but one at a time \
+                         {reference:?} for {batch:?}"
+                    ),
+                }
+            }
+        }
+        assert_eq!(
+            outcomes.len(),
+            3,
+            "every outcome is exercised: {outcomes:?}"
+        );
+    }
+
+    /// ORNA-ROW-006 and store-format-3 §3 on a map two branch levels deep
+    /// (A07-storage-rows-04): one update reads the pages on the path to its
+    /// row and at most two more, never the table, and its root is the
+    /// complete build of the same rows. A page read costs its envelope and
+    /// data objects, plus its refs tree when it names dependencies, and every
+    /// pass reads the `height` branches on the path, each with refs, so the
+    /// objects read are at least twice the pages read plus `height`.
+    #[test]
+    fn one_update_reads_its_path_and_at_most_two_more_pages() {
+        const ROWS: usize = 20_000;
+        let (_directory, mut graph) = capture_test_context();
+        let key = |index: usize| TypedKey::Text(format!("row-{index:05}"));
+        let fields = |index: usize, label: &str| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Text(format!(
+                "{label} {index}"
+            ))]))
+        };
+        let scope = graph.open_read_scope().expect("seed scope");
+        let seeded = graph
+            .maintain_row_index(
+                &(0..ROWS)
+                    .map(|index| RowIndexMutation::Insert {
+                        key: key(index),
+                        fields: fields(index, "seed"),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("seed rows");
+        adopt_maintenance(&mut graph, &seeded);
+
+        let scope = graph.open_read_scope().expect("root scope");
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let root = graph
+            .read_native_node(
+                graph.row_snapshot.version().primary_root(),
+                &scope,
+                &mut objects,
+            )
+            .expect("read the pinned root");
+        let NodeData::OrderedBranch { height, .. } = root else {
+            panic!("{ROWS} rows fill more than one page");
+        };
+        let height = u64::from(height);
+        assert!(
+            height >= 2,
+            "{ROWS} rows build two branch levels, not {height}"
+        );
+
+        let changed = 12_345;
+        let scope = graph.open_read_scope().expect("update scope");
+        let update = graph
+            .maintain_row_index(
+                &[
+                    RowIndexMutation::Delete { key: key(changed) },
+                    RowIndexMutation::Insert {
+                        key: key(changed),
+                        fields: fields(changed, "updated"),
+                    },
+                ],
+                &scope,
+            )
+            .expect("one update");
+        let objects_read = scope.objects_read();
+        let pages_read = (objects_read - height) / 2;
+        assert!(
+            pages_read <= height + 3,
+            "one update read {objects_read} objects, so up to {pages_read} pages, \
+             in a map {height} branch levels deep"
+        );
+
+        let rows = (0..ROWS)
+            .map(|index| {
+                let label = if index == changed { "updated" } else { "seed" };
+                (key(index), fields(index, label))
+            })
+            .collect::<Vec<_>>();
+        let mut sink = BTreeSet::new();
+        let complete = complete_row_build(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &rows,
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        );
+        assert_eq!(update.primary_root(), &complete);
+    }
+
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
         let (directory, mut graph) = capture_test_context();
@@ -9584,6 +10509,366 @@ mod persisted_orp_tests {
 
         assert!(matches!(
             graph.accept_protected_blob_pin(pin),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+    }
+
+    #[test]
+    fn accepted_blob_pin_admits_its_own_descriptor() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"accepted pin admits its own Blob";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+
+        let admitted = graph
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope,
+            )
+            .expect("admit the accepted pin");
+
+        assert_eq!(admitted.descriptor_oid(), &pin.descriptor_oid);
+        assert_eq!(admitted.content_identity(), pin.content_identity());
+    }
+
+    #[test]
+    fn accepted_blob_pin_admission_rejects_a_different_descriptor() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"accepted pin names exactly one descriptor";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        let mut tampered_oid = pin.descriptor_oid.as_bytes().to_vec();
+        tampered_oid[0] ^= 1;
+        let tampered_oid =
+            NativeOid::new(graph.algorithm, tampered_oid).expect("valid-width tampered OID");
+
+        assert!(matches!(
+            graph.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &tampered_oid,
+                pin.content_identity(),
+                &scope,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+    }
+
+    #[test]
+    fn accepted_blob_pin_refuses_an_unaccepted_candidate() {
+        let (directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"candidate has not been accepted yet";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin_id = candidate.pin_id;
+        let descriptor_oid = candidate.descriptor_oid.clone();
+        let identity = candidate.content_identity();
+        let pending_ref = scratch_content_ref(&graph.owner_id, &pin_id);
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+
+        assert!(matches!(
+            graph.admit_accepted_blob_pin(&pin_id, &descriptor_oid, identity, &scope),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+        assert!(fixture_ref_exists(directory.path(), &pending_ref));
+    }
+
+    #[test]
+    fn accepted_blob_pin_admission_rejects_a_foreign_scope() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"accepted pin is bound to its owner scope";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        // Fixture graphs share one identity and owner, so a foreign scope is
+        // modelled by overriding each bound field in turn.
+        let mut foreign_context = graph.open_read_scope().expect("owner read scope");
+        foreign_context.context = ContextIdentity([0x7a; 32]);
+        let mut foreign_owner = graph.open_read_scope().expect("owner read scope");
+        foreign_owner.owner_id = [0x7b; 16];
+
+        for foreign in [&foreign_context, &foreign_owner] {
+            assert!(matches!(
+                graph.admit_accepted_blob_pin(
+                    pin.pin_id(),
+                    &pin.descriptor_oid,
+                    pin.content_identity(),
+                    foreign,
+                ),
+                Err(GraphError::ContextMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn accepted_blob_pin_admission_rejects_a_mismatched_identity() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("owner read scope");
+        let payload = b"accepted pin identity must match its descriptor";
+        let candidate = graph
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = graph
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+
+        assert!(matches!(
+            graph.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                crate::blob_store::digest_bytes(b"a different payload"),
+                &scope,
+            ),
+            Err(GraphError::ContentIdentityMismatch)
+        ));
+    }
+
+    /// Issues the graph a mounted editor opens over `derived`'s snapshot: the
+    /// same repository, identity, snapshot and row map, owned by the runtime
+    /// lease owner instead of the repository-derived default.
+    fn lease_owned_graph(derived: &NativeGraphContext, owner_id: [u8; 16]) -> NativeGraphContext {
+        NativeGraphContext::issue(
+            derived.repository.clone(),
+            derived.repository_id,
+            derived.identity.0,
+            derived.database_id,
+            owner_id,
+            derived.snapshot_id,
+            derived.algorithm,
+            derived.store_root.clone(),
+            derived.schema_digest,
+            derived.row_snapshot.clone(),
+        )
+        .expect("issue the lease-owned graph over the derived snapshot")
+    }
+
+    #[test]
+    fn accepted_blob_pin_lease_graph_admits_a_pin_captured_under_the_derived_owner() {
+        let (_directory, derived) = capture_test_context();
+        let derived_scope = derived.open_read_scope().expect("derived read scope");
+        let payload = b"pin captured under the derived owner";
+        let candidate = derived
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &derived_scope)
+            .expect("capture authorized stream");
+        let pin = derived
+            .protect_captured_blob(candidate, &derived_scope)
+            .expect("protect complete OGB-2 closure");
+        let lease = lease_owned_graph(&derived, [0x5c; 16]);
+        let scope = lease.open_read_scope().expect("lease read scope");
+
+        assert!(matches!(
+            lease.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+
+        let fallback = lease.with_accepted_pin_fallback_owner(derived.owner_id);
+        let admitted = fallback
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope,
+            )
+            .expect("admit the derived-owner pin through the fallback");
+        assert_eq!(admitted.descriptor_oid(), &pin.descriptor_oid);
+        assert_eq!(admitted.content_identity(), pin.content_identity());
+    }
+
+    #[test]
+    fn accepted_blob_pin_lease_graph_admits_its_own_pin_with_the_derived_fallback_set() {
+        let (_directory, derived) = capture_test_context();
+        let lease = lease_owned_graph(&derived, [0x5c; 16]);
+        let scope = lease.open_read_scope().expect("lease read scope");
+        let payload = b"pin captured under the lease owner";
+        let candidate = lease
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
+            .expect("capture authorized stream");
+        let pin = lease
+            .protect_captured_blob(candidate, &scope)
+            .expect("protect complete OGB-2 closure");
+        let fallback = lease.with_accepted_pin_fallback_owner(derived.owner_id);
+
+        let admitted = fallback
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope,
+            )
+            .expect("admit the lease-owned pin before the fallback");
+        assert_eq!(admitted.descriptor_oid(), &pin.descriptor_oid);
+    }
+
+    #[test]
+    fn accepted_blob_pin_lease_graph_refuses_a_pin_held_by_another_lease_owner() {
+        let (_directory, derived) = capture_test_context();
+        let owner_b = lease_owned_graph(&derived, [0xb0; 16]);
+        let scope_b = owner_b.open_read_scope().expect("lease B read scope");
+        let payload = b"pin captured under lease owner B";
+        let candidate = owner_b
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &scope_b)
+            .expect("capture authorized stream");
+        let pin = owner_b
+            .protect_captured_blob(candidate, &scope_b)
+            .expect("protect complete OGB-2 closure");
+        owner_b
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_b,
+            )
+            .expect("lease B admits its own pin");
+
+        let owner_a = lease_owned_graph(&derived, [0xa0; 16]);
+        let scope_a = owner_a.open_read_scope().expect("lease A read scope");
+        assert!(matches!(
+            owner_a.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_a,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+        // The derived fallback holds no ref for lease B's pin, so it cannot admit it either.
+        let with_fallback = owner_a.with_accepted_pin_fallback_owner(derived.owner_id);
+        assert!(matches!(
+            with_fallback.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &scope_a,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+    }
+
+    #[test]
+    fn accepted_blob_pin_own_ref_naming_another_descriptor_is_refused_without_fallback() {
+        let (directory, derived) = capture_test_context();
+        let derived_scope = derived.open_read_scope().expect("derived read scope");
+        let payload = b"pin whose lease-owned ref names another descriptor";
+        let candidate = derived
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &derived_scope)
+            .expect("capture authorized stream");
+        let pin = derived
+            .protect_captured_blob(candidate, &derived_scope)
+            .expect("protect complete OGB-2 closure");
+        let other_payload = b"a different Blob supplies the mismatched descriptor";
+        let other_candidate = derived
+            .capture_blob_candidate(&other_payload[..], other_payload.len() as u64, &derived_scope)
+            .expect("capture authorized stream");
+        let other = derived
+            .protect_captured_blob(other_candidate, &derived_scope)
+            .expect("protect complete OGB-2 closure");
+        assert_ne!(other.descriptor_oid, pin.descriptor_oid);
+
+        // The lease owner's own accepted ref names a different descriptor. The derived
+        // fallback still holds the matching ref, and must not be consulted.
+        let lease_owner = [0x5c; 16];
+        let own_ref = accepted_content_ref(&lease_owner, pin.pin_id());
+        let written = Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-ref", own_ref.as_str(), other.descriptor_oid.to_hex().as_str()])
+            .status()
+            .expect("write the lease owner's mismatched accepted ref");
+        assert!(written.success(), "write {own_ref}");
+
+        let lease = lease_owned_graph(&derived, lease_owner);
+        let lease_scope = lease.open_read_scope().expect("lease read scope");
+        let with_fallback = lease_owned_graph(&derived, lease_owner)
+            .with_accepted_pin_fallback_owner(derived.owner_id);
+        for graph in [&lease, &with_fallback] {
+            assert!(matches!(
+                graph.admit_accepted_blob_pin(
+                    pin.pin_id(),
+                    &pin.descriptor_oid,
+                    pin.content_identity(),
+                    &lease_scope,
+                ),
+                Err(GraphError::InvalidProtectedRef)
+            ));
+        }
+        derived
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &derived_scope,
+            )
+            .expect("the derived owner still admits its own matching pin");
+    }
+
+    #[test]
+    fn accepted_blob_pin_reclaimed_after_its_owner_departed_is_refused() {
+        let (directory, derived) = capture_test_context();
+        let departed = lease_owned_graph(&derived, [0xd0; 16]);
+        let departed_scope = departed.open_read_scope().expect("departed owner read scope");
+        let payload = b"pin captured under an owner that departs";
+        let candidate = departed
+            .capture_blob_candidate(&payload[..], payload.len() as u64, &departed_scope)
+            .expect("capture authorized stream");
+        let pin = departed
+            .protect_captured_blob(candidate, &departed_scope)
+            .expect("protect complete OGB-2 closure");
+        let successor = lease_owned_graph(&derived, [0x5c; 16])
+            .with_accepted_pin_fallback_owner(departed.owner_id);
+        let successor_scope = successor.open_read_scope().expect("successor read scope");
+        successor
+            .admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &successor_scope,
+            )
+            .expect("the departed owner's accepted pin admits before reclamation");
+
+        // An empty manifest names no accepted pin, so recovery deletes the departed ref.
+        reclaim_dead_owner_pin_refs(&departed.repository, departed.owner_id, &BTreeMap::new())
+            .expect("reclaim the departed owner's pins");
+        assert!(!fixture_ref_exists(
+            directory.path(),
+            &accepted_content_ref(&departed.owner_id, pin.pin_id()),
+        ));
+        assert!(matches!(
+            successor.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &successor_scope,
+            ),
+            Err(GraphError::InvalidProtectedRef)
+        ));
+        assert!(matches!(
+            departed.admit_accepted_blob_pin(
+                pin.pin_id(),
+                &pin.descriptor_oid,
+                pin.content_identity(),
+                &departed_scope,
+            ),
             Err(GraphError::InvalidProtectedRef)
         ));
     }
@@ -10787,7 +12072,7 @@ mod persisted_orp_tests {
             }
             assert_eq!(
                 &graph
-                    .stored_row_fields(row.value(), &read_scope)
+                    .stored_row_fields(&row, &read_scope)
                     .expect("expand the stored fields"),
                 fields,
                 "{key}: stored fields expand to the inserted tuple"
@@ -12151,6 +13436,7 @@ pub enum GraphError {
     InvalidDomain,
     InvalidDigestLength,
     InvalidEmptyBlob,
+    SourceTreeLimit,
     InvalidByteIndex,
     InvalidRange,
     InvalidBlobAnnotation,
@@ -12280,6 +13566,9 @@ impl fmt::Display for GraphError {
                 f.write_str("Git object bytes do not match their native ID")
             }
             Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
+            Self::SourceTreeLimit => {
+                f.write_str("committed source tree exceeds the bounded walk limit")
+            }
             Self::GitCommandFailed => f.write_str("required local Git command failed"),
             Self::CaptureReadFailed => f.write_str("authorized Blob capture input failed"),
             Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),

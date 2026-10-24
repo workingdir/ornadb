@@ -6152,7 +6152,7 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 
 #[test]
 fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
-    let collection_source = orna_standard::reference_standard_sources_v1()
+    let collection_source = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/collection.orna")
         .expect("the collection module is in the pinned standard profile")
@@ -7591,7 +7591,7 @@ fn supports_comparison_boolean_and_allowlisted_math() {
 
 #[test]
 fn pinned_standard_math_source_executes_every_public_function() {
-    let (path, source) = orna_standard::reference_standard_sources_v1()
+    let (path, source) = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .next()
         .expect("pinned standard source");
@@ -7714,7 +7714,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
             &Environment::new(),
             Limits::default(),
         )),
-        "ORNA-EVAL-ASSERT"
+        "ORNA-A091-008"
     );
     assert_eq!(
         code(evaluate_expression(

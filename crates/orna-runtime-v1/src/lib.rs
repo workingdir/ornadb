@@ -126,6 +126,15 @@ CREATE TABLE IF NOT EXISTS pending_mutation (
     payload BLOB NOT NULL,
     digest BLOB NOT NULL CHECK (length(digest) = 32)
 );
+-- Every admitted mutation keeps its identity and digest for the life of the
+-- database. Publication prunes `pending_mutation`, so exact-replay detection
+-- must not depend on it (ORNA-VFS-008).
+CREATE TABLE IF NOT EXISTS admitted_mutation (
+    mutation_id BLOB PRIMARY KEY CHECK (length(mutation_id) = 16),
+    digest BLOB NOT NULL CHECK (length(digest) = 32)
+);
+INSERT OR IGNORE INTO admitted_mutation (mutation_id, digest)
+    SELECT mutation_id, digest FROM pending_mutation;
 CREATE TABLE IF NOT EXISTS accepted_content_pin (
     pin_id BLOB PRIMARY KEY CHECK (length(pin_id) = 16),
     repository_id BLOB NOT NULL CHECK (length(repository_id) = 32),
@@ -436,7 +445,7 @@ CREATE TABLE IF NOT EXISTS admin_invocation_audit (
     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
-    observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+    observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
@@ -445,6 +454,13 @@ CREATE TABLE IF NOT EXISTS admin_invocation_checkpoint_result (
     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
     version INTEGER NOT NULL CHECK (version >= 0),
     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+);
+CREATE TABLE IF NOT EXISTS admin_invocation_stale_capture (
+    invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
 );
 
 CREATE TABLE IF NOT EXISTS sys_run_observation (
@@ -573,6 +589,10 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
     snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
     FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
 );
+-- No runtime path binds a new revision pair or reads a binding back; catalogue
+-- carry-forward only copies an existing predecessor row to its successor
+-- snapshot. The table stays so existing and new state.db files share one
+-- schema; dropping it requires a state-schema migration.
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision_binding (
     snapshot BLOB PRIMARY KEY REFERENCES runtime_catalogue_admission(snapshot),
     source_revision_id BLOB NOT NULL CHECK (length(source_revision_id) = 16),
@@ -2478,13 +2498,23 @@ pub enum RuntimeError {
     /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
     /// format and remedy.
     LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
+    /// A retry, skip or resolve named a failure version or successor that is
+    /// not the stored one (`sys.failure.stale_version`).
+    StreamFailureStale,
+    /// The requested failure transition is not allowed from the stored state,
+    /// such as resolving a blocking open or retrying failure
+    /// (`sys.failure.state_conflict`).
+    StreamFailureStateConflict,
+    /// The provider cannot safely advance past this failed delivery
+    /// (`sys.failure.skip_unsupported`).
+    StreamFailureSkipUnsupported,
 }
 impl RuntimeError {
     /// Returns the stable public system code when this runtime error has one.
     ///
-    /// The provider boundary deliberately exposes only the two checkpoint
-    /// outcomes required by the system contract. Other runtime failures stay
-    /// internal to this crate's existing error convention.
+    /// The provider boundary exposes the checkpoint outcomes and the failure
+    /// transition outcomes required by the system contract. Other runtime
+    /// failures stay internal to this crate's existing error convention.
     pub fn public_code(&self) -> Option<&'static str> {
         match self {
             Self::AdminBusy => Some("sys.admin.busy"),
@@ -2495,6 +2525,9 @@ impl RuntimeError {
             // No standalone cross-context code is defined; an exact pin that
             // cannot be resolved in this runtime is incomplete, never rebound.
             Self::SnapshotContextMismatch => Some("sys.snapshot.incomplete"),
+            Self::StreamFailureStale => Some("sys.failure.stale_version"),
+            Self::StreamFailureStateConflict => Some("sys.failure.state_conflict"),
+            Self::StreamFailureSkipUnsupported => Some("sys.failure.skip_unsupported"),
             _ => None,
         }
     }
@@ -2527,6 +2560,9 @@ impl fmt::Display for RuntimeError {
             Self::SnapshotNotFound => "runtime checkpoint generation was not found",
             Self::SnapshotIncomplete => "historical runtime generation is incomplete",
             Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
+            Self::StreamFailureStale => "stream failure changed after it was observed",
+            Self::StreamFailureStateConflict => "stream failure transition is not allowed from its state",
+            Self::StreamFailureSkipUnsupported => "stream failure cannot be skipped safely",
             Self::LeaseHeld => "runtime writer is held",
             Self::AdminBusy => "runtime administration callback is busy",
             Self::AdminInvocationConflict => "administrative invocation identity was reused",
@@ -2574,6 +2610,29 @@ pub enum StreamTableDeliveryError {
 pub enum TableActivationError {
     Runtime(RuntimeError),
     ValidationFailed(SafeDiagnostic),
+}
+
+/// An accepted content pin the runtime recorded for a descriptor. It names
+/// candidate content only; admission through the graph is what verifies it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedContentPin {
+    pin_id: [u8; 16],
+    content_length: u64,
+    content_sha256: [u8; 32],
+}
+
+impl AcceptedContentPin {
+    pub const fn pin_id(&self) -> &[u8; 16] {
+        &self.pin_id
+    }
+
+    pub const fn content_length(&self) -> u64 {
+        self.content_length
+    }
+
+    pub const fn content_sha256(&self) -> &[u8; 32] {
+        &self.content_sha256
+    }
 }
 
 pub struct RuntimeState {
@@ -4251,7 +4310,8 @@ pub struct AdminInvocationAudit {
     pub function: String,
     pub safe_arguments: String,
     pub owner: WriterLease,
-    pub observed_generation: u64,
+    /// Admitted generation; `None` when the failed call could not observe the CWD.
+    pub observed_generation: Option<u64>,
     pub terminal_outcome: String,
     /// Typed runtime effect decoded from the durable terminal outcome.
     pub effect: AdminLifecycleEffect,
@@ -4418,17 +4478,34 @@ fn admin_reference_descriptor(
     }
 }
 
-fn replay_admin_stream_result(
+/// Replays a stored failure or outcome for an admitted invocation.
+///
+/// A `failure:stale_capture` row replays the capture that rejected the call,
+/// stored in `admin_invocation_stale_capture`, so the replayed error equals the
+/// recorded one after later commits advance the CWD. Rows written before that
+/// table replay the CWD capture current at replay time. A
+/// `failure:unobservable:<class>` row (its CWD capture could not be read)
+/// replays that class. Its `stale_capture` class replays as `RecoveryInvalid`,
+/// because the rejecting capture was never stored. A bare legacy
+/// `failure:unobservable` row replays as `RecoveryInvalid`.
+async fn replay_admin_stream_result(
+    connection: &Connection,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
     if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
-        return Err(match failure {
-            "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
-            "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
-            "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
-            "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
-            _ => RuntimeError::StorageUnavailable,
-        });
+        if failure == "stale_capture" {
+            let current = match load_admin_stale_capture(connection, receipt.invocation_id).await? {
+                Some(current) => current,
+                None => capture_tx(connection).await?,
+            };
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        if let Some(class) = failure.strip_prefix("unobservable:") {
+            return Err(admin_failure_from_class(class));
+        }
+        return Err(admin_failure_from_class(failure));
     }
     let result = match receipt.terminal_outcome.as_str() {
         "paused" => StreamAdministrationOutcome::Paused { changed: true },
@@ -4444,17 +4521,135 @@ fn replay_admin_stream_result(
     Ok(AdminOperationResult::Stream(result))
 }
 
-fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
+/// Stable failure class stored in admin audit rows. Exhaustive: every new
+/// variant must choose its class here. Payload-carrying variants store only
+/// the class; their payload is not persisted (see `admin_failure_from_class`).
+fn admin_failure_class(error: &RuntimeError) -> &'static str {
     match error {
-        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::InvalidIdentity => "invalid_identity",
+        RuntimeError::InvalidDigest => "invalid_digest",
         RuntimeError::InvalidObservationReference => "invalid_observation_reference",
-        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::ObservationCoordinateMismatch => "observation_coordinate_mismatch",
+        RuntimeError::ProcedureMaterializationConflict => "procedure_materialization_conflict",
+        RuntimeError::InvocationObservationConflict => "invocation_observation_conflict",
+        RuntimeError::InvocationStateConflict => "invocation_state_conflict",
+        RuntimeError::QueryObservationConflict => "query_observation_conflict",
+        RuntimeError::QueryStateConflict => "query_state_conflict",
+        RuntimeError::InvocationChildrenActive => "invocation_children_active",
+        RuntimeError::InvocationOwnerInvalid => "invocation_owner_invalid",
+        RuntimeError::InvocationTailInvalid => "invocation_tail_invalid",
+        RuntimeError::InvocationTailLimit => "invocation_tail_limit",
+        RuntimeError::StreamIdentityMismatch => "stream_identity_mismatch",
+        RuntimeError::StreamSourceNotReplayable => "stream_source_not_replayable",
         RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
-        _ => "unavailable",
+        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::SnapshotNotFound => "snapshot_not_found",
+        RuntimeError::SnapshotIncomplete => "snapshot_incomplete",
+        RuntimeError::SnapshotContextMismatch => "snapshot_context_mismatch",
+        RuntimeError::LeaseHeld => "lease_held",
+        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::AdminInvocationConflict => "admin_invocation_conflict",
+        RuntimeError::OwnerLost => "owner_lost",
+        RuntimeError::RecoveryPending => "recovery_pending",
+        RuntimeError::StaleCapture { .. } => "stale_capture",
+        RuntimeError::InvalidCapture => "invalid_capture",
+        RuntimeError::EmptyMutationBatch => "empty_mutation_batch",
+        RuntimeError::StreamFailureStale => "stream_failure_stale",
+        RuntimeError::StreamFailureStateConflict => "stream_failure_state_conflict",
+        RuntimeError::StreamFailureSkipUnsupported => "stream_failure_skip_unsupported",
+        RuntimeError::InvalidTableMutation => "invalid_table_mutation",
+        RuntimeError::ConflictingPublicationIntent => "conflicting_publication_intent",
+        RuntimeError::ConflictingPublicationCommit => "conflicting_publication_commit",
+        RuntimeError::InvalidPublicationCommit => "invalid_publication_commit",
+        RuntimeError::InvalidPublicationPolicy => "invalid_publication_policy",
+        RuntimeError::CompactPublicationRequired => "compact_publication_required",
+        RuntimeError::CompactReceiptKeyMismatch => "compact_receipt_key_mismatch",
+        RuntimeError::InvalidCompactReceipt => "invalid_compact_receipt",
+        RuntimeError::RequestUnknown => "request_unknown",
+        RuntimeError::RequestFingerprintMismatch => "request_fingerprint_mismatch",
+        RuntimeError::RequestOwnerConflict => "request_owner_conflict",
+        RuntimeError::RequestStateConflict => "request_state_conflict",
+        RuntimeError::SessionClosed => "session_closed",
+        RuntimeError::SessionWorkActive => "session_work_active",
+        RuntimeError::TerminalOutcomeTooLarge => "terminal_outcome_too_large",
+        RuntimeError::RecoveryInvalid => "recovery_invalid",
+        // Payload-carrying: the injected point is not stored, so it replays as RecoveryInvalid.
+        RuntimeError::FaultInjected(_) => "fault_injected",
+        RuntimeError::SystemProviderAbiInvalid => "system_provider_abi_invalid",
+        RuntimeError::StorageUnavailable => "storage_unavailable",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
+        RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
     }
 }
 
-fn admin_result_from_receipt(
+/// Rebuilds the runtime error for a stored failure class.
+///
+/// Classes whose variant carries a payload that the row does not store
+/// (`fault_injected`, `legacy_head_read_only`) and unknown names surface as
+/// `RecoveryInvalid`. `stale_capture` is handled in `replay_admin_stream_result`
+/// because its payload is captured at replay. Outcomes stored before stable
+/// classes keep their original variants: `unavailable`, and the `AdminBusy`
+/// message that busy rows stored before durable admin receipts.
+fn admin_failure_from_class(class: &str) -> RuntimeError {
+    match class {
+        "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+        "invalid_identity" => RuntimeError::InvalidIdentity,
+        "invalid_digest" => RuntimeError::InvalidDigest,
+        "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
+        "observation_coordinate_mismatch" => RuntimeError::ObservationCoordinateMismatch,
+        "procedure_materialization_conflict" => RuntimeError::ProcedureMaterializationConflict,
+        "invocation_observation_conflict" => RuntimeError::InvocationObservationConflict,
+        "invocation_state_conflict" => RuntimeError::InvocationStateConflict,
+        "query_observation_conflict" => RuntimeError::QueryObservationConflict,
+        "query_state_conflict" => RuntimeError::QueryStateConflict,
+        "invocation_children_active" => RuntimeError::InvocationChildrenActive,
+        "invocation_owner_invalid" => RuntimeError::InvocationOwnerInvalid,
+        "invocation_tail_invalid" => RuntimeError::InvocationTailInvalid,
+        "invocation_tail_limit" => RuntimeError::InvocationTailLimit,
+        "stream_identity_mismatch" => RuntimeError::StreamIdentityMismatch,
+        "stream_source_not_replayable" => RuntimeError::StreamSourceNotReplayable,
+        "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
+        "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
+        "snapshot_not_found" => RuntimeError::SnapshotNotFound,
+        "snapshot_incomplete" => RuntimeError::SnapshotIncomplete,
+        "snapshot_context_mismatch" => RuntimeError::SnapshotContextMismatch,
+        "lease_held" => RuntimeError::LeaseHeld,
+        "admin_invocation_conflict" => RuntimeError::AdminInvocationConflict,
+        "owner_lost" => RuntimeError::OwnerLost,
+        "recovery_pending" => RuntimeError::RecoveryPending,
+        "invalid_capture" => RuntimeError::InvalidCapture,
+        "stream_failure_stale" => RuntimeError::StreamFailureStale,
+        "stream_failure_state_conflict" => RuntimeError::StreamFailureStateConflict,
+        "stream_failure_skip_unsupported" => RuntimeError::StreamFailureSkipUnsupported,
+        "empty_mutation_batch" => RuntimeError::EmptyMutationBatch,
+        "invalid_table_mutation" => RuntimeError::InvalidTableMutation,
+        "conflicting_publication_intent" => RuntimeError::ConflictingPublicationIntent,
+        "conflicting_publication_commit" => RuntimeError::ConflictingPublicationCommit,
+        "invalid_publication_commit" => RuntimeError::InvalidPublicationCommit,
+        "invalid_publication_policy" => RuntimeError::InvalidPublicationPolicy,
+        "compact_publication_required" => RuntimeError::CompactPublicationRequired,
+        "compact_receipt_key_mismatch" => RuntimeError::CompactReceiptKeyMismatch,
+        "invalid_compact_receipt" => RuntimeError::InvalidCompactReceipt,
+        "request_unknown" => RuntimeError::RequestUnknown,
+        "request_fingerprint_mismatch" => RuntimeError::RequestFingerprintMismatch,
+        "request_owner_conflict" => RuntimeError::RequestOwnerConflict,
+        "request_state_conflict" => RuntimeError::RequestStateConflict,
+        "session_closed" => RuntimeError::SessionClosed,
+        "session_work_active" => RuntimeError::SessionWorkActive,
+        "terminal_outcome_too_large" => RuntimeError::TerminalOutcomeTooLarge,
+        "system_provider_abi_invalid" => RuntimeError::SystemProviderAbiInvalid,
+        "storage_unavailable" | "unavailable" => RuntimeError::StorageUnavailable,
+        "unobservable" => RuntimeError::RecoveryInvalid,
+        _ => RuntimeError::RecoveryInvalid,
+    }
+}
+
+fn admin_observed_generation(capture: &CwdCapture) -> Result<u64, RuntimeError> {
+    u64::try_from(bigint_to_i64(capture.generation())?).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+async fn admin_result_from_receipt(
+    connection: &Connection,
     operation: Option<&AdminInvocationOperation>,
     descriptor: &AdminInvocationDescriptor,
     receipt: &AdminInvocationAudit,
@@ -4468,7 +4663,7 @@ fn admin_result_from_receipt(
     match operation {
         Some(AdminInvocationOperation::Reset { key, .. }) => {
             if receipt.terminal_outcome.starts_with("failure:") {
-                return replay_admin_stream_result(receipt);
+                return replay_admin_stream_result(connection, receipt).await;
             }
             let result = receipt
                 .checkpoint_reset_result
@@ -4482,7 +4677,7 @@ fn admin_result_from_receipt(
         }
         Some(AdminInvocationOperation::Pause { .. })
         | Some(AdminInvocationOperation::Resume { .. })
-        | None => replay_admin_stream_result(receipt),
+        | None => replay_admin_stream_result(connection, receipt).await,
     }
 }
 
@@ -4638,6 +4833,7 @@ impl RuntimeState {
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
+        state.migrate_admin_failure_unobservable().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
@@ -5665,74 +5861,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = match reference
-            .encode()
-            .map_err(|_| RuntimeError::InvalidObservationReference)
-            .and_then(decode_row_ref)
-        {
-            Ok(row) => row,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let requested = match validate_stream_reference(row, expected_capture) {
-            Ok(requested) => requested,
-            Err(_) => {
-                return Err(self
-                    .record_failed_admin_and_return(
-                        &descriptor,
-                        lease,
-                        RuntimeError::InvalidObservationReference,
-                    )
-                    .await);
-            }
-        };
-        let fence = match self.runtime_observation_fence(lease).await {
-            Ok(fence) => fence,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        if fence.capture() != expected_capture {
-            return Err(self
-                .record_failed_admin_and_return(
-                    &descriptor,
-                    lease,
-                    RuntimeError::StaleCapture {
-                        current: Box::new(fence.capture().clone()),
-                    },
-                )
-                .await);
-        }
-        let view = match self.current_runtime_observations(&fence).await {
-            Ok(view) => view,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference);
-        let key = match key {
-            Ok(key) => key,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Pause { key, reason };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -5880,7 +6011,7 @@ impl RuntimeState {
         {
             let error = RuntimeError::CheckpointNotReplayable;
             return match self
-                .record_failed_admin_descriptor(&descriptor, lease, &error)
+                .record_failed_admin_descriptor(&descriptor, lease, None, &error)
                 .await
             {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -5965,7 +6096,7 @@ impl RuntimeState {
         let descriptor =
             admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
         match self
-            .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
+            .record_failed_admin_descriptor(&descriptor, lease, None, &RuntimeError::AdminBusy)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => Err(RuntimeError::AdminBusy),
@@ -6045,29 +6176,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = decode_row_ref(
-            reference
-                .encode()
-                .map_err(|_| RuntimeError::InvalidObservationReference)?,
-        )?;
-        let requested = validate_stream_reference(row, expected_capture)
-            .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let fence = self.runtime_observation_fence(lease).await?;
-        if fence.capture() != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(fence.capture().clone()),
-            });
-        }
-        let view = self.current_runtime_observations(&fence).await?;
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference)?;
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Resume { key };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -6110,14 +6221,23 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut admitted_generation: Option<u64> = None;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
             if let Some(receipt) =
                 load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
             {
-                return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                return admin_result_from_receipt(
+                    &transaction,
+                    Some(&operation),
+                    &descriptor,
+                    &receipt,
+                )
+                .await;
             }
             let current_capture = capture_tx(&transaction).await?;
+            let observed_generation = admin_observed_generation(&current_capture)?;
+            admitted_generation = Some(observed_generation);
             if let Some(expected_capture) = expected_capture {
                 if &current_capture != expected_capture {
                     return Err(RuntimeError::StaleCapture {
@@ -6125,15 +6245,13 @@ impl RuntimeState {
                     });
                 }
             }
-            let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let result =
                 apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
             store_admin_invocation_audit(
                 &transaction,
                 &descriptor,
                 lease,
-                observed_generation,
+                Some(observed_generation),
                 admin_operation_outcome(&result),
                 admin_operation_succeeded(&result),
                 match &result {
@@ -6159,10 +6277,16 @@ impl RuntimeState {
                     load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
                         .await?
                 {
-                    return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                    return admin_result_from_receipt(
+                        &self.connection,
+                        Some(&operation),
+                        &descriptor,
+                        &receipt,
+                    )
+                    .await;
                 }
                 match self
-                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .record_failed_admin_descriptor(&descriptor, lease, admitted_generation, &error)
                     .await
                 {
                     Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -6185,10 +6309,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, lease).await?;
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
-        let result = receipt
-            .as_ref()
-            .map(|receipt| admin_result_from_receipt(operation, descriptor, receipt))
-            .transpose()?;
+        let result = match receipt.as_ref() {
+            Some(receipt) => Some(
+                admin_result_from_receipt(&transaction, operation, descriptor, receipt).await?,
+            ),
+            None => None,
+        };
         transaction
             .commit()
             .await
@@ -6203,7 +6329,7 @@ impl RuntimeState {
     ) -> RuntimeError {
         let error = RuntimeError::AdminBusy;
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, None, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
@@ -6211,10 +6337,19 @@ impl RuntimeState {
         }
     }
 
+    /// Records a failed admin call with its observed generation and stable
+    /// failure class (ORNA-ADMIN-001). `admitted_generation` is the generation
+    /// captured under the lock that admitted the call; a call rejected before
+    /// any capture records the generation current when its failure is
+    /// recorded. A `failure:stale_capture` row also stores the rejecting
+    /// capture. If that capture cannot be read, the row records a NULL
+    /// generation with `failure:unobservable:<class>`, where `<class>` is the
+    /// stable class of the original error; the caller still returns that error.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
         let transaction = self
@@ -6239,22 +6374,33 @@ impl RuntimeState {
                 Err(RuntimeError::AdminInvocationConflict)
             };
         }
-        let observed_generation = capture_tx(&transaction)
-            .await
-            .ok()
-            .and_then(|capture| bigint_to_i64(capture.generation()).ok())
-            .and_then(|generation| u64::try_from(generation).ok())
-            .unwrap_or(0);
+        let observed_generation = match admitted_generation {
+            Some(generation) => Some(generation),
+            None => capture_tx(&transaction)
+                .await
+                .and_then(|capture| admin_observed_generation(&capture))
+                .ok(),
+        };
+        let (terminal_outcome, stale_capture) = match (observed_generation, error) {
+            (None, error) => (format!("failure:unobservable:{}", admin_failure_class(error)), None),
+            (Some(_), RuntimeError::StaleCapture { current }) => {
+                ("failure:stale_capture".to_owned(), Some(&**current))
+            }
+            (Some(_), error) => (format!("failure:{}", admin_failure_class(error)), None),
+        };
         store_admin_invocation_audit(
             &transaction,
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{}", admin_failure_outcome(error)),
+            terminal_outcome,
             false,
             None,
         )
         .await?;
+        if let Some(current) = stale_capture {
+            store_admin_stale_capture(&transaction, descriptor.invocation_id, current).await?;
+        }
         transaction
             .commit()
             .await
@@ -6265,14 +6411,73 @@ impl RuntimeState {
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: RuntimeError,
     ) -> RuntimeError {
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, admitted_generation, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
             Err(audit_error) => audit_error,
+        }
+    }
+
+    /// Resolves an admitted `sys.StreamRef` to the checkpoint of the live
+    /// stream it names, under the writer fence and only while
+    /// `expected_capture` is current. Each rejection is recorded under
+    /// `descriptor` as a failed invocation (ORNA-ADMIN-001); a rejection
+    /// decided under the fence records the generation the fence observed.
+    async fn resolve_admin_stream_reference(
+        &self,
+        lease: WriterLease,
+        descriptor: &AdminInvocationDescriptor,
+        reference: &Value,
+        expected_capture: &CwdCapture,
+    ) -> Result<CheckpointKey, RuntimeError> {
+        let fenced = async {
+            let row = decode_row_ref(
+                reference
+                    .encode()
+                    .map_err(|_| RuntimeError::InvalidObservationReference)?,
+            )?;
+            let requested = validate_stream_reference(row, expected_capture)
+                .map_err(|_| RuntimeError::InvalidObservationReference)?;
+            let fence = self.runtime_observation_fence(lease).await?;
+            let generation = admin_observed_generation(fence.capture())?;
+            Ok::<_, RuntimeError>((requested, fence, generation))
+        }
+        .await;
+        let (requested, fence, generation) = match fenced {
+            Ok(fenced) => fenced,
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(descriptor, lease, None, error)
+                    .await);
+            }
+        };
+        let resolved = async {
+            if fence.capture() != expected_capture {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(fence.capture().clone()),
+                });
+            }
+            let view = self.current_runtime_observations(&fence).await?;
+            view.streams
+                .iter()
+                .find_map(|stream| {
+                    let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                    (stream.reference(run).ok().as_ref() == Some(&requested))
+                        .then(|| stream.checkpoint.clone())
+                })
+                .ok_or(RuntimeError::InvalidObservationReference)
+        }
+        .await;
+        match resolved {
+            Ok(key) => Ok(key),
+            Err(error) => Err(self
+                .record_failed_admin_and_return(descriptor, lease, Some(generation), error)
+                .await),
         }
     }
 
@@ -6902,7 +7107,6 @@ impl RuntimeState {
                 faults,
                 None,
                 None,
-                None,
             )
             .await
         {
@@ -6956,7 +7160,7 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, None, None)
+        self.commit_validated_request_activation(request, None)
             .await
     }
 
@@ -6971,21 +7175,7 @@ impl RuntimeState {
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: &catalogue::CatalogueAdmission,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), None)
-            .await
-    }
-
-    /// Publishes a complete compiler-resolved source catalogue with the exact
-    /// source/catalogue revision pair that produced it. The pair is retained
-    /// only as compiler/core identity evidence; this boundary neither derives
-    /// a revision identity nor constructs a snapshot-pinned reference.
-    pub async fn commit_validated_catalogue_table_request_activation_with_revision_pair(
-        &self,
-        request: ValidatedTableRequestActivationCommit<'_>,
-        admission: &catalogue::CatalogueAdmission,
-        revision_pair: orna_core::revision::RevisionPair,
-    ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), Some(revision_pair))
+        self.commit_validated_request_activation(request, Some(admission))
             .await
     }
 
@@ -6993,7 +7183,6 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
         let ValidatedTableRequestActivationCommit {
             writer,
@@ -7018,7 +7207,6 @@ impl RuntimeState {
                 faults,
                 Some(validator),
                 admission,
-                revision_pair,
             )
             .await
         {
@@ -7066,7 +7254,6 @@ impl RuntimeState {
         faults: &dyn FaultInjector,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
@@ -7172,7 +7359,6 @@ impl RuntimeState {
                 &current_capture,
                 &next,
                 admission,
-                revision_pair,
             )
             .await
             {
@@ -9544,6 +9730,78 @@ impl RuntimeState {
             .execute(
                 "INSERT OR IGNORE INTO runtime_schema_migration (migration)
                  VALUES ('nullable-stream-partition-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Makes the admin audit's `observed_generation` nullable, so a failed
+    /// invocation whose CWD cannot be read is still recorded as
+    /// `failure:unobservable`. The audit table and its checkpoint-result child
+    /// are rebuilt in one transaction; existing rows keep their values.
+    async fn migrate_admin_failure_unobservable(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut columns = transaction
+            .query("PRAGMA table_info(admin_invocation_audit)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut generation_required = None;
+        while let Some(column) = columns
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let name: String = column.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if name == "observed_generation" {
+                let notnull: i64 = column.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                generation_required = Some(notnull == 1);
+            }
+        }
+        if generation_required.ok_or(RuntimeError::RecoveryInvalid)? {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE admin_invocation_audit_nullable (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                        function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                        safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                        owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                        owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                        observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
+                        terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                        succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                        redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                    );
+                    CREATE TABLE admin_invocation_checkpoint_result_nullable (
+                        invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit_nullable(invocation_id),
+                        version INTEGER NOT NULL CHECK (version >= 0),
+                        committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                    );
+                    INSERT INTO admin_invocation_audit_nullable SELECT * FROM admin_invocation_audit;
+                    INSERT INTO admin_invocation_checkpoint_result_nullable
+                        SELECT * FROM admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_audit;
+                    ALTER TABLE admin_invocation_audit_nullable RENAME TO admin_invocation_audit;
+                    ALTER TABLE admin_invocation_checkpoint_result_nullable
+                        RENAME TO admin_invocation_checkpoint_result;",
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('admin-failure-unobservable-v1')",
                 (),
             )
             .await
@@ -13535,6 +13793,57 @@ impl RuntimeState {
         Ok(accepted_pending)
     }
 
+    /// Lists the accepted content pins this runtime's graph repository holds
+    /// for `descriptor_oid`, ordered by pin id. A listed pin is only a
+    /// candidate: the caller must admit it through the graph, which checks Git.
+    /// A runtime without a graph repository identity holds no candidates.
+    pub async fn accepted_content_pins_for_descriptor(
+        &self,
+        descriptor_oid: &NativeOid,
+    ) -> Result<Vec<AcceptedContentPin>, RuntimeError> {
+        let Some(repository_id) = self.graph_repository_id else {
+            return Ok(Vec::new());
+        };
+        let algorithm = match descriptor_oid.algorithm() {
+            GitHashAlgorithm::Sha1 => 1_i64,
+            GitHashAlgorithm::Sha256 => 2_i64,
+        };
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT pin.pin_id, pin.content_length, pin.content_sha256
+                 FROM accepted_content_pin AS pin
+                 JOIN runtime_meta AS runtime
+                   ON runtime.singleton = 1 AND runtime.database_id = pin.database_id
+                 WHERE pin.repository_id = ?1
+                   AND pin.descriptor_oid_algorithm = ?2
+                   AND pin.descriptor_oid = ?3
+                 ORDER BY pin.pin_id",
+                params![&repository_id[..], algorithm, descriptor_oid.as_bytes()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut pins = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let pin_id: [u8; 16] = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let content_length: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let content_length =
+                u64::try_from(content_length).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let content_sha256: [u8; 32] =
+                fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            pins.push(AcceptedContentPin {
+                pin_id,
+                content_length,
+                content_sha256,
+            });
+        }
+        Ok(pins)
+    }
+
     async fn validate_accepted_content_pin_recovery(
         &self,
         current_generation: u64,
@@ -16207,7 +16516,7 @@ async fn store_admin_invocation_audit(
     connection: &Connection,
     descriptor: &AdminInvocationDescriptor,
     owner: WriterLease,
-    observed_generation: u64,
+    observed_generation: Option<u64>,
     terminal_outcome: String,
     succeeded: bool,
     checkpoint_result: Option<&StreamCheckpoint>,
@@ -16224,7 +16533,10 @@ async fn store_admin_invocation_audit(
                 descriptor.safe_arguments.clone(),
                 owner.owner_id.to_vec(),
                 i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                observed_generation
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 terminal_outcome,
                 if succeeded { 1_i64 } else { 0_i64 },
                 if descriptor.redacted { 1_i64 } else { 0_i64 },
@@ -16251,6 +16563,55 @@ async fn store_admin_invocation_audit(
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+async fn store_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+    capture: &CwdCapture,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO admin_invocation_stale_capture
+             (invocation_id, database_id, runtime_id, generation, generation_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invocation_id.to_vec(),
+                capture.database_id().to_vec(),
+                capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?,
+                capture.generation_digest().to_vec(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+) -> Result<Option<CwdCapture>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT database_id, runtime_id, generation, generation_digest
+             FROM admin_invocation_stale_capture WHERE invocation_id = ?1",
+            params![invocation_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest).map(Some)
 }
 
 async fn load_admin_invocation_audits(
@@ -16301,10 +16662,11 @@ async fn load_admin_invocation_audits_through(
             )?,
         };
         validate_writer_lease(owner)?;
-        let observed_generation = decode_u64(
-            row.get::<i64>(6)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        )?;
+        let observed_generation = row
+            .get::<Option<i64>>(6)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .map(decode_u64)
+            .transpose()?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -16378,10 +16740,11 @@ async fn load_admin_invocation_receipt(
         )?,
     };
     validate_writer_lease(owner)?;
-    let observed_generation = decode_u64(
-        row.get::<i64>(6)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )?;
+    let observed_generation = row
+        .get::<Option<i64>>(6)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(decode_u64)
+        .transpose()?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
     let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -16739,6 +17102,25 @@ fn stream_pause_key(result: &CommitResult) -> Result<&CheckpointKey, RuntimeErro
         CommitResult::StreamStatusChanged { state, .. }
         | CommitResult::PausePending { state, .. } => Ok(&state.key),
         _ => Err(RuntimeError::RecoveryInvalid),
+    }
+}
+
+/// Maps a rejected failure transition to its public system outcome.
+///
+/// A version or successor the stored failure did not record is
+/// `sys.failure.stale_version`. A transition the stored failure status does
+/// not admit, such as resolving an open failure or skipping one that is no
+/// longer open, is `sys.failure.state_conflict`. Other rejections keep their
+/// internal classification and return `None`. No rejection maps to
+/// `sys.failure.skip_unsupported`: that code reports a provider that cannot
+/// safely advance past a delivery, not a failure-state check.
+pub fn failure_transition_error(reason: RejectReason) -> Option<RuntimeError> {
+    match reason {
+        RejectReason::StaleFailure => Some(RuntimeError::StreamFailureStale),
+        RejectReason::ResolveBlocked | RejectReason::RetryNotAllowed => {
+            Some(RuntimeError::StreamFailureStateConflict)
+        }
+        _ => None,
     }
 }
 
@@ -17790,7 +18172,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &failure).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_version {
+            if record.version != expected_version
+                || record.identity.0.successor != failure.0.successor
+            {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
             if record.status != FailureStatus::Failed {
@@ -17916,7 +18300,9 @@ async fn apply_stream_intent_tx(
             let Some(record) = load_stream_failure(connection, &identity).await? else {
                 return Ok(CommitResult::Rejected(RejectReason::FailureMissing));
             };
-            if record.version != expected_failure_version || record.status != FailureStatus::Failed
+            if record.version != expected_failure_version
+                || record.status != FailureStatus::Failed
+                || record.identity.0.successor != lease.delivery.successor
             {
                 return Ok(CommitResult::Rejected(RejectReason::StaleFailure));
             }
@@ -18648,6 +19034,15 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest)
+}
+
+fn cwd_capture_from_parts(
+    database_id: [u8; 16],
+    runtime_id: [u8; 16],
+    generation: i64,
+    digest: [u8; 32],
+) -> Result<CwdCapture, RuntimeError> {
     if generation < 0 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -19542,7 +19937,7 @@ async fn table_mutations_already_durable_tx(
     for mutation in mutations {
         let mut rows = connection
             .query(
-                "SELECT payload, digest FROM pending_mutation WHERE mutation_id = ?1",
+                "SELECT digest FROM admitted_mutation WHERE mutation_id = ?1",
                 params![mutation.id.to_vec()],
             )
             .await
@@ -19554,9 +19949,14 @@ async fn table_mutations_already_durable_tx(
         else {
             continue;
         };
-        let payload: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let digest: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        if payload != mutation.payload || digest != mutation.digest {
+        // The retained digest must commit to the payload being replayed: an
+        // identical digest over different bytes is a reuse, not a replay.
+        let payload_digest: [u8; 32] = Sha256::digest(&mutation.payload).into();
+        if payload_digest != mutation.digest {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+        let digest: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        if digest != mutation.digest {
             return Err(RuntimeError::InvalidTableMutation);
         }
         retained += 1;
@@ -19603,6 +20003,27 @@ async fn append_mutations_with_catalogue_tx(
         .unwrap_or(0)
         .checked_add(1)
         .ok_or(RuntimeError::RecoveryInvalid)?;
+    // Scan the whole batch before the first write: a mixed batch that carries a
+    // retained identity must leave no pending or admitted row behind. A retained
+    // id here is id reuse (an exact replay was short-circuited by the caller),
+    // reported as a caller error, not as storage failure (ORNA-VFS-008).
+    for mutation in mutations {
+        let mut retained_rows = connection
+            .query(
+                "SELECT 1 FROM admitted_mutation WHERE mutation_id = ?1",
+                params![mutation.id.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        if retained_rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidTableMutation);
+        }
+    }
     for mutation in mutations {
         connection
             .execute(
@@ -19612,6 +20033,13 @@ async fn append_mutations_with_catalogue_tx(
                     mutation.payload.clone(),
                     mutation.digest.to_vec()
                 ],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        connection
+            .execute(
+                "INSERT INTO admitted_mutation (mutation_id, digest) VALUES (?1, ?2)",
+                params![mutation.id.to_vec(), mutation.digest.to_vec()],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -19953,7 +20381,8 @@ async fn migrate_historical_governance(connection: &Connection) -> Result<(), Ru
              SELECT checkpoint.generation,
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM admin_invocation_audit AS audit
-                              WHERE audit.observed_generation < checkpoint.generation), 0),
+                              WHERE audit.observed_generation IS NOT NULL
+                                AND audit.observed_generation < checkpoint.generation), 0),
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM stream_checkpoint_reset_audit AS audit
                               WHERE audit.observed_generation >= 0
@@ -21966,6 +22395,541 @@ mod tests {
         );
     }
 
+    /// ORNA-VFS-008: publication prunes the pending mutation record. An exact
+    /// replay of an already-accepted candidate after publication must not
+    /// advance the durable generation or re-admit the mutation. This asserts
+    /// durable state only; the replay outcome shape is the open gap covered by
+    /// the ignored test below (SPEC-QUESTIONS Q2).
+    #[tokio::test]
+    async fn replaying_a_published_vfs_save_keeps_the_durable_generation() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = b"saved".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &accepted_row).await.unwrap();
+        let applied = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // Publication consumes the pending mutation record of the accepted save.
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+        assert!(state.pending().await.unwrap().is_empty());
+
+        // The replay of the identical candidate arrives after publication.
+        let replay_draft = target.open_draft(1 << 20).await;
+        replay_draft.truncate(0).await.unwrap();
+        replay_draft.write_at(0, &accepted_row).await.unwrap();
+        let replayed = target
+            .commit_durable_document_save(
+                &replay_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        // The outcome of a post-publication replay is deliberately not asserted
+        // here. The outcome property lives in the ignored twin
+        // `replaying_a_published_vfs_save_reports_the_idempotent_outcome`
+        // (ornadb-5il1.354). Only the durable invariants below are claimed.
+        let _ = replayed;
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the acknowledged save keeps its checkpoint")
+                .generation,
+            1,
+            "a post-publication replay must not advance the durable generation"
+        );
+        assert!(
+            state.pending().await.unwrap().is_empty(),
+            "a post-publication replay must not re-admit the mutation"
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "the replay leaves the accepted row in place"
+        );
+    }
+
+    /// ORNA-VFS-008 outcome property (open gap, bead ornadb-5il1.354): publication
+    /// prunes the pending mutation record, and an exact replay of an accepted
+    /// candidate after publication must report the already-durable generation,
+    /// not a second acceptance. Ignored until the outcome shape is fixed; the
+    /// active test above asserts only durable state.
+    #[ignore = "ornadb-5il1.354: ORNA-VFS-008 outcome shape (SPEC-QUESTIONS Q2)"]
+    #[tokio::test]
+    async fn replaying_a_published_vfs_save_reports_the_idempotent_outcome() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let accepted_row = b"saved".to_vec();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, &accepted_row).await.unwrap();
+        let applied = target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            applied,
+            vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+        ));
+
+        // Publication consumes the pending mutation record of the accepted save.
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+        assert!(state.pending().await.unwrap().is_empty());
+
+        // The replay of the identical candidate arrives after publication.
+        let replay_draft = target.open_draft(1 << 20).await;
+        replay_draft.truncate(0).await.unwrap();
+        replay_draft.write_at(0, &accepted_row).await.unwrap();
+        let replayed = target
+            .commit_durable_document_save(
+                &replay_draft,
+                &state,
+                durable_save(),
+                admit(id(7), identity.clone(), accepted_row.clone()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                replayed,
+                vfs::TemporaryRenameOutcome::Applied { generation: 1, .. }
+            ),
+            "a post-publication replay reports the already-durable generation (ORNA-VFS-008)"
+        );
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the acknowledged save keeps its checkpoint")
+                .generation,
+            1,
+            "a post-publication replay must not advance the durable generation"
+        );
+        assert!(
+            state.pending().await.unwrap().is_empty(),
+            "a post-publication replay must not re-admit the mutation"
+        );
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(accepted_row.as_slice()),
+            "the replay leaves the accepted row in place"
+        );
+    }
+
+    /// The durable-replay check binds the payload to the digest: the same id
+    /// and digest over different bytes is id reuse, not a replay.
+    #[tokio::test]
+    async fn replayed_table_mutation_with_different_payload_is_invalid() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let payload = b"generic-payload-a".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let stored = Mutation {
+            id: id(31),
+            payload: payload.clone(),
+            digest,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(&transaction, context.capture(), &[stored], digest, &NoFault)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let exact = Mutation {
+            id: id(31),
+            payload: payload.clone(),
+            digest,
+        };
+        assert!(
+            table_mutations_already_durable_tx(&transaction, &[exact])
+                .await
+                .unwrap(),
+            "identical id, digest and payload is an exact replay"
+        );
+        let reused_bytes = Mutation {
+            id: id(31),
+            payload: b"generic-payload-b".to_vec(),
+            digest,
+        };
+        assert_eq!(
+            table_mutations_already_durable_tx(&transaction, &[reused_bytes])
+                .await
+                .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+    }
+
+    /// The append path rejects a retained identity from any caller, not only
+    /// table commits, and leaves no pending row from the rejected batch.
+    #[tokio::test]
+    async fn append_path_rejects_retained_id_without_pending_write() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let payload = b"generic-append".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let mutation = Mutation {
+            id: id(41),
+            payload,
+            digest,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(
+            &transaction,
+            context.capture(),
+            std::slice::from_ref(&mutation),
+            digest,
+            &NoFault,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let pending_before = pending_count(&transaction).await;
+        assert_eq!(
+            append_mutations_tx(
+                &transaction,
+                context.capture(),
+                std::slice::from_ref(&mutation),
+                digest,
+                &NoFault,
+            )
+            .await
+            .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+        assert_eq!(
+            pending_count(&transaction).await,
+            pending_before,
+            "a rejected retained id must not write a pending row first"
+        );
+    }
+
+    /// A mixed batch carrying a retained identity is rejected before any write:
+    /// the fresh mutation in the same batch must not be admitted.
+    #[tokio::test]
+    async fn append_path_mixed_batch_with_retained_id_writes_nothing() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let retained_payload = b"retained-append".to_vec();
+        let retained = Mutation {
+            id: id(51),
+            digest: Sha256::digest(&retained_payload).into(),
+            payload: retained_payload,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        append_mutations_tx(
+            &transaction,
+            context.capture(),
+            std::slice::from_ref(&retained),
+            retained.digest,
+            &NoFault,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(context);
+
+        let fresh_payload = b"fresh-append".to_vec();
+        let fresh = Mutation {
+            id: id(52),
+            digest: Sha256::digest(&fresh_payload).into(),
+            payload: fresh_payload,
+        };
+        let context = state.begin_activation().await.unwrap();
+        let transaction = state
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let pending_before = pending_count(&transaction).await;
+        assert_eq!(
+            append_mutations_tx(
+                &transaction,
+                context.capture(),
+                &[fresh.clone(), retained.clone()],
+                fresh.digest,
+                &NoFault,
+            )
+            .await
+            .unwrap_err(),
+            RuntimeError::InvalidTableMutation
+        );
+        assert_eq!(pending_count(&transaction).await, pending_before);
+        let mut rows = transaction
+            .query(
+                "SELECT COUNT(*) FROM admitted_mutation WHERE mutation_id = ?1",
+                params![fresh.id.to_vec()],
+            )
+            .await
+            .unwrap();
+        let admitted: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+        assert_eq!(admitted, 0, "the fresh mutation of a rejected batch is not admitted");
+    }
+
+    async fn pending_count(connection: &Connection) -> i64 {
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM pending_mutation", ())
+            .await
+            .unwrap();
+        rows.next().await.unwrap().unwrap().get(0).unwrap()
+    }
+
+    /// Reusing a retained mutation identity after publication with different
+    /// bytes is caller error: it must be rejected as invalid input, not reported
+    /// as storage unavailability, and must leave the accepted row unchanged.
+    #[tokio::test]
+    async fn reusing_a_published_mutation_id_with_new_bytes_is_invalid() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let object_id = TableObjectId::new(id(11));
+        let identity = RuntimeTableIdentity::new("books", object_id).unwrap();
+        let repository_cache = vfs::VfsRepositoryCache::new();
+        let target = repository_cache
+            .managed_file(Arc::new(vfs::VfsFileSnapshot::new(
+                vfs::SnapshotPin::capture(Arc::new(0_u64)),
+                Arc::<[u8]>::from(b"draft".as_slice()),
+            )))
+            .await
+            .unwrap();
+        let durable_save = || {
+            vfs::VfsDurableSave::new(
+                id(4),
+                activation_test_cwd_generation(0).clone(),
+                identity.clone(),
+                vec![1],
+            )
+        };
+        let admit = |mutation_id: [u8; 16], accepted: Vec<u8>| {
+            let identity = identity.clone();
+            move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
+                let replacement = vfs::VfsTableRowReplacement::new(
+                    mutation_id,
+                    identity.clone(),
+                    coordinates.key().to_vec(),
+                    Some(bytes.to_vec()),
+                )
+                .map_err(TableActivationError::Runtime)?;
+                let mut table_object_ids = BTreeMap::new();
+                table_object_ids.insert(identity.table().to_owned(), identity.object_id());
+                Ok(vfs::VfsSaveCandidate::new(
+                    replacement,
+                    Box::new(AcceptingRowValidator {
+                        tables: vec![identity.table().to_owned()],
+                        table_object_ids,
+                        accepted,
+                        calls: 0,
+                    }),
+                ))
+            }
+        };
+        let first_draft = target.open_draft(1 << 20).await;
+        first_draft.truncate(0).await.unwrap();
+        first_draft.write_at(0, b"saved").await.unwrap();
+        target
+            .commit_durable_document_save(
+                &first_draft,
+                &state,
+                durable_save(),
+                admit(id(7), b"saved".to_vec()),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        let checkpoint = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the save publishes its checkpoint");
+        let freeze = state.freeze(id(9), &checkpoint).await.unwrap();
+        state
+            .complete_publication(&freeze, &PublicationCommitId::new(vec![b'a'; 40]).unwrap())
+            .await
+            .unwrap();
+
+        let reused_draft = target.open_draft(1 << 20).await;
+        reused_draft.truncate(0).await.unwrap();
+        reused_draft.write_at(0, b"changed").await.unwrap();
+        let reused = target
+            .commit_durable_document_save(
+                &reused_draft,
+                &state,
+                durable_save(),
+                admit(id(7), b"changed".to_vec()),
+                &NoFault,
+            )
+            .await;
+        assert!(
+            matches!(
+                reused,
+                Err(vfs::VfsSaveError::Activation(TableActivationError::Runtime(
+                    RuntimeError::InvalidTableMutation
+                )))
+            ),
+            "id reuse with different bytes must be InvalidTableMutation"
+        );
+        assert!(state.pending().await.unwrap().is_empty());
+        assert_eq!(
+            admitted_row(&state, &identity, &[1]).await.as_deref(),
+            Some(b"saved".as_slice()),
+            "the rejected reuse leaves the accepted row in place"
+        );
+    }
+
+
     /// One complete VFS row save candidate for `identity`, exactly as a caller's
     /// admission callback must build it: the typed row replacement plus the
     /// validator that carries the relation's schema authority (VFS-002).
@@ -23491,6 +24455,76 @@ mod tests {
         assert_eq!(
             pins.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_content_pins_for_descriptor_lists_only_matching_pins() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let graph_repository_id = state
+            .graph_repository_id
+            .expect("a repository-opened runtime carries its graph repository id");
+        let descriptor = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x44; 20]).unwrap();
+        let other_descriptor = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x45; 20]).unwrap();
+        // Pin metadata is injected directly: this exercises the lookup over
+        // persisted rows, not a pin issuer or transfer proof.
+        for (pin, repository, oid, length) in [
+            (88, graph_repository_id, &descriptor, 5_i64),
+            (89, graph_repository_id, &descriptor, 6_i64),
+            (90, [0x99; 32], &descriptor, 7_i64),
+            (91, graph_repository_id, &other_descriptor, 8_i64),
+        ] {
+            state
+                .connection
+                .execute(
+                    "INSERT INTO accepted_content_pin
+                     (pin_id, repository_id, database_id, descriptor_oid_algorithm,
+                      descriptor_oid, content_length, content_sha256, owner_id,
+                      owner_epoch, checkpoint_generation)
+                     VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7, 1, NULL)",
+                    params![
+                        id(pin).to_vec(),
+                        repository.to_vec(),
+                        id(1).to_vec(),
+                        oid.as_bytes().to_vec(),
+                        length,
+                        vec![pin; 32],
+                        id(7).to_vec(),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+
+        let pins = state
+            .accepted_content_pins_for_descriptor(&descriptor)
+            .await
+            .unwrap();
+        let listed = pins
+            .iter()
+            .map(|pin| (*pin.pin_id(), pin.content_length(), *pin.content_sha256()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![(id(88), 5, [88; 32]), (id(89), 6, [89; 32])],
+            "wrong repository (pin 90) and wrong descriptor (pin 91) are excluded"
+        );
+
+        let other = state
+            .accepted_content_pins_for_descriptor(&other_descriptor)
+            .await
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].pin_id(), &id(91));
+
+        let absent = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x46; 20]).unwrap();
+        assert!(
+            state
+                .accepted_content_pins_for_descriptor(&absent)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -39790,6 +40824,257 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_retry_rejects_a_successor_the_failure_did_not_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-retry-successor", "runtime-recorded-next");
+        let forged = stream_delivery("runtime-retry-successor", "runtime-forged-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Retry {
+                    failure: FailureIdentity(forged),
+                    expected_version: failed.version,
+                    expected,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.version, failed.version);
+        assert_eq!(stored.status, FailureStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn runtime_skip_rejects_a_successor_the_failure_did_not_record() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-skip-successor", "runtime-skip-recorded-next");
+        let forged = stream_delivery("runtime-skip-successor", "runtime-skip-forged-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let deliver_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                deliver_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let forged_lease = DeliveryLease {
+            delivery: forged,
+            ..skip_lease
+        };
+        assert_eq!(
+            stream
+                .apply_async(CommitIntent::Skip {
+                    lease: forged_lease,
+                    expected: expected.clone(),
+                    expected_failure_version: failed.version,
+                })
+                .await
+                .unwrap(),
+            CommitResult::Rejected(RejectReason::StaleFailure)
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.version, failed.version);
+        assert_eq!(stored.status, FailureStatus::Failed);
+        let checkpoint = stream
+            .checkpoint_async(&recorded.checkpoint_key())
+            .await
+            .unwrap();
+        assert_eq!(checkpoint.version, 0);
+        assert!(checkpoint.committed.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_skip_lease_on_a_skipped_failure_is_a_failure_state_conflict() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-skip-twice", "runtime-skip-twice-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let deliver_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                deliver_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let checkpoint = match stream
+            .apply_async(CommitIntent::Skip {
+                lease: skip_lease,
+                expected,
+                expected_failure_version: failed.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected skip result: {other:?}"),
+        };
+
+        // The failure is no longer open, so a second skip lease is refused by
+        // the failure-status check: a state conflict, not an unsupported skip.
+        let rejected = stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected,
+            CommitResult::Rejected(RejectReason::RetryNotAllowed)
+        );
+        let CommitResult::Rejected(reason) = rejected else {
+            unreachable!("asserted above");
+        };
+        assert_eq!(
+            failure_transition_error(reason).and_then(|error| error.public_code()),
+            Some("sys.failure.state_conflict"),
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.status, FailureStatus::Skipped);
+        assert_eq!(
+            stream
+                .checkpoint_async(&recorded.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint,
+            "a refused skip lease must not move the checkpoint",
+        );
+    }
+
+    #[test]
+    fn failure_transition_rejections_map_to_public_failure_codes() {
+        let code = |reason| failure_transition_error(reason).and_then(|error| error.public_code());
+        assert_eq!(code(RejectReason::StaleFailure), Some("sys.failure.stale_version"));
+        assert_eq!(code(RejectReason::ResolveBlocked), Some("sys.failure.state_conflict"));
+        // Skip acquisition rejects a failure that is no longer open with
+        // RetryNotAllowed: a state conflict, not an unsupported skip.
+        assert_eq!(code(RejectReason::RetryNotAllowed), Some("sys.failure.state_conflict"));
+        assert_eq!(code(RejectReason::StreamBusy), None);
+    }
+
+    #[tokio::test]
     async fn durable_pause_waits_for_delivery_and_survives_owner_recovery() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -39930,6 +41215,311 @@ mod tests {
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
         );
+    }
+
+    #[tokio::test]
+    async fn admin_capture_failure_records_unobservable_row() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-capture", "admin-capture-next").checkpoint_key();
+        // Dropping the singleton makes capture_tx fail on the attempt path and
+        // again on the re-capture. Owner checks read writer_lease, not runtime_meta.
+        state
+            .connection
+            .execute("DELETE FROM runtime_meta", ())
+            .await
+            .unwrap();
+        let error = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key,
+                "maintenance boundary".into(),
+                id(72),
+            )
+            .await
+            .expect_err("capture failure must fail the call");
+        assert_eq!(error, RuntimeError::RecoveryInvalid);
+        let audits = state.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 1, "the failed call still gets one row: {audits:?}");
+        assert_eq!(audits[0].observed_generation, None);
+        assert_eq!(audits[0].terminal_outcome, "failure:unobservable:recovery_invalid");
+        assert!(!audits[0].succeeded);
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_replays_recorded_class() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let cases: [(&str, RuntimeError); 4] = [
+            ("failure:unobservable:invalid_digest", RuntimeError::InvalidDigest),
+            ("failure:unobservable:stale_capture", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable:fault_injected", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable", RuntimeError::RecoveryInvalid),
+        ];
+        for (index, (outcome, expected)) in cases.into_iter().enumerate() {
+            let invocation = [80 + index as u8; 16];
+            state
+                .connection
+                .execute(
+                    "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (?1, 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, NULL, ?2, 0, 0)",
+                    (invocation.to_vec(), outcome),
+                )
+                .await
+                .unwrap();
+            let receipt = state
+                .admin_invocation_audits()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|audit| audit.invocation_id == invocation)
+                .unwrap();
+            match replay_admin_stream_result(&state.connection, &receipt).await {
+                Err(error) => assert_eq!(error, expected, "{outcome}"),
+                Ok(_) => panic!("{outcome} must replay its failure"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_migration_keeps_legacy_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        // Rebuild the pre-1.1.0 shape: observed_generation NOT NULL and no
+        // stale-capture child table.
+        state
+            .connection
+            .execute_batch(
+                "DROP TABLE admin_invocation_stale_capture;
+                 DROP TABLE admin_invocation_checkpoint_result;
+                 DROP TABLE admin_invocation_audit;
+                 CREATE TABLE admin_invocation_audit (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                     function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                     observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+                     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                 );
+                 CREATE TABLE admin_invocation_checkpoint_result (
+                     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+                     version INTEGER NOT NULL CHECK (version >= 0),
+                     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                 );
+                 INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'02020202020202020202020202020202', 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, 7, 'paused', 1, 0);
+                 INSERT INTO admin_invocation_checkpoint_result (invocation_id, version, committed_position)
+                     VALUES (x'02020202020202020202020202020202', 3, 'pos');",
+            )
+            .await
+            .unwrap();
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        // Raw counts: the decoder requires coherent checkpoint-reset rows, and
+        // this test is about storage fidelity, not decoding.
+        macro_rules! count {
+            ($sql:expr) => {{
+                let mut rows = state.connection.query($sql, ()).await.unwrap();
+                rows.next().await.unwrap().expect("count row").get::<i64>(0).unwrap()
+            }};
+        }
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation = 7 AND terminal_outcome = 'paused'"),
+            1,
+            "legacy audit row keeps its generation"
+        );
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_checkpoint_result WHERE version = 3 AND committed_position = 'pos'"),
+            1,
+            "checkpoint result child is kept"
+        );
+        // The rebuilt table accepts an unobservable row with a NULL generation.
+        state
+            .connection
+            .execute_batch(
+                "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'04040404040404040404040404040404', 'sys.admin.pause_stream', 'x', x'01010101010101010101010101010101', 1, NULL, 'failure:unobservable:recovery_invalid', 0, 0);",
+            )
+            .await
+            .unwrap();
+        // A second run is a no-op and keeps both rows.
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation IS NULL"),
+            1,
+            "NULL generation row is accepted"
+        );
+        assert_eq!(count!("SELECT COUNT(*) FROM admin_invocation_audit"), 2, "migration keeps every row");
+    }
+
+    #[test]
+    fn admin_failure_class_round_trips_every_payload_free_variant() {
+        // The 48 payload-free variants. StaleCapture, FaultInjected and
+        // LegacyHeadReadOnly carry payloads the row does not store; they are
+        // checked by the class-only assertions below.
+        let table: &[(RuntimeError, &str)] = &[
+            (RuntimeError::InvalidIdentity, "invalid_identity"),
+            (RuntimeError::InvalidDigest, "invalid_digest"),
+            (RuntimeError::InvalidObservationReference, "invalid_observation_reference"),
+            (RuntimeError::ObservationCoordinateMismatch, "observation_coordinate_mismatch"),
+            (RuntimeError::ProcedureMaterializationConflict, "procedure_materialization_conflict"),
+            (RuntimeError::InvocationObservationConflict, "invocation_observation_conflict"),
+            (RuntimeError::InvocationStateConflict, "invocation_state_conflict"),
+            (RuntimeError::QueryObservationConflict, "query_observation_conflict"),
+            (RuntimeError::QueryStateConflict, "query_state_conflict"),
+            (RuntimeError::InvocationChildrenActive, "invocation_children_active"),
+            (RuntimeError::InvocationOwnerInvalid, "invocation_owner_invalid"),
+            (RuntimeError::InvocationTailInvalid, "invocation_tail_invalid"),
+            (RuntimeError::InvocationTailLimit, "invocation_tail_limit"),
+            (RuntimeError::StreamIdentityMismatch, "stream_identity_mismatch"),
+            (RuntimeError::StreamSourceNotReplayable, "stream_source_not_replayable"),
+            (RuntimeError::StreamCheckpointStale, "stream_checkpoint_stale"),
+            (RuntimeError::CheckpointNotReplayable, "checkpoint_not_replayable"),
+            (RuntimeError::SnapshotNotFound, "snapshot_not_found"),
+            (RuntimeError::SnapshotIncomplete, "snapshot_incomplete"),
+            (RuntimeError::SnapshotContextMismatch, "snapshot_context_mismatch"),
+            (RuntimeError::LeaseHeld, "lease_held"),
+            (RuntimeError::AdminBusy, "admin_busy"),
+            (RuntimeError::AdminInvocationConflict, "admin_invocation_conflict"),
+            (RuntimeError::OwnerLost, "owner_lost"),
+            (RuntimeError::RecoveryPending, "recovery_pending"),
+            (RuntimeError::InvalidCapture, "invalid_capture"),
+            (RuntimeError::EmptyMutationBatch, "empty_mutation_batch"),
+            (RuntimeError::InvalidTableMutation, "invalid_table_mutation"),
+            (RuntimeError::ConflictingPublicationIntent, "conflicting_publication_intent"),
+            (RuntimeError::ConflictingPublicationCommit, "conflicting_publication_commit"),
+            (RuntimeError::InvalidPublicationCommit, "invalid_publication_commit"),
+            (RuntimeError::InvalidPublicationPolicy, "invalid_publication_policy"),
+            (RuntimeError::CompactPublicationRequired, "compact_publication_required"),
+            (RuntimeError::CompactReceiptKeyMismatch, "compact_receipt_key_mismatch"),
+            (RuntimeError::InvalidCompactReceipt, "invalid_compact_receipt"),
+            (RuntimeError::RequestUnknown, "request_unknown"),
+            (RuntimeError::RequestFingerprintMismatch, "request_fingerprint_mismatch"),
+            (RuntimeError::RequestOwnerConflict, "request_owner_conflict"),
+            (RuntimeError::RequestStateConflict, "request_state_conflict"),
+            (RuntimeError::SessionClosed, "session_closed"),
+            (RuntimeError::SessionWorkActive, "session_work_active"),
+            (RuntimeError::TerminalOutcomeTooLarge, "terminal_outcome_too_large"),
+            (RuntimeError::RecoveryInvalid, "recovery_invalid"),
+            (RuntimeError::SystemProviderAbiInvalid, "system_provider_abi_invalid"),
+            (RuntimeError::StorageUnavailable, "storage_unavailable"),
+            (RuntimeError::StreamFailureStale, "stream_failure_stale"),
+            (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
+            (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
+        ];
+        assert_eq!(table.len(), 48);
+        for (variant, class) in table {
+            assert_eq!(admin_failure_class(variant), *class);
+            assert_eq!(admin_failure_from_class(class), *variant, "{class}");
+        }
+        // Payload-carrying classes replay as RecoveryInvalid: the payload is not stored.
+        assert_eq!(
+            admin_failure_class(&RuntimeError::FaultInjected(FaultPoint::AfterCommit)),
+            "fault_injected",
+        );
+        assert_eq!(
+            admin_failure_from_class("fault_injected"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("legacy_head_read_only"),
+            RuntimeError::RecoveryInvalid,
+        );
+    }
+
+    #[test]
+    fn admin_failure_replays_legacy_outcome_names() {
+        // Outcomes stored before stable failure classes keep replaying as
+        // their original variants.
+        assert_eq!(admin_failure_from_class("unavailable"), RuntimeError::StorageUnavailable);
+        assert_eq!(admin_failure_from_class("admin_busy"), RuntimeError::AdminBusy);
+        assert_eq!(
+            admin_failure_from_class("runtime administration callback is busy"),
+            RuntimeError::AdminBusy,
+        );
+        assert_eq!(
+            admin_failure_from_class("invalid_observation_reference"),
+            RuntimeError::InvalidObservationReference,
+        );
+        assert_eq!(
+            admin_failure_from_class("checkpoint_not_replayable"),
+            RuntimeError::CheckpointNotReplayable,
+        );
+        assert_eq!(
+            admin_failure_from_class("stream_checkpoint_stale"),
+            RuntimeError::StreamCheckpointStale,
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_replays_failure_rows_stored_before_stable_classes() {
+        // Rows as earlier releases stored them. Each legacy failure outcome
+        // replays as the error it recorded, and a replay neither applies the
+        // pause nor appends a row (ORNA-ADMIN-003).
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-legacy", "admin-legacy-next").checkpoint_key();
+        let reason = String::from("maintenance boundary");
+        let generation = admin_observed_generation(&state.capture().await.unwrap()).unwrap();
+        let legacy = [
+            ("unavailable", RuntimeError::StorageUnavailable),
+            ("admin_busy", RuntimeError::AdminBusy),
+            (
+                "runtime administration callback is busy",
+                RuntimeError::AdminBusy,
+            ),
+            (
+                "invalid_observation_reference",
+                RuntimeError::InvalidObservationReference,
+            ),
+            (
+                "checkpoint_not_replayable",
+                RuntimeError::CheckpointNotReplayable,
+            ),
+            (
+                "stream_checkpoint_stale",
+                RuntimeError::StreamCheckpointStale,
+            ),
+        ];
+        for (invocation_id, (outcome, expected)) in (80u8..).map(id).zip(legacy.iter()) {
+            let operation = AdminInvocationOperation::Pause {
+                key: key.clone(),
+                reason: Some(reason.clone()),
+            };
+            store_admin_invocation_audit(
+                &state.connection,
+                &admin_invocation_descriptor_with_id(&operation, invocation_id),
+                writer,
+                Some(generation),
+                format!("failure:{outcome}"),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state
+                    .pause_stream_with_reason_and_invocation_id(
+                        writer,
+                        key.clone(),
+                        reason.clone(),
+                        invocation_id,
+                    )
+                    .await,
+                Err(expected.clone()),
+                "{outcome}",
+            );
+        }
+        assert_eq!(
+            state.admin_invocation_audits().await.unwrap().len(),
+            legacy.len()
+        );
+        assert_eq!(state.stream_pause_reason(&key).await, Ok(None));
     }
 
     #[tokio::test]
@@ -40131,7 +41721,9 @@ mod tests {
         assert_eq!(failed.function, "sys.admin.pause_stream_with_reason");
         assert!(failed.safe_arguments.contains("stream_ref_digest="));
         assert!(failed.safe_arguments.contains("reason_digest="));
-        assert!(failed.terminal_outcome.starts_with("failure:"));
+        assert_eq!(failed.terminal_outcome, "failure:admin_busy");
+        let generation = admin_observed_generation(&capture_before).unwrap();
+        assert_eq!(failed.observed_generation, Some(generation));
         let receipt = reopened
             .admin_invocation_receipt(invocation_id)
             .await
@@ -40151,6 +41743,7 @@ mod tests {
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
         assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
+        assert_eq!(rejected_receipt.observed_generation, Some(generation));
     }
 
     #[tokio::test]

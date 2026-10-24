@@ -67,7 +67,7 @@ fn found_match(text: &str, start: i64, end: i64, captures: &[Option<&str>]) -> R
 
 fn pinned_runtime() -> (Functions, NominalDefinitions) {
     let mut functions = BTreeMap::new();
-    for (path, source) in orna_standard::reference_standard_sources_v1()
+    for (path, source) in orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
     {
