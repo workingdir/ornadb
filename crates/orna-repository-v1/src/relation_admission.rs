@@ -820,36 +820,99 @@ impl Repository {
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let database_id = *staged.database_id.as_bytes();
         let mut writer = NodeWriter::new(self)?;
-        // An unborn branch commits no relation.
-        let committed: BTreeMap<[u8; 16], NativeOid> = match staged.index.head() {
-            Some(head) => self
-                .store_entries_in(head.as_str(), database_id)?
-                .into_iter()
-                .map(|entry| (entry.relation_id, entry.schema_oid))
-                .collect(),
-            None => BTreeMap::new(),
-        };
-        let base = match staged.store_root.as_ref() {
-            // `git rm --cached` leaves skip-worktree payload entries in the
-            // index, so the store tree survives while some node data does
-            // not. A committed relation whose node is absent is unstaged,
-            // not a corrupt store (ORNA-STAGE-004 refuses the candidate).
-            Some(root) => {
-                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)
-                    .map_err(|error| match (error, committed.keys().next()) {
-                        (GraphError::MissingNodeData, Some(relation_id)) => {
-                            RelationAdmissionError::CommittedRelationUnstaged {
-                                relation_id: *relation_id,
-                            }
-                        }
-                        (error, _) => error.into(),
-                    })?
-            }
-            None => Vec::new(),
-        };
+        let committed = self.committed_schema_nodes(staged)?;
+        let base = self.staged_store_entries(&writer, staged, &committed)?;
         let (entries, admitted) =
             admit_relations(&mut writer, base, &committed, relations, Some(identities))?;
         let store_root = write_store_root(&mut writer, database_id, &entries)?;
+        self.install_staged_store_root(&writer, staged, store_root, admitted)
+    }
+
+    /// Restages only the identity inventory of the staged store, as an
+    /// explicit semantic rename (`orna mv`) does: every table relation, its
+    /// schema node and its rows are kept exactly, and the inventory relation
+    /// is rewritten from `identities` (ORNA-OBJECT-003, ORNA-META-001). Each
+    /// table relation must stay owned by an active identity, so a rename
+    /// cannot orphan committed rows. A staged index without a store gets one
+    /// holding only the inventory; one whose `HEAD` commits relations it
+    /// lacks is refused as unstaged. The store is installed under the same
+    /// guards as [`Self::stage_store_admission`]: the captured index and
+    /// `HEAD` must be unchanged, and the legacy identity sidecar leaves the
+    /// index.
+    pub fn stage_object_identities(
+        &self,
+        staged: &StagedCandidate,
+        identities: &[StoredObjectIdentity],
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
+        let database_id = *staged.database_id.as_bytes();
+        let mut writer = NodeWriter::new(self)?;
+        let committed = self.committed_schema_nodes(staged)?;
+        let mut entries = self
+            .staged_store_entries(&writer, staged, &committed)?
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(relation_id) = committed
+            .keys()
+            .find(|relation_id| !entries.contains_key(*relation_id))
+        {
+            return Err(RelationAdmissionError::CommittedRelationUnstaged {
+                relation_id: *relation_id,
+            });
+        }
+        let owners = identities
+            .iter()
+            .filter(|identity| !identity.retired)
+            .map(|identity| identity.id)
+            .collect::<BTreeSet<_>>();
+        if let Some(relation_id) = entries.keys().find(|relation_id| {
+            **relation_id != OBJECT_IDENTITY_RELATION_ID
+                && **relation_id != OBJECT_REKEY_RELATION_ID
+                && !owners.contains(*relation_id)
+        }) {
+            return Err(RelationAdmissionError::OrphanRelation {
+                relation_id: *relation_id,
+            });
+        }
+        entries.insert(
+            OBJECT_IDENTITY_RELATION_ID,
+            write_identity_relation(&mut writer, identities)?,
+        );
+        let admitted = if committed.contains_key(&OBJECT_IDENTITY_RELATION_ID) {
+            Vec::new()
+        } else {
+            vec![OBJECT_IDENTITY_RELATION_ID]
+        };
+        let entries = entries.into_values().collect::<Vec<_>>();
+        let store_root = write_store_root(&mut writer, database_id, &entries)?;
+        self.install_staged_store_root(&writer, staged, store_root, admitted)
+    }
+
+    /// The schema node of each relation `HEAD`'s store commits; empty on an
+    /// unborn branch, which commits no relation.
+    fn committed_schema_nodes(
+        &self,
+        staged: &StagedCandidate,
+    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RelationAdmissionError> {
+        let Some(head) = staged.index.head() else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(self
+            .store_entries_in(head.as_str(), *staged.database_id.as_bytes())?
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry.schema_oid))
+            .collect())
+    }
+
+    /// Binds `store_root` at `.orna/store` in the ordinary index, unless the
+    /// index already stages exactly that store and no legacy sidecar.
+    fn install_staged_store_root(
+        &self,
+        writer: &NodeWriter<'_>,
+        staged: &StagedCandidate,
+        store_root: NativeOid,
+        admitted: Vec<[u8; 16]>,
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
         let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
         if staged.store_root.as_ref() == Some(&store_root) && !sidecar_staged {
             return Ok(StoreAdmission {
@@ -864,6 +927,36 @@ impl Repository {
             store_root,
             admitted,
             changed: true,
+        })
+    }
+
+    /// The validated relation entries of the staged store, empty when the
+    /// index has none. `git rm --cached` leaves skip-worktree payload entries
+    /// in the index, so the store tree survives while some node data does
+    /// not; a committed relation whose node is absent is unstaged, not a
+    /// corrupt store (ORNA-STAGE-004 refuses the candidate).
+    fn staged_store_entries(
+        &self,
+        writer: &NodeWriter<'_>,
+        staged: &StagedCandidate,
+        committed: &BTreeMap<[u8; 16], NativeOid>,
+    ) -> Result<Vec<StoreRelationEntry>, RelationAdmissionError> {
+        let Some(root) = staged.store_root.as_ref() else {
+            return Ok(Vec::new());
+        };
+        NativeGraphContext::read_store_relations(
+            self,
+            writer.algorithm,
+            *staged.database_id.as_bytes(),
+            root,
+        )
+        .map_err(|error| match (error, committed.keys().next()) {
+            (GraphError::MissingNodeData, Some(relation_id)) => {
+                RelationAdmissionError::CommittedRelationUnstaged {
+                    relation_id: *relation_id,
+                }
+            }
+            (error, _) => error.into(),
         })
     }
 
@@ -2225,6 +2318,85 @@ mod tests {
         assert_eq!(
             repository.read_staged_object_identities(&restaged).unwrap(),
             Some(identities_for(&[relation(1)]))
+        );
+    }
+
+    /// `orna mv` restages only the inventory (ORNA-OBJECT-003): every
+    /// committed relation keeps its exact entry and `HEAD` is untouched. An
+    /// inventory that would leave a relation without an active owner, and a
+    /// capture the index has moved past, are refused without changing it.
+    #[test]
+    fn identity_restaging_keeps_every_relation_and_refuses_orphans() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        let music = relation(1);
+        stage(&repository, &[music]).expect("stage the store");
+        git(root, &["commit", "--quiet", "-m", "first table"]);
+        let head = repository.head().unwrap().expect("committed HEAD");
+        let staged = repository.capture_staged_candidate().unwrap();
+        let database_id = *staged.database_id().as_bytes();
+        let music_entry = |store_root: &NativeOid| {
+            NativeGraphContext::read_store_relations(
+                &repository,
+                store_root.algorithm(),
+                database_id,
+                store_root,
+            )
+            .expect("read the staged relation map")
+            .into_iter()
+            .find(|entry| entry.relation_id == music)
+            .expect("the table relation is staged")
+        };
+        let committed_entry = music_entry(staged.store_root().expect("a staged store"));
+
+        let orphaned = repository
+            .stage_object_identities(
+                &staged,
+                &[StoredObjectIdentity::new(music, 1, "Table0", true)],
+            )
+            .expect_err("a retired owner orphans its relation");
+        assert!(matches!(
+            orphaned,
+            RelationAdmissionError::OrphanRelation { relation_id } if relation_id == music
+        ));
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+        let renamed = vec![StoredObjectIdentity::new(music, 1, "Archive", false)];
+        let admission = repository
+            .stage_object_identities(&staged, &renamed)
+            .expect("restage the renamed inventory");
+        assert!(admission.changed());
+        assert!(admission.admitted().is_empty());
+        assert_eq!(music_entry(admission.store_root()), committed_entry);
+        let restaged = repository.capture_staged_candidate().unwrap();
+        assert_eq!(
+            repository.read_staged_object_identities(&restaged).unwrap(),
+            Some(renamed.clone())
+        );
+        assert!(
+            !repository
+                .stage_object_identities(&restaged, &renamed)
+                .unwrap()
+                .changed()
+        );
+        assert!(matches!(
+            repository
+                .stage_object_identities(
+                    &staged,
+                    &[StoredObjectIdentity::new(music, 1, "Backup", false)]
+                )
+                .expect_err("the first capture is stale"),
+            RelationAdmissionError::StaleIndex
+        ));
+        assert_eq!(
+            repository
+                .read_staged_object_identities(&repository.capture_staged_candidate().unwrap())
+                .unwrap(),
+            Some(renamed)
+        );
+        assert_eq!(
+            repository.read_committed_object_identities(&head).unwrap(),
+            Some(identities_for(&[music]))
         );
     }
 
