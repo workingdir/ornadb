@@ -4289,7 +4289,10 @@ mod tests {
                 send_frame(stream, 10, &payload);
                 continue;
             }
-            assert_eq!(opcode, 2, "the answer is one binary message");
+            assert_eq!(
+                opcode, 2,
+                "the answer is one binary message, not opcode {opcode} with payload {payload:?}"
+            );
             return Envelope::decode(&payload, limits).expect("canonical answer");
         }
     }
