@@ -1704,7 +1704,10 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         .truncate(true)
         .open(&data_path)
         .unwrap();
-    document.write_all(b"{ title: \"after\", }\n").unwrap();
+    // A schema-invalid candidate: a flush (close or the exec of a child that inherits
+    // this descriptor) refuses it, so it stays an unresolved draft (ORNA-VFS-009/024).
+    // A valid unsynced candidate would be accepted by that flush (EDIT-1 step 5).
+    document.write_all(b"{ title: 123, }\n").unwrap();
     let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
@@ -1727,6 +1730,11 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     assert!(mountinfo_contains(&mountpoint));
     assert_eq!(repository.mount_status().unwrap().len(), 1);
 
+    // Replace the refused candidate with a valid row and sync it: the accepted
+    // sync clears the unresolved draft, so unmount can succeed.
+    document.set_len(0).unwrap();
+    document.seek(SeekFrom::Start(0)).unwrap();
+    document.write_all(b"{ title: \"after\", }\n").unwrap();
     document.sync_all().unwrap();
     drop(document);
     run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
