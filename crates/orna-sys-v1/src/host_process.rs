@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use orna_sys_macros::sys_host_operation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,6 +182,10 @@ impl ProcessProvider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The child leads its own process group so a timeout/abort can kill
+        // grandchildren that inherited the output pipes.
+        #[cfg(unix)]
+        command.process_group(0);
         // An omitted API timeout still inherits the host-selected cap. This
         // keeps every admitted process bounded even when callers use `null`.
         let effective_timeout = timeout.unwrap_or(self.maximum_timeout);
@@ -229,7 +235,7 @@ impl ProcessProvider {
         };
         let status = loop {
             if abort.load(Ordering::Acquire) {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 join_reader(stdout_thread);
                 join_reader(stderr_thread);
@@ -248,7 +254,7 @@ impl ProcessProvider {
             let status = match child.try_wait() {
                 Ok(status) => status,
                 Err(_) => {
-                    let _ = child.kill();
+                    kill_process_tree(&mut child);
                     let _ = child.wait();
                     join_reader(stdout_thread);
                     join_reader(stderr_thread);
@@ -262,7 +268,7 @@ impl ProcessProvider {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 join_reader(stdout_thread);
                 join_reader(stderr_thread);
@@ -353,6 +359,23 @@ fn capture_pipe<R: Read + Send + 'static>(
 
 fn join_reader(reader: thread::JoinHandle<()>) {
     let _ = reader.join();
+}
+
+/// Kills the child's whole process group on Linux. The child leads its own
+/// group (`process_group(0)`), so grandchildren that inherited the output pipes
+/// are killed too and cannot hold the reader threads past the deadline.
+#[cfg(target_os = "linux")]
+fn kill_process_tree(child: &mut Child) {
+    let _ = rustix::process::kill_process_group(
+        rustix::process::Pid::from_child(child),
+        rustix::process::Signal::Kill,
+    );
+    let _ = child.kill();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_process_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 fn validate_environment_name(name: &str) -> Result<(), ProcessProviderError> {

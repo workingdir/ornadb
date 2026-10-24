@@ -890,7 +890,7 @@ impl Repository {
         let mut clone = Command::new("git");
         scrub_git_routing_environment(&mut clone);
         let status = clone
-            .args(["clone", "--filter=blob:none", "--no-checkout"])
+            .args(["clone", "--filter=blob:none", "--no-checkout", "--"])
             .arg(remote.as_ref())
             .arg(destination.as_ref())
             .status()
