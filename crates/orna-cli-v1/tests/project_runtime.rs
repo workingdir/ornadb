@@ -836,6 +836,11 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         .await
         .expect("seed durable pending mutation");
 
+    // The seeding writer has exited before the CLI starts. A live in-process
+    // runtime still holds the worktree owner lock, and ORNA-TURSO-004/005
+    // require a concurrent `orna run` to fail rather than share that writer.
+    drop(state);
+
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
@@ -854,6 +859,69 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
     );
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_lease() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/private-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let _lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+
+    // ORNA-TURSO-004 permits at most one owning writer, and ORNA-TURSO-005
+    // requires a second `orna run` to coordinate or fail while it is live.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        !refused.status.success(),
+        "concurrent run unexpectedly succeeded: {:?}",
+        refused.stdout
+    );
+    assert!(refused.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("error[E2200]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    drop(state);
+
+    let released = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        released.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    assert_eq!(released.stdout, b"invocation completed\n");
+    assert!(released.stderr.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1238,6 +1306,10 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             && integer(row, "quantity") == 4
     }));
 
+    // The previous writer has exited; release its owner lock so this run is a
+    // fresh process taking over a departed lease (ORNA-TASK-003).
+    drop(state);
+
     let duplicate = invoke(directory.path(), "run", "seed");
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("error[E2200]"));
@@ -1264,6 +1336,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             .len(),
         2
     );
+
+    // Release the duplicate-check writer so the next run is a fresh process.
+    drop(duplicate_state);
 
     let exercise = invoke(directory.path(), "run", "exercise");
     assert!(

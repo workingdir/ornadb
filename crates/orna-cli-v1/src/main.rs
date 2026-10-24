@@ -1836,11 +1836,10 @@ fn runtime_identity(
     })
 }
 
-fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
-    // The embedded runtime persists one local writer lease in the worktree's
-    // private state. Reusing the repository-derived owner lets a later CLI
-    // process resume that same local owner without stealing an unknown lease.
-    identity.repository_id
+/// The writer owner for this process. A later process has a different owner, so
+/// it takes the lease over (bumping the epoch) and fences a killed writer's token.
+fn invocation_owner_id() -> [u8; 16] {
+    orna_runtime_v1::process_owner_id()
 }
 
 fn run_project_invocation(
@@ -1993,7 +1992,7 @@ fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2083,7 +2082,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2702,7 +2701,7 @@ fn run_repl_input(
                     .state
                     .as_ref()
                     .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id(transactions.identity)),
+                    .acquire_lease(invocation_owner_id()),
             )
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         transactions.lease = Some(lease);

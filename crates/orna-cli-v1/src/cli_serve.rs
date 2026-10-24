@@ -525,12 +525,11 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    // The served runtime uses the same repository-derived owner as `orna run`,
-    // `orna repl` and mounts, so the live host's writer lease is held by the
-    // owner that the repository's other local commands use. Test
-    // `served_runtime_holds_the_repository_owner_lease` pins this: that owner
-    // re-acquires the lease and a different owner is refused `LeaseHeld`.
-    let owner_id = invocation_owner_id(identity);
+    // The served runtime uses this process's owner. A later process takes the
+    // lease over with a bumped epoch once it holds the runtime owner lock, so a
+    // killed predecessor's token is fenced. Test
+    // `served_runtime_holds_the_process_owner_lease` pins the holder's lease.
+    let owner_id = invocation_owner_id();
     let executor = current_thread_executor().map_err(|_| {
         Diagnostic::target(
             "E2200",
@@ -596,10 +595,9 @@ fn new_serve_state(
             )
         })?,
         runtime,
-        // The served runtime was opened with this same repository-derived owner
-        // (see `open_served_clone`), so the live host's `acquire_lease` is a
-        // re-acquisition by the holder, as pinned by the owner-lease test.
-        invocation_owner_id(identity),
+        // The served runtime was opened with this same process owner (see
+        // `open_served_clone`), so the live host's `acquire_lease` re-acquires it.
+        invocation_owner_id(),
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -4080,11 +4078,13 @@ mod tests {
         );
     }
 
-    /// G-4: the served runtime is opened under the repository-derived owner,
-    /// the same owner `orna run` and mounts use. It therefore holds the
-    /// writer lease for that owner, and a different owner is refused.
+    /// G-4: the served runtime is opened under this process's owner, the same
+    /// owner `orna run`, the REPL and mounts use in this process. It holds the
+    /// worktree's runtime owner lock and the writer lease for that owner at
+    /// epoch 1. Re-acquisition is idempotent, and a different owner is refused
+    /// even through the served runtime that holds the lock.
     #[test]
-    fn served_runtime_holds_the_repository_owner_lease() {
+    fn served_runtime_holds_the_process_owner_lease() {
         let directory = tempfile::tempdir().expect("temporary project");
         orna_repository_v1::initialize_repository(directory.path()).expect("orna init");
         std::fs::write(
@@ -4100,16 +4100,30 @@ mod tests {
                 .to_owned(),
         );
         let clone = open_served_clone(&endpoint).expect("`orna serve` resolves the clone");
-        let owner = invocation_owner_id(clone.identity);
+        let owner = invocation_owner_id();
         let executor = current_thread_executor().expect("test executor");
         let lease = executor
             .block_on(clone.runtime.acquire_lease(owner))
             .expect("the repository owner acquires the served lease");
         assert_eq!(lease.owner_id, owner);
+        assert_eq!(lease.epoch, 1);
+        assert!(clone.runtime.holds_runtime_owner_lock());
+        assert_eq!(
+            executor
+                .block_on(clone.runtime.acquire_lease(owner))
+                .expect("the holder re-acquires its own lease"),
+            lease
+        );
         assert!(matches!(
             executor.block_on(clone.runtime.acquire_lease([7; 16])),
             Err(orna_runtime_v1::RuntimeError::LeaseHeld)
         ));
+        assert_eq!(
+            executor
+                .block_on(clone.runtime.current_lease())
+                .expect("read the served lease"),
+            Some(lease)
+        );
     }
 
     /// ORNA-EVAL-003, ORNA-EVAL-008, ORNA-PROTO-004 and 30-protocol REQUEST-1
