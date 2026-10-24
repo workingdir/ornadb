@@ -5,13 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- A malformed format-3 native graph now reports its specific diagnostic at
-  row-map load and schema lookup instead of a generic invalid-data error:
-  overlapping child ranges, broken counts, over-wide fanout, and a wrong
-  schema domain each surface a typed `GraphMalformed` cause under
-  `ORNA-REPO-CONTEXT-017`; a root branch with one child is reported as
-  uncollapsed. Storage reports the malformed case as `RepositoryMalformed`
-  (store-format-3 section 2, ORNA-ROW-012).
+- A malformed format-3 native graph now reports its specific diagnostic when
+  loaded through `load_row_map`: overlapping child ranges, broken counts,
+  over-wide fanout, and a wrong schema domain each surface a typed
+  `GraphMalformed` cause under `ORNA-REPO-CONTEXT-017`; a root branch with one
+  child is reported as uncollapsed (store-format-3 section 2, lines 50-55).
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with
