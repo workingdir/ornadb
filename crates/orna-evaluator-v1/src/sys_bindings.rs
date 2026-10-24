@@ -1728,6 +1728,7 @@ mod tests {
         );
     }
 
+    // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
     #[test]
     fn rov3_descriptor_only_is_unavailable_and_self_equal() {
         struct PayloadResolver(Vec<u8>);
@@ -1888,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_same_content_observes_cancellation_without_partial_result() {
+    fn blob_same_content_observes_cancellation() {
         let left = ContextValue::from_blob(
             &Blob::from_bytes_with_annotation(b"same".to_vec(), "application/octet-stream", None)
                 .unwrap(),
@@ -1903,13 +1904,11 @@ mod tests {
         .unwrap();
         let token = CancellationToken::new();
         token.request();
-        let error = dispatch_blob_reflection(
-            "sys.blob.same_content",
-            &[left, right],
-            Some(&token),
-        )
-        .err()
-        .expect("a requested cancellation must fail the comparison");
+        let result = dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
+        // No partial Bool may escape: the cancelled comparison yields only an error.
+        let error = result
+            .err()
+            .expect("a requested cancellation must fail the comparison");
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
     }
 }
