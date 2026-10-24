@@ -24,6 +24,7 @@ use orna_runtime_v1::TableObjectId;
 use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
 
 use std::collections::BTreeMap;
+use orna_repository_v1::relation_admission::CommittedRekey;
 
 /// Most revisions one history listing reports when `--limit` is not given.
 const DEFAULT_HISTORY_LIMIT: usize = 64;
@@ -548,6 +549,10 @@ enum RowChange {
         before: HistoryRow,
         after: HistoryRow,
     },
+    Rekeyed {
+        before: HistoryRow,
+        after: HistoryRow,
+    },
 }
 
 fn history_row(
@@ -789,15 +794,22 @@ fn run_diff(
     let (after, after_read) = read_relation_rows(&after_format, relation, after_schema.binding())?;
     let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
     let native_objects_read = before_read.objects_read + after_read.objects_read;
-    let changes = compare_rows(before, after);
-    let (added, changed, removed) = counts(&changes);
+    let window = rekey_window(repository, &from_commit, &to_commit, relation)?;
+    let (before, after, paired) = pair_rekeys(before, after, &window);
+    let mut changes = compare_rows(before, after);
+    changes.extend(
+        paired
+            .into_iter()
+            .map(|(before, after)| RowChange::Rekeyed { before, after }),
+    );
+    let (added, changed, removed, rekeyed) = counts(&changes);
     match format {
         HistoryFormat::Human => {
             for change in &changes {
                 println!("{}", human_change(change));
             }
             println!(
-                "{added} added; {changed} changed; {removed} removed; {} rows in {to_label}",
+                "{added} added; {changed} changed; {removed} removed; {rekeyed} rekeyed; {} rows in {to_label}",
                 changes
                     .iter()
                     .filter(|change| !matches!(change, RowChange::Removed(_)))
@@ -817,6 +829,7 @@ fn run_diff(
                     "added": added,
                     "changed": changed,
                     "removed": removed,
+                    "rekeyed": rekeyed,
                     "media_payload_bytes_read": payload_bytes_read,
                     "native_objects_read": native_objects_read,
                     "changes": entries,
@@ -950,6 +963,14 @@ fn change_json(change: &RowChange) -> serde_json::Value {
             "before": { "annotations": annotations_of(before) },
             "after": { "annotations": annotations_of(after) },
         }),
+        RowChange::Rekeyed { before, after } => serde_json::json!({
+            "change": "rekeyed",
+            "key": render_key(&after.key),
+            "from_key": render_key(&before.key),
+            "content_changed": content_changed(before, after),
+            "before": { "annotations": annotations_of(before) },
+            "after": { "annotations": annotations_of(after) },
+        }),
     }
 }
 
@@ -965,22 +986,86 @@ fn human_change(change: &RowChange) -> String {
             content_changed(before, after),
             annotations_changed(before, after),
         ),
+        RowChange::Rekeyed { before, after } => format!(
+            "rekeyed {} -> {} (content={}, annotation={})",
+            render_key(&before.key),
+            render_key(&after.key),
+            content_changed(before, after),
+            annotations_changed(before, after),
+        ),
     }
 }
 
-/// Counts the changes as `(added, changed, removed)`.
-fn counts(changes: &[RowChange]) -> (usize, usize, usize) {
+/// Counts the changes as `(added, changed, removed, rekeyed)`.
+fn counts(changes: &[RowChange]) -> (usize, usize, usize, usize) {
     let mut added = 0;
     let mut changed = 0;
     let mut removed = 0;
+    let mut rekeyed = 0;
     for change in changes {
         match change {
             RowChange::Added(_) => added += 1,
             RowChange::Changed { .. } => changed += 1,
             RowChange::Removed(_) => removed += 1,
+            RowChange::Rekeyed { .. } => rekeyed += 1,
         }
     }
-    (added, changed, removed)
+    (added, changed, removed, rekeyed)
+}
+
+/// The committed rekeys that landed between the two pinned snapshots for
+/// `relation`. A rekey log is append-only, so the later snapshot's log must
+/// extend the earlier one; otherwise the snapshots do not share one history
+/// and the window cannot be trusted.
+fn rekey_window(
+    repository: &Repository,
+    from: &GitCommitRef,
+    to: &GitCommitRef,
+    relation: [u8; 16],
+) -> Result<Vec<CommittedRekey>, Diagnostic> {
+    let from_log = repository
+        .read_committed_rekeys(from)
+        .map_err(|error| history_error("Rekey log could not be read", format!("{error:?}")))?;
+    let to_log = repository
+        .read_committed_rekeys(to)
+        .map_err(|error| history_error("Rekey log could not be read", format!("{error:?}")))?;
+    if !to_log.starts_with(&from_log) {
+        return Err(history_error(
+            "Rekey logs do not share one history",
+            "the later snapshot's rekey log must extend the earlier snapshot's",
+        ));
+    }
+    Ok(to_log[from_log.len()..]
+        .iter()
+        .filter(|rekey| rekey.relation_id() == &relation)
+        .cloned()
+        .collect())
+}
+
+/// Takes each window rekey's old row out of `before` and its new row out of
+/// `after`, pairing them, so the move reads as one rekeyed change instead of a
+/// removal plus an addition. A rekey whose old or new address is absent from
+/// its side stays in the comparison as the plain removal or addition it is.
+fn pair_rekeys(
+    mut before: BTreeMap<Vec<u8>, HistoryRow>,
+    mut after: BTreeMap<Vec<u8>, HistoryRow>,
+    window: &[CommittedRekey],
+) -> (
+    BTreeMap<Vec<u8>, HistoryRow>,
+    BTreeMap<Vec<u8>, HistoryRow>,
+    Vec<(HistoryRow, HistoryRow)>,
+) {
+    let mut pairs = Vec::new();
+    for rekey in window {
+        let (Some(old), Some(new)) = (before.get(rekey.old_key()), after.get(rekey.new_key()))
+        else {
+            continue;
+        };
+        pairs.push((old.clone(), new.clone()));
+        before.remove(rekey.old_key());
+        after.remove(rekey.new_key());
+    }
+    (before, after, pairs)
 }
 
 /// Renders a canonical row key the way `orna query` prints one: a text key as
