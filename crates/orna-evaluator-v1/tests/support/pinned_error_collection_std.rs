@@ -12,7 +12,7 @@ pub fn captured_profile() -> (StandardDependencyProfile, Vec<(String, String)>) 
 }
 
 fn sources() -> Vec<(String, String)> {
-    orna_standard::reference_standard_sources_v1()
+    orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/error.orna" || path == "std/collection.orna")
         .collect()
