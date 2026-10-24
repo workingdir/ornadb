@@ -78,6 +78,9 @@ jobs:
       - name: Prove standard library pin checker behavior
         run: python3 -m unittest scripts.test_standard_library_pin
 
+      - name: Prove gate evidence recorder behavior
+        run: python3 -m unittest scripts.test_gate_evidence
+
       - name: Check standard library pin and Rust mirror
         run: python3 scripts/check_standard_library_pin.py --check
 
@@ -182,8 +185,9 @@ jobs:
       # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
       # missing.
       - name: Install editor hosts for the highlighter test
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
           sudo apt-get install -y emacs-nox vim
           npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
             tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1

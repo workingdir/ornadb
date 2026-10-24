@@ -7,6 +7,7 @@ check: fixture-audit editor-artifacts-check fmt build lint test lsp-syntax-v1-pa
 fixture-audit:
     test ! -e reference || (echo "fixture-audit: remove the top-level reference tree" >&2; exit 1)
     python3 -m unittest scripts.test_fixture_manifest
+    python3 -m unittest scripts.test_gate_evidence
     python3 scripts/check_fixture_manifest.py --check
     cargo test --locked -p orna-syntax-v1 --test fixture_audit
     cargo test --locked -p orna-lsp --test ji3t0_conformance --test editor_attachment_completion
