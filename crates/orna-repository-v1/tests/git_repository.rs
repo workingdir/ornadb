@@ -3686,6 +3686,174 @@ fn publication_refuses_to_replace_a_retained_journal() {
 }
 
 #[test]
+fn retained_journal_with_moved_head_is_stale_and_keeps_batch() {
+    // ORNA-PUB-009: a HEAD that moved past this publisher's expected head is a
+    // lost CAS and reports StaleHead, checked before the retained-journal
+    // pending outcome. ORNA-PUB-006: the retained batch is not released.
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let retained_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"retained row\n".to_vec()),
+            )],
+            "orna: retained publication",
+        )
+        .unwrap();
+    let retained = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        retained_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [71; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"retained row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&retained).unwrap();
+
+    let replacement_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"replacement row\n".to_vec()),
+            )],
+            "orna: replacement publication",
+        )
+        .unwrap();
+    let mut replacement = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        replacement_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [72; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"replacement row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    git(root.path(), &["commit", "--allow-empty", "-m", "moved head"]);
+    let moved_head = repo.head().unwrap();
+    assert_ne!(moved_head, Some(head));
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &replacement_candidate, &mut replacement),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), moved_head);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(retained));
+}
+
+#[test]
+fn crashed_publisher_after_ref_advance_recovers_despite_stale_retry() {
+    // ORNA-PUB-006: a publisher that dies after RefAdvanced leaves its journal
+    // retained and the ref moved. A later publisher prepared from the old head
+    // is refused with StaleHead, which must not mask recovery of that journal.
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let crashed_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"crashed row\n".to_vec()),
+            )],
+            "orna: crashed publication",
+        )
+        .unwrap();
+    let mut crashed = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        crashed_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [73; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"crashed row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    let stale_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"stale row\n".to_vec()),
+            )],
+            "orna: stale publication",
+        )
+        .unwrap();
+    let mut stale = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        stale_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [74; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"stale row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    // Simulated crash: unwinding right after the ref is durably advanced.
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        repo.publish_candidate_with_stage_hook(
+            &index_before,
+            &crashed_candidate,
+            &mut crashed,
+            |stage| {
+                if stage == orna_repository_v1::PublicationJournalStage::RefAdvanced {
+                    panic!("simulated publisher crash after ref advance");
+                }
+            },
+        )
+    }));
+    assert!(crash.is_err());
+    let advanced = repo.head().unwrap();
+    assert_eq!(advanced, Some(crashed_candidate.commit().clone()));
+    let retained = repo.read_publication_journal().unwrap();
+    assert_eq!(
+        retained.as_ref().map(|journal| journal.stage()),
+        Some(orna_repository_v1::PublicationJournalStage::RefAdvanced)
+    );
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &stale_candidate, &mut stale),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), advanced);
+    assert_eq!(repo.read_publication_journal().unwrap(), retained);
+
+    // Recovery reconciles the ref-advanced journal and then stops at the
+    // runtime-completion boundary, which only the runtime owner may clear.
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert_eq!(repo.head().unwrap(), advanced);
+    assert_eq!(
+        repo.read_publication_journal()
+            .unwrap()
+            .map(|journal| journal.stage()),
+        Some(orna_repository_v1::PublicationJournalStage::WorktreeReconciled)
+    );
+}
+
+#[test]
 fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3821,7 +3989,9 @@ fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
 fn publication_pauses_during_unfinished_merge_and_rebase() {
     for operation in ["merge", "rebase"] {
         let root = repository_with_v1_module_fixture();
-        let repo = Repository::discover(root.path()).unwrap();
+        let repo = Repository::discover(root.path())
+            .unwrap()
+            .with_coordination_lock_wait(std::time::Duration::from_millis(50));
         let head = repo.head().unwrap().unwrap();
         let index_before = repo.index_generation().unwrap();
         let managed = ManagedPath::new("generated/row.orna").unwrap();
