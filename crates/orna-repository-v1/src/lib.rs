@@ -4672,7 +4672,7 @@ impl Repository {
         if journal.compact_manifest().is_some() {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
-        let _coordination_lock = self.acquire_coordination_lock()?;
+        let _coordination_lock = self.acquire_coordination_lock_blocking()?;
         if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
         self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
@@ -4686,6 +4686,9 @@ impl Repository {
             // same recovery operation, not a second publisher. Any differing
             // journal remains fenced rather than replacing its evidence.
             Some(retained) if retained != *journal => {
+                if self.head()?.as_ref() != Some(journal.old_head()) {
+                    return Err(RepositoryError::StaleHead);
+                }
                 return Err(RepositoryError::PublicationPending);
             }
             retained => retained.is_some(),
@@ -8334,19 +8337,33 @@ impl Repository {
     }
 
     fn acquire_coordination_lock(&self) -> Result<CoordinationLock, RepositoryError> {
+        let file = self.open_coordination_lock_file()?;
+        file.try_lock_exclusive()
+            .map_err(|_| RepositoryError::RepositoryBusy)?;
+        Ok(CoordinationLock { file })
+    }
+
+    /// Waits for the coordination lock. Publication uses this so a concurrent
+    /// publisher queues behind the winner and then fails its compare-and-set
+    /// (ORNA-PUB-009) instead of reporting a transient busy state.
+    fn acquire_coordination_lock_blocking(&self) -> Result<CoordinationLock, RepositoryError> {
+        let file = self.open_coordination_lock_file()?;
+        file.lock_exclusive()
+            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        Ok(CoordinationLock { file })
+    }
+
+    fn open_coordination_lock_file(&self) -> Result<fs::File, RepositoryError> {
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let path = locks.join("coordination.lock");
-        let file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&path)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        file.try_lock_exclusive()
-            .map_err(|_| RepositoryError::RepositoryBusy)?;
-        Ok(CoordinationLock { file })
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
     /// Acquires the process-lifetime owner lock for this worktree's local
