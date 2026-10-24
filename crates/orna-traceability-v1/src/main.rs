@@ -37,7 +37,13 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
     }
     let Some(baseline_path) = baseline_path else { return usage("missing required --baseline <file>") };
     let catalogue = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference/tests/requirements.json");
-    let report = match orna_traceability_v1::citation_ratchet::cite_requirements(&catalogue, &crates_root.join("crates")) {
+    let baseline: orna_traceability_v1::citation_ratchet::CitationBaseline = match fs::read(&baseline_path)
+        .map_err(|e| format!("read {}: {e}", baseline_path.display()))
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", baseline_path.display()))) {
+            Ok(value) => value,
+            Err(error) => { eprintln!("citation baseline failed: {error}"); return ExitCode::FAILURE; }
+        };
+    let report = match orna_traceability_v1::citation_ratchet::cite_requirements(&catalogue, &crates_root, &baseline.scanned_crates) {
         Ok(report) => report,
         Err(error) => { eprintln!("citation count failed: {error}"); return ExitCode::FAILURE; }
     };
@@ -51,12 +57,6 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
     println!("total: cited={}, uncited={}", report.cited_ids.len(), report.uncited_ids.len());
     println!("cited IDs (deterministic JSON):");
     println!("{}", serde_json::to_string_pretty(&report.cited_ids).expect("BTreeSet serializes"));
-    let baseline: orna_traceability_v1::citation_ratchet::CitationBaseline = match fs::read(&baseline_path)
-        .map_err(|e| format!("read {}: {e}", baseline_path.display()))
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", baseline_path.display()))) {
-            Ok(value) => value,
-            Err(error) => { eprintln!("citation baseline failed: {error}"); return ExitCode::FAILURE; }
-        };
     match orna_traceability_v1::citation_ratchet::check_ratchet(&report, &baseline) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

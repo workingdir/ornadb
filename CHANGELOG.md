@@ -367,6 +367,11 @@ been published.
   removal without rechecking the source, reports nothing to discard once nothing
   remains, and `migrate copy` refuses the destination while the quarantine
   exists.
+- The command-line executable is now `orna`; the package and crate remain
+  `orna-cli-v1`. The former `orna-cli-v1` executable name is removed with no
+  alias or shim. Build output is `target/<profile>/orna`, and the Linux package
+  and release paths, CI, and the command examples in the README and docs name
+  `orna`.
 
 ## 1.0.0 — release inventory (publication pending)
 

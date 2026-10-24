@@ -329,13 +329,13 @@ def build_executable(repository: Path, source_date_epoch: int) -> Path:
         "--package",
         "orna-cli-v1",
         "--bin",
-        "orna-cli-v1",
+        "orna",
     ]
     try:
         subprocess.run(command, cwd=repository, env=environment, check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         fail(f"the reproducible Orna build failed: {error}")
-    executable = target / "release" / "orna-cli-v1"
+    executable = target / "release" / "orna"
     if not executable.is_file() or executable.is_symlink():
         fail(f"the reproducible build did not produce {executable}")
     return executable

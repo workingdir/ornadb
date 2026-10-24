@@ -595,10 +595,30 @@ impl RepositoryFormatContext {
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
     /// whose repository, database, schema, store root, and exact snapshot
-    /// authority match this pinned format-3 context.
+    /// authority match this pinned format-3 context. The graph is owned by this
+    /// context's runtime owner, or by the repository-derived owner when none is set.
     pub fn open_native_graph(
         &self,
         rows: &RowMapSnapshot,
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.issue_native_graph(rows, self.runtime_owner_id)
+    }
+
+    /// Issues the same graph authority as [`Self::open_native_graph`], owned by
+    /// `owner_id`. Accepted pins captured under the repository-derived owner
+    /// stay admissible through that owner as a fallback.
+    pub fn open_native_graph_for_owner(
+        &self,
+        rows: &RowMapSnapshot,
+        owner_id: [u8; 16],
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.issue_native_graph(rows, Some(owner_id))
+    }
+
+    fn issue_native_graph(
+        &self,
+        rows: &RowMapSnapshot,
+        runtime_owner_id: Option<[u8; 16]>,
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.require_format3()?;
         let database_id = self.require_database_id()?;
@@ -645,7 +665,7 @@ impl RepositoryFormatContext {
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
         let authority = rows.authority();
-        let owner_id = self.runtime_owner_id.unwrap_or_else(|| {
+        let derived_owner_id = {
             let mut owner_hash = Sha256::new();
             owner_hash.update(b"orna.repository.graph.owner.v1\0");
             owner_hash.update(authority);
@@ -653,7 +673,8 @@ impl RepositoryFormatContext {
             let mut owner_id = [0u8; 16];
             owner_id.copy_from_slice(&owner_digest[..16]);
             owner_id
-        });
+        };
+        let owner_id = runtime_owner_id.unwrap_or(derived_owner_id);
         let mut identity_hash = Sha256::new();
         identity_hash.update(b"orna.repository.graph.context.v1\0");
         identity_hash.update(repository_id);
@@ -677,6 +698,7 @@ impl RepositoryFormatContext {
             schema_digest,
             rows.clone(),
         )
+        .map(|graph| graph.with_accepted_pin_fallback_owner(derived_owner_id))
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
@@ -1049,6 +1071,16 @@ impl HistoricalFormatContext {
         rows: &RowMapSnapshot,
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.context.open_native_graph(rows)
+    }
+
+    /// Issues the graph authority of [`Self::open_native_graph`], owned by
+    /// `owner_id`, for a mount that runs under that lease owner.
+    pub fn open_native_graph_for_owner(
+        &self,
+        rows: &RowMapSnapshot,
+        owner_id: [u8; 16],
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.context.open_native_graph_for_owner(rows, owner_id)
     }
 
     /// Reads one committed path's bytes from the pinned commit only.

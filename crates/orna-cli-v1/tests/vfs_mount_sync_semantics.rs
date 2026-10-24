@@ -96,7 +96,7 @@ async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
     }
 }
 
-/// Sets the mount root's unmount-quiesce attribute, as `orna-cli-v1` does
+/// Sets the mount root's unmount-quiesce attribute, as `orna` does
 /// before unmount.
 fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
     let root = mount_root(fixture);
