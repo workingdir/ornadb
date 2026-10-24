@@ -1115,6 +1115,9 @@ fn build_frozen_publication_store_root(
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)
         .map_err(|_| Error::RepositoryUnavailable)?;
+    let store_root = repository
+        .append_rekey_log(&format, &store_root, &logical_rekeys)
+        .map_err(|_| Error::RepositoryUnavailable)?;
     let (_, graph, _) = relation_candidates.swap_remove(0);
     Ok((graph, store_root, logical_rekeys))
 }
