@@ -132,6 +132,69 @@ fn stored_field_rejects_recursive_nominal_containing_secret() {
     );
 }
 
+fn assert_rejects_secret(analysis: &Analysis) {
+    assert!(!analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == SECRET_STORED_MESSAGE
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; an alias inside a nominal row resolves to its
+// target, so a nominal whose member is an alias of `Secret` stores that secret.
+fn stored_field_rejects_nominal_member_alias_of_secret() {
+    let analysis = analysis_for(
+        "type Token = Secret<Str>;\npub type Cred {\n    t: Token,\n}\npub table Account(id: Uuid) {\n    cred: Cred,\n}\n",
+    );
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; an alias of a nominal that is itself a member
+// of another nominal still reaches the secret.
+fn stored_field_rejects_nominal_member_alias_of_nominal_containing_secret() {
+    let analysis = analysis_for(
+        "pub type Credential {\n    token: Secret<Str>,\n}\ntype Login = Credential;\npub type Session {\n    login: Login,\n}\npub table Account(id: Uuid) {\n    session: Session,\n}\n",
+    );
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; a secret nested through a nominal member of a nominal is stored.
+fn stored_field_rejects_nested_nominal_containing_secret() {
+    let analysis = analysis_for(
+        "pub type Inner {\n    token: Secret<Str>,\n}\npub type Cred {\n    inner: Inner,\n}\npub table Account(id: Uuid) {\n    cred: Cred,\n}\n",
+    );
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: 29-formats serialisable subset; a nominal without any secret is a valid stored field.
+fn stored_field_accepts_nominal_without_secret() {
+    let analysis = analysis_for(
+        "pub type Addr {\n    street: Str,\n    tags: List<Str>,\n}\npub table Account(id: Uuid) {\n    addr: Addr,\n}\n",
+    );
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; an imported nominal whose exported (public) member is a
+// secret is a stored secret. Private members are not exported (see declared_nominal_schema).
+fn stored_field_rejects_imported_nominal_containing_secret() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Credential};\n\npub table Account(id: Uuid) {\n    cred: Credential,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Credential {\n    pub token: Secret<Str>,\n}\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
 #[test]
 // Specified: 29-formats serialisable subset; ordinary stored fields keep passing.
 fn ordinary_stored_fields_remain_valid() {
