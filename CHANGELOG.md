@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A malformed format-3 native graph now reports a typed `GraphMalformed` cause
+  under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
+  faults such as overlapping child ranges, broken counts, over-wide fanout, and
+  a wrong schema domain. Operational graph failures (quota, cancellation,
+  durability) are not reported as malformation.
 - Runtime admission reads the format recorded at the committed `HEAD` before
   any worktree metadata or runtime state. A `HEAD` that records a format this
   build does not know, whether `database.orna` names another `repository_format`
