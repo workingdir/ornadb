@@ -4567,11 +4567,12 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
 /// Classes whose variant carries a payload that the row does not store
 /// (`fault_injected`, `legacy_head_read_only`) and unknown names surface as
 /// `RecoveryInvalid`. `stale_capture` is handled in `replay_admin_stream_result`
-/// because its payload is captured at replay. The legacy `unavailable` and
-/// the pre-PR outcome names still map to their original variants.
+/// because its payload is captured at replay. Outcomes stored before stable
+/// classes keep their original variants: `unavailable`, and the `AdminBusy`
+/// message that busy rows stored before durable admin receipts.
 fn admin_failure_from_class(class: &str) -> RuntimeError {
     match class {
-        "admin_busy" => RuntimeError::AdminBusy,
+        "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
         "invalid_identity" => RuntimeError::InvalidIdentity,
         "invalid_digest" => RuntimeError::InvalidDigest,
         "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
@@ -41078,11 +41079,15 @@ mod tests {
     }
 
     #[test]
-    fn admin_failure_replays_pre_pr_class_names() {
-        // Stored by earlier builds (origin/main admin_failure_outcome): these
-        // must keep mapping to their original variants.
+    fn admin_failure_replays_legacy_outcome_names() {
+        // Outcomes stored before stable failure classes keep replaying as
+        // their original variants.
         assert_eq!(admin_failure_from_class("unavailable"), RuntimeError::StorageUnavailable);
         assert_eq!(admin_failure_from_class("admin_busy"), RuntimeError::AdminBusy);
+        assert_eq!(
+            admin_failure_from_class("runtime administration callback is busy"),
+            RuntimeError::AdminBusy,
+        );
         assert_eq!(
             admin_failure_from_class("invalid_observation_reference"),
             RuntimeError::InvalidObservationReference,
