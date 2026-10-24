@@ -100,6 +100,9 @@ jobs:
       - name: Audit fixture boundaries
         run: cargo test --locked -p orna-syntax-v1 --test fixture_audit
 
+      - name: Prove std wrapper effect propagation through std.reflection
+        run: cargo test --locked -p orna-semantic-v1 --test standard_effect_propagation
+
       - name: Prove pinned parser fixture behavior
         run: >-
           cargo test --locked -p orna-syntax-v1 --lib
