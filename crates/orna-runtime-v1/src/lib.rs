@@ -40803,6 +40803,106 @@ mod tests {
         assert!(checkpoint.committed.is_none());
     }
 
+    #[tokio::test]
+    async fn runtime_skip_lease_on_a_skipped_failure_is_a_failure_state_conflict() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-skip-twice", "runtime-skip-twice-next");
+        let expected = orna_stream_v1::CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let deliver_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                deliver_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let checkpoint = match stream
+            .apply_async(CommitIntent::Skip {
+                lease: skip_lease,
+                expected,
+                expected_failure_version: failed.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected skip result: {other:?}"),
+        };
+
+        // The failure is no longer open, so a second skip lease is refused by
+        // the failure-status check: a state conflict, not an unsupported skip.
+        let rejected = stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected,
+            CommitResult::Rejected(RejectReason::RetryNotAllowed)
+        );
+        let CommitResult::Rejected(reason) = rejected else {
+            unreachable!("asserted above");
+        };
+        assert_eq!(
+            failure_transition_error(reason).and_then(|error| error.public_code()),
+            Some("sys.failure.state_conflict"),
+        );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.status, FailureStatus::Skipped);
+        assert_eq!(
+            stream
+                .checkpoint_async(&recorded.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint,
+            "a refused skip lease must not move the checkpoint",
+        );
+    }
+
     #[test]
     fn failure_transition_rejections_map_to_public_failure_codes() {
         let code = |reason| failure_transition_error(reason).and_then(|error| error.public_code());
@@ -41086,6 +41186,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_replays_failure_rows_stored_before_stable_classes() {
+        // Rows as earlier releases stored them. Each legacy failure outcome
+        // replays as the error it recorded, and a replay neither applies the
+        // pause nor appends a row (ORNA-ADMIN-003).
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-legacy", "admin-legacy-next").checkpoint_key();
+        let reason = String::from("maintenance boundary");
+        let generation = admin_observed_generation(&state.capture().await.unwrap()).unwrap();
+        let legacy = [
+            ("unavailable", RuntimeError::StorageUnavailable),
+            ("admin_busy", RuntimeError::AdminBusy),
+            (
+                "runtime administration callback is busy",
+                RuntimeError::AdminBusy,
+            ),
+            (
+                "invalid_observation_reference",
+                RuntimeError::InvalidObservationReference,
+            ),
+            (
+                "checkpoint_not_replayable",
+                RuntimeError::CheckpointNotReplayable,
+            ),
+            (
+                "stream_checkpoint_stale",
+                RuntimeError::StreamCheckpointStale,
+            ),
+        ];
+        for (invocation_id, (outcome, expected)) in (80u8..).map(id).zip(legacy.iter()) {
+            let operation = AdminInvocationOperation::Pause {
+                key: key.clone(),
+                reason: Some(reason.clone()),
+            };
+            store_admin_invocation_audit(
+                &state.connection,
+                &admin_invocation_descriptor_with_id(&operation, invocation_id),
+                writer,
+                generation,
+                format!("failure:{outcome}"),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state
+                    .pause_stream_with_reason_and_invocation_id(
+                        writer,
+                        key.clone(),
+                        reason.clone(),
+                        invocation_id,
+                    )
+                    .await,
+                Err(expected.clone()),
+                "{outcome}",
+            );
+        }
+        assert_eq!(
+            state.admin_invocation_audits().await.unwrap().len(),
+            legacy.len()
+        );
+        assert_eq!(state.stream_pause_reason(&key).await, Ok(None));
+    }
+
+    #[tokio::test]
     async fn admin_request_replay_returns_its_durable_receipt_without_reapplying() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -41284,7 +41451,9 @@ mod tests {
         assert_eq!(failed.function, "sys.admin.pause_stream_with_reason");
         assert!(failed.safe_arguments.contains("stream_ref_digest="));
         assert!(failed.safe_arguments.contains("reason_digest="));
-        assert!(failed.terminal_outcome.starts_with("failure:"));
+        assert_eq!(failed.terminal_outcome, "failure:admin_busy");
+        let generation = admin_observed_generation(&capture_before).unwrap();
+        assert_eq!(failed.observed_generation, generation);
         let receipt = reopened
             .admin_invocation_receipt(invocation_id)
             .await
@@ -41304,6 +41473,7 @@ mod tests {
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
         assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
+        assert_eq!(rejected_receipt.observed_generation, generation);
     }
 
     #[tokio::test]
