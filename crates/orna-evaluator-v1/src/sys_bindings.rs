@@ -18,7 +18,7 @@ use orna_sys_v1::{
 use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{
-    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget, Value,
     SysHostAttachment, SysHostContext,
 };
 
@@ -1072,6 +1072,77 @@ pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
     operation == BLOB_ANNOTATION_OPERATION
 }
 
+/// True when `operation` is a metadata or content reflection over a Blob value
+/// (`sys.blob.media_type`, `sys.blob.suffix`, `sys.blob.same_content`).
+///
+/// These declare no role: the generated `annotated-blob-format-3` contract
+/// names them and the evaluator answers them natively from the Blob value.
+pub(crate) fn is_blob_reflection_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "sys.blob.media_type" | "sys.blob.suffix" | "sys.blob.same_content"
+    )
+}
+
+/// True when the evaluator dispatches `operation` as a Blob annotation or as a
+/// Blob reflection.
+pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
+    is_blob_annotation_operation(operation) || is_blob_reflection_operation(operation)
+}
+
+/// Answers a generated Blob reflection call from the value's own annotation.
+///
+/// `media_type` and `suffix` read only the canonical annotation without
+/// hydrating payload bytes. `same_content` compares exact bytes under the
+/// content rules and may stream them, so an unreadable side fails with its
+/// portable `sys.blob.*` code. Arity comes from the generated contract.
+pub(crate) fn dispatch_blob_reflection(
+    operation: &str,
+    arguments: &[ContextValue],
+) -> Result<Value, EvaluationError> {
+    if !is_blob_reflection_operation(operation) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    let contract = orna_sys_v1::system_dispatch_table()
+        .operation(operation)
+        .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+    if contract.role.is_some() || contract.contract.as_deref() != Some(BLOB_ANNOTATION_CONTRACT) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    match (operation, arguments) {
+        ("sys.blob.media_type", [value]) => {
+            let blob = value.blob().map_err(blob_reflection_failure)?;
+            Ok(Value::String(blob.media_type().to_owned()))
+        }
+        ("sys.blob.suffix", [value]) => {
+            let blob = value.blob().map_err(blob_reflection_failure)?;
+            Ok(Value::Option(
+                blob.suffix()
+                    .map(|suffix| Box::new(Value::String(suffix.to_owned()))),
+            ))
+        }
+        ("sys.blob.same_content", [left, right]) => {
+            let left = left.blob().map_err(blob_reflection_failure)?;
+            let right = right.blob().map_err(blob_reflection_failure)?;
+            left.same_content(&right)
+                .map(Value::Bool)
+                .map_err(blob_reflection_failure)
+        }
+        _ => Err(redacted_error("ORNA-EVAL-ARGUMENT")),
+    }
+}
+
+/// Maps a Blob read failure to the portable code the reflection contract
+/// declares.
+fn blob_reflection_failure(error: ValueError) -> EvaluationError {
+    match error {
+        ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
+        ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
+        ValueError::InvalidContext => redacted_error("sys.blob.reference_context"),
+        _ => redacted_error("ORNA-EVAL-VALUE"),
+    }
+}
+
 /// Rewraps a registry-admitted failure code as an evaluator error.
 ///
 /// The code already crossed `validate_failure`, so it is a generated qualified
@@ -1645,5 +1716,146 @@ mod tests {
             Some("sys.codec.unsupported_value_profile".to_owned()),
             "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
         );
+    }
+
+    #[test]
+    fn sys_blob_reflection_on_rov3_and_ovb2() {
+        struct PayloadResolver(Vec<u8>);
+
+        impl orna_value_v1::BlobResolver for PayloadResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                offset: u64,
+                length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                let start =
+                    usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let length =
+                    usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(orna_value_v1::Error::InvalidRange)?;
+                self.0
+                    .get(start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(orna_value_v1::Error::InvalidRange)
+            }
+        }
+
+        let payload = b"payload";
+        let database = [1; 16];
+        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
+            std::sync::Arc::new(PayloadResolver(payload.to_vec()));
+        let context = orna_value_v1::Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let identity = orna_value_v1::ContentIdentity::from_bytes(payload);
+        let reference = context
+            .reference(
+                identity,
+                orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+            )
+            .unwrap();
+        let rov3_source =
+            Blob::from_reference_with_annotation(reference, "application/octet-stream", None)
+                .unwrap();
+        let ovb2_source =
+            Blob::from_bytes_with_annotation(payload.to_vec(), "application/octet-stream", None)
+                .unwrap();
+        let rov3 = ContextValue::from_blob(&rov3_source, ValueFormat::Rov3).unwrap();
+        let ovb2 = ContextValue::from_blob(&ovb2_source, ValueFormat::Ovb2).unwrap();
+
+        let rov3_text = |value: &str| {
+            ContextValue::new_in_context(
+                &context,
+                ValueFormat::Rov3,
+                OvbRaw::Text(value.to_owned()),
+            )
+            .unwrap()
+        };
+        let ovb2_text = |value: &str| {
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text(value.to_owned())).unwrap()
+        };
+        let rov3_annotated = dispatch_blob_annotation(
+            BLOB_ANNOTATION_OPERATION,
+            &[rov3.clone(), rov3_text("audio/mp4"), rov3_text("m4b")],
+        )
+        .expect("annotation keeps the ROV-3 profile");
+        let ovb2_annotated = dispatch_blob_annotation(
+            BLOB_ANNOTATION_OPERATION,
+            &[ovb2.clone(), ovb2_text("audio/mp4"), ovb2_text("m4b")],
+        )
+        .expect("annotation keeps the OVB-2 profile");
+        assert_eq!(rov3_annotated.format(), ValueFormat::Rov3);
+        assert_eq!(ovb2_annotated.format(), ValueFormat::Ovb2);
+
+        let media_type = |value: &ContextValue| {
+            match dispatch_blob_reflection("sys.blob.media_type", std::slice::from_ref(value))
+                .expect("media_type reads metadata")
+            {
+                Value::String(media_type) => media_type,
+                _ => panic!("media_type returns Str"),
+            }
+        };
+        let suffix = |value: &ContextValue| {
+            dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value))
+                .expect("suffix reads metadata")
+        };
+        assert_eq!(media_type(&rov3), "application/octet-stream");
+        assert_eq!(media_type(&ovb2), "application/octet-stream");
+        assert_eq!(media_type(&rov3_annotated), "audio/mp4");
+        assert_eq!(media_type(&ovb2_annotated), "audio/mp4");
+        assert!(matches!(suffix(&rov3), Value::Option(None)));
+        assert!(matches!(
+            suffix(&ovb2_annotated),
+            Value::Option(Some(value)) if matches!(value.as_ref(), Value::String(text) if text == "m4b")
+        ));
+
+        let same_content = |left: &ContextValue, right: &ContextValue| {
+            match dispatch_blob_reflection(
+                "sys.blob.same_content",
+                &[left.clone(), right.clone()],
+            )
+            .expect("same_content reads exact content")
+            {
+                Value::Bool(equal) => equal,
+                _ => panic!("same_content returns Bool"),
+            }
+        };
+        // ORNA-BLOB-005: a descriptor-only ROV-3 value has no shared admitted
+        // witness with inline OVB-2 bytes, so the reflection reports explicit
+        // unavailability instead of inventing a content comparison.
+        assert!(
+            dispatch_blob_reflection(
+                "sys.blob.same_content",
+                &[rov3.clone(), ovb2.clone()],
+            )
+            .is_err()
+        );
+        // Annotations are ignored when comparing exact inline OVB-2 bytes.
+        assert!(same_content(&ovb2, &ovb2_annotated));
+
+        let other = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"different".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        assert!(!same_content(&rov3, &other));
+
+        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[]);
+        assert!(undeclared.is_err());
+        assert!(is_blob_host_operation("sys.blob.suffix"));
+        assert!(!is_blob_host_operation("sys.blob.capture_file"));
     }
 }
