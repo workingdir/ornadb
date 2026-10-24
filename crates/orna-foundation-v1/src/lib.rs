@@ -1327,6 +1327,10 @@ impl Diagnostic {
     pub fn notes(&self) -> &[SafeText] {
         &self.notes
     }
+    /// Nested causes attached by the producer, in attachment order.
+    pub fn causes(&self) -> &[Diagnostic] {
+        &self.causes
+    }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
         Value::new(self.boundary_projection().raw()?)
             .map_err(FoundationError::Value)?
