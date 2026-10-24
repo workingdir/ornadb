@@ -44,6 +44,9 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
     // with the typed ref conflict (ORNA-PUB-006: no false success), and the
     // repository stays consistent.
     let (repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    // The winner's locked publish body runs on a loaded runner; a long bound
+    // keeps the loser queued so the race outcome, not a timer, decides it.
+    let repository = repository.with_coordination_lock_wait(std::time::Duration::from_secs(120));
     let media = TempDir::new().expect("temporary media directory");
     fs::copy(
         Path::new(MEDIA_FIXTURES).join("tone.wav"),
