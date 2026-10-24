@@ -4357,7 +4357,11 @@ pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
+/// Encodes one value as the canonical CBOR a repository row stores, the
+/// inverse of [`decode_canonical_storage_value`]. Repository-profile tags pass
+/// through unvalidated; callers must validate the bytes against their
+/// authenticated row schema.
+pub fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_raw(raw, &mut bytes)?;
     Ok(bytes)
