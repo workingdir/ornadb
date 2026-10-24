@@ -1800,6 +1800,7 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
     sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     explain_catalogue: Option<ActivationExplainCatalogue>,
     admission: AdmissionCatalogue,
@@ -1837,6 +1838,7 @@ impl TransactionalEvaluator {
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
+            mutation_scope: [0; 32],
             sys_host: None,
             explain_catalogue: None,
         }
@@ -1859,6 +1861,11 @@ impl TransactionalEvaluator {
 
     fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    fn with_mutation_scope(mut self, scope: [u8; 32]) -> Self {
+        self.mutation_scope = scope;
         self
     }
 
@@ -2034,6 +2041,7 @@ impl TransactionalEvaluator {
                 limits,
                 activation_time: self.activation_time,
                 publication_rows: self.publication_rows.clone(),
+                mutation_scope: self.mutation_scope,
                 sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
             };
@@ -2250,6 +2258,8 @@ impl DurableTransactionalEvaluator {
 
     /// Executes one admitted source activation against durable committed rows.
     /// Failed source evaluation never reaches the durable commit boundary.
+    /// Zero-scope: this entry point carries no request identity, so its table mutation
+    /// ids stay content-addressed. The CLI never reaches it; conformance and tests do.
     pub async fn execute_source(
         &self,
         repository: &Repository,
@@ -2467,7 +2477,8 @@ impl DurableTransactionalEvaluator {
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
             .with_sys_host_context(self.sys_host.clone())
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_mutation_scope(request_mutation_scope(&request));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -2636,7 +2647,8 @@ impl DurableTransactionalEvaluator {
         }
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
             .with_sys_host_context(self.sys_host.clone())
-            .with_activation_time(continuation.context().activation_time());
+            .with_activation_time(continuation.context().activation_time())
+            .with_mutation_scope(request_mutation_scope(&continuation.identity()));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -3506,6 +3518,8 @@ impl DurableTransactionalEvaluator {
             .await
     }
 
+    /// Stream rows take delivery-addressed mutation ids (ORNA-LIST-STREAM-MUTATION),
+    /// not the content-addressed source digest, so no request mutation scope applies.
     async fn execute_admitted_project_stream<C>(
         &self,
         target: RuntimeTarget<'_>,
@@ -3648,6 +3662,8 @@ impl DurableTransactionalEvaluator {
         }
     }
 
+    /// Zero-scope: reached only through `execute_project_with_arguments`, which has no
+    /// request identity. Mutation ids stay content-addressed.
     async fn execute_admitted_project_with_arguments(
         &self,
         target: RuntimeTarget<'_>,
@@ -3782,6 +3798,7 @@ impl DurableTransactionalEvaluator {
             .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows)
+            .with_mutation_scope(request_mutation_scope(&request))
             .with_explain_catalogue(explain_catalogue);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
@@ -5681,6 +5698,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
     sys_host: Option<&'activation SysHostAttachment>,
     explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
 }
@@ -6298,6 +6316,7 @@ impl TableEffectHandler<'_, '_> {
         self.next_mutation = self.next_mutation.saturating_add(1);
         let mut digest = Sha256::new();
         digest.update(b"ORNA-SOURCE-MUTATION\0");
+        digest.update(self.mutation_scope);
         digest.update(table.as_bytes());
         digest.update([0]);
         digest.update(&key);
@@ -6757,6 +6776,14 @@ fn project_transaction_namespace(
         return Err("project transaction modules need a non-empty logical namespace".into());
     }
     Ok(stem.replace('/', "."))
+}
+
+fn request_mutation_scope(request: &RequestIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-SOURCE-MUTATION-SCOPE\0");
+    digest.update(request.session_id);
+    digest.update(request.request_id);
+    digest.finalize().into()
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -10122,6 +10149,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
@@ -10476,6 +10504,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
@@ -10666,6 +10695,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
