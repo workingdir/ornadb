@@ -9,7 +9,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pinned_reflection_modules_are_snapshot_bound_and_importable() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
             path == "std/introspection.orna" || path == "std/reflection.orna"

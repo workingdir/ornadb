@@ -38,6 +38,28 @@ been published.
   publish, show history and mount its rows. Opening a row map pins the
   committed `main.orna` by its blob OID instead of reading the source under a
   64 KiB cap that store format 3 sets only for `database.orna`.
+- Deleted the old-stack island crates `orna-client`, `orna-artifact`, `orna-protocol`, `orna-standard` and `orna-runtime-tty` (deletion programme step 7). None had a production caller: their only remaining dependents were the `orna-application-v1` dev-dependency (now removed) and each other. The `orna-standard` snapshot oracle `v1_profile.rs` is ported to `crates/orna-evaluator-v1/tests/standard_profile_v1.rs` (imports rewired to `orna-standard-sources`, fixtures moved alongside); `orna-standard-sources` remains the canonical source. The `just` recipes for the removed demos, Qt runtime and Studio shell (`runtime-tty-demo`, `client-*-demo`, `demo-suite`, `runtime-qt-*`, `studio-qt-*`, `runtime-suite`, `runtime-display-suite`, `runtime-abi-header-check`, `runtime-abi-parity`) were removed with them.
+- The `orna` CLI no longer links `orna-client` (and its HTTP, WebSocket and Qt-ABI dependencies) for the `:watch` types. `live_presentation` moved unchanged from `orna-client` into `orna-live-v1`, which the CLI already depends on (deletion programme step 4). The public API of `orna-client` no longer exports `live_presentation`; import it from `orna-live-v1` instead.
+- A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
+- Managed paths refuse a `.git` component at any depth and in any letter case,
+  including the Windows and macOS spellings Git refuses (trailing dot or space,
+  `git~1`, a `:` stream suffix and HFS ignorable characters), on write and when
+  a committed tree is loaded or listed. Before, only an exact `.git` first
+  component was refused. Path length is not capped, because Git stores names of
+  any length. Untracked user paths such as `Sub/.GIT/notes` still appear in
+  status and checkout plans, and a forced checkout leaves them in place.
+  `orna export --check` and `--restore` refuse an archive whose dependency path
+  names Git metadata before anything is restored. Managed paths also refuse a
+  backslash, a NUL byte, an empty component (`a//b`, `a/`), and `..`, absolute
+  and other non-normal components, on write, in publication and checkout
+  journals, and in compact manifests. The system worktree listing skips a
+  Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
+  as a user path.
+- `scripts/orna_extract.py` is an independent extractor. It reads a format-3
+  repository's Git objects at a commit through `git cat-file --batch`, without
+  the engine's readers, and writes the modules, the schema, the rows and each
+  Blob's bytes. It refuses any tracked `.orna/` entry other than `database.orna`
+  and `store` (ORNA-META-001).
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
@@ -69,6 +91,16 @@ been published.
 - `orna commit` refuses a staged index whose `.orna/store` is partial after `git rm --cached .orna/store`, leaving skip-worktree payload entries behind, with `E2302` naming the unstaged committed relation and its `git restore --staged .orna/store` remedy, instead of a generic staging failure.
 - A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
 - A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
+- `orna serve` hosts the clone's durable runtime. A live eval that inserts
+  into a project table commits the row together with its terminal outcome,
+  and resending the same request ID returns the recorded outcome without
+  running again; before, every writing eval was refused. Each eval is one
+  REPL input: a declaration, binding or import answers with typed Unit and
+  persists for the session, and an input that declares a function named
+  `serve` or `main` is an ordinary declaration rather than a one-shot module
+  run. An explicit resync is answered with the watch's latest full snapshot
+  under its own request ID; before, a changed value produced a delta with no
+  request ID.
 - `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
@@ -136,6 +168,26 @@ been published.
   The build checks that every published code is declared by an operation, is
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
+- A failed stream administration call (pause, resume or checkpoint reset)
+  records a stable failure class in its invocation audit row, with the
+  generation its writer fence observed. A retry under the same invocation ID
+  returns the recorded error instead of a storage-unavailable error. A stale
+  capture stores the capture that rejected the call and replays that same
+  error, even after later commits advance the CWD. A rejected stream-reference
+  resume now records its failure like a rejected pause.
+- When the CWD generation cannot be read, the row records no generation (NULL)
+  with a `failure:unobservable:<class>` outcome, and the first call still
+  returns its original error. A retry replays `<class>` as the same error when
+  the class is payload-free. The payload-carrying classes `stale_capture`,
+  `fault_injected` and `legacy_head_read_only`, and a bare legacy
+  `failure:unobservable` row, replay as `RecoveryInvalid`, because their
+  payload was never stored. The observed generation is nullable in the audit
+  schema, migrated in place for existing stores; unobservable rows are
+  excluded from the checkpoint-reset generation ordering.
+- A skip lease refused because the
+  failure is no longer open is `sys.failure.state_conflict`, not
+  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
+  no longer takes a lease purpose.
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and
@@ -145,6 +197,13 @@ been published.
   and `SystemDiagnosticAdapterError`). Also removed
   `SysHostBindingRegistry::with_explain_catalogue` and
   `CaptureFileError::code`.
+- Removed the unreachable `orna-core` catalogue bridge from `orna-runtime-v1`:
+  `CatalogueAdmission::from_artifact`,
+  `RuntimeState::commit_validated_catalogue_table_request_activation_with_revision_pair`
+  and `RuntimeState::catalogue_revision_pair_at`. Nothing called them, so every
+  catalogue admission already recorded no revision pair. `orna-runtime-v1` no
+  longer depends on `orna-core`. The `runtime_catalogue_revision_binding` table
+  stays in the state schema, so existing `state.db` files open unchanged.
 - Opening a repository format context reads only the root tree, the `.orna`
   tree and its metadata blobs, through one long-lived `git cat-file
   --batch-command` reader per repository handle. It no longer lists the whole
@@ -399,6 +458,17 @@ been published.
   removal without rechecking the source, reports nothing to discard once nothing
   remains, and `migrate copy` refuses the destination while the quarantine
   exists.
+- The command-line executable is now `orna`; the package and crate remain
+  `orna-cli-v1`. The former `orna-cli-v1` executable name is removed with no
+  alias or shim. Build output is `target/<profile>/orna`, and the Linux package
+  and release paths, CI, and the command examples in the README and docs name
+  `orna`.
+- `TransactionalEvaluator` and `DurableTransactionalEvaluator` now admit
+  transactions against the production catalogue by default, so a user module
+  whose path matches a conformance fixture namespace, such as
+  `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
+  conformance fixture catalogue is an explicit harness opt-in only, through
+  `TransactionalEvaluator::with_fixture_catalogue`.
 
 ## 1.0.0 — release inventory (publication pending)
 
