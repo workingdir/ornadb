@@ -13,6 +13,19 @@ been published.
   handle does not re-admit a refusal that a later accepted save resolved.
   Earlier builds did not attempt acceptance at close and did not keep unsynced
   drafts on release.
+- A malformed format-3 native graph now reports a typed `GraphMalformed` cause
+  under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
+  faults such as overlapping child ranges, broken counts, over-wide fanout, and
+  a wrong schema domain. Operational graph failures (quota, cancellation,
+  durability) are not reported as malformation.
+- Runtime admission reads the format recorded at the committed `HEAD` before
+  any worktree metadata or runtime state. A `HEAD` that records a format this
+  build does not know, whether `database.orna` names another `repository_format`
+  integer with any other fields or `format.orna` names one, is refused with
+  `ORNA-REPO-CONTEXT-003` (ORNA-UPGRADE-001, ORNA-META-002). The refusal is a
+  new `RuntimeError::UnknownHeadFormat`, and its persisted admin failure class
+  is `unknown_head_format`. Other `HEAD` metadata failures keep the existing
+  path.
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with
