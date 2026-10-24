@@ -1,6 +1,7 @@
 //! Process-kill recovery checks for the real `orna publish` executable.
 use std::{
     fs::File,
+    ops::{Deref, DerefMut},
     path::Path,
     process::{Child, Command, Output},
     thread,
@@ -109,6 +110,32 @@ async fn commit_capture(
     drop(source_bindings);
 }
 
+/// A crash child that is SIGKILLed and reaped when dropped, so a failed
+/// assertion mid-matrix never leaks a parked publisher or its runtime locks.
+struct ChildGuard(Child);
+
+impl Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn cli(directory: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command.current_dir(directory)
@@ -120,11 +147,11 @@ fn cli(directory: &Path, arguments: &[&str]) -> Output {
     command.args(arguments).output().expect("CLI process starts")
 }
 
-fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> Child {
+fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> ChildGuard {
     launch_with_arguments(directory, boundary, crash_dir, &["publish"])
 }
 
-fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arguments: &[&str]) -> Child {
+fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arguments: &[&str]) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command.current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -132,7 +159,7 @@ fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arg
         .env(CRASH_AT, boundary)
         .env(CRASH_DIR, crash_dir);
     command.args(arguments);
-    command.spawn().expect("publication child starts")
+    ChildGuard(command.spawn().expect("publication child starts"))
 }
 
 fn launch_capture_child(
@@ -143,7 +170,7 @@ fn launch_capture_child(
     store_root: &str,
     boundary: &str,
     crash_dir: &Path,
-) -> Child {
+) -> ChildGuard {
     let mut command = Command::new(std::env::current_exe().expect("test executable path"));
     command
         .current_dir(repository_root)
@@ -160,7 +187,7 @@ fn launch_capture_child(
         command.env_remove(name);
     }
     command.args(["--exact", "capture_crash_child", "--nocapture"]);
-    command.spawn().expect("capture crash child starts")
+    ChildGuard(command.spawn().expect("capture crash child starts"))
 }
 
 #[tokio::test]
