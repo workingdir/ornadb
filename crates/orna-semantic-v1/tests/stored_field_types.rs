@@ -363,3 +363,52 @@ fn stored_field_local_nominal_does_not_collide_with_unimported_secret_alias() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+// Specified: ORNA-SECRET-001; two modules export `Token`. The import `use creds.{Token}` names
+// the secret-holding one, so the stored field is rejected regardless of the other export.
+fn stored_field_rejects_ambiguous_name_imported_from_secret_module() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Token};\n\npub table Account(id: Uuid) {\n    token: Token,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+        ModuleInput::new("other.orna", "pub type Token = Int;\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; the same name imported from the module exporting a non-secret
+// `Token` is a valid stored field: the import names the module, not a search across modules.
+fn stored_field_accepts_ambiguous_name_imported_from_plain_module() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use other.{Token};\n\npub table Account(id: Uuid) {\n    token: Token,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+        ModuleInput::new("other.orna", "pub type Token = Int;\n"),
+    ]);
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; an alias chain through an ambiguous name stays secret: `relay`
+// imports the secret `Token` from `creds` and re-exports an alias of it.
+fn stored_field_rejects_alias_chain_through_ambiguous_name() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use relay.{Alias};\n\npub table Account(id: Uuid) {\n    token: Alias,\n}\n",
+        ),
+        ModuleInput::new(
+            "relay.orna",
+            "use creds.{Token};\n\npub type Alias = Token;\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+        ModuleInput::new("other.orna", "pub type Token = Int;\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
