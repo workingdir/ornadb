@@ -278,6 +278,9 @@ pub async fn import_stream_carry(
 
     let (identity, digest) = migration_copy_runtime_identity(destination)?;
     let state = RuntimeState::open(destination, identity, digest).await?;
+    if carried_rows_present(&state.connection).await? {
+        return Err(RuntimeError::MigrationCarryTargetNotEmpty);
+    }
     let transaction = state
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -342,6 +345,19 @@ pub async fn import_stream_carry(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(())
+}
+
+async fn carried_rows_present(connection: &Connection) -> Result<bool, RuntimeError> {
+    for table in [
+        "stream_checkpoint",
+        "stream_checkpoint_migration_bridge",
+        "stream_checkpoint_migration_archive",
+    ] {
+        if count_rows(connection, table).await? > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn read_source_generation(connection: &Connection) -> Result<(i64, Vec<u8>), RuntimeError> {
