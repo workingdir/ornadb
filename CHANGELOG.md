@@ -12,9 +12,7 @@ been published.
   than drops, a valid dirty draft that retention cannot keep, and a released
   handle does not re-admit a refusal that a later accepted save resolved.
   Earlier builds did not attempt acceptance at close and did not keep unsynced
-  drafts on release. `orna unmount` retries a busy FUSE mount for the same
-  grace window a termination-signal unmount already used, because the kernel
-  can report the mount busy for a few milliseconds after the final `close(2)`.
+  drafts on release.
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with
