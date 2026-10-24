@@ -15,6 +15,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn prelude_sources() -> Vec<(String, String)> {
     let wanted = [
         REFERENCE_STANDARD_COLLECTION_PATH_V1,
+        "std/list.orna",
         REFERENCE_STANDARD_OPTION_PATH_V1,
         REFERENCE_STANDARD_PRELUDE_PATH_V1,
         REFERENCE_STANDARD_TEXT_PATH_V1,
