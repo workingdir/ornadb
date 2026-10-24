@@ -810,7 +810,14 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
     let schema_bytes = schema_descriptor(relation_id)
         .encode()
         .expect("encode canonical table schema");
-    let schema_digest: [u8; 32] = <Sha256 as sha2::Digest>::digest(&schema_bytes).into();
+    let chunk_digest: [u8; 32] = <Sha256 as sha2::Digest>::digest(&schema_bytes).into();
+    // The kind-6 node and every rows domain carry the format-3 schema
+    // identity: SHA-256 of `orna.schema.v3`, NUL and the descriptor bytes.
+    let schema_digest: [u8; 32] = <Sha256 as sha2::Digest>::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_bytes)
+        .finalize()
+        .into();
 
     let mut graph = GraphFixture::default();
     if fault == Fault::None {
@@ -827,7 +834,7 @@ fn build_fixture(row_count: u64, fault: Fault) -> Fixture {
     cbor_array(&mut byte_index_data, 3);
     cbor_uint(&mut byte_index_data, schema_bytes.len() as u64);
     cbor_bytes(&mut byte_index_data, &schema_chunk.0);
-    cbor_bytes(&mut byte_index_data, &schema_digest);
+    cbor_bytes(&mut byte_index_data, &chunk_digest);
     let byte_index = graph.add_node(
         byte_index_data,
         vec![Edge {
@@ -1193,12 +1200,13 @@ fn exercise_concurrent_writes(fixture: &Fixture) {
         cold_page_delta.0 > 0,
         "cold writes must fetch missing row pages"
     );
+    // Maintenance is incremental (store-format-3 §3): an append reads the
+    // path to the last page, never the table.
     assert!(
-        fixture
-            .index_data_blobs
-            .keys()
-            .all(|oid| after_cold.objects.contains_key(oid)),
-        "cold write traversal must materialize all source row pages"
+        cold_page_delta.0 * 100 < fixture.index_data_blobs.len(),
+        "cold writes fetched {} of {} source row pages",
+        cold_page_delta.0,
+        fixture.index_data_blobs.len()
     );
 
     let cold_media_delta =
@@ -1267,12 +1275,16 @@ struct IndexChurnMetrics {
     media_transfer: (usize, usize),
 }
 
+/// Runs one maintenance pass. `media_page` says whether the pass rewrites the
+/// page holding the Blob row, or adds a row naming its descriptor: only then
+/// do the rewritten pages name the descriptor again.
 fn measure_index_churn(
     fixture: &Fixture,
     repository_path: &Path,
     operation: &str,
     mutation: RowIndexMutation,
     expected_rows: u64,
+    media_page: bool,
 ) -> IndexChurnMetrics {
     let repository = Repository::discover(repository_path).expect("discover churn clone");
     let context = repository.open_format_context().expect("admit churn clone");
@@ -1303,10 +1315,19 @@ fn measure_index_churn(
         !maintenance.index_objects_created().is_empty(),
         "{operation} must create index objects"
     );
-    assert!(
+    // Untouched pages keep their object IDs unread (store-format-3 §3); a
+    // rewritten page names the stored Blob descriptor without rewriting it.
+    assert_eq!(
         !maintenance.payload_objects_reused().is_empty(),
-        "{operation} must retain the existing Blob descriptor"
+        media_page,
+        "{operation}: the rewritten pages name the existing Blob descriptor"
     );
+    if fixture.leaf_pages > 1 {
+        assert!(
+            !maintenance.index_objects_reused().is_empty(),
+            "{operation} keeps the untouched pages by object ID"
+        );
+    }
     let after_objects = object_inventory(repository_path);
     let source_page_transfer =
         index_data_delta(&fixture.index_data_blobs, &before_objects, &after_objects);
@@ -1367,6 +1388,7 @@ fn exercise_index_churn(fixture: &Fixture) {
             "prepend row",
             prepend,
             fixture.row_count + 1,
+            true,
         ),
     );
 
@@ -1381,6 +1403,7 @@ fn exercise_index_churn(fixture: &Fixture) {
                 key: TypedKey::UInt(fixture.row_count / 2),
             },
             fixture.row_count - 1,
+            fixture.leaf_pages == 1,
         ),
     );
 
@@ -1396,6 +1419,7 @@ fn exercise_index_churn(fixture: &Fixture) {
                 to: TypedKey::UInt(fixture.row_count + 20),
             },
             fixture.row_count,
+            fixture.leaf_pages == 1,
         ),
     );
 
@@ -1423,6 +1447,7 @@ fn exercise_index_churn(fixture: &Fixture) {
             "insert large row",
             large_row,
             fixture.row_count + 1,
+            true,
         ),
     );
     let after_churn = object_inventory(&clone_path);
