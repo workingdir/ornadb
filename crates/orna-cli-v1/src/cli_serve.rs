@@ -1915,11 +1915,15 @@ fn run_git_http_backend(
         .parent()
         .ok_or_else(|| io::Error::other("repository parent is unavailable"))?;
     let mut command = Command::new("git");
-    // The CGI child gets no inherited environment, so server tokens, proxy
-    // settings and ambient GIT_* routing or config never reach it.
-    command
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
+    // The CGI child inherits only this allow-list: PATH to run git, HOME and
+    // TMPDIR for git's own state, and locale. Server tokens, proxy settings and
+    // ambient GIT_* routing or config variables never reach it.
+    command.env_clear();
+    for name in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
         .arg("http-backend")
         .current_dir(root)

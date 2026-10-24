@@ -390,3 +390,38 @@ fn validate_environment_name(name: &str) -> Result<(), ProcessProviderError> {
     }
     Ok(())
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A timed-out child that spawned a grandchild holding the output pipes
+    /// must not keep the call waiting for the grandchild: the whole process
+    /// group is killed at the deadline.
+    #[test]
+    fn timeout_kills_grandchildren_that_hold_the_output_pipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut provider = ProcessProvider::new(Duration::from_secs(60), 4096).unwrap();
+        provider
+            .allow_command("/bin/sh", &root, Vec::<String>::new())
+            .unwrap();
+
+        let started = Instant::now();
+        let result = provider.run(
+            "/bin/sh",
+            &["-c".to_owned(), "sleep 30 & wait".to_owned()],
+            root.to_str().unwrap(),
+            &[],
+            None,
+            Some(Duration::from_millis(500)),
+            4096,
+        );
+
+        assert_eq!(result, Err(ProcessProviderError::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "timeout waited for a grandchild holding the output pipes"
+        );
+    }
+}
