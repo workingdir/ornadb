@@ -53,6 +53,19 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+/// The writer owner identity of this operating-system process.
+///
+/// Every CLI invocation, served host, REPL and mount in one process shares this
+/// identity. A different process never reuses it, so a process that opens the
+/// runtime after a predecessor died takes the writer lease over with a new
+/// epoch (see [`RuntimeState::acquire_lease`]) instead of resuming the dead
+/// owner's token.
+#[must_use]
+pub fn process_owner_id() -> [u8; 16] {
+    static OWNER: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    *OWNER.get_or_init(|| *Uuid::new_v4().as_bytes())
+}
+
 mod activation;
 pub use activation::{
     ActivationError, ActivationWork, run_admitted_table_activation,
@@ -10044,6 +10057,12 @@ impl RuntimeState {
         CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
     }
 
+    /// Acquires the writer lease for `owner_id`.
+    ///
+    /// The current holder re-acquires its own lease unchanged. A different
+    /// recorded owner is refused with `LeaseHeld` unless this state holds the
+    /// runtime owner lock, which proves the recorded owner has departed; then
+    /// the lease is taken over with a bumped epoch, fencing the departed token.
     pub async fn acquire_lease(&self, owner_id: [u8; 16]) -> Result<WriterLease, RuntimeError> {
         validate_id(owner_id)?;
         let tx = self
@@ -10066,7 +10085,20 @@ impl RuntimeState {
             let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
             if owner != owner_id {
-                return Err(RuntimeError::LeaseHeld);
+                // Holding the exclusive runtime owner lock proves no other live
+                // process is a writer, so the recorded owner is departed. Its
+                // token is fenced by a compare-and-swap takeover, which bumps the
+                // epoch and makes every stale token fail with `OwnerLost`.
+                if self.runtime_owner_lock.is_none() {
+                    return Err(RuntimeError::LeaseHeld);
+                }
+                let abandoned = WriterLease {
+                    owner_id: owner,
+                    epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                };
+                drop(rows);
+                drop(tx);
+                return self.takeover_lease(abandoned, owner_id).await;
             }
             tx.commit()
                 .await

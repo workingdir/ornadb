@@ -242,22 +242,15 @@ fn crash_at_the_row_commit_barrier_keeps_the_committed_row() {
         );
         assert_eq!(state.pending().await.unwrap().len(), 1);
 
-        // The crashed owner is still recorded, and its write permission is
-        // only released through the explicit compare-and-swap takeover.
-        assert_eq!(
-            state.acquire_lease(REPLACEMENT).await,
-            Err(RuntimeError::LeaseHeld)
-        );
+        // The crashed owner is still recorded, but this process holds the
+        // runtime owner lock, so the departed owner is taken over with a
+        // bumped epoch and its token is fenced.
         let replacement = state
-            .recover_abandoned(OWNER, REPLACEMENT)
+            .acquire_lease(REPLACEMENT)
             .await
-            .expect("the abandoned owner is recoverable by compare-and-swap");
+            .expect("a departed owner is taken over by the lock holder");
         assert_eq!(replacement.owner_id, REPLACEMENT);
         assert_eq!(replacement.epoch, 2, "takeover advances the writer epoch");
-        assert_eq!(
-            state.acquire_lease(OWNER).await,
-            Err(RuntimeError::LeaseHeld)
-        );
 
         // The replacement writer can commit a further row on top of the
         // surviving one, so the crash consumed no later tail.
@@ -312,15 +305,11 @@ fn crash_before_the_row_commit_barrier_acknowledges_nothing() {
             "the uncommitted tail leaves no durable mutation record"
         );
 
-        // The crashed owner still holds the fence until an explicit takeover.
-        assert_eq!(
-            state.acquire_lease(REPLACEMENT).await,
-            Err(RuntimeError::LeaseHeld)
-        );
+        // The crashed owner is taken over by the lock holder with a bumped epoch.
         let replacement = state
-            .recover_abandoned(OWNER, REPLACEMENT)
+            .acquire_lease(REPLACEMENT)
             .await
-            .expect("the abandoned owner is recoverable by compare-and-swap");
+            .expect("a departed owner is taken over by the lock holder");
         assert_eq!(replacement.epoch, 2);
     });
 }

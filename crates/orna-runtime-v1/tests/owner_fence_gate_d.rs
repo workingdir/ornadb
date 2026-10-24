@@ -2,13 +2,13 @@
 //!
 //! Gate D clause "no abandoned owner retains write permission" is defined here
 //! by the existing lease semantics: a writer is its lease token `(owner, epoch)`.
-//! The CLI writers (`orna run`, the REPL, and the mount) all acquire the lease
-//! with `acquire_lease` under the worktree's shared owner ID. A child process
-//! does exactly that while holding the runtime owner lock, then blocks until it
-//! is SIGKILLed. The parent proves a live owner excludes a second owner, then
-//! takes the lease over with the existing owner-and-epoch compare-and-swap
-//! (`takeover_lease`). The dead owner's token must be rejected with `OwnerLost`
-//! and land nothing, while the replacement owner can commit.
+//! Every CLI process acquires the lease under its own per-process owner ID
+//! (`process_owner_id`). A child process acquires the lease while holding the
+//! runtime owner lock, prints its `WriterLease` token, then blocks until it is
+//! SIGKILLed. A replacement process that takes the runtime owner lock acquires
+//! the lease, which takes over the departed token with a bumped epoch. The dead
+//! owner's token must then be rejected with `OwnerLost` and land nothing, while
+//! the replacement owner can commit.
 //!
 //! This test does not claim that a live writer is fenced from outside its
 //! process; that remains a gap (see the filed bead for Gate D).
@@ -23,7 +23,10 @@ use std::{
 };
 
 use orna_repository_v1::Repository;
-use orna_runtime_v1::{NoFault, RequestIdentity, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation};
+use orna_runtime_v1::{
+    NoFault, RequestIdentity, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    WriterLease, process_owner_id,
+};
 use tempfile::{Builder, TempDir};
 
 const CHILD_REPOSITORY: &str = "ORNA_OWNER_FENCE_CHILD_REPOSITORY";
@@ -32,9 +35,9 @@ const LEASE_CHILD_TEST: &str = "owner_fence_child_holds_writer_lease";
 const RUNNING_CHILD_TEST: &str = "owner_fence_child_leaves_running_request";
 const SIGKILL: i32 = 9;
 
-/// The CLI writer owner for a repository is its repository ID (`invocation_owner_id`).
-/// `identity()` uses this value as `repository_id`; `writer_owner_shared.rs` pins the CLI derivation.
-const SHARED_OWNER: [u8; 16] = [2; 16];
+/// The repository identity is shared by every writer of one worktree. Writer
+/// ownership is per process (`process_owner_id`), not this value.
+const REPOSITORY_ID: [u8; 16] = [2; 16];
 /// A second, distinct writer that must never take a live owner's lease.
 const OTHER_OWNER: [u8; 16] = [0xd2; 16];
 const INITIAL_DIGEST: [u8; 32] = [3; 32];
@@ -97,7 +100,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 fn identity() -> RuntimeIdentity {
     RuntimeIdentity {
         database_id: [1; 16],
-        repository_id: SHARED_OWNER,
+        repository_id: REPOSITORY_ID,
     }
 }
 
@@ -130,7 +133,7 @@ fn wait_for_marker(marker: &Path, child: &mut Child) {
     }
     assert!(
         marker.exists(),
-        "child never committed under its lease: {:?}",
+        "child never signalled the parent: {:?}",
         child.try_wait()
     );
 }
@@ -141,9 +144,34 @@ fn kill_and_reap(child: &mut Child) {
     assert_eq!(status.signal(), Some(SIGKILL), "owner must die by SIGKILL");
 }
 
+fn encode_lease(lease: WriterLease) -> String {
+    let owner: String = lease.owner_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("owner={owner} epoch={}", lease.epoch)
+}
+
+fn decode_lease(text: &str) -> WriterLease {
+    let mut owner_id = [0; 16];
+    let mut epoch = None;
+    for field in text.split_whitespace() {
+        if let Some(hex) = field.strip_prefix("owner=") {
+            for (index, slot) in owner_id.iter_mut().enumerate() {
+                *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+                    .expect("hex owner byte");
+            }
+        } else if let Some(value) = field.strip_prefix("epoch=") {
+            epoch = Some(value.parse().expect("decimal epoch"));
+        }
+    }
+    WriterLease {
+        owner_id,
+        epoch: epoch.expect("epoch field"),
+    }
+}
+
 /// The owner that gets killed. It only runs when the parent re-executes this
-/// binary with `CHILD_REPOSITORY` set; it acquires the CLI writer lease,
-/// commits one row, signals the parent, then blocks until SIGKILL.
+/// binary with `CHILD_REPOSITORY` set; it acquires the writer lease under its
+/// process owner, commits one row, prints its `WriterLease` token, signals the
+/// parent, then blocks until SIGKILL.
 #[test]
 fn owner_fence_child_holds_writer_lease() {
     let Some(repository_path) = env::var_os(CHILD_REPOSITORY) else {
@@ -157,7 +185,7 @@ fn owner_fence_child_holds_writer_lease() {
             &repository,
             identity(),
             INITIAL_DIGEST,
-            SHARED_OWNER,
+            process_owner_id(),
         )
         .await
         .expect("open child runtime");
@@ -166,7 +194,7 @@ fn owner_fence_child_holds_writer_lease() {
             "child must own the worktree runtime lock"
         );
         let lease = state
-            .acquire_lease(SHARED_OWNER)
+            .acquire_lease(process_owner_id())
             .await
             .expect("child acquires the writer lease");
         let context = state.begin_activation().await.expect("child capture");
@@ -180,7 +208,9 @@ fn owner_fence_child_holds_writer_lease() {
             )
             .await
             .expect("child commits its row under the lease");
-        fs::write(&marker, b"committed").expect("signal parent");
+        let token = encode_lease(lease);
+        println!("WriterLease {token}");
+        fs::write(&marker, token.as_bytes()).expect("signal parent with the lease token");
         loop {
             thread::sleep(Duration::from_secs(1));
         }
@@ -188,7 +218,7 @@ fn owner_fence_child_holds_writer_lease() {
 }
 
 /// The owner that gets killed while a request is Running. It leaves a durable
-/// `Running` request-ledger row under the shared CLI owner, as an `orna run`
+/// `Running` request-ledger row under its process owner, as an `orna run`
 /// killed mid-invocation would.
 #[test]
 fn owner_fence_child_leaves_running_request() {
@@ -203,12 +233,12 @@ fn owner_fence_child_leaves_running_request() {
             &repository,
             identity(),
             INITIAL_DIGEST,
-            SHARED_OWNER,
+            process_owner_id(),
         )
         .await
         .expect("open child runtime");
         let lease = state
-            .acquire_lease(SHARED_OWNER)
+            .acquire_lease(process_owner_id())
             .await
             .expect("child acquires the writer lease");
         let (_, capability) = state
@@ -240,6 +270,10 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
     let marker = directory.path().join("owner-fence-child-marker");
     let mut child = spawn_child(LEASE_CHILD_TEST, directory.path(), &marker);
     wait_for_marker(&marker, &mut child);
+    // The dead writer's token, exactly as the child printed and published it.
+    let dead = decode_lease(&fs::read_to_string(&marker).expect("child lease token"));
+    assert_eq!(dead.epoch, 1, "the child's first acquisition is epoch 1");
+    assert_ne!(dead.owner_id, OTHER_OWNER);
 
     runtime().block_on(async {
         // While the child is alive it owns the runtime lock and the lease. A
@@ -263,11 +297,7 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             ),
             "a secondary participant must not take the writer lease from a live owner"
         );
-        assert_eq!(
-            secondary.current_lease().await.unwrap().map(|lease| lease.owner_id),
-            Some(SHARED_OWNER),
-            "the live owner's lease must be untouched by the secondary"
-        );
+        assert_eq!(secondary.current_lease().await.unwrap(), Some(dead));
         drop(secondary);
     });
 
@@ -286,17 +316,11 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             state.holds_runtime_owner_lock(),
             "the dead owner must release the runtime lock"
         );
-        let dead = state
-            .current_lease()
-            .await
-            .unwrap()
-            .expect("dead owner lease");
-        assert_eq!(dead.owner_id, SHARED_OWNER);
-        assert_eq!(dead.epoch, 1);
 
-        // Fence the abandoned lease with the existing owner-and-epoch CAS.
+        // The replacement process holds the runtime lock, so acquiring the
+        // lease takes the departed token over with a bumped epoch.
         let fresh = state
-            .takeover_lease(dead, OTHER_OWNER)
+            .acquire_lease(OTHER_OWNER)
             .await
             .expect("replacement owner takes over the dead lease");
         assert_eq!(fresh.owner_id, OTHER_OWNER);
@@ -355,11 +379,13 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
     });
 }
 
-/// A SIGKILLed `orna run` leaves a Running request under the shared owner.
-/// The REPL and later CLI writers reacquire that same owner ID, so their
-/// writes must not be wedged by the leftover row.
+/// A SIGKILLed `orna run` leaves a Running request under its dead process
+/// owner. A later process that takes the lease over bumps the epoch, and the
+/// takeover records a recovery barrier for that Running request, so the new
+/// writer's commit is refused with `RecoveryPending` until that request is
+/// recovered. This pins the fence; the owner-side recovery path remains open.
 #[test]
-fn running_request_from_killed_run_does_not_wedge_shared_owner_writes() {
+fn running_request_from_killed_run_is_fenced_by_takeover() {
     let (directory, repository) = repository();
     let marker = directory.path().join("owner-fence-running-marker");
     let mut child = spawn_child(RUNNING_CHILD_TEST, directory.path(), &marker);
@@ -367,36 +393,40 @@ fn running_request_from_killed_run_does_not_wedge_shared_owner_writes() {
     kill_and_reap(&mut child);
 
     runtime().block_on(async {
-        // The REPL reopens the worktree and acquires the shared CLI owner lease.
+        // A later CLI process reopens the worktree and acquires the lease.
         let repl = RuntimeState::open_with_owner_id(
             &repository,
             identity(),
             INITIAL_DIGEST,
-            SHARED_OWNER,
+            OTHER_OWNER,
         )
         .await
         .expect("REPL reopens after the killed run");
         assert!(repl.holds_runtime_owner_lock());
         let lease = repl
-            .acquire_lease(SHARED_OWNER)
+            .acquire_lease(OTHER_OWNER)
             .await
-            .expect("REPL reacquires the shared owner lease");
-        assert_eq!(lease.owner_id, SHARED_OWNER);
-        assert_eq!(lease.epoch, 1, "same owner reacquires without a fence");
+            .expect("REPL takes over the killed run's lease");
+        assert_eq!(lease.owner_id, OTHER_OWNER);
+        assert_eq!(lease.epoch, 2, "takeover from a departed owner bumps the epoch");
 
         let context = repl.begin_activation().await.expect("REPL capture");
-        repl.commit_table_activation(
-            lease,
-            &context,
-            &[insert([13; 16], NEW_OWNER_ROW, 4)],
-            [12; 32],
-            &NoFault,
-        )
-        .await
-        .expect("REPL write is not wedged by the Running request row");
+        let refused = repl
+            .commit_table_activation(
+                lease,
+                &context,
+                &[insert([13; 16], NEW_OWNER_ROW, 4)],
+                [12; 32],
+                &NoFault,
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(RuntimeError::RecoveryPending)),
+            "a Running request from the departed owner must hold a recovery barrier, got {refused:?}"
+        );
         assert_eq!(
             repl.committed_table_row("records", NEW_OWNER_ROW).await.unwrap(),
-            Some(vec![4])
+            None
         );
     });
 }
