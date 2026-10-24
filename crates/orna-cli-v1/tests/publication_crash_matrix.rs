@@ -40,7 +40,7 @@ async fn commit_capture(
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
-    logical_path: &str,
+    media_root: &Path,
     insert_only: bool,
     owner_id: [u8; 16],
     request: RequestIdentity,
@@ -49,13 +49,14 @@ async fn commit_capture(
 ) {
     use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
 
+    // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
+    // source is the fixture document, never a committed file.
+    let logical_path = "Object/image.orna";
+    let row_source = object_source_row(media_root, "image");
     let loader = ProjectLoader::default();
     let project = loader.load_committed_snapshot(repository, source_commit).unwrap();
     let schema = loader
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
-        .unwrap();
-    let row_source = repository
-        .read_committed_file(source_commit, logical_path, 1 << 20)
         .unwrap();
     let value = evaluate_expression_ovb2_with_effects(
         expression, &Default::default(), Limits::default(), bindings,
@@ -64,7 +65,7 @@ async fn commit_capture(
     let admitted = admit_source_row_with_owner_fields(
         &project,
         logical_path,
-        std::str::from_utf8(&row_source).unwrap(),
+        &row_source,
         &schema,
         format_context,
         vec![("payload".to_owned(), blob_binding)],
@@ -209,7 +210,7 @@ async fn capture_crash_child() {
                 writer,
                 &mut bindings,
                 &expression,
-                "Object/image.orna",
+                source_root,
                 true,
                 [33; 16],
                 RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
@@ -233,7 +234,7 @@ async fn seeded_project() -> (
 ) {
     let source = TempDir::new().unwrap();
     std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel.png"), source.path().join("pixel.png")).unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let base = repository.head().unwrap().unwrap();
     let (identity, digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
@@ -254,7 +255,7 @@ async fn seeded_project() -> (
         writer,
         &mut bindings,
         &expression,
-        "Object/image.orna",
+        source.path(),
         true,
         [33; 16],
         RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
@@ -940,7 +941,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         writer,
         &mut bindings,
         &expression,
-        "Object/image.orna",
+        source.path(),
         false,
         [43; 16],
         RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
@@ -1098,7 +1099,7 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         let payload = vec![0x6d; 128 * 1024];
         let source_path = source.path().join("capture.bin");
         std::fs::write(&source_path, &payload).unwrap();
-        let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
+        let (directory, repository, relation_id, format_context) = object_format3_repository();
         let root = directory.path();
         std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
         git(root, &["add", "--", "unrelated-tracked.txt"]);
