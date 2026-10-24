@@ -22,8 +22,8 @@ Audit baseline: `origin/main` `e02fa05effb86c23afa1a39e641903144e974f45` (2026-0
 | `ORNA-TXN-006` | `:19` | Reference scenario `ACTIVATION-001` in `tests/scenarios.json` specifies the oracle; no cross-activation partial-write visibility test was found in the audited conformance tests. | **Gap.** Two overlapping activations are not shown observing the uncommitted/committed boundary. |
 | `ORNA-TXN-007` | `:31` | Reference scenario `TXN-003` is an abstract scenario; no executed `.orna`/mock-host test was found proving an external effect remains externally observed after local rollback. | **Gap.** External effects and rollback are not jointly tested at an implementation boundary. |
 | `ORNA-TXN-008` | `:33` | Semantic/effect checks exist in evaluator and semantic packages; no focused execution test was found for table mutation ownership inferred without user-visible annotations. | **B.** Static/effect evidence exists, but the stated runtime ownership behavior lacks focused fixture-backed proof. |
-| `ORNA-CONCUR-001` | `:42` | `crates/orna-execution-v1/tests/termination.rs:188-274` and `normal_completion_admission.rs:117-160` test the generic coordinator/supervisor model. | **C.** Model-level cancel/join and admission fencing pass; no actual Orna asynchronous child is executed through that coordinator. |
-| `ORNA-TASK-001` | `:73` | `termination.rs:612-650` tests acknowledged cancellation and stale-owner fencing in the coordinator/store model; runtime owner-fence tests also exist. | **B.** Model and runtime pieces are present; cross-process execution and transaction-generation proof for an actual Orna child remains unverified. |
+| `ORNA-CONCUR-001` | `:42` | _(Evidence removed: `orna-execution-v1` was deleted in deletion-programme step 5, bead ornadb-5il1.164; it had no production dependents.)_ Previously: `crates/orna-execution-v1/tests/termination.rs:188-274` and `normal_completion_admission.rs:117-160` tested the generic coordinator/supervisor model. | **C.** Model-level cancel/join and admission fencing passed; no actual Orna asynchronous child was executed through that coordinator. |
+| `ORNA-TASK-001` | `:73` | _(Evidence removed: `orna-execution-v1` deleted in step 5, bead ornadb-5il1.164.)_ Previously: `termination.rs:612-650` tested acknowledged cancellation and stale-owner fencing in the coordinator/store model; runtime owner-fence tests also exist. | **B.** Model and runtime pieces are present; cross-process execution and transaction-generation proof for an actual Orna child remains unverified. |
 | `ORNA-TASK-002` | `:75` | REPL/session and `sys` lifecycle tests exist, but the audited execution tests do not demonstrate close cancelling only session-owned work while preserving another session and independent run. | **Gap.** Required isolation across all three owner classes is not demonstrated. |
 | `ORNA-TASK-003` | `:77` | Durable restart/recovery and stream replay tests exist in runtime tests. | **B.** Recovery paths have component evidence; hard process death, owner lease loss, open transaction recovery, and retained committed data are not covered in one fixture-backed execution scenario. |
 | `ORNA-TASK-004` | `:79` | Evaluator cancellation checkpoint tests and stream cancellation tests exist; see evaluator `lib.rs:8015-8095` and `crates/orna-conformance-v1/tests/semantic_runtime_adapter.rs:1270-1376`. | **B.** Bounded checks are exercised; adapter limitations and loss of writable authority for noncooperative code are not proven together. |
@@ -55,7 +55,7 @@ This PR delivers the audit only. No behavior fix or new test is claimed. `crates
 
 ## Focused proof captured during the audit
 
-Command: `cargo test --locked --offline -p orna-execution-v1`
+Command: `cargo test --locked --offline -p orna-execution-v1` _(historical; crate removed in step 5, bead ornadb-5il1.164)_
 
 ```text
 running 10 tests
