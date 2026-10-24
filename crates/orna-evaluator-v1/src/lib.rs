@@ -18765,6 +18765,8 @@ mod blob_equality_tests {
             values: vec![blob],
             source_label: "s".to_owned(),
             source_digest: [0; 32],
+            position: 0,
+            provider: None,
         };
         assert!(blob_aware_eq(&enum_of(left.clone()), &enum_of(make(payload))).unwrap());
         assert!(blob_aware_eq(&record_of(left.clone()), &record_of(make(payload))).unwrap());
