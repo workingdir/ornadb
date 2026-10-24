@@ -3771,11 +3771,40 @@ pub table Invoice(id: Str) {
             Err(SourceTableSchemaError::MissingIdentity)
         );
 
+        // A live relation is outside the serialisable subset (29-formats.md).
+        // Semantic analysis rejects it as a stored field type, so
+        // `source_table_schema` refuses that analysis, and the descriptor
+        // builder has no closed type node for the analysed field type either.
         let relation = [ModuleInput::new(
             "main.orna",
             "pub table Contact(id: Int) { relation: Relation<Int>, }",
         )];
-        let (_, schema) = source_descriptor(&relation, None, "main.orna", "Contact");
+        let analysis = orna_semantic_v1::analyze(&relation);
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            [(
+                orna_semantic_v1::DIAG_TYPE,
+                "stored table field type must be serialisable"
+            )]
+        );
+        let manifest = ObjectIdentityManifest::reconcile(&relation, None).unwrap();
+        assert_eq!(
+            manifest.source_table_schema(&relation, &analysis, None, "", "main.orna", "Contact"),
+            Err(SourceTableSchemaError::InvalidAnalysis)
+        );
+        let root = Namespace(Vec::new());
+        let field_type = &analysis.modules[&root].symbols["Contact"]
+            .table_schema
+            .as_ref()
+            .expect("Contact table schema")
+            .fields["relation"];
+        let sources = parse_source_modules(&relation).unwrap();
+        let schema = DescriptorBuilder::new(&manifest, &analysis, &sources, None)
+            .type_node(field_type, &root);
         assert_eq!(schema, Err(SourceTableSchemaError::UnsupportedType));
     }
 
