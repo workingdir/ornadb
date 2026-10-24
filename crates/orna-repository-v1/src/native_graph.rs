@@ -10159,6 +10159,98 @@ mod persisted_orp_tests {
         );
     }
 
+    /// ORNA-ROW-006 and store-format-3 §3 on a map two branch levels deep
+    /// (A07-storage-rows-04): one update reads the pages on the path to its
+    /// row and at most two more, never the table, and its root is the
+    /// complete build of the same rows. A page read costs its envelope and
+    /// data objects, plus its refs tree when it names dependencies, and every
+    /// pass reads the `height` branches on the path, each with refs, so the
+    /// objects read are at least twice the pages read plus `height`.
+    #[test]
+    fn one_update_reads_its_path_and_at_most_two_more_pages() {
+        const ROWS: usize = 20_000;
+        let (_directory, mut graph) = capture_test_context();
+        let key = |index: usize| TypedKey::Text(format!("row-{index:05}"));
+        let fields = |index: usize, label: &str| {
+            canonical_value_bytes(&CborValue::Array(vec![CborValue::Text(format!(
+                "{label} {index}"
+            ))]))
+        };
+        let scope = graph.open_read_scope().expect("seed scope");
+        let seeded = graph
+            .maintain_row_index(
+                &(0..ROWS)
+                    .map(|index| RowIndexMutation::Insert {
+                        key: key(index),
+                        fields: fields(index, "seed"),
+                    })
+                    .collect::<Vec<_>>(),
+                &scope,
+            )
+            .expect("seed rows");
+        adopt_maintenance(&mut graph, &seeded);
+
+        let scope = graph.open_read_scope().expect("root scope");
+        let mut objects = ObjectBudget::new(
+            scope.max_objects,
+            scope.max_objects,
+            Arc::clone(&scope.objects_used),
+            scope.metadata_quota,
+            Arc::clone(&scope.metadata_used),
+        );
+        let root = graph
+            .read_native_node(
+                graph.row_snapshot.version().primary_root(),
+                &scope,
+                &mut objects,
+            )
+            .expect("read the pinned root");
+        let NodeData::OrderedBranch { height, .. } = root else {
+            panic!("{ROWS} rows fill more than one page");
+        };
+        let height = u64::from(height);
+        assert!(
+            height >= 2,
+            "{ROWS} rows build two branch levels, not {height}"
+        );
+
+        let changed = 12_345;
+        let scope = graph.open_read_scope().expect("update scope");
+        let update = graph
+            .maintain_row_index(
+                &[
+                    RowIndexMutation::Delete { key: key(changed) },
+                    RowIndexMutation::Insert {
+                        key: key(changed),
+                        fields: fields(changed, "updated"),
+                    },
+                ],
+                &scope,
+            )
+            .expect("one update");
+        let objects_read = scope.objects_read();
+        let pages_read = (objects_read - height) / 2;
+        assert!(
+            pages_read <= height + 3,
+            "one update read {objects_read} objects, so up to {pages_read} pages, \
+             in a map {height} branch levels deep"
+        );
+
+        let rows = (0..ROWS)
+            .map(|index| {
+                let label = if index == changed { "updated" } else { "seed" };
+                (key(index), fields(index, label))
+            })
+            .collect::<Vec<_>>();
+        let mut sink = BTreeSet::new();
+        let complete = complete_row_build(
+            &rows_domain_for_version(graph.row_snapshot.version()),
+            &rows,
+            &mut |node| graph.write_capture_node(node, &mut sink, u64::MAX),
+        );
+        assert_eq!(update.primary_root(), &complete);
+    }
+
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
         let (directory, mut graph) = capture_test_context();
