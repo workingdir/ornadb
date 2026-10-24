@@ -7677,7 +7677,11 @@ impl Context<'_, '_> {
             supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
         }
         if crate::sys_bindings::is_blob_reflection_operation(operation) {
-            return crate::sys_bindings::dispatch_blob_reflection(operation, &supplied_values);
+            return crate::sys_bindings::dispatch_blob_reflection(
+                operation,
+                &supplied_values,
+                self.cancellation,
+            );
         }
         let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
         Value::from_context_value(&annotated, self, 0)

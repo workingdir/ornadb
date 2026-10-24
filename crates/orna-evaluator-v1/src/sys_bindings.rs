@@ -1099,6 +1099,7 @@ pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
 pub(crate) fn dispatch_blob_reflection(
     operation: &str,
     arguments: &[ContextValue],
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Value, EvaluationError> {
     if !is_blob_reflection_operation(operation) {
         return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
@@ -1124,9 +1125,15 @@ pub(crate) fn dispatch_blob_reflection(
         ("sys.blob.same_content", [left, right]) => {
             let left = left.blob().map_err(blob_reflection_failure)?;
             let right = right.blob().map_err(blob_reflection_failure)?;
-            left.same_content(&right)
-                .map(Value::Bool)
-                .map_err(blob_reflection_failure)
+            left.same_content_checked(&right, || {
+                if cancellation.is_some_and(CancellationToken::is_requested) {
+                    Err(ValueError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+            .map(Value::Bool)
+            .map_err(blob_reflection_failure)
         }
         _ => Err(redacted_error("ORNA-EVAL-ARGUMENT")),
     }
@@ -1138,6 +1145,7 @@ fn blob_reflection_failure(error: ValueError) -> EvaluationError {
     match error {
         ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
         ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
+        ValueError::Cancelled => redacted_error("ORNA-EVAL-CANCELLED"),
         ValueError::ContentCollision => redacted_error("sys.blob.collision"),
         ValueError::InvalidContext => redacted_error("sys.blob.reference_context"),
         _ => redacted_error("ORNA-EVAL-VALUE"),
@@ -1801,7 +1809,7 @@ mod tests {
         assert_eq!(ovb2_annotated.format(), ValueFormat::Ovb2);
 
         let media_type = |value: &ContextValue| {
-            match dispatch_blob_reflection("sys.blob.media_type", std::slice::from_ref(value))
+            match dispatch_blob_reflection("sys.blob.media_type", std::slice::from_ref(value), None)
                 .expect("media_type reads metadata")
             {
                 Value::String(media_type) => media_type,
@@ -1809,7 +1817,7 @@ mod tests {
             }
         };
         let suffix = |value: &ContextValue| {
-            dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value))
+            dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value), None)
                 .expect("suffix reads metadata")
         };
         assert_eq!(media_type(&rov3), "application/octet-stream");
@@ -1826,6 +1834,7 @@ mod tests {
             match dispatch_blob_reflection(
                 "sys.blob.same_content",
                 &[left.clone(), right.clone()],
+                None,
             )
             .expect("same_content reads exact content")
             {
@@ -1834,7 +1843,7 @@ mod tests {
             }
         };
         let same_content_code = |left: &ContextValue, right: &ContextValue| {
-            dispatch_blob_reflection("sys.blob.same_content", &[left.clone(), right.clone()])
+            dispatch_blob_reflection("sys.blob.same_content", &[left.clone(), right.clone()], None)
                 .err()
                 .map(|error| error.code().to_owned())
         };
@@ -1859,7 +1868,7 @@ mod tests {
         // Different identities are decided without reading bytes.
         assert!(!same_content(&ovb2, &other));
 
-        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[])
+        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[], None)
             .err()
             .map(|error| error.code().to_owned());
         assert_eq!(undeclared, Some("ORNA-EVAL-ARGUMENT".to_owned()));
