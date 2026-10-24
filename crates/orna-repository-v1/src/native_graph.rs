@@ -7381,9 +7381,11 @@ fn apply_row_index_mutations(
         .count();
     let mut added = Vec::with_capacity(target_of.len() + inserts);
     if !removed.is_empty() {
-        // Compaction shifts every row after the first removed one.
+        // Compaction moves each kept row after the first removed one once.
         #[cfg(test)]
-        record_row_moves(rows.len() - *removed.first().expect("removed is non-empty"));
+        if let Some(&first) = removed.first() {
+            record_row_moves(rows.len() - first - removed.len());
+        }
         let mut pending = removed.iter().copied().peekable();
         let mut position = 0usize;
         let extracted = rows.extract_if(.., |_| {
@@ -9543,8 +9545,10 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
     /// order, which for Text keys is length-first rather than logical, so
     /// 20,000 inserts into a 20,000-row table land all over the pinned rows.
     /// The pass must build the root that a complete canonical build of the
-    /// final rows builds, and move each row a bounded number of times:
-    /// shifting the row vector once per insert moves about 3 * 10^8 rows here.
+    /// final rows builds. The row-move counter here is a bookkeeping invariant
+    /// of the merge's own record calls, not a proof of speed: root equality
+    /// and oracle equivalence are the correctness evidence, and the measured
+    /// timings are in the PR body, not in a committed test.
     #[test]
     fn text_key_bulk_insert_in_canonical_byte_order_merges_in_linear_moves() {
         const ROWS: usize = 20_000;
@@ -9618,8 +9622,9 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
 
     /// Bulk inserts that each land at the front of the row vector: the
     /// one-at-a-time pass shifts about every row per insert, while the merging
-    /// pass moves each row once. Both must give the same rows, and the counts
-    /// show the test tells the two apart without timing either.
+    /// pass moves each row once. Both must give the same rows. The counts are
+    /// a bookkeeping invariant of the merge's own record calls, not a timing
+    /// proof; the measured timings are in the PR body.
     #[test]
     fn row_index_merge_moves_linear_rows_where_one_at_a_time_moves_quadratic() {
         const ROWS: usize = 4_000;

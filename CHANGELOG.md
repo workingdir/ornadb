@@ -8,7 +8,7 @@ been published.
 - Publishing row changes to a format-3 table applies them as one sorted merge
   into the table's row map: each existing row moves at most twice, instead of
   being shifted once per change. Publication sends changes in encoded key
-  order, which for `Str` keys is not key order, so the merge sorts them by
+  order, which for `Text` keys is not key order, so the merge sorts them by
   logical key first. The written row map is unchanged.
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
