@@ -10,6 +10,11 @@ been published.
   being shifted once per change. Publication sends changes in encoded key
   order, which for `Text` keys is not key order, so the merge sorts them by
   logical key first. The written row map is unchanged.
+- `scripts/orna_extract.py` is an independent extractor. It reads a format-3
+  repository's Git objects at a commit through `git cat-file --batch`, without
+  the engine's readers, and writes the modules, the schema, the rows and each
+  Blob's bytes. It refuses any tracked `.orna/` entry other than `database.orna`
+  and `store` (ORNA-META-001).
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
@@ -41,6 +46,16 @@ been published.
 - `orna commit` refuses a staged index whose `.orna/store` is partial after `git rm --cached .orna/store`, leaving skip-worktree payload entries behind, with `E2302` naming the unstaged committed relation and its `git restore --staged .orna/store` remedy, instead of a generic staging failure.
 - A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
 - A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.
+- `orna serve` hosts the clone's durable runtime. A live eval that inserts
+  into a project table commits the row together with its terminal outcome,
+  and resending the same request ID returns the recorded outcome without
+  running again; before, every writing eval was refused. Each eval is one
+  REPL input: a declaration, binding or import answers with typed Unit and
+  persists for the session, and an input that declares a function named
+  `serve` or `main` is an ordinary declaration rather than a one-shot module
+  run. An explicit resync is answered with the watch's latest full snapshot
+  under its own request ID; before, a changed value produced a delta with no
+  request ID.
 - `orna invoke` attaches the runtime host context before it evaluates, so `sys.rt.info()` completes in a project and fails closed outside one. The record is computed once per attachment; an incompatible system version reports `sys.version.incompatible`, an unreadable standard snapshot pin reports `sys.snapshot.incomplete`, and the build identity reads git HEAD only from the crate's own repository, otherwise `+nogit`.
 - Semantic analysis keeps described `sys` member types nominal: `checkpoint.position` is a `sys.CheckpointPosition` that matches annotations and `sys.admin` signatures, and `storage.publication_policy` stays the opaque `sys.Value`.
 - A qualified `std.collection` `sum`, `min` or `max` call is checked against a monomorphic pinned export's element type and takes its declared result.
@@ -117,6 +132,13 @@ been published.
   and `SystemDiagnosticAdapterError`). Also removed
   `SysHostBindingRegistry::with_explain_catalogue` and
   `CaptureFileError::code`.
+- Removed the unreachable `orna-core` catalogue bridge from `orna-runtime-v1`:
+  `CatalogueAdmission::from_artifact`,
+  `RuntimeState::commit_validated_catalogue_table_request_activation_with_revision_pair`
+  and `RuntimeState::catalogue_revision_pair_at`. Nothing called them, so every
+  catalogue admission already recorded no revision pair. `orna-runtime-v1` no
+  longer depends on `orna-core`. The `runtime_catalogue_revision_binding` table
+  stays in the state schema, so existing `state.db` files open unchanged.
 - Opening a repository format context reads only the root tree, the `.orna`
   tree and its metadata blobs, through one long-lived `git cat-file
   --batch-command` reader per repository handle. It no longer lists the whole
@@ -376,6 +398,12 @@ been published.
   alias or shim. Build output is `target/<profile>/orna`, and the Linux package
   and release paths, CI, and the command examples in the README and docs name
   `orna`.
+- `TransactionalEvaluator` and `DurableTransactionalEvaluator` now admit
+  transactions against the production catalogue by default, so a user module
+  whose path matches a conformance fixture namespace, such as
+  `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
+  conformance fixture catalogue is an explicit harness opt-in only, through
+  `TransactionalEvaluator::with_fixture_catalogue`.
 
 ## 1.0.0 — release inventory (publication pending)
 
