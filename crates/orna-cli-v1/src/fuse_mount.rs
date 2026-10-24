@@ -1119,6 +1119,12 @@ impl DocumentCommitError {
     }
 }
 
+/// Cause recorded for a dirty document released without an accepted save: the
+/// refusal already recorded for it (ORNA-VFS-009), else `unsynced`.
+fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'static str {
+    refusal.map_or("unsynced", |refusal| refusal.cause)
+}
+
 /// Classifies a failed durable save. Semantic admission and malformed-draft
 /// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
 /// backing I/O `Failed`.
@@ -2422,10 +2428,7 @@ impl WorkspaceFilesystem {
     ) {
         // A candidate already refused by fsync or flush keeps its refusal cause
         // (ORNA-VFS-009); only a candidate never refused is recorded as unsynced.
-        let cause = draft_state
-            .rejected_documents
-            .get(&inode)
-            .map_or("unsynced", |refusal| refusal.cause);
+        let cause = release_retention_cause(draft_state.rejected_documents.get(&inode));
         self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
     }
 
@@ -6203,5 +6206,17 @@ mod hardening_tests {
         assert!(draft.exists(), "a refused edit retains its draft");
         assert!(super::admit_edit_result(Ok(()), &draft).is_ok());
         assert!(!draft.exists(), "an accepted edit removes its draft");
+    }
+
+    #[test]
+    fn release_names_an_unrefused_candidate_unsynced_and_keeps_a_refusal_cause() {
+        assert_eq!(super::release_retention_cause(None), "unsynced");
+        let refusal = super::DraftRefusal {
+            cause: "sys.vfs.stale_edit",
+            handle: None,
+            draft: None,
+            unretained: None,
+        };
+        assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
     }
 }
