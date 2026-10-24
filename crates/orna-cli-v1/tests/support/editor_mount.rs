@@ -296,12 +296,7 @@ pub async fn repository_with_source_row(
     initial: &str,
 ) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            &format!("Music/{key}.orna"),
-            initial,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -322,7 +317,7 @@ pub async fn repository_with_source_row(
         &[SourceCaptureRow {
             key,
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal,
             insert_only: true,
         }],
@@ -357,16 +352,8 @@ pub async fn live_foreign_writer(repository: &Repository) -> RuntimeState {
 pub async fn repository_with_music_rows(
     rows: &[(&str, &str)],
 ) -> (TempDir, Repository, [u8; 16]) {
-    let paths = rows
-        .iter()
-        .map(|(key, document)| (format!("Music/{key}.orna"), *document))
-        .collect::<Vec<_>>();
-    let sources = paths
-        .iter()
-        .map(|(path, document)| (path.as_str(), *document))
-        .collect::<Vec<_>>();
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(MUSIC_SOURCE, "Music", &sources);
+        format3::format3_repository_with_context(MUSIC_SOURCE, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -382,7 +369,7 @@ pub async fn repository_with_music_rows(
         .map(|(&(key, document), ordinal)| SourceCaptureRow {
             key,
             blob_fields: &[],
-            source_row: Some(document),
+            source_row: document,
             ordinal,
             insert_only: true,
         })
