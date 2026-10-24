@@ -7381,9 +7381,9 @@ fn apply_row_index_mutations(
         .count();
     let mut added = Vec::with_capacity(target_of.len() + inserts);
     if !removed.is_empty() {
-        // Compaction moves each row at most once.
+        // Compaction shifts every row after the first removed one.
         #[cfg(test)]
-        record_row_moves(rows.len());
+        record_row_moves(rows.len() - *removed.first().expect("removed is non-empty"));
         let mut pending = removed.iter().copied().peekable();
         let mut position = 0usize;
         let extracted = rows.extract_if(.., |_| {
@@ -7426,6 +7426,8 @@ fn merge_added_rows(
         let below = remaining
             .as_slice()
             .partition_point(|(existing, _)| existing < key);
+        #[cfg(test)]
+        record_row_moves(below);
         merged.extend(remaining.by_ref().take(below));
         if merged.last().is_some_and(|(previous, _)| previous == key)
             || remaining
@@ -7435,11 +7437,13 @@ fn merge_added_rows(
         {
             return Err(GraphError::DuplicateRowKey);
         }
+        #[cfg(test)]
+        record_row_moves(1);
         merged.push((key.clone(), value));
     }
-    merged.extend(remaining);
     #[cfg(test)]
-    record_row_moves(merged.len());
+    record_row_moves(remaining.len());
+    merged.extend(remaining);
     *rows = merged;
     Ok(())
 }
@@ -9583,10 +9587,11 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
             .expect("merge 20,000 inserts into 20,000 rows");
         let moves = ROW_MOVES.get();
         assert_eq!(maintenance.row_count(), 2 * ROWS as u64);
-        // Each inserted row is placed at least once, so fewer moves would mean
-        // the pass no longer counts the rows it moves.
-        assert!(
-            (ROWS..=2 * (ROWS + ROWS)).contains(&moves),
+        // Compaction is skipped and the merge moves every pinned row once and
+        // places every insert once, so the count is exactly n + m.
+        assert_eq!(
+            moves,
+            2 * ROWS,
             "merging {ROWS} inserts into {ROWS} rows moved {moves} rows"
         );
 
@@ -9611,6 +9616,54 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         assert_eq!(maintenance.primary_root(), &full_build);
     }
 
+    /// Bulk inserts that each land at the front of the row vector: the
+    /// one-at-a-time pass shifts about every row per insert, while the merging
+    /// pass moves each row once. Both must give the same rows, and the counts
+    /// show the test tells the two apart without timing either.
+    #[test]
+    fn row_index_merge_moves_linear_rows_where_one_at_a_time_moves_quadratic() {
+        const ROWS: usize = 4_000;
+        let value = RowValue::inline(vec![1], Vec::new()).expect("inline value");
+        let pinned = (0..ROWS)
+            .map(|index| (TypedKey::Text(format!("k{index:06}")), value.clone()))
+            .collect::<Vec<_>>();
+        // Descending keys, all below the pinned rows: each insert lands at 0.
+        let inserts = (0..ROWS)
+            .rev()
+            .map(|index| RowIndexMutation::Insert {
+                key: TypedKey::Text(format!("a{index:06}")),
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let mut merged_rows = pinned.clone();
+        ROW_MOVES.set(0);
+        apply_row_index_mutations(&mut merged_rows, &inserts).expect("merge inserts");
+        let merge_moves = ROW_MOVES.get();
+
+        let mut reference_rows = pinned.clone();
+        ROW_MOVES.set(0);
+        one_at_a_time_row_index_mutations(&mut reference_rows, &inserts)
+            .expect("one-at-a-time inserts");
+        let reference_moves = ROW_MOVES.get();
+
+        assert!(
+            merged_rows
+                .iter()
+                .map(|(key, _)| key)
+                .eq(reference_rows.iter().map(|(key, _)| key)),
+            "merge and one-at-a-time passes disagree on the rows"
+        );
+        assert!(
+            merge_moves <= 2 * (ROWS + ROWS),
+            "merge moved {merge_moves} rows, more than 2 * (n + m)"
+        );
+        assert!(
+            reference_moves >= ROWS * ROWS / 4,
+            "one-at-a-time moved only {reference_moves} rows; the bound would not discriminate"
+        );
+    }
+
     /// The pass as it was first written: every delete, then every rekey, then
     /// every insert, each applied by shifting the row vector. It is the
     /// oracle the merging pass must agree with, rows and error alike.
@@ -9625,6 +9678,7 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
         for mutation in mutations {
             if let RowIndexMutation::Delete { key } = mutation {
                 let index = search(rows, key).map_err(|_| GraphError::RowKeyAbsent)?;
+                record_row_moves(rows.len() - index - 1);
                 rows.remove(index);
             }
         }
@@ -9634,8 +9688,10 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
                 if search(rows, to).is_ok() {
                     return Err(GraphError::DuplicateRowKey);
                 }
+                record_row_moves(rows.len() - index - 1);
                 let (_, value) = rows.remove(index);
                 let insertion = search(rows, to).unwrap_or_else(|index| index);
+                record_row_moves(rows.len() - insertion);
                 rows.insert(insertion, (to.clone(), value));
                 logical_rekeys.push(LogicalRowRekey {
                     old_address: from.clone(),
@@ -9652,6 +9708,7 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
                 {
                     return Err(GraphError::DuplicateRowKey);
                 }
+                record_row_moves(rows.len() - insertion);
                 rows.insert(insertion, (key.clone(), value.clone()));
             }
         }
