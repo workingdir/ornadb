@@ -1807,7 +1807,8 @@ pub struct TransactionalEvaluator {
 
 /// Catalogue that admission checks user modules against. `Production` is the
 /// authoritative core catalogue; `ConformanceFixture` additionally reserves the
-/// conformance fixture namespaces and is opted into by conformance tests only.
+/// conformance fixture namespaces and is opted into by the conformance harness
+/// only, through [`TransactionalEvaluator::with_fixture_catalogue`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionCatalogue {
     Production,
@@ -1824,6 +1825,9 @@ impl AdmissionCatalogue {
 }
 
 impl TransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). The conformance harness
+    /// opts into the fixture catalogue with [`Self::with_fixture_catalogue`].
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
@@ -2184,6 +2188,9 @@ impl std::fmt::Display for PendingPublicationError {
 impl std::error::Error for PendingPublicationError {}
 
 impl DurableTransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). It has no fixture
+    /// catalogue opt-in.
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
@@ -10214,13 +10221,20 @@ mod transaction_admission_tests {
 
         let outcome = evaluator.execute_source(&unit);
         match outcome {
-            // The production catalogue now propagates the external effect
-            // from the ordinary helper body and reports `ORNA-EVAL-EFFECT`.
-            // The admission boundary must still reject before activation.
+            // The single-source effect gate in `admit_transaction_source_inner`
+            // reads the first `main` symbol in `analysis.modules`, which is
+            // ordered by namespace and also holds the catalogue modules. The
+            // production core catalogue declares no `main`, so the gate reads
+            // the user module's `main`, whose summary carries the `network`
+            // effect propagated from `fetch_remote`, and rejects with
+            // `ORNA-EVAL-EFFECT` before table activation. Under the fixture
+            // catalogue the effectless fixture value `bank.main` sorts before
+            // the user namespace, so the gate checked `bank.main` and passed,
+            // and the run failed later with `ORNA-EVAL-NAME` instead.
             StageOutcome::Failed(diagnostic) => assert_eq!(
                 diagnostic.code(),
                 "ORNA-EVAL-EFFECT",
-                "the production catalogue must propagate the helper effect fail-closed"
+                "admission must reject the user entry's propagated network effect"
             ),
             outcome => panic!(
                 "a transitive external effect must be rejected before table activation: {outcome:?}"
