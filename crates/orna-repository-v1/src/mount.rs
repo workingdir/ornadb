@@ -52,7 +52,7 @@ fn mount_registry_lock(paths: &RuntimePaths, exclusive: bool) -> Result<fs::File
 }
 
 /// Why a mount view could not be attached or reported.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MountError {
     /// The host filesystem refused a mountpoint or registry operation.
     HostFilesystem,
@@ -801,6 +801,17 @@ fn reconcile_mount_registry_locked(
 }
 
 impl Repository {
+    /// Runs `operation` while holding the exclusive mount registry lock, so no
+    /// mount view is attached or detached concurrently with it. The lock is
+    /// released before this returns; `operation` must not take it again.
+    pub fn with_mount_registry_locked<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, MountError> {
+        let _registry_lock = mount_registry_lock(self.runtime_paths(), true)?;
+        Ok(operation())
+    }
+
     /// Reports every currently attached read-only mount view, ordered by
     /// mountpoint.
     ///

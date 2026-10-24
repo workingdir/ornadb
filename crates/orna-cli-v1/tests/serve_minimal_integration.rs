@@ -11,7 +11,7 @@ mod format3;
 #[path = "support/orna_cli_run.rs"]
 mod cli;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
+const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 
 struct RunningServer(Child);
 
