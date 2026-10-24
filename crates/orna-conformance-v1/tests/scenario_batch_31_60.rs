@@ -168,6 +168,12 @@ fn executes_batch_two_and_pins_unexecuted_follow_up() {
     // Results come from the default 1.1.0 corpus report, matched by scenario ID.
     let corpus: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/reference/tests/scenarios.json")).unwrap();
+    let corpus_order = corpus["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|scenario| scenario["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
     let corpus_ids = corpus["scenarios"]
         .as_array()
         .unwrap()
@@ -196,6 +202,11 @@ fn executes_batch_two_and_pins_unexecuted_follow_up() {
     });
     let reported = report["scenarios"].as_array().expect("scenario report array");
     assert_eq!(reported.len(), 279);
+    let report_order = reported
+        .iter()
+        .map(|result| result["scenario"].as_str().expect("scenario ID"))
+        .collect::<Vec<_>>();
+    assert_eq!(report_order, corpus_order, "the report lists scenarios in 1.1.0 corpus order");
     let by_id = reported
         .iter()
         .map(|result| (result["scenario"].as_str().expect("scenario ID"), result))
