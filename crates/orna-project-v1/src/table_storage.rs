@@ -300,6 +300,7 @@ pub fn restore_stored_blobs(
         if !holds_blob(ty) || present_blob(ty, &values[index])?.is_none() {
             continue;
         }
+        // Sound only while contains_blob_value and handle_contextual_blob_insert reject non-tag Blobs.
         if values[index] != blob_placeholder(ty) {
             return Err(TableStorageError);
         }
