@@ -12,6 +12,15 @@
 //! legacy authoritative tables, verifies the source repository is unchanged by
 //! `orna migrate copy` (UPGRADE-006, `reference/Orna-1.1.0/source/40-upgrade-contract.md`
 //! line 48), and admits the snapshot through that copy path.
+//!
+//! Non-claims (partial slice of bead 5il1.394; see docs/migration-1.0.0.md):
+//! - Not a byte-for-byte 1.0.0 golden: the bundle comes from the test encoder.
+//! - Blob compact encoding is not covered (spec-silent, excluded).
+//! - `state.db` and persistent consumers are not covered (spec-silent).
+//! - The loose-row path codec is not covered (deferred).
+//! - Key-bound encoding (hex of canonical key bytes in `min_key`/`max_key`) is
+//!   unverified against the 1.0.0 key-schema text.
+//! - ORNA-UPGRADE-008 fail-closed behaviour is NOT asserted by this test.
 
 use std::{path::Path, process::Command};
 
