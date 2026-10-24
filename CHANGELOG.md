@@ -109,13 +109,17 @@ been published.
   returns the recorded error instead of a storage-unavailable error. A stale
   capture stores the capture that rejected the call and replays that same
   error, even after later commits advance the CWD. A rejected stream-reference
-  resume now records its failure like a rejected pause. When the generation
-  cannot be read, the row records no generation with a
-  `failure:unobservable:<class>` outcome, and the call still returns its
-  original error; a retry replays that class, with payload-carrying classes
-  replaying as `RecoveryInvalid`. The observed generation
-  is nullable in the audit schema, migrated in place for existing stores. A
-  skip lease refused because the
+  resume now records its failure like a rejected pause.
+- When the CWD generation cannot be read, the row records no generation (NULL)
+  with a `failure:unobservable:<class>` outcome, and the first call still
+  returns its original error. A retry replays `<class>` as the same error when
+  the class is payload-free. The payload-carrying classes `stale_capture`,
+  `fault_injected` and `legacy_head_read_only`, and a bare legacy
+  `failure:unobservable` row, replay as `RecoveryInvalid`, because their
+  payload was never stored. The observed generation is nullable in the audit
+  schema, migrated in place for existing stores; unobservable rows are
+  excluded from the checkpoint-reset generation ordering.
+- A skip lease refused because the
   failure is no longer open is `sys.failure.state_conflict`, not
   `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
   no longer takes a lease purpose.

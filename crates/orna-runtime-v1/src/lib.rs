@@ -20396,7 +20396,8 @@ async fn migrate_historical_governance(connection: &Connection) -> Result<(), Ru
              SELECT checkpoint.generation,
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM admin_invocation_audit AS audit
-                              WHERE audit.observed_generation < checkpoint.generation), 0),
+                              WHERE audit.observed_generation IS NOT NULL
+                                AND audit.observed_generation < checkpoint.generation), 0),
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM stream_checkpoint_reset_audit AS audit
                               WHERE audit.observed_generation >= 0
