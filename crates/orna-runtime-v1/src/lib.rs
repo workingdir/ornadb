@@ -7259,8 +7259,8 @@ impl RuntimeState {
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
-        // Positive effect evidence commits on its own first, so a rollback
-        // or crash inside the table transaction below still finds it.
+        // The marker commits on its own first: it is the precondition for an
+        // observed-rollback receipt and changes nothing for crash recovery.
         self.record_activation_controlled_marker(lease, identity, fingerprint)
             .await?;
         let transaction = self
@@ -12548,15 +12548,17 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
-    /// Records positive evidence that an activation reached its
-    /// Orna-controlled table boundary with no possible external effect on
-    /// record. The marker commits on its own before the table transaction
-    /// opens, so both an observed rollback and a crash inside that
-    /// transaction still find it. Only a `Running` request owned by the
-    /// current `lease` with no effect evidence is marked: an externally
-    /// marked request stays external, an existing marker is kept, and every
-    /// other state is left for the activation transaction to replay or
-    /// reject with its own error.
+    /// Records that the caller reported no external effect for an activation
+    /// that reached its Orna-controlled table boundary. The marker commits on
+    /// its own before the table transaction opens and is the precondition
+    /// for an observed-rollback receipt; a marker without a receipt changes
+    /// nothing for crash recovery, which stays uncertain. It is not proof
+    /// that no external effect occurred: callers that perform one must
+    /// report it through `record_external_effect`, which always downgrades
+    /// the request. Only a `Running` request owned by the current `lease`
+    /// with no effect evidence is marked: an externally marked request stays
+    /// external, an existing marker is kept, and every other state is left
+    /// for the activation transaction to replay or reject with its own error.
     async fn record_activation_controlled_marker(
         &self,
         lease: WriterLease,
@@ -12604,7 +12606,9 @@ impl RuntimeState {
 
     /// Records that an effect outside Orna's transaction boundary may have
     /// occurred. This is intentionally one-way and can only make recovery
-    /// more conservative.
+    /// more conservative: it also downgrades a request that already carries
+    /// a controlled marker or rollback receipt, for example one left by an
+    /// earlier commit attempt that failed its prechecks.
     pub async fn record_external_effect(
         &self,
         identity: RequestIdentity,
@@ -12645,6 +12649,9 @@ impl RuntimeState {
         }
         match evidence.effects {
             Some(EffectEvidence::ControlledTransaction) => {}
+            // Defence in depth: production activations record the marker
+            // before their table transaction, so `None` is not expected
+            // here; absent evidence is never promoted to a receipt.
             None | Some(EffectEvidence::ExternalPossible) => {
                 tx.commit()
                     .await
@@ -12662,9 +12669,7 @@ impl RuntimeState {
         let proof = controlled_rollback_proof(marker);
         let changed = tx
             .execute(
-                "UPDATE request_ledger
-             SET effect_evidence = 1, controlled_transaction_proof = ?1,
-                 controlled_rollback_proof = ?2
+                "UPDATE request_ledger SET controlled_rollback_proof = ?2
              WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8
                AND effect_evidence = 1 AND controlled_transaction_proof = ?1
@@ -12719,18 +12724,24 @@ impl RuntimeState {
         if evidence.owner != Some(RequestOwner::from(owner)) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        match (evidence.effects, evidence.controlled_marker) {
+        let downgrade_controlled = match (evidence.effects, evidence.controlled_marker) {
             (Some(EffectEvidence::ExternalPossible), None) => return Ok(()),
-            (Some(_), _) => return Err(RuntimeError::RequestStateConflict),
-            (None, None) => {}
-            (None, Some(_)) => return Err(RuntimeError::RequestStateConflict),
-        }
+            (Some(EffectEvidence::ControlledTransaction), Some(_)) => true,
+            (None, None) => false,
+            (Some(_), _) | (None, Some(_)) => return Err(RuntimeError::RequestStateConflict),
+        };
         let changed = tx
             .execute(
-                "UPDATE request_ledger SET effect_evidence = 2
+                "UPDATE request_ledger
+                 SET effect_evidence = 2, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?1 AND request_id = ?2 AND fingerprint = ?3
                    AND state = ?4 AND owner_id = ?5 AND owner_epoch = ?6
-                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
+                   AND ((?7 AND effect_evidence = 1
+                         AND controlled_transaction_proof IS NOT NULL)
+                     OR (NOT ?7 AND effect_evidence = 0
+                         AND controlled_transaction_proof IS NULL
+                         AND controlled_rollback_proof IS NULL))",
                 params![
                     identity.session_id.to_vec(),
                     identity.request_id.to_vec(),
@@ -12738,6 +12749,7 @@ impl RuntimeState {
                     RequestState::Running.code(),
                     owner.owner_id.to_vec(),
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    i64::from(downgrade_controlled),
                 ],
             )
             .await
@@ -46774,10 +46786,10 @@ mod tests {
         )
     }
 
-    // Gate D: a rollback observed without positive controlled-effect evidence
-    // is never a proven rollback; absent evidence recovers as uncertain.
+    // Gate D: a rollback receipt requires the controlled marker; absent
+    // effect evidence is never promoted to a receipt and recovers uncertain.
     #[tokio::test]
-    async fn rolled_back_activation_without_controlled_marker_recovers_uncertain() {
+    async fn rollback_proof_requires_controlled_marker() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let owner = state.acquire_lease(id(4)).await.unwrap();
@@ -46921,6 +46933,139 @@ mod tests {
             .unwrap();
         assert_eq!(committed.request.state, RequestState::Completed);
         assert_eq!(ledger_effect_evidence(&state, fresh).await, (0, None, None));
+    }
+
+    // Gate D: a reported external effect always downgrades the request, even
+    // after an earlier commit attempt left the controlled marker (a failed
+    // precheck) or a rollback receipt, so a later rollback stays uncertain.
+    #[tokio::test]
+    async fn external_effect_downgrades_a_marker_left_by_an_earlier_commit_attempt() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let fingerprint = digest(6);
+        let prechecked = request(4, 5);
+        let receipted = request(4, 6);
+        for identity in [prechecked, receipted] {
+            let (_, capability) = state
+                .reserve_request_with_admission(identity, fingerprint)
+                .await
+                .unwrap();
+            state
+                .start_request_with_owner_and_admission(
+                    identity,
+                    fingerprint,
+                    owner,
+                    capability.expect("fresh owner-bound capability"),
+                )
+                .await
+                .unwrap();
+        }
+        let context = state.begin_activation().await.unwrap();
+
+        // A precheck failure after the marker step leaves the marker behind.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    prechecked,
+                    fingerprint,
+                    &context,
+                    &[],
+                    digest(10),
+                    outcome(11),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::EmptyMutationBatch)
+        );
+        let marker = controlled_transaction_marker(prechecked, fingerprint, owner);
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (1, Some(marker.to_vec()), None)
+        );
+        state
+            .record_external_effect(prechecked, fingerprint, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (2, None, None)
+        );
+        // The retry neither re-marks the request nor records a receipt.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    prechecked,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (2, None, None)
+        );
+
+        // A receipt from an observed rollback is downgraded as well.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    receipted,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        let marker = controlled_transaction_marker(receipted, fingerprint, owner);
+        assert_eq!(
+            ledger_effect_evidence(&state, receipted).await,
+            (
+                1,
+                Some(marker.to_vec()),
+                Some(controlled_rollback_proof(marker).to_vec())
+            )
+        );
+        state
+            .record_external_effect(receipted, fingerprint, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, receipted).await,
+            (2, None, None)
+        );
+
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        for identity in [prechecked, receipted] {
+            let recovered = state
+                .recover_running_request_with_outcomes(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(12),
+                    outcome(13),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.disposition,
+                RecoveryDisposition::ExternalEffectsUncertain
+            );
+            assert_eq!(recovered.status.terminal_outcome, Some(outcome(13)));
+        }
     }
 
     #[tokio::test]
