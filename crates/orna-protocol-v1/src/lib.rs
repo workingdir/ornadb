@@ -3838,46 +3838,143 @@ mod tests {
         );
     }
 
+    fn marker_value() -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Text("abc".into())).unwrap()
+    }
+    fn marker_node() -> Node {
+        Node::Text("abc".into())
+    }
+    fn marker_present() -> PresentNode {
+        PresentNode::new(
+            PresentKind::Name("row".into()),
+            None,
+            [(PresentPropertyKey::Name("p".into()), marker_value())],
+            Vec::<PresentNode>::new(),
+        )
+        .unwrap()
+    }
+    fn patch_at(component: Node) -> PatchList {
+        PatchList::decode(&Node::Array(vec![Node::Array(vec![
+            uint(2),
+            Node::Array(vec![component]),
+            present().0.0.clone(),
+        ])]))
+        .unwrap()
+    }
+    /// Replaces the single 4-byte text "abc" with a profile-tag wrapper around
+    /// null. The replacement keeps the envelope length and every enclosing
+    /// container intact, so only the tagged value changes.
+    fn tamper_marker(encoded: &[u8], tag: u16) -> Vec<u8> {
+        let marker = [0x63, b'a', b'b', b'c'];
+        let positions: Vec<usize> = encoded
+            .windows(marker.len())
+            .enumerate()
+            .filter(|(_, window)| *window == marker)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "marker must be unique in the envelope");
+        let at = positions[0];
+        let [hi, lo] = tag.to_be_bytes();
+        let mut tampered = encoded[..at].to_vec();
+        tampered.extend_from_slice(&[0xD9, hi, lo, 0xF6]);
+        tampered.extend_from_slice(&encoded[at + marker.len()..]);
+        tampered
+    }
+    /// Encodes an envelope whose marker sits at one value position, then checks
+    /// that each profile tag there decodes to the wire outcome. The control
+    /// envelope must decode unchanged first.
+    fn assert_profile_tags_rejected(envelope: Envelope, position: &str) {
+        let encoded = envelope.encode(Limits::default()).unwrap();
+        assert_eq!(
+            Envelope::decode(&encoded, Limits::default()).unwrap(),
+            envelope,
+            "{position}: control must decode"
+        );
+        for tag in 60_110_u16..=60_113 {
+            let tampered = tamper_marker(&encoded, tag);
+            assert_eq!(
+                Envelope::decode(&tampered, Limits::default()).map_err(|error| error.code()),
+                Err("wire.invalid_message"),
+                "{position}: tag {tag}"
+            );
+        }
+    }
     #[test]
     fn legacy_wire_rejects_format3_blob_tags() {
         // OVB-2/ROV-3/SOV-3 profile tags (60110..=60113) are not portable wire
-        // values. The protocol keeps its existing outcome: the envelope is
-        // rejected at decode, before any effect, as wire.invalid_message.
-        let request = Envelope {
+        // values. Each position below decodes to the existing wire outcome,
+        // wire.invalid_message, at decode time, before any effect.
+        let event = Envelope {
             request: Some(id(1)),
             watch: Some(id(2)),
             message: Message::Event {
                 revision: 0,
                 action: id(3),
-                value: value(),
+                value: marker_value(),
                 fingerprint: digest(1),
             },
             extensions: BTreeMap::new(),
         };
-        let encoded = request.encode(Limits::default()).unwrap();
-        assert_eq!(Envelope::decode(&encoded, Limits::default()).unwrap(), request);
-        // The event value is the text "ok" (0x62 'o' 'k'); replace it with each
-        // profile tag wrapping null, keeping the surrounding envelope bytes.
-        let text_ok = [0x62, b'o', b'k'];
-        let positions: Vec<usize> = encoded
-            .windows(text_ok.len())
-            .enumerate()
-            .filter(|(_, window)| *window == text_ok)
-            .map(|(index, _)| index)
-            .collect();
-        assert_eq!(positions.len(), 1, "event value must be unique in the envelope");
-        for tag in 60_110_u16..=60_113 {
-            let [hi, lo] = tag.to_be_bytes();
-            let mut tampered = encoded[..positions[0]].to_vec();
-            tampered.extend_from_slice(&[0xD9, hi, lo, 0xF6]);
-            tampered.extend_from_slice(&encoded[positions[0] + text_ok.len()..]);
-            assert_eq!(
-                Envelope::decode(&tampered, Limits::default()),
-                Err(Error::InvalidValue),
-                "tag {tag}"
-            );
-            assert_eq!(Error::InvalidValue.code(), "wire.invalid_message");
-        }
+        assert_profile_tags_rejected(event, "event value");
+
+        let patch_value = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: PatchList::replace_root(&marker_present()).unwrap(),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(patch_value, "patch value");
+
+        let relation_path = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: patch_at(Node::Array(vec![uint(1), uuid_node([4; 16]), marker_node()])),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(relation_path, "relation path key");
+
+        let key_path = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: patch_at(Node::Array(vec![uint(3), marker_node()])),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(key_path, "key path");
+
+        let extension = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Resync,
+            extensions: BTreeMap::from([(11_u16, ValueNode(marker_node()))]),
+        };
+        assert_profile_tags_rejected(extension, "extension value");
+
+        let present_property = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Snapshot {
+                revision: 0,
+                present: marker_present(),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(present_property, "present property");
     }
 
 }
