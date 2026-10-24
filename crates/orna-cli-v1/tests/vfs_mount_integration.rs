@@ -304,21 +304,47 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     );
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
-    // Advance HEAD past the historical commit. Rows live only in the store
-    // (ORNA-REPO-004), so the advancing commit tracks no row file.
-    format3::git(
-        repository_directory.path(),
-        &[
-            "commit",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "advance HEAD after historical commit",
-        ],
+    let historical_rows = format3::committed_store_rows(&repository, relation_id);
+    // Advance HEAD past the historical commit by publishing a retitled store
+    // row, so a mount that followed HEAD would show the newer title. Rows
+    // live only in the store (ORNA-REPO-004).
+    let revised_row = format!(
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: {capture},\n    cover: null,\n}}\n"
     );
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let revised_context = format3::format3_context_for_snapshot(&repository, current.as_str());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &revised_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &blob_captures,
+            source_row: &revised_row,
+            ordinal: 0x84,
+            insert_only: false,
+        }],
+    )
+    .await;
+    drop(state);
     assert_ne!(
         repository.head().unwrap().unwrap(),
         historical_commit
+    );
+    assert_ne!(
+        format3::committed_store_rows(&repository, relation_id)[0].value(),
+        historical_rows[0].value(),
+        "HEAD carries the retitled row"
     );
     let historical_commit_selector = "HEAD~1";
     let (selected_commit, historical_format) = repository

@@ -61,9 +61,9 @@ const STORE_ENTRY: &str = "store";
 /// reviewed commit adds one.
 const TRANSITIONAL_FORMAT3_ENTRIES: [&str; 2] = [
     // The object identity inventory from before it moved into the store.
-    // `orna mv` and LSP rename still write it, and `orna commit` migrates a
-    // staged copy into the store and drops it from the index. Removed by the
-    // store-backed `orna mv`, ornadb-5il1.413.
+    // LSP rename (`orna-lsp` `server.rs`) still writes it, and `orna commit`
+    // migrates a staged copy into the store and drops it from the index.
+    // Removed by the store-backed LSP rename, ornadb-5il1.414.
     crate::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
     // The record a prepared `orna migrate copy` candidate tracks. Removed when
     // the migration coordinates move into commit trailers, ornadb-5il1.314.

@@ -163,7 +163,7 @@ fn assert_loose_row_refused(error: ProjectLoadError, path: &str) {
     assert!(error.to_string().contains(path), "{error}");
 }
 
-/// ORNA-META-001, ORNA-REPO-004, ORNA-UPGRADE-003: format 3 keeps rows only
+/// ORNA-REPO-004, ORNA-UPGRADE-003, Gate A: format 3 keeps rows only
 /// in `.orna/store`, so a committed format-3 snapshot that tracks a loose row
 /// file mixes formats. Loading it fails with ORNA-REPO-CONTEXT-004 naming the
 /// row file, before its bytes are read (these are not even UTF-8), instead of
@@ -202,7 +202,7 @@ fn format3_committed_snapshot_with_a_loose_row_mixes_formats() {
     assert_loose_row_refused(error, "Music/london.orna");
 }
 
-/// ORNA-META-001, ORNA-REPO-004, ORNA-UPGRADE-003: a format-3 commit
+/// ORNA-REPO-004, ORNA-UPGRADE-003, Gate A: a format-3 commit
 /// candidate that tracks a loose row file would publish a mixed snapshot, so
 /// loading it fails with ORNA-REPO-CONTEXT-004 naming the row file. A
 /// candidate that changes only source loads.
@@ -243,6 +243,65 @@ fn format3_candidate_writing_a_loose_row_mixes_formats() {
         .load_private_candidate(&repository, &added_row)
         .expect_err("a written loose row mixes formats");
     assert_loose_row_refused(error, path);
+}
+
+/// The loose-row refusal recognises only row files: an unreached
+/// `<table>/<key>.orna`. A module a `use` reaches is a module even beside a
+/// table of the same name (ORNA-NS-002), and `dir/main.orna`, files beside a
+/// similarly named table, and non-`.orna` files are never rows. A format-3
+/// snapshot or candidate holding only those loads; adding an unreached row
+/// file under the table is refused.
+#[test]
+fn format3_modules_beside_a_table_are_not_loose_rows() {
+    let (directory, repository) = repository(&[
+        (
+            "main.orna",
+            "use sensors.input;\npub table sensors(id: Str) { name: Str, }\npub table Music(id: Str) { title: Str, }\n",
+        ),
+        ("sensors/input.orna", "pub fn reading(): Int = 1;\n"),
+        ("sensors/main.orna", "pub fn unused(): Int = 2;\n"),
+        ("sensors/notes.txt", "not a row\n"),
+        ("Musicals/london.orna", "{\n    title: \"Not a Music row\",\n}\n"),
+        (".orna/database.orna", FORMAT3_DATABASE),
+        (".orna/store/data", "format-3 row graph"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .expect("a format-3 snapshot with modules beside a table loads");
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna", "sensors/input.orna"]
+    );
+    assert!(project.loose_rows().is_empty());
+
+    let candidate = |path: &str, bytes: &str| {
+        repository
+            .build_private_commit(
+                &commit,
+                &[ManagedFileChange::new(
+                    ManagedPath::new(path).unwrap(),
+                    Some(bytes.as_bytes().to_vec()),
+                )],
+                "format-3 candidate",
+            )
+            .unwrap()
+    };
+    let module_edit = candidate("sensors/input.orna", "pub fn reading(): Int = 3;\n");
+    ProjectLoader::default()
+        .load_private_candidate(&repository, &module_edit)
+        .expect("editing a reached module under a table path is not a loose row");
+
+    let row_file = candidate("sensors/london.orna", "{\n    name: \"London\",\n}\n");
+    let error = ProjectLoader::default()
+        .load_private_candidate(&repository, &row_file)
+        .expect_err("an unreached file under the table is a loose row");
+    assert_loose_row_refused(error, "sensors/london.orna");
 }
 
 #[test]

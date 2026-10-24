@@ -53,6 +53,10 @@ jobs:
       - name: Test the publication crash-barrier matrix
         run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
 
+      # Format-3 project loading: loose-row refusal, module and row admission.
+      - name: Test the orna-project-v1 project loader
+        run: cargo test --locked -p orna-project-v1 --test project_loader -- --nocapture
+
       # Owner-lease and crash-recovery tests. Fencing is NOT yet enforced in production
       # (W76 F1; beads .127/.220): owner_fence_gate_d fences by test-body takeover and asserts
       # same-owner reacquire at epoch 1, which a production fix will change. durable_crash_recovery
