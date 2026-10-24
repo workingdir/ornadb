@@ -633,7 +633,16 @@ fn write_source_atomically_before_replace(
             .create_new(true)
             .open(&temp)?;
         temp_created = true;
-        file.set_permissions(metadata.permissions())?;
+        // Copy only the permission bits: never carry setuid/setgid/sticky onto
+        // the replacement source (W62-08).
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::Permissions::from_mode(metadata.permissions().mode() & 0o777)
+        };
+        #[cfg(not(unix))]
+        let permissions = metadata.permissions();
+        file.set_permissions(permissions)?;
         file.write_all(replacement)?;
         file.sync_all()?;
         drop(file);
@@ -1106,6 +1115,26 @@ mod mv_tests {
 
         assert_eq!(fs::read(&target).unwrap(), b"target");
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+
+    /// W62-08: the replacement source must not inherit setuid/setgid/sticky.
+    #[cfg(unix)]
+    #[test]
+    fn source_writer_drops_setuid_setgid_and_sticky_from_the_replaced_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("main.orna");
+        fs::write(&source, b"before").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o7755)).unwrap();
+
+        write_source_atomically(&source, b"before", b"after").unwrap();
+
+        assert_eq!(fs::read(&source).unwrap(), b"after");
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
     }
 
     #[test]
