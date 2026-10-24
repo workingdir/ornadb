@@ -132,6 +132,54 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
         .await.expect("invalid candidate leaves accepted row");
     assert_eq!(rejected_row, after, "rejection leaves accepted row unchanged");
 }
+
+#[tokio::test]
+async fn edit_entrypoint_plain_and_row_edits_both_admit_without_a_live_mount() {
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(NOTES_SOURCE, "Music");
+    let (identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    let writer = state.acquire_lease(identity.repository_id).await.unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x91,
+            insert_only: true,
+        }],
+    ).await;
+    drop(state);
+    let before = current_row(&repository, relation_id, "Music", b"london")
+        .await.expect("the source row is admitted before editing");
+
+    // No mount is live, so both edits take the in-process path (edit_path).
+    // The baseline rule for `edit PATH` and `edit --row` must match the
+    // owner-routed path; with no mount there is no baseline to advance.
+    let scripts = TempDir::new().unwrap();
+    let plain_editor = editor(&scripts, "plain-editor", r#"printf '%s\n' '{ title: "plain", }' > "$1""#);
+    let plain = edit(&repository_directory, &plain_editor, &["edit", ROW_PATH]);
+    assert!(plain.status.success(), "plain edit stderr: {}", String::from_utf8_lossy(&plain.stderr));
+    let after_plain = current_row(&repository, relation_id, "Music", b"london")
+        .await.expect("plain edit leaves the row admitted");
+    assert_ne!(after_plain, before, "plain edit replaces the stored row");
+
+    let row_editor = editor(&scripts, "row-editor", r#"printf '%s\n' '{ title: "row", }' > "$1""#);
+    let grouped = edit(&repository_directory, &row_editor, &["edit", "--row", ROW_PATH]);
+    assert!(grouped.status.success(), "row edit stderr: {}", String::from_utf8_lossy(&grouped.stderr));
+    let after_row = current_row(&repository, relation_id, "Music", b"london")
+        .await.expect("row edit leaves the row admitted");
+    assert_ne!(after_row, after_plain, "row edit replaces the plain-edited row");
+}
 #[tokio::test]
 async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snapshot() {
     const ORIGINAL_PIXEL: &[u8] = include_bytes!("fixtures/media/pixel.png");
