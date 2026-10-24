@@ -2823,6 +2823,10 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
+        // EDIT-1 (41-vfs.md:42-44): a Blob projection has no private candidate, so a
+        // write-intent open, including O_TRUNC, is refused with EPERM (41-vfs.md:103-105).
+        let write_mode =
+            flags.0 & libc::O_ACCMODE != libc::O_RDONLY || flags.0 & libc::O_TRUNC != 0;
         let mut state = self
             .state
             .lock()
@@ -2832,6 +2836,11 @@ impl Filesystem for WorkspaceFilesystem {
             Some(NodeKind::BlobBytes(_))
         );
         if replaced_blob {
+            if write_mode {
+                drop(state);
+                reply.error(Errno::EPERM);
+                return;
+            }
             state.track_blob_open(inode.0);
         }
         drop(state);
@@ -2869,6 +2878,10 @@ impl Filesystem for WorkspaceFilesystem {
                     blob_field.clone(),
                 ),
                 Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => {
+                    if write_mode {
+                        reply.error(Errno::EPERM);
+                        return;
+                    }
                     state.track_blob_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
