@@ -8743,6 +8743,90 @@ fn delete_requires_current_unexpired_bearer_and_original_origin() {
     assert_eq!(expired_deletion.calls, 0);
 }
 
+/// 30-protocol §Session creation and ownership and portable codes: a session
+/// whose lifetime elapsed answers 410 with the portable `wire.session_expired`
+/// code, not the generic closed-session `live.expired`. Exercised on resume,
+/// where the expired boundary error reaches the wire mapping.
+#[test]
+fn expired_session_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let resume = wire(
+        "POST",
+        "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+        &format!(r#"{{"resume_token":"{credential}","protocol":"orna.present.v1"}}"#),
+    );
+    let resumed = block_on(transport.handle(resume, 100, &mut authority, &mut issuer, &mut deletion));
+    assert_eq!(resumed.status, 410);
+    assert_eq!(
+        resumed.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
+/// 30-protocol §Protocol messages (ORNA-PROTO admission): when the per-session
+/// application work bound is full, a well-formed Eval is refused before any
+/// request state exists and receives a correlated `wire.limit` diagnostic on
+/// the same socket, leaving the socket and session usable.
+#[test]
+fn application_work_bound_refuses_admission_with_correlated_wire_limit() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let session_token = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1)).status,
+        101
+    );
+
+    let supervisor = transport.application_work_supervisor();
+    let mut held = Vec::new();
+    for index in 0..4096_u32 {
+        let mut request = [0; 16];
+        request[..4].copy_from_slice(&index.to_be_bytes());
+        held.push(supervisor.admit([1; 16], request).unwrap());
+    }
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .expect("an admission limit is returned as a wire diagnostic, not a transport error");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("a refused admission should produce a correlated diagnostic output");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([30; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    assert!(
+        payload.windows(b"wire.limit".len()).any(|window| window == b"wire.limit"),
+        "the diagnostic must carry the portable wire.limit code"
+    );
+    drop(held);
+}
+
 #[test]
 fn frames_are_bounded_binary_canonical_and_cancellable() {
     let mut host = host();
