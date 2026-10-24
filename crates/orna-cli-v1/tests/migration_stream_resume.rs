@@ -386,3 +386,30 @@ fn migration_carry_without_bridge_origin_refuses_open() {
         }
     });
 }
+
+#[test]
+fn stream_carry_import_refuses_a_destination_already_holding_carried_rows() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&source, &destination);
+    assert!(
+        output.status.success(),
+        "first carry must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        let recorded = carry.continuity_record().expect("carry continuity is recorded");
+        let destination_repository = Repository::discover(&destination).unwrap();
+        let again = import_stream_carry(&destination_repository, &carry, Some(&recorded)).await;
+        assert_eq!(again, Err(RuntimeError::MigrationCarryTargetNotEmpty));
+    });
+}
