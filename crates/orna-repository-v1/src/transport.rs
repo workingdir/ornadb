@@ -1995,6 +1995,16 @@ mod tests {
     fn crashed_fetch_holds_objects_durable_before_any_ref_names_them() {
         use std::time::{Duration, Instant};
 
+        /// Kills and reaps the held fetch child when the test unwinds early.
+        struct KillOnDrop(std::process::Child);
+
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
         if let Some(root) = std::env::var_os(FETCH_CRASH_ROOT) {
             crashed_fetch_child_body(Path::new(&root));
             return;
@@ -2016,7 +2026,7 @@ mod tests {
             "the parent repository must not already hold the fetched commit"
         );
 
-        let mut child = Command::new(std::env::current_exe().expect("resolve test binary"))
+        let mut child = KillOnDrop(Command::new(std::env::current_exe().expect("resolve test binary"))
             .args([
                 "--exact",
                 FETCH_CRASH_TEST,
@@ -2027,7 +2037,7 @@ mod tests {
             .env(FAULT_INJECTION_HOLD_ENV, "30")
             .stdout(Stdio::null())
             .spawn()
-            .expect("spawn the held fetch");
+            .expect("spawn the held fetch"));
 
         let deadline = Instant::now() + Duration::from_secs(20);
         while !fetched_object_on_disk(&objects, &head) && Instant::now() < deadline {
@@ -2043,12 +2053,12 @@ mod tests {
             "no ref may name the fetched commit while the fetch is held before its CAS"
         );
         assert!(
-            child.try_wait().expect("poll the held fetch").is_none(),
+            child.0.try_wait().expect("poll the held fetch").is_none(),
             "the fetch must still be held in the seam, not finished"
         );
 
-        child.kill().expect("kill the held fetch");
-        let status = child.wait().expect("await the killed fetch");
+        child.0.kill().expect("kill the held fetch");
+        let status = child.0.wait().expect("await the killed fetch");
         assert!(
             !status.success(),
             "the held fetch must die by signal, not publish an exit status"
