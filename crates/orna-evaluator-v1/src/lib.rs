@@ -7619,38 +7619,39 @@ impl Context<'_, '_> {
         if let Some(input) = input {
             supplied[0] = Some(input);
         }
-        let positional = arguments.iter().all(|argument| argument.name.is_none());
-        if positional {
-            let offset = usize::from(has_input);
-            if arguments.len() > parameters.len().saturating_sub(offset) {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            for (position, argument) in arguments.iter().enumerate() {
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                supplied[offset + position] = Some(value);
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
+        // Leading positional arguments fill the next free slot in declaration
+        // order; named arguments may follow them (spec examples/valid/blob-range.orna:
+        // `sys.blob.read(value, offset: 1, length: 2)`), never precede them.
+        let mut next_positional = usize::from(has_input);
+        let mut named_seen = false;
+        for argument in arguments {
+            let position = match argument.name.as_deref() {
+                None => {
+                    if named_seen || next_positional >= parameters.len() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    let position = next_positional;
+                    next_positional += 1;
+                    position
                 }
-            }
-        } else {
-            for argument in arguments {
-                let Some(name) = argument.name.as_deref() else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                let Some(position) = parameters
-                    .iter()
-                    .position(|parameter| parameter.name == name)
-                else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                if supplied[position].is_some() {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                Some(name) => {
+                    named_seen = true;
+                    let Some(position) = parameters
+                        .iter()
+                        .position(|parameter| parameter.name == name)
+                    else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    if supplied[position].is_some() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    position
                 }
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                supplied[position] = Some(value);
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
+            };
+            let value = self.evaluate(&argument.value, scope, depth + 1)?;
+            supplied[position] = Some(value);
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
             }
         }
 
