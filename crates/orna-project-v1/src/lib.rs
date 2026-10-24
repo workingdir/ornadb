@@ -1185,6 +1185,13 @@ impl ProjectLoader {
             |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
                 if has_format3_database {
+                    refuse_written_format3_loose_rows(
+                        repository,
+                        candidate,
+                        &snapshot.row_paths,
+                        tables,
+                        self.limits,
+                    )?;
                     Ok(Vec::new())
                 } else {
                     discover_private_candidate_rows(
@@ -1700,7 +1707,9 @@ impl fmt::Display for ProjectLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Repository(_) => "could not discover the Git worktree",
-            Self::FormatContext(_) => "repository format metadata is invalid",
+            // The admission error says which metadata or path failed, such as
+            // the entry or row file that mixes formats.
+            Self::FormatContext(error) => return write!(formatter, "{error}"),
             Self::RootUnavailable => "could not resolve the Git worktree",
             Self::UnsafePath => "project contains an unsafe module path",
             Self::Symlink => "project module path contains a symbolic link",
@@ -2211,6 +2220,67 @@ fn discover_private_candidate_rows(
             })
         })
         .collect()
+}
+
+/// Refuses a format-3 commit candidate that writes a loose row file.
+///
+/// Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004), so a `.orna`
+/// file at a table's row path, `<table>/<key>.orna`, is the legacy loose-row
+/// layout. A candidate that adds or changes one would make the writer produce
+/// a mixed snapshot (ORNA-META-001, ORNA-UPGRADE-003; Gate A, "unknown/mixed
+/// formats fail early"), so it is refused by path before anything is staged.
+/// The candidate is captured on `HEAD`: a row file `HEAD` already commits with
+/// the same bytes is not written by it, and format-3 readers leave it unread.
+fn refuse_written_format3_loose_rows(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    row_paths: &BTreeSet<String>,
+    table_paths: &BTreeSet<String>,
+    limits: ProjectLimits,
+) -> Result<(), ProjectLoadError> {
+    let mut row_files = row_paths
+        .iter()
+        .filter(|logical_path| table_owner_and_key(logical_path, table_paths).is_some())
+        .peekable();
+    if row_files.peek().is_none() {
+        return Ok(());
+    }
+    let head = repository.head().map_err(ProjectLoadError::Repository)?;
+    let committed: BTreeSet<String> = match &head {
+        Some(head) => repository
+            .list_committed_source_tree(head)
+            .map_err(ProjectLoadError::Repository)?
+            .into_iter()
+            .filter(|entry| matches!(entry.kind(), CommittedTreeEntryKind::File { .. }))
+            .filter_map(|entry| entry.path().as_path().to_str().map(str::to_owned))
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    for logical_path in row_files {
+        let unchanged = match &head {
+            Some(head) if committed.contains(logical_path) => {
+                repository
+                    .read_committed_file(head, logical_path, limits.max_source_bytes)
+                    .map_err(ProjectLoadError::Repository)?
+                    == repository
+                        .read_private_candidate_file(
+                            candidate,
+                            logical_path,
+                            limits.max_source_bytes,
+                        )
+                        .map_err(ProjectLoadError::Repository)?
+            }
+            _ => false,
+        };
+        if !unchanged {
+            return Err(ProjectLoadError::FormatContext(
+                FormatContextError::MixedFormats {
+                    path: logical_path.clone(),
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn table_owner_and_key(
