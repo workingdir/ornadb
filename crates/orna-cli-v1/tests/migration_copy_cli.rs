@@ -54,7 +54,7 @@ fn run_copy(
     count: &str,
     git_trace: &Path,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TRACE", git_trace)
         .args([
@@ -73,7 +73,7 @@ fn run_copy(
 }
 
 fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
