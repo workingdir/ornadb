@@ -87,12 +87,14 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorCode {
     RoleMismatch,
+    UnsupportedValueProfile,
 }
 
 impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RoleMismatch => "OVB2_ROLE_MISMATCH",
+            Self::UnsupportedValueProfile => "sys.codec.unsupported_value_profile",
         }
     }
 }
@@ -102,6 +104,7 @@ impl Error {
     pub const fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::RoleMismatch { .. } => Some(ErrorCode::RoleMismatch),
+            Self::InvalidProfile => Some(ErrorCode::UnsupportedValueProfile),
             _ => None,
         }
     }
