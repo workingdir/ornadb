@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_project_v1::{ProjectLimits, ProjectLoadError, ProjectLoader};
+use orna_project_v1::{LoadedProject, ProjectLimits, ProjectLoadError, ProjectLoader};
 use orna_repository_v1::{ManagedFileChange, ManagedPath, Repository};
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use tempfile::TempDir;
@@ -1124,6 +1124,9 @@ fn rejects_unreachable_symlinks_during_metadata_preflight() {
 }
 
 /// ORNA-REPO-004: rows for reachable tables are discovered through the production loader.
+/// The unreachable row is not a valid row unit either; loading still succeeds
+/// because files outside reachable table directories are never read
+/// (ORNA-REPO-003).
 #[test]
 fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     let (directory, repository) = repository(&[
@@ -1137,10 +1140,6 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             include_str!("fixtures/contact_42.orna"),
         ),
         (
-            "contacts/Contact/malformed.orna",
-            include_str!("fixtures/contact_malformed.orna"),
-        ),
-        (
             "unused/Contact/1.orna",
             include_str!("fixtures/unreachable_contact_row.orna"),
         ),
@@ -1148,7 +1147,7 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     commit_all(&directory);
 
     let worktree = ProjectLoader::default().load(&repository).unwrap();
-    assert_eq!(worktree.loose_rows().len(), 2);
+    assert_eq!(worktree.loose_rows().len(), 1);
     assert_eq!(
         worktree.loose_rows()[0].logical_path(),
         "contacts/Contact/42.orna"
@@ -1157,8 +1156,8 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     assert_eq!(worktree.loose_rows()[0].key_path(), ["42.orna"]);
     assert_eq!(worktree.loose_rows()[0].parse_as(), "row_unit");
     assert_eq!(
-        worktree.loose_rows()[1].source(),
-        include_str!("fixtures/contact_malformed.orna")
+        worktree.loose_rows()[0].source(),
+        include_str!("fixtures/contact_42.orna")
     );
     assert!(
         !worktree
@@ -1177,11 +1176,58 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             .iter()
             .map(|row| row.logical_path())
             .collect::<Vec<_>>(),
-        [
-            "contacts/Contact/42.orna",
-            "contacts/Contact/malformed.orna"
-        ]
+        ["contacts/Contact/42.orna"]
     );
+}
+
+/// ORNA-SOURCE-003: a reachable row file that is not exactly one record
+/// expression is rejected at load with the parser's row-unit code, in the
+/// worktree and in a committed snapshot alike; a valid sibling row does not
+/// hide it.
+#[test]
+fn rejects_malformed_reachable_row_unit_with_parser_code() {
+    let (directory, repository) = repository(&[
+        ("main.orna", include_str!("fixtures/main_contacts.orna")),
+        (
+            "contacts.orna",
+            include_str!("fixtures/contacts_table.orna"),
+        ),
+        (
+            "contacts/Contact/42.orna",
+            include_str!("fixtures/contact_42.orna"),
+        ),
+        (
+            "contacts/Contact/malformed.orna",
+            include_str!("fixtures/contact_malformed.orna"),
+        ),
+    ]);
+    commit_all(&directory);
+
+    let assert_rejected = |result: Result<LoadedProject, ProjectLoadError>| match result {
+        Err(ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        }) => {
+            assert_eq!(logical_path, "contacts/Contact/malformed.orna");
+            let first = diagnostics.first().expect("row unit diagnostic");
+            assert_eq!(first.code, "E8001");
+            assert!(
+                first
+                    .message
+                    .contains("row unit must contain one record expression"),
+                "{first:?}"
+            );
+            assert_eq!(
+                first.span.file.as_deref(),
+                Some("contacts/Contact/malformed.orna")
+            );
+        }
+        other => panic!("expected InvalidRowUnit, got {other:?}"),
+    };
+    assert_rejected(ProjectLoader::default().load(&repository));
+
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+    assert_rejected(ProjectLoader::default().load_committed_snapshot(&repository, &commit));
 }
 
 #[test]
