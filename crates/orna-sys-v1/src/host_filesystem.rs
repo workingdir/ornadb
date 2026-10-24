@@ -1001,8 +1001,9 @@ mod beneath {
             return Err(FilesystemProviderError::OutputLimit);
         }
         let (parent, name) = parent_and_name(root, destination)?;
-        // Like `std::fs::copy`, the copy takes the source's permission bits.
-        let permissions = Mode::from_raw_mode(status.st_mode);
+        // The copy takes the source's permission bits without setuid, setgid or
+        // sticky, so a copied executable never carries privilege bits.
+        let permissions = Mode::from_raw_mode(status.st_mode & 0o777);
         let existing = if overwrite {
             Existing::Open
         } else {
