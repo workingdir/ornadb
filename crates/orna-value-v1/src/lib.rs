@@ -1305,6 +1305,16 @@ impl Blob {
 
     /// Compare exact bytes while ignoring annotation metadata.
     pub fn same_content(&self, other: &Self) -> Result<bool> {
+        self.same_content_checked(other, || Ok(()))
+    }
+
+    /// Like [`Blob::same_content`], but calls `checkpoint` before each streamed
+    /// chunk so callers can enforce cancellation and budgets (ORNA-BLOB-015).
+    pub fn same_content_checked(
+        &self,
+        other: &Self,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<bool> {
         if self.identity != other.identity {
             return Ok(false);
         }
@@ -1324,6 +1334,7 @@ impl Blob {
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
+            checkpoint()?;
             let size = (self.length() - offset).min(chunk_limit);
             let left = read_content_range(self, offset, size)?;
             let right = read_content_range(other, offset, size)?;
@@ -8525,6 +8536,43 @@ mod resolver_integrity_tests {
         assert_eq!(replaced.read(0, 0), Err(Error::MissingDescriptor));
         assert_eq!(resolver.reads.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(resolver.bytes_read.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn same_content_over_admitted_references_compares_exact_bytes() {
+        let descriptor = NativeOid::from_bytes(&[6; 20]).unwrap();
+        let identity = ContentIdentity::from_bytes(b"abcdef");
+        let resolver = resolver(descriptor.clone(), identity, b"abcdef", b"abcdef");
+        let context = context(resolver);
+        let left = Blob::from_reference(context.reference(identity, descriptor.clone()).unwrap())
+            .unwrap();
+        let right = Blob::from_reference(context.reference(identity, descriptor).unwrap()).unwrap();
+
+        assert!(left.same_content(&right).unwrap());
+        assert!(left.same_content(&left).unwrap());
+    }
+
+    #[test]
+    fn same_content_rejects_tampered_bytes_under_an_admitted_identity() {
+        let identity = ContentIdentity::from_bytes(b"abc");
+        let good_descriptor = NativeOid::from_bytes(&[4; 20]).unwrap();
+        let tampered_descriptor = NativeOid::from_bytes(&[5; 20]).unwrap();
+        let good_resolver = resolver(good_descriptor.clone(), identity, b"abc", b"abc");
+        let tampered_resolver = resolver(tampered_descriptor.clone(), identity, b"axc", b"abc");
+        let good = Blob::from_reference(
+            context(good_resolver)
+                .reference(identity, good_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+        let tampered = Blob::from_reference(
+            context(tampered_resolver)
+                .reference(identity, tampered_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(good.same_content(&tampered), Err(Error::ContentDigestMismatch));
     }
 
     #[test]
