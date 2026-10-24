@@ -1979,10 +1979,15 @@ enum OpenFile {
     ),
 }
 /// Why a submitted candidate was not accepted, for the unmount listing and
-/// the stop-time report. `draft` is its recovery record once retained.
+/// the stop-time report. `draft` is its recovery record once retained. While
+/// recovery storage refuses the candidate, `unretained` holds its save context
+/// and bytes so a later retention attempt can still write them.
 struct DraftRefusal {
     cause: &'static str,
     draft: Option<String>,
+    /// The handle whose candidate this refusal describes; a write by that handle clears it.
+    handle: Option<u64>,
+    unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
 /// Unsynced Document drafts are discarded on release; a Document whose fsync was
@@ -2007,6 +2012,17 @@ impl DraftState {
             || !self.retained_scratch.is_empty()
             || !self.rejected_documents.is_empty()
             || !self.rejected_scratch.is_empty()
+    }
+
+    /// A write or truncate by `handle` makes its candidate newer than the refused
+    /// one, so the refusal no longer names that handle. An accepted save must not
+    /// end the unresolved state of that newer candidate (ORNA-VFS-008).
+    fn candidate_written(&mut self, handle: u64, inode: u64) {
+        if let Some(refusal) = self.rejected_documents.get_mut(&inode) {
+            if refusal.handle == Some(handle) {
+                refusal.handle = None;
+            }
+        }
     }
 }
 
@@ -2283,6 +2299,7 @@ impl WorkspaceFilesystem {
         &self,
         draft_state: &mut DraftState,
         inode: u64,
+        handle: u64,
         save: &Arc<RowSaveContext>,
         draft: &EditDraft<RowMapSnapshot>,
         error: &DocumentCommitError,
@@ -2290,6 +2307,7 @@ impl WorkspaceFilesystem {
         self.retain_candidate(
             draft_state,
             inode,
+            handle,
             save,
             draft,
             error.cause(),
@@ -2312,7 +2330,7 @@ impl WorkspaceFilesystem {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
             if !matches!(error, DocumentCommitError::NoCandidate) {
-                self.refuse_document(draft_state, inode, save, draft, &error);
+                self.refuse_document(draft_state, inode, handle, save, draft, &error);
             }
             return Err(error);
         }
@@ -2336,7 +2354,16 @@ impl WorkspaceFilesystem {
             }
         }
         draft_state.unresolved_handles.remove(&handle);
-        draft_state.rejected_documents.remove(&inode);
+        // The accepted save supersedes the refusal it replaces. A refusing handle
+        // whose candidate is unchanged holds only obsolete bytes, so its unresolved
+        // state ends here and its later RELEASE retains nothing.
+        if let Some(DraftRefusal {
+            handle: Some(refused),
+            ..
+        }) = draft_state.rejected_documents.remove(&inode)
+        {
+            draft_state.unresolved_handles.remove(&refused);
+        }
         Ok(())
     }
 
@@ -2389,6 +2416,7 @@ impl WorkspaceFilesystem {
         &self,
         draft_state: &mut DraftState,
         inode: u64,
+        handle: u64,
         save: &Arc<RowSaveContext>,
         draft: &EditDraft<RowMapSnapshot>,
     ) {
@@ -2398,7 +2426,7 @@ impl WorkspaceFilesystem {
             .rejected_documents
             .get(&inode)
             .map_or("unsynced", |refusal| refusal.cause);
-        self.retain_candidate(draft_state, inode, save, draft, cause, false);
+        self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
     }
 
     /// Writes a candidate that was not accepted to recovery storage and records
@@ -2409,6 +2437,7 @@ impl WorkspaceFilesystem {
         &self,
         draft_state: &mut DraftState,
         inode: u64,
+        handle: u64,
         save: &Arc<RowSaveContext>,
         draft: &EditDraft<RowMapSnapshot>,
         cause: &'static str,
@@ -2420,27 +2449,33 @@ impl WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
-        let retained_draft = match save.writer.retained_drafts.retain(&path, cause, &bytes) {
+        let retained = save.writer.retained_drafts.retain(&path, cause, &bytes);
+        let (retained_draft, unretained) = match retained {
             Ok(retained) => {
                 eprintln!(
                     "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
                     retained.id,
                     retained.record.display()
                 );
-                Some(retained.id)
+                (Some(retained.id), None)
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                None
+                (None, Some((Arc::clone(save), bytes)))
             }
         };
-        draft_state.rejected_documents.insert(
+        if let Some(superseded) = draft_state.rejected_documents.insert(
             inode,
             DraftRefusal {
                 cause,
+                handle: Some(handle),
                 draft: retained_draft,
+                unretained,
             },
-        );
+        ) && superseded.unretained.is_some()
+        {
+            eprintln!("{path}: an earlier unretained candidate was superseded");
+        }
         if refresh {
             state.report_refresh(inode, save, &path);
         }
@@ -2506,8 +2541,10 @@ impl WorkspaceFilesystem {
     /// recovery storage; unsynced document writes and truncates are added to
     /// it; scratch files are persisted to the scratch store, which the next
     /// mount restores. Every kept draft is reported with
-    /// `sys.vfs.draft_retained`.
-    fn retain_all_drafts(&self, draft_state: &mut DraftState) {
+    /// `sys.vfs.draft_retained`. A candidate that recovery storage refuses keeps
+    /// its bytes as an unresolved refusal, so a later attempt retries it.
+    /// Returns whether every document draft was retained.
+    fn retain_all_drafts(&self, draft_state: &mut DraftState) -> bool {
         let open_files = self
             .open_files
             .lock()
@@ -2518,21 +2555,12 @@ impl WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut reports = std::collections::BTreeSet::new();
-        let mut retain = |save: &RowSaveContext, inode: u64, cause: &str, bytes: &[u8]| {
-            let path = state.display_path(inode);
-            reports.insert(match save.writer.retained_drafts.retain(&path, cause, bytes) {
-                Ok(retained) => format!(
-                    "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
-                    retained.id,
-                    retained.record.display()
-                ),
-                Err(error) => format!("draft for {path} ({cause}) could not be retained: {error}"),
-            });
-        };
+        let mut candidates: Vec<(u64, Option<u64>, &'static str, Arc<RowSaveContext>, Arc<[u8]>)> =
+            Vec::new();
         for (handle, inode) in &draft_state.unresolved_handles {
             if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
                 let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
-                retain(save.as_ref(), *inode, "unsynced", &bytes);
+                candidates.push((*inode, Some(*handle), "unsynced", Arc::clone(save), bytes));
             }
         }
         for (inode, size) in &draft_state.pending_truncates {
@@ -2541,21 +2569,50 @@ impl WorkspaceFilesystem {
             {
                 let mut candidate = bytes.clone();
                 candidate.resize(usize::try_from(*size).unwrap_or(usize::MAX), 0);
-                retain(save.as_ref(), *inode, "unsynced", &candidate);
+                candidates.push((*inode, None, "unsynced", Arc::clone(save), Arc::from(candidate)));
             }
         }
-        for (inode, refusal) in &draft_state.rejected_documents {
-            let path = state.display_path(*inode);
-            reports.insert(match &refusal.draft {
-                Some(draft) => format!(
-                    "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
-                    refusal.cause
-                ),
-                None => format!(
-                    "draft for {path} ({}) could not be retained when it was refused",
-                    refusal.cause
-                ),
-            });
+        let mut unresolved = HashMap::new();
+        for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
+            match (refusal.draft, refusal.unretained) {
+                (_, Some((save, bytes))) => {
+                    candidates.push((inode, refusal.handle, refusal.cause, save, bytes));
+                }
+                (Some(draft), None) => {
+                    let path = state.display_path(inode);
+                    reports.insert(format!(
+                        "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
+                        refusal.cause
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        for (inode, handle, cause, save, bytes) in candidates {
+            let path = state.display_path(inode);
+            match save.writer.retained_drafts.retain(&path, cause, &bytes) {
+                Ok(retained) => {
+                    reports.insert(format!(
+                        "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
+                        retained.id,
+                        retained.record.display()
+                    ));
+                }
+                Err(error) => {
+                    reports.insert(format!(
+                        "draft for {path} ({cause}) could not be retained: {error}"
+                    ));
+                    unresolved.insert(
+                        inode,
+                        DraftRefusal {
+                            cause,
+                            draft: None,
+                            handle,
+                            unretained: Some((save, bytes)),
+                        },
+                    );
+                }
+            }
         }
         let scratch = draft_state
             .retained_scratch
@@ -2588,8 +2645,10 @@ impl WorkspaceFilesystem {
         draft_state.unresolved_handles.clear();
         draft_state.pending_truncates.clear();
         draft_state.retained_scratch.clear();
-        draft_state.rejected_documents.clear();
         draft_state.rejected_scratch.clear();
+        let all_retained = unresolved.is_empty();
+        draft_state.rejected_documents = unresolved;
+        all_retained
     }
 }
 
@@ -2693,8 +2752,11 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
             draft_state.quiescing = true;
-            self.retain_all_drafts(&mut draft_state);
-            reply.ok();
+            if self.retain_all_drafts(&mut draft_state) {
+                reply.ok();
+            } else {
+                reply.error(Errno::EIO);
+            }
         } else if value == b"1" {
             if draft_state.has_unresolved_drafts() {
                 reply.error(Errno::EBUSY);
@@ -2911,6 +2973,7 @@ impl Filesystem for WorkspaceFilesystem {
         let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
         if truncate_size.is_some() {
             draft_state.unresolved_handles.insert(handle, inode.0);
+            draft_state.candidate_written(handle, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
             }
@@ -3290,7 +3353,15 @@ impl Filesystem for WorkspaceFilesystem {
             .retain(|_, dirty_inode| *dirty_inode != source_inode);
         draft_state.retained_scratch.remove(&source_inode);
         draft_state.rejected_scratch.remove(&source_inode);
-        draft_state.rejected_documents.remove(&destination_inode);
+        // The accepted replacement supersedes the refused candidate it replaces, so
+        // the refusing handle no longer holds the destination unresolved (ORNA-VFS-024).
+        if let Some(DraftRefusal {
+            handle: Some(refused),
+            ..
+        }) = draft_state.rejected_documents.remove(&destination_inode)
+        {
+            draft_state.unresolved_handles.remove(&refused);
+        }
         draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
@@ -3536,6 +3607,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .contains_key(&inode.0);
         if !data.is_empty() && is_tracked {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
+            draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
             }
@@ -3684,7 +3756,7 @@ impl Filesystem for WorkspaceFilesystem {
             // Release is cleanup only (EDIT-1 step 4): an unsynced document is
             // retained as a draft, never accepted here.
             (Some(inode), Some(OpenFile::Document(save, draft))) => {
-                self.retain_unsynced_document(&mut draft_state, inode, &save, &draft);
+                self.retain_unsynced_document(&mut draft_state, inode, handle.0, &save, &draft);
             }
             _ => {}
         }
