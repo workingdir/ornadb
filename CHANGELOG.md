@@ -12,18 +12,30 @@ been published.
   than drops, a valid dirty draft that retention cannot keep, and a released
   handle does not re-admit a refusal that a later accepted save resolved.
   Earlier builds did not attempt acceptance at close and did not keep unsynced
-  drafts on release. `orna unmount` retries a busy FUSE mount for the same
-  grace window a termination-signal unmount already used, because the kernel
-  can report the mount busy for a few milliseconds after the final `close(2)`.
+  drafts on release.
 - A FUSE write-intent open of a Blob projection (any write access mode, or
   `O_TRUNC`) now fails at open with `EPERM` and leaves the blob unchanged. It
   used to succeed or be ignored, and the later write failed with `EBADF`
   (profiles/vfs-1.md:104-106). Tools that write a Blob in place, such as `cp`
   onto `content.mp3` or an editor with `backupcopy=yes`, now see the error at
-  open. Other non-candidate Blob writes in the same mount still return `EROFS`;
-  the split is not unified yet (profiles/vfs-1.md:139). This is an interim
-  errno, not Gate E Blob candidate support: zero-length and sparse-hole Blob
-  coverage remains open.
+  open. Unlinking a Blob, renaming it within its row, and truncating it by path
+  also return `EPERM`. Other non-writable nodes in the mount still return
+  `EROFS`; the split is not fully unified (profiles/vfs-1.md:139). This is an
+  interim errno, not Gate E Blob candidate support: zero-length and sparse-hole
+  Blob coverage remains open.
+- A malformed format-3 native graph now reports a typed `GraphMalformed` cause
+  under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
+  faults such as overlapping child ranges, broken counts, over-wide fanout, and
+  a wrong schema domain. Operational graph failures (quota, cancellation,
+  durability) are not reported as malformation.
+- Runtime admission reads the format recorded at the committed `HEAD` before
+  any worktree metadata or runtime state. A `HEAD` that records a format this
+  build does not know, whether `database.orna` names another `repository_format`
+  integer with any other fields or `format.orna` names one, is refused with
+  `ORNA-REPO-CONTEXT-003` (ORNA-UPGRADE-001, ORNA-META-002). The refusal is a
+  new `RuntimeError::UnknownHeadFormat`, and its persisted admin failure class
+  is `unknown_head_format`. Other `HEAD` metadata failures keep the existing
+  path.
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with

@@ -58,6 +58,17 @@ fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
     }
 }
 
+/// Errno for a mutation refused on a node of a live mount. A Blob projection has
+/// no candidate, so a mutation of it is unsupported and returns EPERM
+/// (profiles/vfs-1.md:110, :139; 41-vfs.md:103-105). Other non-writable nodes
+/// keep EROFS.
+fn refused_mutation_errno(kind: Option<&NodeKind>) -> Errno {
+    match kind {
+        Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => Errno::EPERM,
+        _ => Errno::EROFS,
+    }
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -1119,6 +1130,12 @@ impl DocumentCommitError {
     }
 }
 
+/// Cause recorded for a dirty document released without an accepted save: the
+/// refusal already recorded for it (ORNA-VFS-009), else `unsynced`.
+fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'static str {
+    refusal.map_or("unsynced", |refusal| refusal.cause)
+}
+
 /// Classifies a failed durable save. Semantic admission and malformed-draft
 /// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
 /// backing I/O `Failed`.
@@ -1990,8 +2007,9 @@ struct DraftRefusal {
     unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
-/// Unsynced Document drafts are discarded on release; a Document whose fsync was
-/// rejected stays unresolved until a later sync of the same file is accepted.
+/// Unsynced Document drafts are retained on release with cause `unsynced`; a
+/// Document whose fsync was rejected stays unresolved until a later sync of the
+/// same file is accepted.
 /// Replacement scratch drafts remain unresolved until their rename is accepted
 /// or the scratch is removed.
 #[derive(Default)]
@@ -2422,10 +2440,7 @@ impl WorkspaceFilesystem {
     ) {
         // A candidate already refused by fsync or flush keeps its refusal cause
         // (ORNA-VFS-009); only a candidate never refused is recorded as unsynced.
-        let cause = draft_state
-            .rejected_documents
-            .get(&inode)
-            .map_or("unsynced", |refusal| refusal.cause);
+        let cause = release_retention_cause(draft_state.rejected_documents.get(&inode));
         self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
     }
 
@@ -2890,8 +2905,8 @@ impl Filesystem for WorkspaceFilesystem {
         // without truncating or replacing the blob. EPERM is the unsupported-mutation
         // errno (profiles/vfs-1.md:139; 41-vfs.md:103-105), and unsupported operations
         // return an explicit errno, never fake success (profiles/vfs-1.md:104-106).
-        // Other non-candidate Blob writes in this mount return EROFS; the errno split
-        // is spec-admissible but not yet unified (flagged for owner decision).
+        // Blob unlink, rename, and path truncate are refused with EPERM by
+        // refused_mutation_errno, so every Blob mutation in this mount agrees.
         let write_mode =
             flags.0 & libc::O_ACCMODE != libc::O_RDONLY || flags.0 & libc::O_TRUNC != 0;
         let mut state = self
@@ -3211,7 +3226,9 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) = state.nodes.get(&source_inode).map(|node| &node.kind)
             else {
-                reply.error(Errno::EROFS);
+                reply.error(refused_mutation_errno(
+                    state.nodes.get(&source_inode).map(|node| &node.kind),
+                ));
                 return;
             };
             let (save, target, scratch, blob_field, baseline, identity) = (
@@ -3410,7 +3427,7 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&inode).map(|node| &node.kind),
             Some(NodeKind::Temporary { .. })
         ) {
-            reply.error(Errno::EROFS);
+            reply.error(refused_mutation_errno(state.nodes.get(&inode).map(|node| &node.kind)));
             return;
         }
         if draft_state
@@ -3429,7 +3446,7 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) => (Arc::clone(save), Arc::clone(identity), Arc::clone(scratch)),
             _ => {
-                reply.error(Errno::EROFS);
+                reply.error(refused_mutation_errno(state.nodes.get(&inode).map(|node| &node.kind)));
                 return;
             }
         };
@@ -3862,7 +3879,9 @@ impl Filesystem for WorkspaceFilesystem {
                     state.nodes.get(&inode.0).map(|node| &node.kind),
                     Some(NodeKind::Document { .. })
                 ) {
-                    reply.error(Errno::EROFS);
+                    reply.error(refused_mutation_errno(
+                        state.nodes.get(&inode.0).map(|node| &node.kind),
+                    ));
                     return;
                 }
                 if size > DRAFT_FILE_BOUND_BYTES as u64 {
@@ -6098,8 +6117,8 @@ mod hardening_tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::{
-        Errno, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY, create_editor_draft,
-        denied_attribute_change,
+        Errno, NodeKind, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY,
+        create_editor_draft, denied_attribute_change, refused_mutation_errno,
     };
 
     #[test]
@@ -6221,5 +6240,27 @@ mod hardening_tests {
         assert!(draft.exists(), "a refused edit retains its draft");
         assert!(super::admit_edit_result(Ok(()), &draft).is_ok());
         assert!(!draft.exists(), "an accepted edit removes its draft");
+    }
+
+    #[test]
+    fn release_names_an_unrefused_candidate_unsynced_and_keeps_a_refusal_cause() {
+        assert_eq!(super::release_retention_cause(None), "unsynced");
+        let refusal = super::DraftRefusal {
+            cause: "sys.vfs.stale_edit",
+            handle: None,
+            draft: None,
+            unretained: None,
+        };
+        assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
+    }
+
+    #[test]
+    fn refused_mutation_is_eperm_for_blob_bytes_and_erofs_otherwise() {
+        assert_eq!(
+            refused_mutation_errno(Some(&NodeKind::BlobBytes(std::sync::Arc::from(&b"blob"[..])))),
+            Errno::EPERM,
+        );
+        assert_eq!(refused_mutation_errno(Some(&NodeKind::Bytes(Vec::new()))), Errno::EROFS);
+        assert_eq!(refused_mutation_errno(None), Errno::EROFS);
     }
 }

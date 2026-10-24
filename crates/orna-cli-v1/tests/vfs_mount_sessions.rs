@@ -902,3 +902,28 @@ async fn blob_write_open_is_refused_with_eperm_and_not_truncated() {
     );
     session.finish();
 }
+
+/// A Blob projection has no candidate, so unlink and a same-row rename of it are
+/// refused with EPERM (profiles/vfs-1.md:110, :139; 41-vfs.md:103-105). The stored
+/// Blob is unchanged afterwards.
+#[tokio::test]
+async fn blob_unlink_and_rename_are_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) =
+        media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
+    let blob = session.row("london").join("content.mp3");
+    assert_errno(fs::remove_file(&blob), EPERM, "a Blob unlink is refused");
+    assert_errno(
+        fs::rename(&blob, session.row("london").join("moved.mp3")),
+        EPERM,
+        "a same-row Blob rename is refused",
+    );
+    assert_eq!(
+        fs::read(&blob).unwrap(),
+        b"london-mp3-bytes",
+        "a refused Blob unlink or rename leaves the stored content unchanged",
+    );
+    session.finish();
+}
