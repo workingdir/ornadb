@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
+use num_bigint::BigInt;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_repository_v1::{
     CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
@@ -15,7 +16,7 @@ use orna_sys_v1::{
     ProviderDiagnostic, ProviderFailure, ProviderOffer, SemanticRoleContract,
     SystemOperationProvider, TypeId, TypedValue, system_host_operation_registry,
 };
-use orna_value_v1::{ContextValue, Error as ValueError, ValueFormat};
+use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{
     CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
@@ -978,7 +979,7 @@ impl SysHostBindingRegistry {
                     && operation.implementation == "capture_file"
                     && operation.role == "host.sys.blob.capture@1.0"
                     && operation.provider == "orna.sys.host.filesystem.v1"
-                    && operation.effects == ["read"]
+                    && operation.effects == ["invoke"]
             })
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
         let [root, path, max_bytes] = arguments else {
@@ -1070,6 +1071,13 @@ const BLOB_ANNOTATION_CONTRACT: &str = "annotated-blob-format-3";
 /// True when `operation` is the generated portable Blob annotation operation.
 pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
     operation == BLOB_ANNOTATION_OPERATION
+}
+
+/// True when `operation` is dispatched through the native Blob call path.
+pub(crate) fn is_blob_call_operation(operation: &str) -> bool {
+    is_blob_annotation_operation(operation)
+        || is_blob_read_operation(operation)
+        || is_blob_from_bytes_operation(operation)
 }
 
 /// Rewraps a registry-admitted failure code as an evaluator error.
@@ -1279,6 +1287,143 @@ pub(crate) fn dispatch_blob_annotation(
         // The host does not link the generated provider for this operation:
         // the required coordinate is unavailable (ORNA-SYS-008).
         Err(_) => Err(redacted_error("sys.version.incompatible")),
+    }
+}
+
+/// Portable read-side Blob operations. Length, digest, bounded reads and full
+/// verification use only the Blob value's own identity and content, so they
+/// need no host effect grant and never reach native I/O.
+const BLOB_READ_OPERATIONS: [&str; 5] = [
+    "sys.blob.length",
+    "sys.blob.digest",
+    "sys.blob.read",
+    "sys.blob.verify",
+    "sys.blob.to_bytes",
+];
+
+/// Largest byte count one read-side call may return or materialise (ORNA-BLOB-011).
+pub(crate) const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
+
+/// True when `operation` is one of the portable read-side Blob operations.
+pub(crate) fn is_blob_read_operation(operation: &str) -> bool {
+    BLOB_READ_OPERATIONS.contains(&operation)
+}
+
+/// True when `operation` is the portable Blob constructor from integer bytes.
+pub(crate) fn is_blob_from_bytes_operation(operation: &str) -> bool {
+    operation == "sys.blob.from_bytes"
+}
+
+/// Builds the Blob of `sys.blob.from_bytes` from integers in `0..=255`. The
+/// integer list is checked against the 8 MiB call limit before any byte is
+/// copied, and a value outside the byte range is `sys.blob.bounds`.
+pub(crate) fn dispatch_blob_from_bytes(values: &[BigInt]) -> Result<ContextValue, EvaluationError> {
+    if values.len() as u64 > MAX_BLOB_CALL_BYTES {
+        return Err(redacted_error("sys.blob.limit"));
+    }
+    let bytes = values
+        .iter()
+        .map(|value| {
+            value
+                .to_u8()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))
+        })
+        .collect::<Result<Vec<u8>, _>>()?;
+    ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2).map_err(blob_read_failure)
+}
+
+/// Typed result of one read-side Blob call, before evaluator value conversion.
+pub(crate) enum BlobReadValue {
+    Int(u64),
+    Blob(ContextValue),
+    Bytes(Vec<u8>),
+    Unit,
+}
+
+/// Maps an `orna_value_v1` read failure onto the portable failures declared by
+/// the read-side `sys.blob.*` descriptors.
+fn blob_read_failure(error: ValueError) -> EvaluationError {
+    let code = match error {
+        ValueError::InvalidContext => "sys.blob.reference_context",
+        ValueError::ContentUnavailable => "sys.blob.unavailable",
+        ValueError::InvalidRange => "sys.blob.bounds",
+        ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
+        ValueError::Truncated
+        | ValueError::TrailingBytes
+        | ValueError::Unsupported
+        | ValueError::NonCanonical
+        | ValueError::InvalidUtf8
+        | ValueError::InvalidTag
+        | ValueError::InvalidValue
+        | ValueError::DuplicateOrUnorderedMapKey
+        | ValueError::ProtectedValue
+        | ValueError::InvalidPath
+        | ValueError::InvalidSchema
+        | ValueError::DecimalLimit
+        | ValueError::DivisionByZero
+        | ValueError::NonFiniteDecimal
+        | ValueError::InvalidMediaType
+        | ValueError::InvalidSuffix
+        | ValueError::IncompatibleSuffix
+        | ValueError::InvalidProfile
+        | ValueError::InvalidOid
+        | ValueError::ContentDigestMismatch
+        | ValueError::MissingDescriptor
+        | ValueError::RoleMismatch { .. }
+        | ValueError::OwnerExpired
+        | ValueError::Cancelled
+        | ValueError::SinkFailed => "sys.blob.corrupt",
+    };
+    redacted_error(code)
+}
+
+/// Dispatches one portable read-side Blob operation. `bounds` holds the `Int`
+/// arguments of `sys.blob.read` (offset, length) in declared order and is
+/// empty for every other operation; the caller has checked arity and types.
+pub(crate) fn dispatch_blob_read(
+    operation: &str,
+    source: &ContextValue,
+    bounds: &[BigInt],
+) -> Result<BlobReadValue, EvaluationError> {
+    let blob = source.blob().map_err(blob_read_failure)?;
+    match (operation, bounds) {
+        ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
+        // The declared Digest result has no evaluator value representation yet,
+        // so it is a typed failure rather than a Blob-shaped stand-in.
+        ("sys.blob.digest", []) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+        ("sys.blob.verify", []) => {
+            blob.verify().map_err(blob_read_failure)?;
+            Ok(BlobReadValue::Unit)
+        }
+        ("sys.blob.to_bytes", []) => {
+            if blob.length() > MAX_BLOB_CALL_BYTES {
+                return Err(redacted_error("sys.blob.limit"));
+            }
+            blob.read_to_end()
+                .map(BlobReadValue::Bytes)
+                .map_err(blob_read_failure)
+        }
+        ("sys.blob.read", [offset, length]) => {
+            // Negative or unrepresentable bounds, a start past EOF and checked
+            // overflow are bounds failures before any byte is read (ORNA-BLOB-011).
+            let offset = offset
+                .to_u64()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            let length = length
+                .to_u64()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            if offset > blob.length() || offset.checked_add(length).is_none() {
+                return Err(redacted_error("sys.blob.bounds"));
+            }
+            if length > MAX_BLOB_CALL_BYTES {
+                return Err(redacted_error("sys.blob.limit"));
+            }
+            let bytes = blob.read(offset, length).map_err(blob_read_failure)?;
+            ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2)
+                .map(BlobReadValue::Blob)
+                .map_err(blob_read_failure)
+        }
+        _ => Err(redacted_error("ORNA-EVAL-ARGUMENT")),
     }
 }
 
@@ -1644,6 +1789,158 @@ mod tests {
                 .map(|error| error.code().to_owned()),
             Some("sys.codec.unsupported_value_profile".to_owned()),
             "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
+        );
+    }
+
+    fn blob_source(bytes: &[u8]) -> ContextValue {
+        ContextValue::from_blob(&Blob::from_bytes(bytes.to_vec()), ValueFormat::Ovb2)
+            .expect("OVB-2 Blob source")
+    }
+
+    fn bounds(values: &[i64]) -> Vec<BigInt> {
+        values.iter().map(|value| BigInt::from(*value)).collect()
+    }
+
+    fn read_code(result: Result<BlobReadValue, EvaluationError>) -> String {
+        match result {
+            Ok(_) => panic!("read-side call must fail"),
+            Err(error) => error.code().to_owned(),
+        }
+    }
+
+    #[test]
+    fn blob_read_length_digest_verify_and_bytes_come_from_the_value() {
+        let payload = b"0123456789";
+        let source = blob_source(payload);
+        let Ok(BlobReadValue::Int(length)) = dispatch_blob_read("sys.blob.length", &source, &[])
+        else {
+            panic!("length must return Int");
+        };
+        assert_eq!(length, 10);
+        assert_eq!(
+            dispatch_blob_read("sys.blob.digest", &source, &[])
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("ORNA-EVAL-UNSUPPORTED".to_owned())
+        );
+        assert!(matches!(
+            dispatch_blob_read("sys.blob.verify", &source, &[]),
+            Ok(BlobReadValue::Unit)
+        ));
+        let Ok(BlobReadValue::Bytes(bytes)) = dispatch_blob_read("sys.blob.to_bytes", &source, &[])
+        else {
+            panic!("to_bytes must return bytes");
+        };
+        assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn blob_read_returns_a_bounded_slice_clipped_only_at_known_eof() {
+        let source = blob_source(b"0123456789");
+        let Ok(BlobReadValue::Blob(slice)) =
+            dispatch_blob_read("sys.blob.read", &source, &bounds(&[2, 3]))
+        else {
+            panic!("read must return a Blob");
+        };
+        assert_eq!(slice.blob().expect("slice Blob").read_to_end().unwrap(), b"234");
+        let Ok(BlobReadValue::Blob(clipped)) =
+            dispatch_blob_read("sys.blob.read", &source, &bounds(&[8, 5]))
+        else {
+            panic!("read past EOF must clip to the known end");
+        };
+        assert_eq!(clipped.blob().expect("clipped Blob").read_to_end().unwrap(), b"89");
+    }
+
+    #[test]
+    fn blob_read_bounds_and_limit_failures_use_declared_codes() {
+        let source = blob_source(b"0123456789");
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[-1, 1]))),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[11, 1]))),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[i64::MAX, i64::MAX])
+            )),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[0, 8 * 1024 * 1024 + 1])
+            )),
+            "sys.blob.limit"
+        );
+    }
+
+    #[test]
+    fn blob_from_bytes_builds_an_ovb2_blob_within_the_byte_range() {
+        let values = bounds(&[0, 1, 255]);
+        let value = dispatch_blob_from_bytes(&values).expect("bytes in 0..=255 build a Blob");
+        assert_eq!(value.format(), ValueFormat::Ovb2);
+        assert_eq!(
+            value.blob().expect("Blob").read_to_end().unwrap(),
+            [0u8, 1, 255]
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[256]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[-1]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        let too_many = vec![BigInt::from(0); MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            dispatch_blob_from_bytes(&too_many)
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn blob_to_bytes_materialises_at_most_the_call_limit() {
+        let at_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize];
+        let Ok(BlobReadValue::Bytes(bytes)) =
+            dispatch_blob_read("sys.blob.to_bytes", &blob_source(&at_limit), &[])
+        else {
+            panic!("to_bytes at the 8 MiB limit must succeed");
+        };
+        assert_eq!(bytes.len(), at_limit.len());
+
+        let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.to_bytes",
+                &blob_source(&over_limit),
+                &[]
+            )),
+            "sys.blob.limit"
+        );
+    }
+
+    #[test]
+    fn blob_read_rejects_arity_outside_the_declared_signature() {
+        let source = blob_source(b"0123456789");
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[1]))),
+            "ORNA-EVAL-ARGUMENT"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.length", &source, &bounds(&[1]))),
+            "ORNA-EVAL-ARGUMENT"
         );
     }
 }

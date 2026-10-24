@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The read-side `sys.blob` operations `length`, `read`, `verify` and `to_bytes` run natively and answer from the Blob value, with `read` returning a bounded Blob slice. `to_bytes` and `read` refuse more than 8 MiB in one call with `sys.blob.limit`, `verify` streams the content in bounded chunks, and `from_bytes` builds a Blob from integers in `0..=255` with the `application/octet-stream` fallback, refusing an out-of-range integer with `sys.blob.bounds`. `sys.blob.digest` is not yet implemented: it fails with `ORNA-EVAL-UNSUPPORTED` because the evaluator has no Digest value representation. `sys.blob.capture_file` is invoked as an effect, not read. The write-side `begin`, `append`, `finish` and `abort`, and `media_type`, `suffix`, `same_content`, `resource`, are not yet implemented.
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
