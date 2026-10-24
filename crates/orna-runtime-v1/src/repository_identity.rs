@@ -13,12 +13,43 @@ use crate::{RuntimeError, RuntimeIdentity};
 /// metadata (ORNA-UPGRADE-001). A format-1/2 `HEAD` has no row writer
 /// (ORNA-UPGRADE-003), so it is refused with
 /// [`RuntimeError::LegacyHeadReadOnly`] before any runtime state is opened.
+/// A `HEAD` that records an unknown format is refused first with
+/// [`RuntimeError::UnknownHeadFormat`] (ORNA-REPO-CONTEXT-003), so the worktree
+/// metadata is never consulted to admit it.
 pub fn repository_runtime_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
     repository
+        .require_known_head_format()
+        .map_err(RuntimeError::UnknownHeadFormat)?;
+    repository
         .require_writable_head_format()
         .map_err(RuntimeError::LegacyHeadReadOnly)?;
+    migration_metadata_identity(repository)
+}
+
+/// Derives the identity for the migration's own checkpoint carry into a
+/// prepared copy. This is the only sanctioned entry for migration carry: it
+/// is the sole caller that admits a prepared copy whose `HEAD` is still
+/// legacy. Every other caller uses [`repository_runtime_identity`].
+///
+/// Residual API risk (recorded on ornadb-5il1.396): this function is `pub`
+/// and nothing in the type system restricts it to the migration, so a
+/// downstream crate could call it directly. No token machinery is added here;
+/// the restriction is by convention and by the single call site in
+/// `migration_copy`.
+pub fn migration_copy_runtime_identity(
+    repository: &Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
+    repository
+        .require_migration_carry_head_format()
+        .map_err(RuntimeError::LegacyHeadReadOnly)?;
+    migration_metadata_identity(repository)
+}
+
+fn migration_metadata_identity(
+    repository: &Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
     let metadata = inspect_metadata_for_runtime(repository)
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(metadata) = metadata else {
