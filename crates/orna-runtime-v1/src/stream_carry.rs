@@ -28,7 +28,7 @@ use orna_stream_v1::{Component, ConsumerIdentity};
 use orna_value_v1::{Raw, sov3_context_free_domain_digest};
 use sha2::{Digest as _, Sha256};
 
-use crate::{RuntimeError, RuntimeState, repository_runtime_identity};
+use crate::{RuntimeError, RuntimeState, migration_copy_runtime_identity};
 
 /// Stream tables whose rows a migration does not carry.
 const NON_CARRIABLE_TABLES: &[&str] = &[
@@ -276,7 +276,7 @@ pub async fn import_stream_carry(
         }
     }
 
-    let (identity, digest) = repository_runtime_identity(destination)?;
+    let (identity, digest) = migration_copy_runtime_identity(destination)?;
     let state = RuntimeState::open(destination, identity, digest).await?;
     let transaction = state
         .connection
