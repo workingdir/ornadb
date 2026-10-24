@@ -4314,7 +4314,7 @@ impl Repository {
         if review.candidate_paths.is_empty() {
             return Err(RepositoryError::SysGitNothingToCommit);
         }
-        let actual_cwd = self.cwd_generation(review.cwd.runtime())?;
+        let (actual_cwd, scan) = self.cwd_observation(review.cwd.runtime())?;
         let index = self.git_path("index")?;
         let index_bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         if actual_cwd != review.cwd
@@ -4326,6 +4326,7 @@ impl Repository {
         let Some(old_head) = review.cwd.head().cloned() else {
             return self.commit_reviewed_root_candidate(
                 review,
+                &scan,
                 message,
                 &result_path,
                 &intent_hex,
@@ -4392,7 +4393,7 @@ impl Repository {
             old_head, candidate.commit().clone(), review.index_tree.clone(), runtime_intent_id, entries,
         )?;
         self.publish_candidate_impl_with_migration(
-            &review.cwd.index, &candidate, &mut journal, false, Some(review), &mut on_stage,
+            &review.cwd.index, &candidate, &mut journal, false, Some((review, &scan)), &mut on_stage,
         )?;
         on_stage(PublicationJournalStage::WorktreeReconciled);
         fs::write(&result_path, format!("{intent_hex}\n{message_digest_hex}\n{}", candidate.commit().as_str()))
@@ -4413,6 +4414,7 @@ impl Repository {
     fn commit_reviewed_root_candidate(
         &self,
         review: &ReviewedCandidateReview,
+        scan: &WorktreeScan,
         message: &str,
         result_path: &Path,
         intent_hex: &str,
@@ -4423,7 +4425,7 @@ impl Repository {
         // The index is not rewritten, so Git's index lock is not taken: a
         // concurrent `git add` after this check stays staged against the new
         // commit, and the branch itself moves only by compare-and-set.
-        self.verify_reviewed_candidate_locked(review)?;
+        self.verify_reviewed_candidate_locked(review, scan)?;
         if self.head()?.is_some() {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
@@ -4515,17 +4517,29 @@ impl Repository {
     fn verify_reviewed_candidate_locked(
         &self,
         review: &ReviewedCandidateReview,
+        scan: &WorktreeScan,
     ) -> Result<(), RepositoryError> {
         if review.token != reviewed_candidate_token(review) {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
-        let actual = self.cwd_generation_locked(review.cwd.runtime())?;
+        let index_generation = self.index_generation()?;
+        let branch = self.current_branch()?;
         let index = self.git_path("index")?;
         let bytes = fs::read(index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        // The reviewed scan supplies the worktree state. Its managed paths are
+        // fenced by stamp below, so they are not reread.
+        let actual = CwdGeneration {
+            head: index_generation.head.clone(),
+            branch: branch.clone(),
+            index: index_generation,
+            worktree: scan.state.clone(),
+            runtime: review.cwd.runtime(),
+        };
         if actual != review.cwd
-            || self.current_branch()? != review.head_ref
+            || branch != review.head_ref
             || actual.index.tree() != Some(&review.index_tree)
             || Sha256::digest(bytes).as_slice() != review.index_bytes_digest
+            || !self.worktree_scan_stable(scan)?
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
@@ -4645,7 +4659,7 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
         permit_legacy_migration: bool,
-        review: Option<&ReviewedCandidateReview>,
+        review: Option<(&ReviewedCandidateReview, &WorktreeScan)>,
         on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<IndexGeneration, RepositoryError> {
         let published = self.publish_candidate_body(
@@ -4672,7 +4686,7 @@ impl Repository {
         candidate: &PrivateCommit,
         journal: &mut PublicationJournal,
         permit_legacy_migration: bool,
-        review: Option<&ReviewedCandidateReview>,
+        review: Option<(&ReviewedCandidateReview, &WorktreeScan)>,
         mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<IndexGeneration, RepositoryError> {
         if journal.migration_continuity().is_some() != permit_legacy_migration
@@ -4693,7 +4707,7 @@ impl Repository {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         let _coordination_lock = self.acquire_coordination_lock_for_publication()?;
-        if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
+        if let Some((review, scan)) = review { self.verify_reviewed_candidate_locked(review, scan)?; }
         self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
         // A retained PUB-1 journal is the sole recovery authority for its
@@ -4741,12 +4755,12 @@ impl Repository {
             .compact_manifest()
             .map(|witness| witness.selected_ref());
         self.advance_target_ref(journal.old_head(), selected_ref)?;
-        if let Some(review) = review {
+        if let Some((review, scan)) = review {
             let bytes = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
             if Sha256::digest(bytes).as_slice() != review.index_bytes_digest
                 || self.head()? != review.cwd.head().cloned()
                 || self.current_branch()? != review.head_ref
-                || self.worktree_state()? != *review.cwd.worktree()
+                || !self.worktree_scan_stable(scan)?
             {
                 return Err(RepositoryError::StaleReviewedCandidate);
             }
@@ -5824,6 +5838,23 @@ impl Repository {
         &self,
         runtime: RuntimeGeneration,
     ) -> Result<CwdGeneration, RepositoryError> {
+        self.cwd_observation_locked(runtime).map(|(cwd, _)| cwd)
+    }
+
+    /// Observes CWD and returns the scan it was built from, so a later check
+    /// can fence the same managed bytes by stamp instead of rereading them.
+    fn cwd_observation(
+        &self,
+        runtime: RuntimeGeneration,
+    ) -> Result<(CwdGeneration, WorktreeScan), RepositoryError> {
+        let _lock = self.acquire_coordination_lock()?;
+        self.cwd_observation_locked(runtime)
+    }
+
+    fn cwd_observation_locked(
+        &self,
+        runtime: RuntimeGeneration,
+    ) -> Result<(CwdGeneration, WorktreeScan), RepositoryError> {
         // Do not return a torn CWD if another Git process changes the index,
         // branch, status, or a managed file while it is observed.  The lock
         // serializes Orna writers; the bounded recheck detects external Git
@@ -5835,13 +5866,14 @@ impl Repository {
             let after = self.index_generation()?;
             let branch_after = self.current_branch()?;
             if before == after && branch == branch_after && self.worktree_scan_stable(&scan)? {
-                return Ok(CwdGeneration {
+                let cwd = CwdGeneration {
                     head: before.head.clone(),
                     branch,
                     index: before,
-                    worktree: scan.state,
+                    worktree: scan.state.clone(),
                     runtime,
-                });
+                };
+                return Ok((cwd, scan));
             }
         }
         Err(RepositoryError::StaleCwd)
@@ -12420,7 +12452,8 @@ mod tests {
         ).unwrap();
         let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             repository.publish_candidate_impl_with_migration(
-                &review.cwd.index, &candidate, &mut journal, false, Some(&review),
+                &review.cwd.index, &candidate, &mut journal, false,
+                Some((&review, &repository.worktree_scan().unwrap())),
                 |stage| if stage == PublicationJournalStage::RefAdvanced { panic!("simulated interruption") },
             ).unwrap();
         }));
