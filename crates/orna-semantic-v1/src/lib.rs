@@ -1419,7 +1419,7 @@ impl Catalogue {
                         "parallel",
                         function(
                             vec![Type::List(Box::new(Type::Error))],
-                            Type::Stream(Box::new(Type::Error)),
+                            Type::List(Box::new(Type::Error)),
                         ),
                     ),
                     fixture_function(
@@ -12160,7 +12160,14 @@ fn infer_case_arm_body(
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
-    if let Some(expected) = result.as_ref() {
+    // ORNA-CASE-004 joins reachable bodies. `null` is a member of `T?`
+    // (ORNA-TYPE-001), so a `null` body followed by an `Optional` body joins
+    // to that `Optional` type; the reverse order is already accepted by types_match.
+    let widens_null = matches!(result.as_ref(), Some(Type::Null))
+        && matches!(body.ty, Type::Optional(_));
+    if widens_null {
+        *result = Some(body.ty);
+    } else if let Some(expected) = result.as_ref() {
         require_same(expected, &body.ty, diagnostics);
     } else {
         *result = Some(body.ty);
@@ -18335,7 +18342,7 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "log" => Some(function(vec![Type::Text], Type::Null)),
         "parallel" => Some(function(
             vec![Type::List(Box::new(Type::Error))],
-            Type::Stream(Box::new(Type::Error)),
+            Type::List(Box::new(Type::Error)),
         )),
         "merge_streams" => Some(function(
             vec![Type::List(Box::new(Type::Error))],

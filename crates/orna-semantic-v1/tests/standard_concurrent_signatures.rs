@@ -85,3 +85,16 @@ pub fn run(count: fn(): Int, label: fn(): Text): [Int] =
         diagnostics(&analysis)
     );
 }
+
+#[test]
+fn root_parallel_intrinsic_over_a_callback_list_value_returns_the_declared_list() {
+    // The root intrinsic path (intrinsic_value_type) must agree with the
+    // std.concurrent catalogue: parallel yields a list (ORNA-CONCUR-002), not a stream.
+    let analysis = analysis(
+        r#"
+pub fn run(callbacks: [fn(): Int]): [Int] = parallel(callbacks);
+"#,
+    );
+
+    assert_eq!(diagnostics(&analysis), Vec::<(&str, &str)>::new());
+}
