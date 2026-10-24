@@ -6,6 +6,20 @@ been published.
 
 ## Unreleased
 - A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
+- Managed paths refuse a `.git` component at any depth and in any letter case,
+  including the Windows and macOS spellings Git refuses (trailing dot or space,
+  `git~1`, a `:` stream suffix and HFS ignorable characters), on write and when
+  a committed tree is loaded or listed. Before, only an exact `.git` first
+  component was refused. Path length is not capped, because Git stores names of
+  any length. Untracked user paths such as `Sub/.GIT/notes` still appear in
+  status and checkout plans, and a forced checkout leaves them in place.
+  `orna export --check` and `--restore` refuse an archive whose dependency path
+  names Git metadata before anything is restored. Managed paths also refuse a
+  backslash, a NUL byte, an empty component (`a//b`, `a/`), and `..`, absolute
+  and other non-normal components, on write, in publication and checkout
+  journals, and in compact manifests. The system worktree listing skips a
+  Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
+  as a user path.
 - Publishing row changes to a format-3 table applies them as one sorted merge
   into the table's row map: each existing row moves at most twice, instead of
   being shifted once per change. Publication sends changes in encoded key

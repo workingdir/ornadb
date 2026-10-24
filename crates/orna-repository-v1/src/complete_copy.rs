@@ -1235,15 +1235,21 @@ fn read_gitmodules_from(
     parse_gitmodules(text)
 }
 
+/// A dependency path is joined onto the restored copy, so it must stay inside
+/// the copy and never name Git metadata: a `.git` part would place a fetched
+/// repository, and later its checked-out files, inside a Git directory.
 fn valid_dependency_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
         && !path.contains(':')
         && !path.bytes().any(|byte| byte.is_ascii_control())
-        && path
-            .split('/')
-            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && path.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && !orna_foundation_v1::is_git_metadata_component(component.as_bytes())
+        })
 }
 
 /// Parses committed `.gitmodules` with Git's config parser so quoted paths and
@@ -1962,6 +1968,34 @@ mod tests {
             CompleteCopyManifest::decode(document),
             Err(CompleteCopyError::InvalidArchive("dependency line"))
         ));
+    }
+
+    #[test]
+    fn manifest_rejects_dependency_paths_that_name_git_metadata() {
+        let document = |path: &str| {
+            format!(
+                "orna-complete-copy 2\n\
+                 snapshot\t0123456789012345678901234567890123456789\n\
+                 archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n\
+                 object\tcommit\t0123456789012345678901234567890123456789\t120\n\
+                 dependency\t{path}\tabcdef0123456789abcdef0123456789abcdef01\thttps://example.invalid/dep.git\tdependencies/abcdef0123456789abcdef0123456789abcdef01.bundle\t0123456789012345678901234567890123456789\n"
+            )
+        };
+        // Restoring joins the path onto the copy, so `.git` here would fetch,
+        // and later check out, a dependency inside a Git directory.
+        for hostile in [".git", "deps/.git", "deps/.GIT/hooks", "deps/git~1", "deps/.git. "] {
+            assert!(
+                matches!(
+                    CompleteCopyManifest::decode(&document(hostile)),
+                    Err(CompleteCopyError::InvalidArchive("dependency line"))
+                ),
+                "{hostile:?} must be refused as a dependency path"
+            );
+        }
+        for ordinary in ["deps/foo.git", "deps/.github", "deps/.gitmodules-data"] {
+            let decoded = CompleteCopyManifest::decode(&document(ordinary)).unwrap();
+            assert_eq!(decoded.dependencies[0].path, ordinary);
+        }
     }
 
     #[test]
