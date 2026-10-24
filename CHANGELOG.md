@@ -19,6 +19,11 @@ been published.
   journals, and in compact manifests. The system worktree listing skips a
   Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
   as a user path.
+- Publishing row changes to a format-3 table applies them as one sorted merge
+  into the table's row map: each existing row moves at most twice, instead of
+  being shifted once per change. Publication sends changes in encoded key
+  order, which for `Text` keys is not key order, so the merge sorts them by
+  logical key first. The written row map is unchanged.
 - `scripts/orna_extract.py` is an independent extractor. It reads a format-3
   repository's Git objects at a commit through `git cat-file --batch`, without
   the engine's readers, and writes the modules, the schema, the rows and each
