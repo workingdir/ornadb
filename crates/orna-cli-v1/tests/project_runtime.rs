@@ -925,6 +925,74 @@ async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn binary_run_debug_detail_names_the_held_runtime_writer_and_plain_output_does_not() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/private-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let _lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+
+    // The lease holder is this test process; the refused `orna run` processes
+    // are separate. `RuntimeError::LeaseHeld` has no public code, so its
+    // `--debug` detail carries the display text (ORNA-UX-004).
+    let plain = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!plain.status.success(), "plain run unexpectedly succeeded");
+    let plain_stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        plain_stderr.contains("error[E2200]"),
+        "stderr: {plain_stderr}"
+    );
+    assert!(
+        !plain_stderr.contains("runtime failure:"),
+        "plain stderr disclosed a debug detail: {plain_stderr}"
+    );
+
+    let debug = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!debug.status.success(), "debug run unexpectedly succeeded");
+    assert!(debug.stdout.is_empty());
+    let debug_stderr = String::from_utf8_lossy(&debug.stderr);
+    assert!(
+        debug_stderr.contains("error[E2200]"),
+        "stderr: {debug_stderr}"
+    );
+    assert!(
+        debug_stderr.contains("runtime failure: runtime writer is held"),
+        "stderr: {debug_stderr}"
+    );
+
+    drop(state);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn binary_invoke_routes_single_module_std_import_needing_publication_metadata_through_authority() {
     let (directory, _module_commit) = captured_standard_project_with(
         &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],

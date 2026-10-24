@@ -47,7 +47,8 @@ use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
     AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
     CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
-    DiagnosticCode, FailureIdentity, FailureStatus, LeasePurpose, Position, SafeDiagnostic,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
+    SafeDiagnostic,
 };
 use orna_syntax_v1::{
     Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
@@ -3689,13 +3690,13 @@ impl DurableTransactionalEvaluator {
                 )
                 .await
             }
-            Ok(StreamRunOutcome::Failed { .. }) => {
+            Ok(StreamRunOutcome::Failed { failure, .. }) => {
                 fail_observed_request_outcome(
                     &state,
                     request,
                     fingerprint,
                     writer,
-                    StageOutcome::Failed(stream_delivery_failure_diagnostic()),
+                    StageOutcome::Failed(stream_delivery_failure_diagnostic(&failure)),
                 )
                 .await
             }
@@ -4308,9 +4309,9 @@ impl DurableTransactionalEvaluator {
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
-            Ok(StreamRunOutcome::Failed { .. }) => {
-                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
-            }
+            Ok(StreamRunOutcome::Failed { failure, .. }) => Ok(StageOutcome::Failed(
+                stream_delivery_failure_diagnostic(&failure),
+            )),
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "literal list stream did not exhaust".into(),
             }),
@@ -5010,12 +5011,35 @@ fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnosti
     .redacted()
 }
 
-fn stream_delivery_failure_diagnostic() -> Diagnostic {
+fn stream_delivery_failure_diagnostic(failure: &FailureRecord) -> Diagnostic {
     Diagnostic::new(
         SafeText::new("ORNA-LIST-STREAM-DELIVERY").expect("static code"),
         DiagnosticSeverity::Error,
         SafeText::new("literal list stream delivery was retained after activation rollback")
             .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .with_cause(stream_failure_cause(failure.diagnostic.code))
+    .redacted()
+}
+
+/// The runtime's typed failure code, carried as a non-catalogue label for the
+/// `--debug` detail. The spec does not catalogue these variants, so the label
+/// deliberately does not use the `ORNA-` prefix and promotes no code.
+fn stream_failure_cause(code: DiagnosticCode) -> Diagnostic {
+    let label = match code {
+        DiagnosticCode::ProviderUnavailable => "stream-failure:provider-unavailable",
+        DiagnosticCode::DecodeRejected => "stream-failure:decode-rejected",
+        DiagnosticCode::ExecutionRejected => "stream-failure:execution-rejected",
+        DiagnosticCode::Cancelled => "stream-failure:cancelled",
+        DiagnosticCode::Internal => "stream-failure:internal",
+        DiagnosticCode::TableAssertionFalse => "stream-failure:table-assertion-false",
+        DiagnosticCode::StaleBaseline => "stream-failure:stale-baseline",
+    };
+    Diagnostic::new(
+        SafeText::new(label).expect("static label"),
+        DiagnosticSeverity::Error,
+        SafeText::redacted(),
     )
     .expect("valid diagnostic")
     .redacted()
