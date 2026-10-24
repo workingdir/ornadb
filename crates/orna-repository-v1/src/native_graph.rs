@@ -6710,15 +6710,21 @@ impl PinnedNativeGraphReader {
         let root_node = self.read_native_node(root)?;
         match root_node {
             NodeData::OrderedLeaf { domain, entries } => {
-                if domain != expected_domain || entries.len() as u64 != expected_count {
+                if domain != expected_domain {
+                    return Err(GraphError::InvalidDomain);
+                }
+                if entries.len() as u64 != expected_count {
                     return Err(GraphError::InvalidCount(entries.len()));
                 }
             }
             NodeData::OrderedBranch {
                 domain, entries, ..
             } => {
-                if domain != expected_domain || entries.len() == 1 {
+                if domain != expected_domain {
                     return Err(GraphError::InvalidDomain);
+                }
+                if entries.len() == 1 {
+                    return Err(GraphError::UncollapsedRoot);
                 }
                 let count = entries.iter().try_fold(0u64, |sum, entry| {
                     sum.checked_add(entry.row_count)
@@ -13434,6 +13440,11 @@ pub enum GraphError {
     InvalidLength(u64),
     InvalidCount(usize),
     InvalidDomain,
+    /// Adjacent branch entries have non-increasing inclusive fences, so their
+    /// child ranges overlap (store-format-3 section 2).
+    OverlappingChildRange,
+    /// A root branch with exactly one child; the canonical form collapses it.
+    UncollapsedRoot,
     InvalidDigestLength,
     InvalidEmptyBlob,
     SourceTreeLimit,
@@ -13517,6 +13528,8 @@ impl fmt::Display for GraphError {
             Self::InvalidLength(length) => write!(f, "length {length} exceeds the signed bound"),
             Self::InvalidCount(count) => write!(f, "invalid count {count}"),
             Self::InvalidDomain => f.write_str("invalid ORP domain"),
+            Self::OverlappingChildRange => f.write_str("branch child ranges overlap"),
+            Self::UncollapsedRoot => f.write_str("root branch has one child and must collapse"),
             Self::InvalidDigestLength => f.write_str("digest is not 32 bytes"),
             Self::InvalidEmptyBlob => f.write_str("empty Blob descriptor has a byte root"),
             Self::InvalidByteIndex => f.write_str("invalid byte-index spans"),
@@ -13860,7 +13873,7 @@ fn check_branch_fence_order(
             return Err(GraphError::InvalidDomain);
         }
         if previous.as_ref().is_some_and(|previous| previous >= &fence) {
-            return Err(GraphError::NonCanonicalData);
+            return Err(GraphError::OverlappingChildRange);
         }
         previous = Some(fence);
     }

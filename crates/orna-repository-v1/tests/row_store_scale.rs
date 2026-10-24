@@ -1923,7 +1923,11 @@ fn tree_object_delta(before: &ObjectInventory, after: &ObjectInventory) -> usize
         .count()
 }
 
-fn assert_rejected(fault: Fault, rows: u64) {
+fn assert_rejected(
+    fault: Fault,
+    rows: u64,
+    expected: fn(&orna_repository_v1::FormatContextError) -> bool,
+) {
     let control = build_fixture(rows, Fault::None);
     let control_repository =
         Repository::discover(control.root.path()).expect("discover control fixture");
@@ -1939,10 +1943,13 @@ fn assert_rejected(fault: Fault, rows: u64) {
     let context = repository
         .open_format_context()
         .expect("admit malformed graph snapshot header");
-    assert_eq!(
-        context.load_row_map(fixture.relation_id).err(),
-        Some(orna_repository_v1::FormatContextError::GraphContextInvalid),
-        "production row-map loader must reject {fault:?} with GraphContextInvalid"
+    let error = context
+        .load_row_map(fixture.relation_id)
+        .err()
+        .expect("production row-map loader must reject a malformed graph");
+    assert!(
+        expected(&error),
+        "{fault:?} must report its specific diagnostic, got {error:?}"
     );
 }
 
@@ -2029,11 +2036,32 @@ fn orp1_row_store_ten_rows() {
 }
 
 #[test]
-fn orp1_row_store_malformed_graphs_rejected() {
-    assert_rejected(Fault::OverlappingRanges, 10);
-    assert_rejected(Fault::BrokenCounts, 10);
-    assert_rejected(Fault::GiantFanout, 257);
-    assert_rejected(Fault::WrongSchemaDomain, 10);
+fn orp1_malformed_graphs_report_specific_diagnostics() {
+    use orna_repository_v1::{FormatContextError, GraphError};
+    assert_rejected(Fault::OverlappingRanges, 10, |error| {
+        matches!(
+            error,
+            FormatContextError::GraphMalformed(GraphError::OverlappingChildRange)
+        )
+    });
+    assert_rejected(Fault::BrokenCounts, 10, |error| {
+        matches!(
+            error,
+            FormatContextError::GraphMalformed(GraphError::InvalidCount(_))
+        )
+    });
+    assert_rejected(Fault::GiantFanout, 257, |error| {
+        matches!(
+            error,
+            FormatContextError::GraphMalformed(GraphError::FanoutExceeded(_))
+        )
+    });
+    assert_rejected(Fault::WrongSchemaDomain, 10, |error| {
+        matches!(
+            error,
+            FormatContextError::GraphMalformed(GraphError::InvalidDomain)
+        )
+    });
 }
 
 #[test]
