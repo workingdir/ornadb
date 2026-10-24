@@ -6,6 +6,8 @@
 //! All public failures are stable redacted codes and inbound protocol bytes
 //! are decoded canonically.
 
+pub mod live_presentation;
+
 use futures::{
     channel::oneshot,
     executor::block_on,

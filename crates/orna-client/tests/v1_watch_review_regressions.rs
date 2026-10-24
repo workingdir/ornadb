@@ -13,11 +13,11 @@
 //! They do not exercise HTTP, authentication, server request retention, or token
 //! rotation/cancellation. No filesystem or temporary directories are used.
 
-use orna_client::live_presentation::{LivePresentationUpdate, WatchPresentation};
 use orna_client::{
     AuthenticatedLiveTransport, BootstrappedLiveAttachment, LiveByteDriver, LiveSessionDriver,
     LiveSessionEvent, PrefetchedBinaryTransport, PresentRenderer, RequestIdAllocator,
 };
+use orna_live_v1::live_presentation::{LivePresentationUpdate, WatchPresentation};
 use orna_protocol_v1::{
     CanonicalSnapshot, Envelope, Limits, Message, PresentNode, PresentationContext,
 };

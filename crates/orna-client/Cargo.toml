@@ -10,6 +10,7 @@ futures-util = "0.3.31"
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-artifact = { path = "../orna-artifact" }
 orna-core = { path = "../orna-core" }
+orna-live-v1 = { path = "../orna-live-v1" }
 orna-protocol = { path = "../orna-protocol" }
 orna-protocol-v1 = { path = "../orna-protocol-v1" }
 orna-runtime-tty = { path = "../orna-runtime-tty" }
