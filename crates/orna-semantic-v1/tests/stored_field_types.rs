@@ -203,3 +203,74 @@ fn ordinary_stored_fields_remain_valid() {
     );
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
 }
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a nominal's private member is still committed
+// with the record, so an imported nominal holding a secret in a private member is a stored secret
+// whatever the importer can see.
+fn stored_field_rejects_imported_nominal_private_secret_member() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Credential};\n\npub table Account(id: Uuid) {\n    cred: Credential,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a transparent alias of `Secret` exported by
+// another module stores a secret when imported and used as a stored field.
+fn stored_field_rejects_imported_alias_of_secret() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Token};\n\npub table Account(id: Uuid) {\n    token: Token,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: 29-formats serialisable subset; an imported nominal with no secret anywhere in its
+// row, private members included, remains a valid stored field.
+fn stored_field_accepts_imported_nominal_without_secret() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use addr.{Address};\n\npub table Account(id: Uuid) {\n    addr: Address,\n}\n",
+        ),
+        ModuleInput::new(
+            "addr.orna",
+            "pub type Address {\n    street: Str,\n    note: Str,\n}\n",
+        ),
+    ]);
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; a name that resolves to no nominal in scope must not borrow the
+// secret of an unrelated namespaced nominal that shares its short name. The unresolved-name
+// diagnostic is the only one reported.
+fn stored_field_unresolved_name_does_not_match_unrelated_secret_nominal() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "pub table Account(id: Uuid) {\n    cred: Credential,\n}\n",
+        ),
+        ModuleInput::new(
+            "vault.orna",
+            "pub type Credential {\n    pub token: Secret<Str>,\n}\n",
+        ),
+    ]);
+    assert!(!analysis.is_ok());
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.message() != SECRET_STORED_MESSAGE),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
