@@ -59,6 +59,21 @@ jobs:
       # re-executes the test binary through /bin/sh and ulimit, so it is Linux-only (ubuntu-latest).
       - name: Test owner-lease and durable crash recovery (production fence not yet enforced)
         run: cargo test --locked -p orna-runtime-v1 --test owner_fence_gate_d --test durable_crash_recovery -- --nocapture
+
+      # Gate D: recovery of an uncertain external effect never fabricates a proven rollback.
+      # A rollback receipt needs the positive controlled marker the activation records before
+      # its table transaction; absent or external evidence recovers as uncertain.
+      - name: Test rollback-proof effect evidence
+        run: |
+          cargo test --locked -p orna-runtime-v1 --test uncertain_effect_recovery -- --nocapture
+          cargo test --locked -p orna-runtime-v1 --lib -- --nocapture \
+            external_effect_marker_keeps_fault_recovery_uncertain \
+            recovery_retains_uncertainty_and_clears_old_owner_evidence \
+            rolled_back_activation_without_controlled_marker_recovers_uncertain \
+            activation_records_controlled_marker_before_its_table_transaction \
+            controlled_fault_receipt_recovers_as_proven_after_owner_takeover_and_reopen \
+            runtime_owned_activation_failure_rolls_back_and_recovers_as_proven_after_reopen \
+            migrated_ledger_retains_controlled_rollback_recovery_after_reopen
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     steps:
