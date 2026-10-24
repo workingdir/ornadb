@@ -24,10 +24,12 @@ use sha2::{Digest, Sha256};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
+mod effects;
 mod located;
 mod repl;
 mod semantic_payload;
 mod system_api;
+pub use effects::EffectKind;
 pub use system_api::system_enum_constant;
 mod source_row;
 
@@ -485,19 +487,27 @@ pub enum Type {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EffectSummary {
-    pub effects: BTreeSet<String>,
+    /// Host effects of the `sys.EffectKind` vocabulary.
+    pub effects: BTreeSet<EffectKind>,
+    /// Effectful operation with no `sys.EffectKind`, such as `sys.invoke` or
+    /// an admin operation. Fails closed: it counts as effectful everywhere.
+    pub opaque: bool,
     pub may_fail: bool,
 }
 impl EffectSummary {
     fn join(&mut self, other: &Self) {
-        self.effects.extend(other.effects.iter().cloned());
+        self.effects.extend(other.effects.iter().copied());
+        self.opaque |= other.opaque;
         self.may_fail |= other.may_fail;
     }
+    /// Whether this summary performs any effect, including opaque ones.
+    pub fn is_effectful(&self) -> bool {
+        self.opaque || !self.effects.is_empty()
+    }
     fn forbidden_for_assertion(&self) -> bool {
-        !self.effects.is_empty()
+        self.is_effectful()
     }
 }
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SymbolKind {
     Function,
@@ -701,6 +711,7 @@ impl Catalogue {
         catalogue.standard_dependency_profile = Some(profile.clone());
         let mut seen = BTreeSet::new();
         let mut supplied = BTreeSet::new();
+        let mut trees = Vec::new();
         for (logical_path, source) in sources {
             profile.verify_source(&logical_path, &source)?;
             if !seen.insert(logical_path.clone()) {
@@ -741,6 +752,7 @@ impl Catalogue {
                     StandardProfileError::InvalidPreludeExport,
                 ));
             }
+            trees.push((namespace.clone(), parsed.value));
             if catalogue.modules.insert(namespace, header).is_some() {
                 return Err(StandardCatalogueError::DuplicateModule);
             }
@@ -758,6 +770,7 @@ impl Catalogue {
                 StandardProfileError::InvalidPreludeExport,
             ));
         }
+        summarize_standard_function_effects(&mut catalogue.modules, &trees);
         Ok(catalogue)
     }
 
@@ -1510,11 +1523,20 @@ where
     let symbols = symbols
         .into_iter()
         .map(|(name, ty)| {
-            let effects = matches!(&ty, Type::Function { .. })
-                .then(|| catalogue_effects(&namespace))
-                .unwrap_or_default();
+            let name: String = name.into();
+            let effects = if matches!(&ty, Type::Function { .. }) {
+                let path = namespace
+                    .0
+                    .iter()
+                    .map(String::as_str)
+                    .chain([name.as_str()])
+                    .collect::<Vec<_>>();
+                standard_function_effects(&path)
+            } else {
+                EffectSummary::default()
+            };
             (
-                name.into(),
+                name,
                 Symbol {
                     table_schema: None,
                     kind: if matches!(ty, Type::Function { .. }) {
@@ -1542,22 +1564,372 @@ where
     }
 }
 
-fn catalogue_effects(namespace: &Namespace) -> EffectSummary {
-    let effect = if namespace.0.first().is_some_and(|part| part == "std")
-        && namespace.0.get(1).is_some_and(|part| part == "net")
-    {
-        "network"
-    } else if namespace.0.first().is_some_and(|part| part == "std")
-        && namespace.0.get(1).is_some_and(|part| part == "io")
-        && namespace.0.get(2).is_some_and(|part| part == "fs")
-    {
-        "filesystem"
-    } else {
-        return EffectSummary::default();
-    };
+/// Effect summary of a host-bound standard function, keyed by its fully
+/// qualified path. These declarations are host-bound or wrap host operations,
+/// so the declared path is the classification and the body is not trusted.
+fn standard_function_effects(path: &[&str]) -> EffectSummary {
     EffectSummary {
-        effects: BTreeSet::from([effect.into()]),
-        may_fail: true,
+        effects: effects::host_effect(path).into_iter().collect(),
+        opaque: false,
+        may_fail: effects::host_effect(path).is_some(),
+    }
+}
+
+/// A source-declared function of the standard corpus. `callees` holds every
+/// syntactic `Name`/`Field` path its signature defaults and body reference.
+struct StandardFunction {
+    namespace: Namespace,
+    callees: Vec<Vec<String>>,
+}
+
+/// The `use` declarations of one standard module.
+#[derive(Default)]
+struct StandardImports {
+    aliases: BTreeMap<String, Vec<String>>,
+    globs: Vec<Vec<String>>,
+}
+
+impl StandardImports {
+    fn add(&mut self, path: Vec<String>, tail: &UseTail) {
+        match tail {
+            UseTail::None => {
+                if let Some(last) = path.last().cloned() {
+                    self.aliases.insert(last, path);
+                }
+            }
+            UseTail::Alias { name, .. } => {
+                self.aliases.insert(name.clone(), path);
+            }
+            UseTail::Glob { .. } => self.globs.push(path),
+            UseTail::Names(names) => {
+                for name in names {
+                    let mut target = path.clone();
+                    target.push(name.name.clone());
+                    self.aliases.insert(name.name.clone(), target);
+                }
+            }
+        }
+    }
+}
+
+/// Propagates host effects through the bodies of source-backed standard
+/// functions. A standard wrapper performs whatever host operations its callees
+/// perform, so each function's effects are the least fixed point over its
+/// syntactic callees. Effects are keyed by full path and monotone, so the
+/// iteration terminates.
+fn summarize_standard_function_effects(
+    modules: &mut BTreeMap<Namespace, ModuleHeader>,
+    trees: &[(Namespace, SyntaxTree)],
+) {
+    let mut imports: BTreeMap<Namespace, StandardImports> = BTreeMap::new();
+    let mut functions: BTreeMap<Vec<String>, StandardFunction> = BTreeMap::new();
+    for (namespace, tree) in trees {
+        let module_imports = imports.entry(namespace.clone()).or_default();
+        for item in &tree.items {
+            match &item.declaration {
+                Declaration::Use { path, tail } => module_imports.add(
+                    path.iter().map(|segment| segment.name.clone()).collect(),
+                    tail,
+                ),
+                Declaration::Function { signature, body } => {
+                    let mut callees = Vec::new();
+                    for parameter in &signature.parameters {
+                        if let Some(default) = &parameter.default {
+                            collect_callee_paths(default, &mut callees);
+                        }
+                    }
+                    collect_callee_paths(body, &mut callees);
+                    let key: Vec<String> = namespace
+                        .0
+                        .iter()
+                        .cloned()
+                        .chain([signature.name.clone()])
+                        .collect();
+                    functions.insert(
+                        key,
+                        StandardFunction {
+                            namespace: namespace.clone(),
+                            callees,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Declared standard symbols: source functions and host-bound module members.
+    // Only these may be named by a namespace-relative callee.
+    let declared: BTreeSet<Vec<String>> = modules
+        .iter()
+        .flat_map(|(namespace, header)| {
+            header
+                .symbols
+                .keys()
+                .map(|name| concat_path(&namespace.0, std::slice::from_ref(name)))
+                .collect::<Vec<_>>()
+        })
+        .chain(functions.keys().cloned())
+        .collect();
+    let candidates: BTreeMap<Vec<String>, Vec<Vec<String>>> = functions
+        .iter()
+        .map(|(key, function)| {
+            let module_imports = imports.get(&function.namespace);
+            let paths = function
+                .callees
+                .iter()
+                .flat_map(|callee| {
+                    standard_callee_candidates(
+                        &function.namespace,
+                        module_imports,
+                        callee,
+                        &declared,
+                    )
+                })
+                .collect();
+            (key.clone(), paths)
+        })
+        .collect();
+
+    // A source function's effects come only from its body: its callees' host
+    // classifications and the summaries of the source functions it calls. The
+    // path of the function itself is not a classification, so a pure function
+    // in a host-named module such as `std.net.*` stays effect-free.
+    let mut summary: BTreeMap<Vec<String>, EffectSummary> = functions
+        .keys()
+        .map(|key| (key.clone(), EffectSummary::default()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (key, paths) in &candidates {
+            let mut effects = summary[key].clone();
+            for path in paths {
+                match summary.get(path) {
+                    Some(known) => effects.join(known),
+                    None => effects.join(&standard_path_effects(path)),
+                }
+            }
+            if effects != summary[key] {
+                summary.insert(key.clone(), effects);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (key, effect_summary) in summary {
+        let Some((name, namespace)) = key.split_last() else {
+            continue;
+        };
+        let Some(header) = modules.get_mut(&Namespace(namespace.to_vec())) else {
+            continue;
+        };
+        for symbols in [&mut header.symbols, &mut header.exports] {
+            if let Some(symbol) = symbols.get_mut(name) {
+                symbol.effects = effect_summary.clone();
+            }
+        }
+    }
+}
+
+/// Effects of a full path that is not a source-declared standard function: its
+/// host classification, joined with the descriptor effect of the `sys`
+/// operation it names. A `sys` callee carries the descriptor effect it has
+/// when called directly, so an opaque `sys.invoke`, `sys.start`, `sys.await` or
+/// `sys.cancel` marks its wrapper opaque too (SYS-077, SYS-039).
+fn standard_path_effects(path: &[String]) -> EffectSummary {
+    let segments = path.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut summary = standard_function_effects(&segments);
+    if let Some(functions) = system_api::embedded_system_api().function(&path.join(".")) {
+        for function in functions {
+            summary.join(&descriptor_effects(function.effect));
+        }
+    }
+    summary
+}
+
+fn concat_path(prefix: &[String], suffix: &[String]) -> Vec<String> {
+    prefix.iter().chain(suffix).cloned().collect()
+}
+
+/// Full paths a syntactic callee may denote from within `namespace`. Paths
+/// rooted at `std` or `sys` are absolute and always candidates. Any other root
+/// is tried relative to the module, its parent, and the module's `use` aliases
+/// and globs; a relative spelling is a candidate only when it names a declared
+/// symbol, so a parameter or local never inherits a host classification.
+fn standard_callee_candidates(
+    namespace: &Namespace,
+    imports: Option<&StandardImports>,
+    callee: &[String],
+    declared: &BTreeSet<Vec<String>>,
+) -> Vec<Vec<String>> {
+    if callee
+        .first()
+        .is_some_and(|root| root == "std" || root == "sys")
+    {
+        return vec![callee.to_vec()];
+    }
+    let mut candidates = Vec::new();
+    push_declared(&mut candidates, declared, concat_path(&namespace.0, callee));
+    let Some(imports) = imports else {
+        return candidates;
+    };
+    if let Some((root, rest)) = callee.split_first() {
+        if let Some(target) = imports.aliases.get(root) {
+            push_import_candidates(&mut candidates, namespace, target, rest, declared);
+        }
+    }
+    for glob in &imports.globs {
+        push_import_candidates(&mut candidates, namespace, glob, callee, declared);
+    }
+    candidates
+}
+
+fn push_declared(
+    candidates: &mut Vec<Vec<String>>,
+    declared: &BTreeSet<Vec<String>>,
+    path: Vec<String>,
+) {
+    if declared.contains(&path) {
+        candidates.push(path);
+    }
+}
+
+fn push_import_candidates(
+    candidates: &mut Vec<Vec<String>>,
+    namespace: &Namespace,
+    base: &[String],
+    rest: &[String],
+    declared: &BTreeSet<Vec<String>>,
+) {
+    let target = concat_path(base, rest);
+    if base
+        .first()
+        .is_some_and(|root| root == "std" || root == "sys")
+    {
+        candidates.push(target);
+        return;
+    }
+    let parent = &namespace.0[..namespace.0.len().saturating_sub(1)];
+    push_declared(candidates, declared, concat_path(&namespace.0, &target));
+    push_declared(candidates, declared, concat_path(parent, &target));
+}
+
+/// Collects the maximal `Name`/`Field` paths an expression references.
+/// Paths are syntactic, so they may name callees, function values, or locals;
+/// resolution against standard modules happens in `standard_callee_candidates`.
+fn collect_callee_paths(expr: &Expr, out: &mut Vec<Vec<String>>) {
+    if let Some(path) = qualified_path(expr) {
+        out.push(path.into_iter().map(str::to_owned).collect());
+        return;
+    }
+    match expr {
+        Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+        Expr::InterpolatedString { segments, .. } => {
+            for segment in segments {
+                if let StringSegment::Expression { value, .. } = segment {
+                    collect_callee_paths(value, out);
+                }
+            }
+        }
+        Expr::Unary { rhs, .. } => collect_callee_paths(rhs, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_callee_paths(lhs, out);
+            collect_callee_paths(rhs, out);
+        }
+        Expr::Range { lower, upper, .. } => {
+            for bound in [lower, upper].into_iter().flatten() {
+                collect_callee_paths(bound, out);
+            }
+        }
+        Expr::Call {
+            callee, arguments, ..
+        }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => {
+            collect_callee_paths(callee, out);
+            for argument in arguments {
+                collect_callee_paths(&argument.value, out);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_callee_paths(base, out);
+            collect_callee_paths(index, out);
+        }
+        Expr::Field { base, .. } | Expr::Group { inner: base, .. } => {
+            collect_callee_paths(base, out);
+        }
+        Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+            for element in elements {
+                collect_callee_paths(element, out);
+            }
+        }
+        Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+            for field in fields {
+                collect_callee_paths(&field.value, out);
+            }
+        }
+        Expr::Lambda { body, .. } => collect_callee_paths(body, out),
+        Expr::Block {
+            statements, tail, ..
+        } => {
+            for statement in statements {
+                collect_statement_paths(statement, out);
+            }
+            if let Some(tail) = tail {
+                collect_callee_paths(tail, out);
+            }
+        }
+        Expr::Control {
+            condition,
+            body,
+            arms,
+            alternate,
+            ..
+        } => {
+            for inner in [condition, body, alternate].into_iter().flatten() {
+                collect_callee_paths(inner, out);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_callee_paths(guard, out);
+                }
+                collect_callee_paths(&arm.body, out);
+            }
+        }
+    }
+}
+
+fn collect_statement_paths(statement: &Statement, out: &mut Vec<Vec<String>>) {
+    match statement {
+        Statement::Let { value, .. }
+        | Statement::Assert { value, .. }
+        | Statement::Expression { value, .. }
+        | Statement::Control { value, .. } => collect_callee_paths(value, out),
+        Statement::Return { value, .. } | Statement::Break { value, .. } => {
+            if let Some(value) = value {
+                collect_callee_paths(value, out);
+            }
+        }
+        Statement::Continue { .. } => {}
+        Statement::Assignment { target, value, .. } => {
+            collect_target_paths(target, out);
+            collect_callee_paths(value, out);
+        }
+    }
+}
+
+fn collect_target_paths(target: &AssignmentTarget, out: &mut Vec<Vec<String>>) {
+    match target {
+        AssignmentTarget::Name { .. } => {}
+        AssignmentTarget::Field { base, .. } => collect_target_paths(base, out),
+        AssignmentTarget::Index { base, index, .. } => {
+            collect_target_paths(base, out);
+            collect_callee_paths(index, out);
+        }
     }
 }
 
@@ -1665,7 +2037,8 @@ fn fixture_connector_function(
 ) -> (String, Symbol) {
     let (name, mut symbol) = fixture_function(name, named_function(parameters, result));
     symbol.effects = EffectSummary {
-        effects: BTreeSet::from(["network".into()]),
+        effects: BTreeSet::from([EffectKind::Network]),
+        opaque: false,
         may_fail: true,
     };
     (name, symbol)
@@ -4930,7 +5303,7 @@ fn check_item(
                         let inferred =
                             infer_contextual(value, &expected, scope, &row_locals, diagnostics);
                         if matches!(initializer, FieldInitializer::Computed(_))
-                            && (!inferred.effects.effects.is_empty() || inferred.effects.may_fail)
+                            && (inferred.effects.is_effectful() || inferred.effects.may_fail)
                         {
                             diagnostics.push(diag(
                                 DIAG_COMPUTED_NONDETERMINISTIC,
@@ -6455,7 +6828,7 @@ fn call_may_write(callee: &Expr, scope: &Scope, local: &BTreeMap<String, Symbol>
         return true;
     }
     if let Some(symbol) = resolved_callable_symbol(callee, scope, local) {
-        return symbol.kind != SymbolKind::Function || !symbol.effects.effects.is_empty();
+        return symbol.kind != SymbolKind::Function || symbol.effects.is_effectful();
     }
     // A callable that is not represented by a resolved, effect-free function
     // summary is not proven pure. This intentionally rejects unknown indirect
@@ -8728,7 +9101,8 @@ fn infer_node(
                 Some(s) if s.kind == SymbolKind::Table => Inferred {
                     ty: Type::Relation(Box::new(s.ty.clone())),
                     effects: EffectSummary {
-                        effects: BTreeSet::from(["database read".into()]),
+                        effects: BTreeSet::from([EffectKind::TableRead]),
+                        opaque: false,
                         may_fail: true,
                     },
                 },
@@ -9018,7 +9392,8 @@ fn infer_node(
                     return Inferred {
                         ty: Type::Relation(Box::new(table.ty.clone())),
                         effects: EffectSummary {
-                            effects: BTreeSet::from(["database read".into()]),
+                            effects: BTreeSet::from([EffectKind::TableRead]),
+                            opaque: false,
                             may_fail: true,
                         },
                     };
@@ -16553,7 +16928,8 @@ fn infer_recovery_pipeline(
     let mut effects = input.effects;
     effects
         .effects
-        .extend(recovered.effects.effects.iter().cloned());
+        .extend(recovered.effects.effects.iter().copied());
+    effects.opaque |= recovered.effects.opaque;
     effects.may_fail = recovered.effects.may_fail;
     let ty = if recovered.ty == Type::Bottom {
         input.ty
@@ -17082,11 +17458,12 @@ fn infer_relation_callback(
     } else {
         infer(expression, scope, local, diagnostics)
     };
-    if callback
-        .effects
-        .effects
-        .iter()
-        .any(|effect| effect != "database read")
+    if callback.effects.opaque
+        || callback
+            .effects
+            .effects
+            .iter()
+            .any(|effect| *effect != EffectKind::TableRead)
     {
         diagnostics.push(diag(DIAG_TYPE, "relation query callback must be read-only"));
     }
@@ -17205,7 +17582,7 @@ fn infer_relation_member_call(
     );
 
     let mut effects = receiver.effects;
-    effects.effects.insert("database read".into());
+    effects.effects.insert(EffectKind::TableRead);
     effects.may_fail = true;
     Some(Inferred {
         ty: match name.as_str() {
@@ -17262,20 +17639,20 @@ fn infer_table_operation(
         ));
     }
     let (parameters, result, effect) = match name.as_str() {
-        "insert" | "upsert" => (1, table.ty.clone(), Some("database write")),
-        "update" | "rekey" => (2, table.ty.clone(), Some("database write")),
-        "delete" => (1, Type::Unit, Some("database write")),
-        "count" => (0, Type::Int, Some("database read")),
+        "insert" | "upsert" => (1, table.ty.clone(), Some(EffectKind::TableWrite)),
+        "update" | "rekey" => (2, table.ty.clone(), Some(EffectKind::TableWrite)),
+        "delete" => (1, Type::Unit, Some(EffectKind::TableWrite)),
+        "count" => (0, Type::Int, Some(EffectKind::TableRead)),
         "first" => (
             0,
             Type::Optional(Box::new(table.ty.clone())),
-            Some("database read"),
+            Some(EffectKind::TableRead),
         ),
-        "one" => (0, table.ty.clone(), Some("database read")),
+        "one" => (0, table.ty.clone(), Some(EffectKind::TableRead)),
         "as_of" => (
             1,
             Type::Relation(Box::new(table.ty.clone())),
-            Some("database read"),
+            Some(EffectKind::TableRead),
         ),
         _ => return None,
     };
@@ -17286,7 +17663,8 @@ fn infer_table_operation(
         ));
     }
     let mut effects = EffectSummary {
-        effects: BTreeSet::from([effect.expect("all table operations have an effect").into()]),
+        effects: BTreeSet::from([effect.expect("all table operations have an effect")]),
+        opaque: false,
         may_fail: true,
     };
     let row = table.table_fields().or_else(|| match &table.ty {
@@ -19903,15 +20281,18 @@ fn descriptor_call_type(
 fn descriptor_effects(effect: system_api::SystemEffect) -> EffectSummary {
     match effect {
         system_api::SystemEffect::Read => EffectSummary {
-            effects: BTreeSet::from(["database read".into()]),
+            effects: BTreeSet::from([EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         },
         system_api::SystemEffect::Invoke => EffectSummary {
-            effects: BTreeSet::from(["invoke".into()]),
+            effects: BTreeSet::new(),
+            opaque: true,
             may_fail: true,
         },
         system_api::SystemEffect::Admin => EffectSummary {
-            effects: BTreeSet::from(["admin".into()]),
+            effects: BTreeSet::new(),
+            opaque: true,
             may_fail: true,
         },
     }
@@ -24625,7 +25006,8 @@ fn infer_historical_member(
             return Some(Inferred {
                 ty: historical_table_type(snapshot, &relation),
                 effects: EffectSummary {
-                    effects: BTreeSet::from(["database read".into()]),
+                    effects: BTreeSet::from([EffectKind::TableRead]),
+                    opaque: false,
                     may_fail: true,
                 },
             });
@@ -24645,17 +25027,19 @@ fn infer_historical_member(
             return Some(Inferred {
                 ty: historical_table_type(snapshot, &full_name),
                 effects: EffectSummary {
-                    effects: BTreeSet::from(["database read".into()]),
+                    effects: BTreeSet::from([EffectKind::TableRead]),
+                    opaque: false,
                     may_fail: true,
                 },
             });
         }
         if symbol.kind == SymbolKind::Function
-            && symbol
-                .effects
-                .effects
-                .iter()
-                .any(|effect| !matches!(effect.as_str(), "database read"))
+            && (symbol.effects.opaque
+                || symbol
+                    .effects
+                    .effects
+                    .iter()
+                    .any(|effect| *effect != EffectKind::TableRead))
         {
             diagnostics.push(diag(
                 DIAG_UNSUPPORTED,
@@ -24674,7 +25058,7 @@ fn infer_historical_member(
             },
             effects: {
                 let mut effects = symbol.effects.clone();
-                effects.effects.insert("database read".into());
+                effects.effects.insert(EffectKind::TableRead);
                 effects.may_fail = true;
                 effects
             },
@@ -25239,23 +25623,7 @@ fn intrinsic_call_effects(callee: &Expr) -> EffectSummary {
     let Some(path) = qualified_path(callee) else {
         return EffectSummary::default();
     };
-    let effect = match path.as_slice() {
-        ["sys", "io", ..] | ["std", "io", "fs", ..] => Some("filesystem"),
-        ["sys", "net", ..] => Some("network"),
-        ["std", "net", ..] => Some("network"),
-        ["sys", "process", ..] => Some("process"),
-        ["sys", "ui", ..] => Some("ui"),
-        ["sys", "clock", ..] => Some("clock"),
-        ["sys", "random", ..] => Some("random"),
-        _ => None,
-    };
-    match effect {
-        Some(effect) => EffectSummary {
-            effects: BTreeSet::from([effect.into()]),
-            may_fail: true,
-        },
-        None => EffectSummary::default(),
-    }
+    standard_function_effects(&path)
 }
 
 fn qualified_path(expr: &Expr) -> Option<Vec<&str>> {
@@ -25298,9 +25666,9 @@ fn assertion(
         diagnostics.push(diag(DIAG_ASSERTION, message));
     }
     if inferred.effects.forbidden_for_assertion() {
-        let message = if inferred.effects.effects.contains("network") {
+        let message = if inferred.effects.effects.contains(&EffectKind::Network) {
             "declaration assertion uses forbidden network effect"
-        } else if inferred.effects.effects.contains("filesystem") {
+        } else if inferred.effects.effects.contains(&EffectKind::Filesystem) {
             "declaration assertion uses forbidden filesystem effect"
         } else {
             "assertion has forbidden effects or failure"
