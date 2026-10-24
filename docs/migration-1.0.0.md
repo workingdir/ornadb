@@ -199,3 +199,35 @@ For command details and the current evidence map, see the
 [editor tooling guide](editor-tooling.md),
 [1.0.0 release inventory](../CHANGELOG.md), and
 [decision index](decisions/README.md).
+
+## Legacy format-1 compact fixture (bead 5il1.394, partial slice)
+
+Fixture: `crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle`, built by the
+`build_legacy_fixture` example in `orna-repository-v1` (feature
+`legacy-fixture-writer`). Its SHA-256 is pinned by `BUNDLE_SHA256` in
+`crates/orna-cli-v1/tests/legacy_fixture_bundle.rs` and the bundle is listed in
+`scripts/fixture-manifest.sha256`.
+
+Provenance: the fixture is produced by the test encoder (`encoder_version`
+`test-encoder-v1`). It shares the canonical OVB encoder, base64 helper, date-key
+mapping and Parquet page-checksum helper with production. It is NOT an
+independent 1.0.0 golden repository.
+
+What it proves (focused test `legacy_fixture_bundle`): a clone of the bundle
+reads through `read_legacy_authoritative_tables` and admits through
+`migrate copy`, covering key-only compact Int (INT64), Str (BYTE_ARRAY, STRING,
+`utf8`) and Date (INT32, DATE) segments plus a committed gitlink.
+
+Open gaps (not proven by this fixture):
+
+- Blob compact encoding: excluded (spec-silent, conservative).
+- `state.db` and persistent consumers: not covered; spec-silent.
+- ORNA-UPGRADE-008 fail-closed behaviour for Blob-containing persistent-consumer
+  arguments: NOT asserted by any test.
+- Loose-row path codec: deferred.
+- Key-bound encoding: manifest and shard `min_key`/`max_key` are hex of the
+  canonical key bytes. The 1.0.0 text at
+  `crates/orna-conformance-v1/tests/fixtures/legacy-1.0.0/source/23-storage.md:214,216`
+  says key values use the table key schema. Whether this hex encoding conforms
+  is unresolved.
+- Byte-compatibility with 1.0.0 golden output: not verified.
