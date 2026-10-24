@@ -170,6 +170,9 @@ pub fn write_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
 
 pub struct EditorMount {
     pub _mounted: MountedProcess,
+    /// A live writer other than the mount, holding the worktree's runtime owner
+    /// lock and writer lease for the fixture's lifetime.
+    pub _foreign_writer: Option<RuntimeState>,
     pub repository: Repository,
     pub relation_id: [u8; 16],
     pub row_directory: PathBuf,
@@ -273,14 +276,16 @@ pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
 
+/// The writer owner of the live foreign writer `start_editor_mount(true)` keeps.
+pub const FOREIGN_OWNER: [u8; 16] = [0x83; 16];
+
 /// Creates a repository whose `Music` table has one committed row named `key`.
 pub async fn repository_with_music_row(
     key: &str,
     ordinal: u8,
     initial: &str,
-    foreign_owner: bool,
 ) -> (TempDir, Repository, [u8; 16]) {
-    repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial, foreign_owner).await
+    repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial).await
 }
 
 /// Like `repository_with_music_row`, with a caller-supplied table `source`.
@@ -289,7 +294,6 @@ pub async fn repository_with_source_row(
     key: &str,
     ordinal: u8,
     initial: &str,
-    foreign_owner: bool,
 ) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_for_table_with_source_row(
@@ -302,12 +306,10 @@ pub async fn repository_with_source_row(
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let lease_owner = if foreign_owner {
-        [0x83; 16]
-    } else {
-        runtime_identity.repository_id
-    };
-    let writer = state.acquire_lease(lease_owner).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     commit_source_captures_for_table(
         &repository,
@@ -328,6 +330,26 @@ pub async fn repository_with_source_row(
     .await;
     drop(state);
     (repository_directory, repository, relation_id)
+}
+
+/// Opens a writer that is not the mount and keeps it live: it holds the
+/// worktree's runtime owner lock and takes the writer lease for
+/// `FOREIGN_OWNER`, so a mount started afterwards is only a secondary
+/// participant (ORNA-TURSO-005).
+pub async fn live_foreign_writer(repository: &Repository) -> RuntimeState {
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(repository);
+    let state = RuntimeState::open(repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(
+        state.holds_runtime_owner_lock(),
+        "the foreign writer owns the worktree runtime"
+    );
+    state
+        .acquire_lease(FOREIGN_OWNER)
+        .await
+        .expect("the foreign writer takes the writer lease");
+    state
 }
 
 /// Creates a repository whose `Music` table has one committed row for each
@@ -402,6 +424,9 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     }
 }
 
+/// Mounts a repository whose `Music/london` row is `Original`. With
+/// `foreign_owner`, a live foreign writer owns the worktree for the fixture's
+/// lifetime, so the mount runs as a secondary participant.
 pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     start_editor_mount_with_source(
         "pub table Music(id: Str) { title: Str, artist: Str, }\n",
@@ -417,7 +442,12 @@ pub async fn start_editor_mount_with_source(
     foreign_owner: bool,
 ) -> EditorMount {
     let (repository_directory, repository, relation_id) =
-        repository_with_source_row(source, "london", 0x90, initial, foreign_owner).await;
+        repository_with_source_row(source, "london", 0x90, initial).await;
+    let foreign_writer = if foreign_owner {
+        Some(live_foreign_writer(&repository).await)
+    } else {
+        None
+    };
 
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
@@ -426,6 +456,7 @@ pub async fn start_editor_mount_with_source(
     let data_path = row_directory.join("data.orna");
     EditorMount {
         _mounted: mounted,
+        _foreign_writer: foreign_writer,
         repository,
         relation_id,
         row_directory,
