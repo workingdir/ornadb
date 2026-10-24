@@ -53,6 +53,19 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+/// The writer owner identity of this operating-system process.
+///
+/// Every CLI invocation, served host, REPL and mount in one process shares this
+/// identity. A different process never reuses it, so a process that opens the
+/// runtime after a predecessor died takes the writer lease over with a new
+/// epoch (see [`RuntimeState::acquire_lease`]) instead of resuming the dead
+/// owner's token.
+#[must_use]
+pub fn process_owner_id() -> [u8; 16] {
+    static OWNER: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    *OWNER.get_or_init(|| *Uuid::new_v4().as_bytes())
+}
+
 mod activation;
 pub use activation::{
     ActivationError, ActivationWork, run_admitted_table_activation,
@@ -115,7 +128,8 @@ CREATE TABLE IF NOT EXISTS runtime_schema_migration (
 CREATE TABLE IF NOT EXISTS writer_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
-    epoch INTEGER NOT NULL CHECK (epoch > 0)
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    lock_owner_id BLOB CHECK (lock_owner_id IS NULL OR length(lock_owner_id) = 16)
 );
 CREATE TABLE IF NOT EXISTS takeover_recovery_pending (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -2501,6 +2515,10 @@ pub enum RuntimeError {
     /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
     /// format and remedy.
     LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
+    /// The format recorded at `HEAD` is not a format this build knows, so
+    /// runtime admission is refused before any worktree metadata or runtime
+    /// state is read (ORNA-REPO-CONTEXT-003). The refusal carries its code.
+    UnknownHeadFormat(orna_repository_v1::FormatContextError),
     /// A retry, skip or resolve named a failure version or successor that is
     /// not the stored one (`sys.failure.stale_version`).
     StreamFailureStale,
@@ -2599,6 +2617,7 @@ impl fmt::Display for RuntimeError {
             Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
             Self::LegacyHeadReadOnly(refusal) => refusal.title(),
+            Self::UnknownHeadFormat(_) => "repository format is unknown",
         })
     }
 }
@@ -2642,11 +2661,43 @@ impl AcceptedContentPin {
 pub struct RuntimeState {
     connection: Connection,
     graph_repository_id: Option<[u8; 32]>,
-    runtime_owner_lock: Option<RuntimeOwnerLock>,
+    writer_authority: WriterAuthority,
     compact_receipt_signing_key: SigningKey,
     system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
     vfs_repository_cache: vfs::VfsRepositoryCache,
+}
+
+/// What a runtime handle may do with its worktree's single writer lease
+/// (ORNA-TURSO-004/005).
+enum WriterAuthority {
+    /// Opened by path without a repository owner lock, which only unit tests
+    /// do. The caller is the only writer of that database; a different
+    /// recorded owner is never presumed departed.
+    #[cfg(test)]
+    Unmanaged,
+    /// Another live runtime holds the worktree's owner lock. This handle may
+    /// re-acquire a lease its own owner already holds, but it can neither
+    /// create the lease nor fence its holder.
+    Secondary,
+    /// This handle holds the worktree's runtime owner lock under `lock_id`.
+    /// Every lease it creates, re-acquires or takes over is bound to that
+    /// lock identity.
+    Owner {
+        lock: RuntimeOwnerLock,
+        lock_id: [u8; 16],
+    },
+}
+
+impl WriterAuthority {
+    fn lock_id(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Owner { lock_id, .. } => Some(*lock_id),
+            Self::Secondary => None,
+            #[cfg(test)]
+            Self::Unmanaged => None,
+        }
+    }
 }
 
 enum RequestActivationTransactionError {
@@ -4584,6 +4635,8 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::StorageUnavailable => "storage_unavailable",
         // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
         RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
+        RuntimeError::UnknownHeadFormat(_) => "unknown_head_format",
     }
 }
 
@@ -4729,8 +4782,10 @@ impl RuntimeState {
     }
 
     /// Opens the runtime with an owner identity shared with the component
-    /// issuing its owner-scoped graph references. A busy owner lock still
-    /// opens the runtime as a secondary participant.
+    /// issuing its owner-scoped graph references. That identity is also the
+    /// runtime owner lock identity every writer lease this handle establishes
+    /// is bound to. A busy owner lock still opens the runtime as a secondary
+    /// participant.
     pub async fn open_with_owner_id(
         repository: &Repository,
         identity: RuntimeIdentity,
@@ -4741,15 +4796,17 @@ impl RuntimeState {
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let runtime_owner_lock = match repository.acquire_runtime_owner_lock(owner_id) {
-            Ok(owner_lock) => Some(owner_lock),
-            // The owner lock is the takeover lock that reclaims a departed
-            // owner's protected pins. It says nothing about the state
-            // database or the writer lease, so a second live runtime in the
-            // same worktree opens as a secondary participant instead of
-            // refusing every verb that needs the runtime. Reclamation stays
-            // with the owner that holds the lock.
-            Err(RepositoryError::RepositoryBusy) => None,
+        let writer_authority = match repository.acquire_runtime_owner_lock(owner_id) {
+            Ok(lock) => WriterAuthority::Owner {
+                lock,
+                lock_id: owner_id,
+            },
+            // A second live runtime in the same worktree opens as a secondary
+            // participant instead of refusing every verb that needs the
+            // runtime. It cannot create the writer lease or fence its holder,
+            // and the reclamation of departed owners' pins stays with the
+            // owner that holds the lock.
+            Err(RepositoryError::RepositoryBusy) => WriterAuthority::Secondary,
             Err(_) => return Err(RuntimeError::StorageUnavailable),
         };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
@@ -4763,11 +4820,12 @@ impl RuntimeState {
                     .runtime_paths()
                     .compact_runtime_receipt_public_key(),
             ),
-            runtime_owner_lock,
+            writer_authority,
         )
         .await
     }
 
+    #[cfg(test)]
     async fn open_path(
         path: &Path,
         identity: RuntimeIdentity,
@@ -4780,7 +4838,7 @@ impl RuntimeState {
             initial_digest,
             None,
             public_key_path,
-            None,
+            WriterAuthority::Unmanaged,
         )
         .await
     }
@@ -4790,7 +4848,7 @@ impl RuntimeState {
         initial_digest: [u8; 32],
         graph_repository_id: Option<[u8; 32]>,
         public_key_path: Option<PathBuf>,
-        runtime_owner_lock: Option<RuntimeOwnerLock>,
+        writer_authority: WriterAuthority,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -4828,11 +4886,12 @@ impl RuntimeState {
             system_dispatch,
             system_provider_roles,
             vfs_repository_cache: vfs::VfsRepositoryCache::new(),
-            runtime_owner_lock,
+            writer_authority,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
         state.migrate_request_recovery_evidence().await?;
+        state.migrate_writer_lease_lock_binding().await?;
         state.migrate_stream_failure_payloads().await?;
         state.migrate_stream_failure_assertion_details().await?;
         state.migrate_nullable_stream_partitions().await?;
@@ -4843,7 +4902,7 @@ impl RuntimeState {
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
         // departed-owner chain until publication becomes terminal.
-        if let Some(owner_lock) = &state.runtime_owner_lock {
+        if let WriterAuthority::Owner { lock: owner_lock, .. } = &state.writer_authority {
             owner_lock
                 .reclaim_departed_owner_pins(&accepted_pending)
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4854,7 +4913,7 @@ impl RuntimeState {
     /// Whether this state owns the repository runtime lock used to reclaim
     /// scratch references for its owner identity.
     pub fn holds_runtime_owner_lock(&self) -> bool {
-        self.runtime_owner_lock.is_some()
+        matches!(self.writer_authority, WriterAuthority::Owner { .. })
     }
     /// The runtime links the baked module roles at startup. Extension loading
     /// is not part of this 1.0 runtime surface.
@@ -10241,6 +10300,58 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
+    /// Adds the runtime owner lock identity a writer lease is bound to. A
+    /// lease written before this column existed stays unbound (null): no
+    /// live lock vouches for its holder, so only the worktree's current lock
+    /// holder may fence it.
+    async fn migrate_writer_lease_lock_binding(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query("PRAGMA table_info(writer_lease)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut found = false;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            if row
+                .get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                == "lock_owner_id"
+            {
+                found = true;
+            }
+        }
+        if !found {
+            transaction
+                .execute(
+                    "ALTER TABLE writer_lease ADD COLUMN lock_owner_id BLOB
+                     CHECK (lock_owner_id IS NULL OR length(lock_owner_id) = 16)",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('writer-lease-lock-binding-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     pub async fn identity(&self) -> Result<RuntimeIdentity, RuntimeError> {
         let mut rows = self
             .connection
@@ -10280,48 +10391,74 @@ impl RuntimeState {
         CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
     }
 
+    /// Acquires the worktree's single writer lease for `owner_id`.
+    ///
+    /// The holder re-acquires its own lease unchanged. Only a handle holding
+    /// the worktree's runtime owner lock creates the lease or fences a
+    /// different holder (ORNA-TURSO-004/005), and every lease such a handle
+    /// establishes is bound to its lock identity. That binding is the
+    /// liveness proof: while this handle holds the exclusive lock, a lease
+    /// bound to another lock identity, or to none, has no live lock holder
+    /// behind it. It is taken over with a bumped epoch, so every stale token
+    /// fails with `OwnerLost`, and the same transaction fences each Running
+    /// request those tokens left into its conservative orphaned outcome
+    /// (ORNA-TASK-003, REQUEST-1 step 5). The replacement is therefore
+    /// admitted only after recovery. A different owner bound to this
+    /// handle's own lock is live and is refused with `LeaseHeld`, as is every
+    /// different owner seen by a handle without the lock.
     pub async fn acquire_lease(&self, owner_id: [u8; 16]) -> Result<WriterLease, RuntimeError> {
         validate_id(owner_id)?;
+        let lock_id = self.writer_authority.lock_id();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = tx
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
-            let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-            let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if owner != owner_id {
-                return Err(RuntimeError::LeaseHeld);
-            }
-            tx.commit()
+        let lease = match bound_writer_lease_tx(&tx).await? {
+            None => {
+                if matches!(self.writer_authority, WriterAuthority::Secondary) {
+                    return Err(RuntimeError::LeaseHeld);
+                }
+                tx.execute(
+                    "INSERT INTO writer_lease (singleton, owner_id, epoch, lock_owner_id)
+                     VALUES (1, ?1, 1, ?2)",
+                    params![owner_id.to_vec(), lock_id.map(|id| id.to_vec())],
+                )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok(WriterLease {
-                owner_id,
-                epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            });
-        }
-        tx.execute(
-            "INSERT INTO writer_lease VALUES (1, ?1, 1)",
-            params![owner_id.to_vec()],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                WriterLease { owner_id, epoch: 1 }
+            }
+            Some((current, bound_lock)) if current.owner_id == owner_id => {
+                if let Some(lock_id) = lock_id
+                    && bound_lock != Some(lock_id)
+                {
+                    tx.execute(
+                        "UPDATE writer_lease SET lock_owner_id = ?1 WHERE singleton = 1",
+                        params![lock_id.to_vec()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                }
+                current
+            }
+            Some((current, bound_lock)) => {
+                let Some(lock_id) = lock_id.filter(|lock_id| bound_lock != Some(*lock_id)) else {
+                    return Err(RuntimeError::LeaseHeld);
+                };
+                Self::replace_writer_lease_tx(
+                    &tx,
+                    current,
+                    owner_id,
+                    Some(lock_id),
+                    TakeoverRecovery::OrphanRunning,
+                )
+                .await?
+            }
+        };
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(WriterLease { owner_id, epoch: 1 })
+        Ok(lease)
     }
 
     /// Reads the current writer lease without changing runtime state.
@@ -10361,6 +10498,10 @@ impl RuntimeState {
     /// This is a compare-and-swap fence, not an abandonment detector: the
     /// caller owns the liveness proof. A changed owner or epoch returns
     /// `OwnerLost`; no blind or arbitrary steal is permitted by this method.
+    /// The replacement is bound to this handle's runtime owner lock when it
+    /// holds one. Running requests stay with the caller: a durable recovery
+    /// barrier blocks ordinary writes until the caller recovers them with
+    /// its own outcomes and completes takeover recovery.
     pub async fn takeover_lease(
         &self,
         abandoned: WriterLease,
@@ -10376,15 +10517,43 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let lease = Self::replace_writer_lease_tx(
+            &transaction,
+            abandoned,
+            replacement,
+            self.writer_authority.lock_id(),
+            TakeoverRecovery::Barrier,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(lease)
+    }
+
+    /// Replaces exactly the expected abandoned writer lease inside
+    /// `transaction`, binds the replacement to `lock_id`, settles the Running
+    /// requests the fenced tokens left as `recovery` selects, and resets the
+    /// abandoned owner's stream work. A changed owner or epoch returns
+    /// `OwnerLost`.
+    async fn replace_writer_lease_tx(
+        transaction: &Connection,
+        abandoned: WriterLease,
+        replacement: [u8; 16],
+        lock_id: Option<[u8; 16]>,
+        recovery: TakeoverRecovery,
+    ) -> Result<WriterLease, RuntimeError> {
         let changed = transaction
             .execute(
                 "UPDATE writer_lease
-                 SET owner_id = ?1, epoch = epoch + 1
+                 SET owner_id = ?1, epoch = epoch + 1, lock_owner_id = ?4
                  WHERE singleton = 1 AND owner_id = ?2 AND epoch = ?3",
                 params![
                     replacement.to_vec(),
                     abandoned.owner_id.to_vec(),
                     i64::try_from(abandoned.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    lock_id.map(|id| id.to_vec()),
                 ],
             )
             .await
@@ -10396,38 +10565,49 @@ impl RuntimeState {
             .epoch
             .checked_add(1)
             .ok_or(RuntimeError::RecoveryInvalid)?;
-        let mut running = transaction
-            .query(
-                "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
-                params![RequestState::Running.code()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if running
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
-            transaction
-                .execute(
-                    "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
-                     VALUES (1, ?1, ?2)
-                     ON CONFLICT(singleton) DO UPDATE SET
-                       owner_id = excluded.owner_id, owner_epoch = excluded.owner_epoch",
-                    params![
-                        replacement.to_vec(),
-                        i64::try_from(replacement_epoch)
-                            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    ],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-        } else {
-            transaction
-                .execute("DELETE FROM takeover_recovery_pending", ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        match recovery {
+            TakeoverRecovery::Barrier => {
+                let mut running = transaction
+                    .query(
+                        "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
+                        params![RequestState::Running.code()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                if running
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .is_some()
+                {
+                    transaction
+                        .execute(
+                            "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
+                             VALUES (1, ?1, ?2)
+                             ON CONFLICT(singleton) DO UPDATE SET
+                               owner_id = excluded.owner_id, owner_epoch = excluded.owner_epoch",
+                            params![
+                                replacement.to_vec(),
+                                i64::try_from(replacement_epoch)
+                                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                            ],
+                        )
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                } else {
+                    transaction
+                        .execute("DELETE FROM takeover_recovery_pending", ())
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                }
+            }
+            TakeoverRecovery::OrphanRunning => {
+                orphan_fenced_running_requests_tx(transaction).await?;
+                transaction
+                    .execute("DELETE FROM takeover_recovery_pending", ())
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
         }
         // A retrying delivery can be returned to `Failed` only when the
         // durable execution lease and its retry claim still describe the same
@@ -10504,10 +10684,6 @@ impl RuntimeState {
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
         let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(WriterLease {
             owner_id: replacement,
             epoch,
@@ -12990,63 +13166,14 @@ impl RuntimeState {
         if evidence.owner != Some(lost_owner) || lost_owner == RequestOwner::from(fence) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let disposition = if evidence.effects == Some(EffectEvidence::ControlledTransaction)
-            && evidence.controlled_marker.is_some()
-            && evidence.rollback_proof.is_some()
-        {
-            RecoveryDisposition::RollbackProven
-        } else {
-            RecoveryDisposition::ExternalEffectsUncertain
-        };
-        let outcome = match disposition {
-            RecoveryDisposition::RollbackProven => rollback_proven_outcome,
-            RecoveryDisposition::ExternalEffectsUncertain => external_effects_uncertain_outcome,
-        };
-        let retained_effect_evidence = if disposition == RecoveryDisposition::RollbackProven {
-            1
-        } else {
-            0
-        };
-        let retained_marker = if disposition == RecoveryDisposition::RollbackProven {
-            evidence.controlled_marker.map(|value| value.to_vec())
-        } else {
-            None
-        };
-        let retained_rollback_proof = if disposition == RecoveryDisposition::RollbackProven {
-            evidence.rollback_proof.map(|value| value.to_vec())
-        } else {
-            None
-        };
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
-                     owner_epoch = NULL, effect_evidence = ?3,
-                     recovery_disposition = ?4, controlled_transaction_proof = ?5,
-                     controlled_rollback_proof = ?6
-                 WHERE session_id = ?7 AND request_id = ?8 AND fingerprint = ?9
-                   AND state = ?10 AND owner_id = ?11 AND owner_epoch = ?12",
-                params![
-                    RequestState::Orphaned.code(),
-                    outcome.as_bytes().to_vec(),
-                    retained_effect_evidence,
-                    disposition.code(),
-                    retained_marker,
-                    retained_rollback_proof,
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Running.code(),
-                    lost_owner.owner_id.to_vec(),
-                    i64::try_from(lost_owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RequestOwnerConflict);
-        }
-        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        let (disposition, outcome) = orphan_running_request_tx(
+            &tx,
+            &current,
+            evidence,
+            rollback_proven_outcome,
+            external_effects_uncertain_outcome,
+        )
+        .await?;
         self.clear_takeover_recovery_if_resolved(&tx, fence, false)
             .await?;
         tx.commit()
@@ -13101,30 +13228,8 @@ impl RuntimeState {
         {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET state = ?1, terminal_outcome = ?2, recovery_disposition = 2
-                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
-                   AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
-                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL
-                   AND controlled_rollback_proof IS NULL
-                   AND recovery_disposition = 0",
-                params![
-                    RequestState::Orphaned.code(),
-                    outcome.as_bytes().to_vec(),
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Running.code(),
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RequestOwnerConflict);
-        }
-        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        let (disposition, outcome) =
+            orphan_running_request_tx(&tx, &current, evidence, outcome.clone(), outcome).await?;
         self.clear_takeover_recovery_if_resolved(&tx, fence, false)
             .await?;
         tx.commit()
@@ -13137,7 +13242,7 @@ impl RuntimeState {
                 state: RequestState::Orphaned,
                 terminal_outcome: Some(outcome),
             },
-            disposition: RecoveryDisposition::ExternalEffectsUncertain,
+            disposition,
         })
     }
 
@@ -19220,6 +19325,170 @@ async fn current_writer_lease_tx(
     let lease = WriterLease { owner_id, epoch };
     validate_writer_lease(lease)?;
     Ok(Some(lease))
+}
+
+/// The current writer lease and the runtime owner lock identity it is bound
+/// to. An unbound lease (null) predates lock binding or was installed by a
+/// handle without the lock; no live lock holder vouches for it.
+async fn bound_writer_lease_tx(
+    connection: &Connection,
+) -> Result<Option<(WriterLease, Option<[u8; 16]>)>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT owner_id, epoch, lock_owner_id FROM writer_lease WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let epoch = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let lease = WriterLease { owner_id, epoch };
+    validate_writer_lease(lease)?;
+    let lock_id = row
+        .get::<Option<Vec<u8>>>(2)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(fixed)
+        .transpose()?;
+    Ok(Some((lease, lock_id)))
+}
+
+/// How a writer lease takeover settles the Running requests left by the
+/// tokens it fences.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TakeoverRecovery {
+    /// Explicit takeover: the caller recovers each Running request with its
+    /// own outcome payloads, and a durable barrier blocks ordinary writes
+    /// until it completes takeover recovery.
+    Barrier,
+    /// Takeover on lease acquisition: every Running request is fenced into
+    /// its conservative orphaned outcome inside the takeover transaction.
+    OrphanRunning,
+}
+
+/// Fences every Running request into its conservative orphaned outcome
+/// (REQUEST-1 step 5) while a lease takeover commits. The takeover has just
+/// installed a fresh token, so each Running request records a fenced token,
+/// or none for a pre-evidence legacy row, and its owner can never record its
+/// own terminal outcome. The runtime retains the identity, fingerprint and
+/// recovery disposition. The outcome payload is empty because the consumer
+/// that would render it is gone; rich output is what retention may prune.
+async fn orphan_fenced_running_requests_tx(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
+                    owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                    controlled_transaction_proof, controlled_rollback_proof
+             FROM request_ledger
+             WHERE state = ?1
+             ORDER BY session_id, request_id",
+            params![RequestState::Running.code()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut running = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let evidence = decode_request_execution_evidence(&row, 5)?;
+        validate_request_execution_evidence(&status, evidence)?;
+        running.push((status, evidence));
+    }
+    drop(rows);
+    let unrendered = TerminalOutcome::new(Vec::new())?;
+    for (status, evidence) in running {
+        orphan_running_request_tx(
+            connection,
+            &status,
+            evidence,
+            unrendered.clone(),
+            unrendered.clone(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Moves one validated Running request whose owner token is fenced to
+/// `Orphaned`, keeping the outcome that matches its durable evidence:
+/// rollback only with the complete controlled-transaction proof, otherwise
+/// uncertain external effects. The update is guarded by the owner evidence
+/// read in the caller's transaction.
+async fn orphan_running_request_tx(
+    connection: &Connection,
+    status: &RequestStatus,
+    evidence: RequestExecutionEvidence,
+    rollback_proven_outcome: TerminalOutcome,
+    external_effects_uncertain_outcome: TerminalOutcome,
+) -> Result<(RecoveryDisposition, TerminalOutcome), RuntimeError> {
+    let rollback_proven = evidence.effects == Some(EffectEvidence::ControlledTransaction)
+        && evidence.controlled_marker.is_some()
+        && evidence.rollback_proof.is_some();
+    let (disposition, outcome) = if rollback_proven {
+        (RecoveryDisposition::RollbackProven, rollback_proven_outcome)
+    } else {
+        (
+            RecoveryDisposition::ExternalEffectsUncertain,
+            external_effects_uncertain_outcome,
+        )
+    };
+    let retained_marker = evidence
+        .controlled_marker
+        .filter(|_| rollback_proven)
+        .map(|value| value.to_vec());
+    let retained_rollback_proof = evidence
+        .rollback_proof
+        .filter(|_| rollback_proven)
+        .map(|value| value.to_vec());
+    let owner_epoch = evidence
+        .owner
+        .map(|owner| i64::try_from(owner.epoch))
+        .transpose()
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let changed = connection
+        .execute(
+            "UPDATE request_ledger
+             SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                 owner_epoch = NULL, effect_evidence = ?3,
+                 recovery_disposition = ?4, controlled_transaction_proof = ?5,
+                 controlled_rollback_proof = ?6
+             WHERE session_id = ?7 AND request_id = ?8 AND fingerprint = ?9
+               AND state = ?10 AND owner_id IS ?11 AND owner_epoch IS ?12",
+            params![
+                RequestState::Orphaned.code(),
+                outcome.as_bytes().to_vec(),
+                i64::from(rollback_proven),
+                disposition.code(),
+                retained_marker,
+                retained_rollback_proof,
+                status.identity.session_id.to_vec(),
+                status.identity.request_id.to_vec(),
+                status.fingerprint.to_vec(),
+                RequestState::Running.code(),
+                evidence.owner.map(|owner| owner.owner_id.to_vec()),
+                owner_epoch,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if changed != 1 {
+        return Err(RuntimeError::RequestOwnerConflict);
+    }
+    sync_run_request_state_tx(connection, status.identity, RunObservationStatus::Orphaned).await?;
+    Ok((disposition, outcome))
 }
 
 async fn request_admission_exists_tx(
@@ -41443,9 +41712,9 @@ mod tests {
 
     #[test]
     fn admin_failure_class_round_trips_every_payload_free_variant() {
-        // The 48 payload-free variants. StaleCapture, FaultInjected and
-        // LegacyHeadReadOnly carry payloads the row does not store; they are
-        // checked by the class-only assertions below.
+        // The 48 payload-free variants. StaleCapture, FaultInjected,
+        // LegacyHeadReadOnly and UnknownHeadFormat carry payloads the row does not
+        // store; they are checked by the class-only assertions below.
         let table: &[(RuntimeError, &str)] = &[
             (RuntimeError::InvalidIdentity, "invalid_identity"),
             (RuntimeError::InvalidDigest, "invalid_digest"),
@@ -41512,6 +41781,10 @@ mod tests {
         );
         assert_eq!(
             admin_failure_from_class("legacy_head_read_only"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("unknown_head_format"),
             RuntimeError::RecoveryInvalid,
         );
     }
