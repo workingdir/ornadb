@@ -1719,19 +1719,13 @@ fn reject_uncaptured_standard_modules(
 fn semantic_catalogue(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
-    let catalogue = orna_semantic_v1::Catalogue::authoritative_core();
-    let Some(profile) = project.standard_profile() else {
-        return Ok(catalogue);
-    };
-    catalogue
-        .with_standard_sources(profile, project.standard_sources().iter().cloned())
-        .map_err(|_| {
-            Diagnostic::target(
-                "ORNA-S010-IMPORT",
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        })
+    project.production_catalogue().map_err(|_| {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    })
 }
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
