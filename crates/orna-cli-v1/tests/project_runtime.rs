@@ -27,7 +27,7 @@ fn reference_project() -> TempDir {
 }
 
 fn invoke(directory: &std::path::Path, command: &str, argument: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -45,7 +45,7 @@ fn contains_ansi(output: &Output) -> bool {
 }
 
 fn initialize_project(directory: &std::path::Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.to_str().expect("UTF-8 path")])
         .output()
@@ -261,7 +261,7 @@ fn sensors_checkpoint_key(database_id: [u8; 16]) -> CheckpointKey {
 #[test]
 fn binary_explain_returns_extended_orna_diagnostic_guidance() {
     let directory = tempfile::tempdir().expect("CLI working directory");
-    let documented = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let documented = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["explain", "ORNA-S010-IMPORT"])
@@ -275,7 +275,7 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
     );
     assert!(documented.stderr.is_empty());
 
-    let unknown = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unknown = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["explain", "ORNA-NOT-A-CODE"])
@@ -294,7 +294,7 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
 fn binary_repl_executes_a_pure_expression_at_the_cli_boundary() {
     let directory = tempfile::tempdir().expect("REPL working directory");
     let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["repl", submission])
@@ -311,7 +311,7 @@ fn binary_reference_repl_respects_color_mode() {
     let directory = function_fixture_project();
 
     let run_repl = |mode: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(directory.path())
             .args([
@@ -365,7 +365,7 @@ fn binary_reference_status_respects_color_mode() {
     let directory = function_fixture_project();
     let status_path = directory.path().to_str().expect("UTF-8 path");
     let status = |mode: &str| {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(directory.path())
             .args(["--color", mode, "--db", status_path, "status"])
@@ -387,7 +387,7 @@ fn binary_reference_status_respects_color_mode() {
     assert_eq!(never.stdout, auto.stdout);
     assert_eq!(never.stderr, auto.stderr);
 
-    let default = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let default = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["--db", status_path, "status"])
@@ -405,7 +405,7 @@ fn binary_reference_status_respects_color_mode() {
 #[test]
 fn binary_repl_recovers_from_malformed_terminal_input() {
     let directory = tempfile::tempdir().expect("REPL working directory");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["repl"])
@@ -439,7 +439,7 @@ fn binary_repl_recovers_from_malformed_terminal_input() {
 #[test]
 fn binary_repl_rejects_remote_endpoints_before_local_evaluation() {
     let submission = include_str!("fixtures/repl-arithmetic.orna").trim_end();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["--db", "orna://host/reference", "repl", submission])
         .output()
@@ -463,7 +463,7 @@ fn binary_check_accepts_a_core_only_project_without_std() {
     .expect("project source");
     initialize_project(directory.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -493,7 +493,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     .expect("project source");
     initialize_project(directory.path());
 
-    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -507,7 +507,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     let expected = b"error[ORNA-S010-IMPORT]: imported module is unavailable\nhelp: use a captured standard dependency or remove the import\n";
     assert_eq!(check.stderr, expected);
 
-    let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let run = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -520,7 +520,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     assert!(run.stdout.is_empty());
     assert_eq!(run.stderr, expected);
 
-    let invoke = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let invoke = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -534,7 +534,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     assert!(invoke.stdout.is_empty());
     assert_eq!(invoke.stderr, expected);
 
-    let stream = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let stream = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -548,7 +548,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     assert!(stream.stdout.is_empty());
     assert_eq!(stream.stderr, expected);
 
-    let repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let repl = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -572,7 +572,7 @@ fn binary_check_run_and_invoke_reject_uncaptured_standard_import_without_host_su
     .expect("standard-free project source");
     initialize_project(repl_directory.path());
 
-    let mut unlisted_repl = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut unlisted_repl = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -621,7 +621,7 @@ fn binary_managed_local_repl_executes_integer_list_aggregates() {
             .success()
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["repl"])
@@ -712,7 +712,7 @@ fn binary_run_rejects_unequal_sys_enum_constants_in_a_project_function() {
     .expect("library source");
     initialize_project(directory.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -770,7 +770,7 @@ fn binary_run_without_a_target_executes_root_main() {
     .expect("root source");
     initialize_project(directory.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -796,7 +796,7 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
     initialize_project(directory.path());
 
     let repository = Repository::discover(directory.path()).expect("repository");
-    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -836,7 +836,7 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         .await
         .expect("seed durable pending mutation");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -866,7 +866,7 @@ fn binary_run_without_a_target_reports_a_missing_root_main() {
     .expect("root source");
     initialize_project(directory.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -1022,7 +1022,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(expected_text.contains("A  staged.orna"));
     assert!(expected_text.contains("?? untracked.orna"));
     assert!(expected_text.contains("?? nested/"));
-    let actual = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let actual = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path())
         .args(["status", "--porcelain"])
@@ -1033,7 +1033,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(actual.stderr.is_empty());
     let status_path = repository.path().to_str().expect("UTF-8 path");
     let porcelain_with_color = |mode: &str| {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .current_dir(repository.path())
             .args([
@@ -1079,7 +1079,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         .expect("git short status");
     let mut expected_short_with_runtime_summary = expected_short.stdout.clone();
     expected_short_with_runtime_summary.extend_from_slice(b"RM 0 runtime mutations\n");
-    let actual_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let actual_short = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path().join("nested"))
         .args(["status", "--short"])
@@ -1089,7 +1089,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert_eq!(actual_short.stdout, expected_short_with_runtime_summary);
     assert!(actual_short.stderr.is_empty());
 
-    let actual_explicit_short = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let actual_explicit_short = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(repository.path().join("nested"))
         .args([
@@ -1108,7 +1108,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(actual_explicit_short.stderr.is_empty());
 
     let outside = tempfile::tempdir().expect("non-repository directory");
-    let failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let failure = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(outside.path())
         .args(["status", "--porcelain"])
@@ -1122,7 +1122,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
     assert!(failure.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&failure.stderr).contains("status repository"));
 
-    let short_failure = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let short_failure = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(outside.path())
         .args(["status", "--short"])
@@ -1141,7 +1141,7 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
 )]
 async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_failure() {
     let directory = reference_project();
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -1296,7 +1296,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
 )]
 async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_without_publication() {
     let directory = reference_project();
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -1320,7 +1320,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
     let books_after_seed = seeded.committed_table_rows("Book").await.unwrap();
     drop(seeded);
 
-    let missing = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let missing = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -1364,7 +1364,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
     );
     drop(after_missing);
 
-    let first_lend = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let first_lend = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -1397,7 +1397,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
     assert_eq!(text(&loans_after_lend[0].1, "borrower"), "reader-1");
     drop(lent);
 
-    let duplicate = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let duplicate = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -1441,7 +1441,7 @@ async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
     std::fs::write(&sensors_path, include_str!("fixtures/sensors-deliver.orna"))
         .expect("rename stream root");
 
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -1573,7 +1573,7 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
         )
         .expect("build captured standard catalogue");
 
-    let check = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["check"])
@@ -1583,7 +1583,7 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert_eq!(check.stdout, b"project valid\n");
     assert!(check.stderr.is_empty());
 
-    let run = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let run = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .args(["--debug", "run", "main.answer"])
@@ -1599,7 +1599,7 @@ fn binary_repl_imports_a_captured_standard_module() {
     use std::io::Write as _;
 
     let (directory, _module_commit) = captured_standard_project();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory.path())
         .arg("repl")
@@ -1629,7 +1629,7 @@ fn binary_repl_imports_a_captured_standard_module() {
 #[allow(clippy::too_many_lines)]
 async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
     let directory = reference_project();
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
