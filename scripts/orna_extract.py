@@ -809,13 +809,23 @@ class GitObjects:
                 process.wait()
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None and not stream.closed:
-                stream.close()
+                try:
+                    stream.close()
+                except OSError:
+                    # Buffered input for a stream that was stopped can no longer be flushed.
+                    pass
 
     def _stopped(self) -> ExtractionError:
         self._process.kill()
         self._process.wait()
         detail = self._process.stderr.read().decode("utf-8", "replace").strip()
         return ExtractionError(f"{self.scope}: git cat-file stopped: {detail or 'no diagnostic'}")
+
+    def _abandon(self, message: str) -> None:
+        """Stops the stream: a failure after a header leaves that object's body unread."""
+        self._process.kill()
+        self._process.wait()
+        raise ExtractionError(message)
 
     def _header(self, name: str, what: str) -> tuple[str, str, int]:
         if not name or "\n" in name:
@@ -853,12 +863,12 @@ class GitObjects:
     def resolve_commit(self, revision: str, what: str) -> tuple[str, bytes]:
         oid, kind, size = self._header(f"{revision}^{{commit}}", what)
         if kind != "commit":
-            fail(f"{what}: {revision} does not name a commit")
+            self._abandon(f"{what}: {revision} does not name a commit")
         if len(oid) not in (40, 64) or not _HEX_RE.fullmatch(oid):
-            fail(f"{what}: {oid!r} is not a SHA-1 or SHA-256 object id")
+            self._abandon(f"{what}: {oid!r} is not a SHA-1 or SHA-256 object id")
         self.width = len(oid) // 2
         if size > SOURCE_TREE_BYTES_LIMIT:
-            fail(f"{what}: commit {oid} is larger than {SOURCE_TREE_BYTES_LIMIT} bytes")
+            self._abandon(f"{what}: commit {oid} is larger than {SOURCE_TREE_BYTES_LIMIT} bytes")
         data = self._body(size)
         self._check_hash(oid, kind, data, what)
         return oid, data
@@ -868,11 +878,11 @@ class GitObjects:
             fail(f"{what}: {oid!r} is not a {self.width}-byte native object id")
         found, actual, size = self._header(oid, what)
         if found != oid:
-            fail(f"{what}: git returned {found} for {oid}")
+            self._abandon(f"{what}: git returned {found} for {oid}")
         if actual != kind:
-            fail(f"{what}: object {oid} is a {actual}; a {kind} is required")
+            self._abandon(f"{what}: object {oid} is a {actual}; a {kind} is required")
         if size > limit:
-            fail(f"{what}: {kind} {oid} holds {size} bytes, above the {limit}-byte bound")
+            self._abandon(f"{what}: {kind} {oid} holds {size} bytes, above the {limit}-byte bound")
         data = self._body(size)
         self._check_hash(oid, kind, data, what)
         return data
