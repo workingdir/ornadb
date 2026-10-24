@@ -2,7 +2,7 @@
 
 A developing CLI for Orna 1.1.0 (publication `final-2026-10-05`, repository
 writer format 3). The installed command is `orna`; Cargo builds it as the
-`orna-cli-v1` binary.
+`orna` binary.
 
 ## Command surface
 

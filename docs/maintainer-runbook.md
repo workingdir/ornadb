@@ -9,7 +9,7 @@ publication under `reference/Orna-1.1.0/`. Historical design records remain in
 ## Before you start
 
 Work from the repository root. The command is `orna`. In a checkout, Cargo
-builds it as the `orna-cli-v1` binary. The Linux package installs it as
+builds it as the `orna` binary. The Linux package installs it as
 `/usr/bin/orna`. Run it from a checked-out repository with the locked
 dependency graph:
 
@@ -253,7 +253,7 @@ blob. CI runs the same two commands in the `fixture-and-editor-artifacts` job of
 `.github/workflows/source-audits.yml`, after a recursive submodule checkout.
 
 Then run the package-scoped Rust checks that cover the snapshot you changed
-(for example `cargo test --locked -p orna-standard`), with the cargo limits from
+(for example `cargo test --locked -p orna-evaluator-v1 --test standard_profile_v1`), with the cargo limits from
 the repository rules. A check that could not run is unavailable, not a pass.
 
 ### Moving a Rust shadow into the standard library
@@ -278,13 +278,13 @@ express; the bits primitives cannot move because Orna has no bitwise operator):
 4. Update the tests that pin the old shape: the `stub_candidates == 30` and
    `registered >= 4` asserts in `registry_covers_pinned_intrinsic_and_sys_host_stubs`,
    the module's `standard_library_*` evaluator tests, and the declaration and
-   index asserts in `v1_profile.rs`. Check `scripts/fixture-manifest.sha256` only
+   index asserts in `crates/orna-evaluator-v1/tests/standard_profile_v1.rs`. Check `scripts/fixture-manifest.sha256` only
    if fixtures change.
 5. Add a golden test for each moved function that runs the new bytes with no
    shadow, and a replay test (as in `standard_snapshot_replay.rs`) showing that the
    old stub commit still behaves identically.
 6. Run `python3 scripts/check_standard_library_pin.py --check`, then
-   `cargo test --locked -p orna-standard` and `-p orna-evaluator-v1`, under the
+   `cargo test --locked -p orna-evaluator-v1` (this includes `standard_profile_v1`), under the
    repository cargo limits, then the fixture-manifest check.
 
 ## 1.1.0 requirement evidence report
