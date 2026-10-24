@@ -110,8 +110,10 @@ been published.
   capture stores the capture that rejected the call and replays that same
   error, even after later commits advance the CWD. A rejected stream-reference
   resume now records its failure like a rejected pause. When the generation
-  cannot be read, the row records no generation with the `failure:unobservable`
-  class and the call still returns its original error; the observed generation
+  cannot be read, the row records no generation with a
+  `failure:unobservable:<class>` outcome, and the call still returns its
+  original error; a retry replays that class, with payload-carrying classes
+  replaying as `RecoveryInvalid`. The observed generation
   is nullable in the audit schema, migrated in place for existing stores. A
   skip lease refused because the
   failure is no longer open is `sys.failure.state_conflict`, not
