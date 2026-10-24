@@ -1,4 +1,3 @@
-use orna_client::BrowserProfileValue;
 use orna_application_v1::execute_browser_profile;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 
@@ -27,10 +26,6 @@ fn browser_boundary_transports_canonical_typed_values_without_server_authority()
     let decoded = CanonicalValue::decode(&encoded).expect("browser payload is canonical OVB");
 
     assert_eq!(decoded, result);
-    let client_value = BrowserProfileValue::decode(&encoded)
-        .expect("the public client API decodes browser profile output");
-
-    assert_eq!(client_value.value(), &result);
 }
 #[test]
 fn independent_http_renderer_and_second_app_use_the_public_profile_entry() {

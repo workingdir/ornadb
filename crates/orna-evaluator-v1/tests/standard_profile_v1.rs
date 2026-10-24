@@ -5,7 +5,7 @@ use orna_standard_sources::{
     REFERENCE_STANDARD_TEXT_LINES_PATH_V1, REFERENCE_STANDARD_TEXT_SLICING_PATH_V1,
 };
 
-use crate::{
+use orna_standard_sources::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
     REFERENCE_STANDARD_MONEY_PATH_V1,
     REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
@@ -29,7 +29,8 @@ use crate::{
     REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1, REFERENCE_STANDARD_IO_METADATA_PATH_V1,
     REFERENCE_STANDARD_IO_BUFFER_PATH_V1,
     REFERENCE_STANDARD_IO_PROCESS_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
-    REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
+    REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1,
+    REFERENCE_STANDARD_ERROR_PATH_V1,
     REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1,
     REFERENCE_STANDARD_NUMERIC_PATH_V1,
     REFERENCE_STANDARD_TEST_PATH_V1,
@@ -56,9 +57,29 @@ use crate::{
     REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
     REFERENCE_STANDARD_FORMAT_PATH_V1, REFERENCE_STANDARD_PARSE_PATH_V1,
     REFERENCE_STANDARD_PRELUDE_PATH_V1, REFERENCE_STANDARD_PRELUDE_EXPORTS_V1,
-    reference_standard_catalogue_v1,
-    reference_standard_profile_v1, reference_standard_sources_v1,
+    reference_standard_sources_v1,
 };
+
+/// Profile that pins the exact 1.0.0 reference-standard source bytes.
+fn reference_standard_profile_v1() -> StandardDependencyProfile {
+    StandardDependencyProfile::from_sources(
+        "orna.std/v1-reference-library",
+        reference_standard_sources_v1(),
+    )
+    .expect("the bundled Orna 1.0.0 standard module path is valid")
+    .with_module_prelude_exports(
+        REFERENCE_STANDARD_PRELUDE_PATH_V1,
+        REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+    )
+}
+
+/// Builds the semantic catalogue from the pinned Orna 1.0.0 source.
+fn reference_standard_catalogue_v1() -> Result<Catalogue, orna_semantic_v1::StandardCatalogueError> {
+    Catalogue::from_standard_sources(
+        &reference_standard_profile_v1(),
+        reference_standard_sources_v1(),
+    )
+}
 
 #[test]
 fn pinned_ui_presentation_helpers_are_included_as_source() {
@@ -153,10 +174,10 @@ fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
     let (index, (path, source)) = sources
         .iter()
         .enumerate()
-        .find(|(_, (path, _))| path == crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1)
+        .find(|(_, (path, _))| path == REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1)
         .expect("the pinned source bundle includes std.concurrent.result");
     assert_eq!(index, 56, "the async result helper source appends to the bundle");
-    assert_eq!(path, crate::REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
+    assert_eq!(path, REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
     for declaration in [
         "pub fn values<T, E>(",
         "pub fn errors<T, E>(",
@@ -166,10 +187,10 @@ fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
     ] {
         assert!(source.contains(declaration), "missing {declaration}");
     }
-    crate::reference_standard_profile_v1()
+    reference_standard_profile_v1()
         .verify_source(path, source)
         .expect("async result helper source bytes are recorded by the pinned std profile");
-    crate::reference_standard_catalogue_v1()
+    reference_standard_catalogue_v1()
         .expect("the concurrent result helper resolves against its pinned dependencies");
 }
 
@@ -754,7 +775,7 @@ fn pinned_text_builder_is_included_in_the_captured_snapshot() {
 
 #[test]
 fn pinned_std_entrypoint_imports_optional_content_modules() {
-    let entrypoint = include_str!("../../../../stdlib/std/main.orna");
+    let entrypoint = include_str!("../../../stdlib/std/main.orna");
     let parsed = orna_syntax_v1::parse_module_with_file(entrypoint, "std/main.orna");
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
@@ -1685,7 +1706,7 @@ fn pinned_reflection_and_introspection_modules_typecheck_as_ordinary_std_modules
 
 #[test]
 fn pinned_encoding_entrypoint_exports_its_named_codec_modules() {
-    let entrypoint = include_str!("../../../../stdlib/std/encoding/main.orna");
+    let entrypoint = include_str!("../../../stdlib/std/encoding/main.orna");
     for module in ["base64", "json", "orna", "ovb"] {
         assert!(
             entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
@@ -1696,7 +1717,7 @@ fn pinned_encoding_entrypoint_exports_its_named_codec_modules() {
 
 #[test]
 fn pinned_network_entrypoint_exports_http_and_websocket_modules() {
-    let entrypoint = include_str!("../../../../stdlib/std/net/main.orna");
+    let entrypoint = include_str!("../../../stdlib/std/net/main.orna");
     for module in ["http", "websocket"] {
         assert!(
             entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
@@ -1707,7 +1728,7 @@ fn pinned_network_entrypoint_exports_http_and_websocket_modules() {
 
 #[test]
 fn pinned_test_module_resolves_against_core_without_importing_optional_std() {
-    let source = include_str!("../../../../stdlib/std/test.orna");
+    let source = include_str!("../../../stdlib/std/test.orna");
     let parsed = orna_syntax_v1::parse_module_with_file(source, "test.orna");
     assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
@@ -2731,7 +2752,7 @@ fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
         assert!(profile.verify_source(path, &changed_source).is_err());
     }
 
-    let io_entrypoint = include_str!("../../../../stdlib/std/io/main.orna");
+    let io_entrypoint = include_str!("../../../stdlib/std/io/main.orna");
     assert!(io_entrypoint.lines().any(|line| line.trim() == "use process;"));
     assert!(io_entrypoint
         .lines()
