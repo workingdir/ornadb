@@ -6,6 +6,11 @@ been published.
 
 ## Unreleased
 - A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
+- Publishing row changes to a format-3 table applies them as one sorted merge
+  into the table's row map: each existing row moves at most twice, instead of
+  being shifted once per change. Publication sends changes in encoded key
+  order, which for `Text` keys is not key order, so the merge sorts them by
+  logical key first. The written row map is unchanged.
 - `scripts/orna_extract.py` is an independent extractor. It reads a format-3
   repository's Git objects at a commit through `git cat-file --batch`, without
   the engine's readers, and writes the modules, the schema, the rows and each
