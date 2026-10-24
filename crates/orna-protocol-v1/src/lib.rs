@@ -1094,13 +1094,18 @@ fn path(node: &Node) -> Result<Vec<PatchPathComponent>> {
                 (0, 2) if matches!(fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok() => {
                     Ok(PatchPathComponent::Field(fields[1].clone()))
                 }
-                (1, 3) if uuid(&fields[1]).is_ok() && canonical_value(&fields[2]).is_ok() => Ok(
-                    PatchPathComponent::Relation(fields[1].clone(), fields[2].clone()),
-                ),
+                (1, 3) if uuid(&fields[1]).is_ok() => {
+                    canonical_value(&fields[2])?;
+                    Ok(PatchPathComponent::Relation(
+                        fields[1].clone(),
+                        fields[2].clone(),
+                    ))
+                }
                 (2, 2) => Ok(PatchPathComponent::Index(
                     usize::try_from(u64_value(&fields[1])?).map_err(|_| Error::InvalidValue)?,
                 )),
-                (3, 2) if canonical_value(&fields[1]).is_ok() => {
+                (3, 2) => {
+                    canonical_value(&fields[1])?;
                     Ok(PatchPathComponent::Key(fields[1].clone()))
                 }
                 _ => Err(Error::InvalidValue),
@@ -1643,6 +1648,9 @@ fn validate_diagnostic(node: &Node) -> Result<()> {
 }
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
+    if contains_profile_tag(node) {
+        return Err(Error::InvalidValue);
+    }
     if contains_protected_value(node) {
         return Err(Error::InvalidValue);
     }
@@ -1664,6 +1672,21 @@ fn contains_protected_value(node: &Node) -> bool {
         | Node::Float(_)
         | Node::Bytes(_)
         | Node::Text(_) => false,
+    }
+}
+
+/// Format-3 profile tags 60110..=60113 (`orna_value_v1::OVB2_BLOB_TAG` through
+/// `ROV3_OVERFLOW_TAG`) are not portable wire values; the wire refuses them as
+/// `wire.invalid_message` before any effect. The sys profile code stays at the
+/// sys/value/evaluator layers (SPEC-QUESTIONS.md).
+fn contains_profile_tag(node: &Node) -> bool {
+    match node {
+        Node::Tag(tag, value) => matches!(*tag, 60_110..=60_113) || contains_profile_tag(value),
+        Node::Array(values) => values.iter().any(contains_profile_tag),
+        Node::Map(entries) => entries
+            .iter()
+            .any(|(key, value)| contains_profile_tag(key) || contains_profile_tag(value)),
+        _ => false,
     }
 }
 
@@ -3814,4 +3837,144 @@ mod tests {
             decoded
         );
     }
+
+    fn marker_value() -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Text("abc".into())).unwrap()
+    }
+    fn marker_node() -> Node {
+        Node::Text("abc".into())
+    }
+    fn marker_present() -> PresentNode {
+        PresentNode::new(
+            PresentKind::Name("row".into()),
+            None,
+            [(PresentPropertyKey::Name("p".into()), marker_value())],
+            Vec::<PresentNode>::new(),
+        )
+        .unwrap()
+    }
+    fn patch_at(component: Node) -> PatchList {
+        PatchList::decode(&Node::Array(vec![Node::Array(vec![
+            uint(2),
+            Node::Array(vec![component]),
+            present().0.0.clone(),
+        ])]))
+        .unwrap()
+    }
+    /// Replaces the single 4-byte text "abc" with a profile-tag wrapper around
+    /// null. The replacement keeps the envelope length and every enclosing
+    /// container intact, so only the tagged value changes.
+    fn tamper_marker(encoded: &[u8], tag: u16) -> Vec<u8> {
+        let marker = [0x63, b'a', b'b', b'c'];
+        let positions: Vec<usize> = encoded
+            .windows(marker.len())
+            .enumerate()
+            .filter(|(_, window)| *window == marker)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "marker must be unique in the envelope");
+        let at = positions[0];
+        let [hi, lo] = tag.to_be_bytes();
+        let mut tampered = encoded[..at].to_vec();
+        tampered.extend_from_slice(&[0xD9, hi, lo, 0xF6]);
+        tampered.extend_from_slice(&encoded[at + marker.len()..]);
+        tampered
+    }
+    /// Encodes an envelope whose marker sits at one value position, then checks
+    /// that each profile tag there decodes to the wire outcome. The control
+    /// envelope must decode unchanged first.
+    fn assert_profile_tags_rejected(envelope: Envelope, position: &str) {
+        let encoded = envelope.encode(Limits::default()).unwrap();
+        assert_eq!(
+            Envelope::decode(&encoded, Limits::default()).unwrap(),
+            envelope,
+            "{position}: control must decode"
+        );
+        for tag in 60_110_u16..=60_113 {
+            let tampered = tamper_marker(&encoded, tag);
+            assert_eq!(
+                Envelope::decode(&tampered, Limits::default()).map_err(|error| error.code()),
+                Err("wire.invalid_message"),
+                "{position}: tag {tag}"
+            );
+        }
+    }
+    #[test]
+    fn legacy_wire_rejects_format3_blob_tags() {
+        // OVB-2/ROV-3/SOV-3 profile tags (60110..=60113) are not portable wire
+        // values. Each position below decodes to the existing wire outcome,
+        // wire.invalid_message, at decode time, before any effect.
+        let event = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Event {
+                revision: 0,
+                action: id(3),
+                value: marker_value(),
+                fingerprint: digest(1),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(event, "event value");
+
+        let patch_value = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: PatchList::replace_root(&marker_present()).unwrap(),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(patch_value, "patch value");
+
+        let relation_path = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: patch_at(Node::Array(vec![uint(1), uuid_node([4; 16]), marker_node()])),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(relation_path, "relation path key");
+
+        let key_path = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Delta {
+                base_revision: 0,
+                new_revision: 1,
+                patches: patch_at(Node::Array(vec![uint(3), marker_node()])),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(key_path, "key path");
+
+        let extension = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Resync,
+            extensions: BTreeMap::from([(11_u16, ValueNode(marker_node()))]),
+        };
+        assert_profile_tags_rejected(extension, "extension value");
+
+        let present_property = Envelope {
+            request: None,
+            watch: Some(id(2)),
+            message: Message::Snapshot {
+                revision: 0,
+                present: marker_present(),
+                snapshot: snapshot(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert_profile_tags_rejected(present_property, "present property");
+    }
+
 }
