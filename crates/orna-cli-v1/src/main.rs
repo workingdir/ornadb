@@ -2248,8 +2248,9 @@ fn run_pure_invocation(
 
     let mut evaluator = BoundedEvaluator::default();
     if let Some(profile) = project.standard_profile() {
-        // Admission verifies the complete pinned snapshot against the profile's
-        // digests; a runtime-reachable subset is rejected as MissingModule.
+        // Admission supplies the runtime-reachable closure (requested roots plus
+        // `main`) and the profile must accept exactly that key set, so every
+        // supplied module digest is verified before any body is evaluated.
         let sources = project.standard_sources().to_vec();
         match evaluator.load_standard_sources(profile, sources) {
             StageOutcome::Passed => {}
@@ -2258,10 +2259,11 @@ fn run_pure_invocation(
             }
             StageOutcome::Failed(diagnostic) => {
                 return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
-                    Diagnostic::target(
+                    Diagnostic::target_with_detail(
                         "ORNA-S010-IMPORT",
                         "imported module is unavailable",
                         "use a captured standard dependency or remove the import",
+                        format!("standard dependency load rejected with {}", diagnostic.code()),
                     )
                 }));
             }
