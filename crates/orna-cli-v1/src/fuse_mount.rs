@@ -1479,127 +1479,27 @@ impl From<&str> for EditError {
     }
 }
 
-pub(super) fn edit_path(
-    repository: &Repository,
-    commit: &GitCommitRef,
-    context: &HistoricalFormatContext,
-    path: &str,
-    grouped_row: bool,
-    row_baselines: Option<MountRowBaselines>,
-) -> Result<(), EditError> {
-    let writer = MountWriter::open(repository, commit, row_baselines)?;
-    let filesystem =
-        WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
-    let relative = Path::new(path);
-    if relative.is_absolute() {
-        return Err("edit path must be relative to the projected row tree".into());
+/// An explicit edit prepared against a live row tree: `initial_bytes` seeds the
+/// editor draft, and `commit` admits the editor's candidate exactly once.
+pub(super) struct PreparedEdit {
+    initial_bytes: Vec<u8>,
+    commit: Box<dyn FnOnce(&[u8], &Path) -> Result<(), EditError>>,
+}
+
+impl PreparedEdit {
+    /// Admits `candidate` for the draft at `draft_path`; the draft is removed once accepted.
+    fn commit(self, candidate: &[u8], draft_path: &Path) -> Result<(), EditError> {
+        (self.commit)(candidate, draft_path)
     }
-    let mut inode = ROOT_INODE;
-    {
-        let mut builder = filesystem
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for component in relative.components() {
-            let std::path::Component::Normal(name) = component else {
-                return Err("edit path contains an unsupported component".into());
-            };
-            inode = builder
-                .lookup_child(inode, name)?
-                .ok_or_else(|| format!("edit path does not exist: {path}"))?;
-        }
-    }
-    let (save, initial_bytes, blob_edit) = {
-        let mut builder = filesystem
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let node = builder
-            .nodes
-            .get(&inode)
-            .ok_or_else(|| "edit target disappeared".to_owned())?;
-        match &node.kind {
-            NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
-            NodeKind::Blob { graph, reference } => {
-                let parent = node.parent;
-                let graph = Arc::clone(graph);
-                let reference = reference.clone();
-                let document = builder
-                    .lookup_child(parent, OsStr::new("data.orna"))?
-                    .ok_or_else(|| "Blob row has no data.orna document".to_owned())?;
-                let save = match &builder
-                    .nodes
-                    .get(&document)
-                    .ok_or_else(|| "Blob row document disappeared".to_owned())?
-                    .kind
-                {
-                    NodeKind::Document { save, .. } => Arc::clone(save),
-                    _ => return Err("Blob row document is not editable".into()),
-                };
-                let file_name = relative
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                let field = save
-                    .blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .find(|field| field.file_name == file_name)
-                    .cloned()
-                    .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
-                let scope = graph
-                    .open_read_scope()
-                    .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
-                let length = usize::try_from(reference.content_identity().length())
-                    .map_err(|_| "Blob length is not addressable".to_owned())?;
-                let initial = graph
-                    .read_blob_range(&reference, 0..length as u64, &scope)
-                    .map_err(|error| format!("Blob content could not be read: {error:?}"))?
-                    .bytes()
-                    .to_vec();
-                let expected = save
-                    .expected_baseline_row
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let image = Arc::new(VfsFileSnapshot::new(
-                    row_image_pin(&save.source.rows),
-                    Arc::<[u8]>::from([]),
-                ));
-                let target = writer
-                    .runtime
-                    .block_on(writer.cache.managed_file(image))
-                    .map_err(|error| format!("Blob edit target could not be opened: {error:?}"))?;
-                let scratch = Arc::new(
-                    writer
-                        .runtime
-                        .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
-                );
-                (save, initial, Some((target, scratch, field, expected)))
-            }
-            _ => {
-                return Err(if grouped_row {
-                "edit --row requires a projected row document or Blob path".into()
-            } else {
-                "edit target is not a managed row document or Blob".into()
-                });
-            }
-        }
-    };
-    let draft = if blob_edit.is_none() {
-        Some(Arc::new(
-            writer
-                .runtime
-                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
-        ))
-    } else {
-        None
-    };
-    let (mut file, draft_path) = create_editor_draft(repository.runtime_paths().root())
+}
+
+/// Writes `initial` to a new explicit editor draft, runs `$EDITOR` on it and
+/// returns the draft path. The draft is retained on every failure.
+pub(super) fn run_editor_on_draft(runtime_root: &Path, initial: &[u8]) -> Result<PathBuf, EditError> {
+    let (mut file, draft_path) = create_editor_draft(runtime_root)
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
-    file.write_all(&initial_bytes)
+    file.write_all(initial)
         .and_then(|()| file.sync_all())
         .map_err(|error| {
             format!(
@@ -1631,45 +1531,24 @@ pub(super) fn edit_path(
         )
         .into());
     }
-    let candidate = std::fs::read(&draft_path).map_err(|error| {
-        format!(
-            "edited candidate could not be read: {error}; draft retained at {}",
-            draft_path.display()
-        )
-    })?;
-    let admission =
-        if let Some((target, scratch, field, expected)) = blob_edit {
-            writer
-                .runtime
-                .block_on(async {
-                    scratch.truncate(0).await.map_err(|error| {
-                        format!("Blob candidate exceeds draft limits: {error:?}")
-                    })?;
-                    scratch
-                        .write_at(0, &candidate)
-                        .await
-                        .map_err(|error| format!("Blob candidate exceeds draft limits: {error:?}"))
-        })
-        .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_blob_temporary(&target, &scratch, &field, expected)
-    } else {
-        let draft = draft.expect("document route creates an editor draft before launch");
-            writer
-                .runtime
-                .block_on(async {
-                    draft.truncate(0).await.map_err(|error| {
-                        format!("edited candidate exceeds draft limits: {error:?}")
-                    })?;
-                    draft.write_at(0, &candidate).await.map_err(|error| {
-                        format!("edited candidate exceeds draft limits: {error:?}")
-                    })
-        })
-        .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_document(&draft)
-    };
+    Ok(draft_path)
+}
+
+fn retained_edit_error(detail: &str, draft_path: &Path) -> EditError {
+    EditError::Failed(format!("{detail}; draft retained at {}", draft_path.display()))
+}
+
+/// Maps a durable admission result to the explicit edit outcome. An accepted
+/// edit removes its draft; any refusal retains it.
+fn admit_edit_result(
+    admission: Result<(), DocumentCommitError>,
+    draft_path: &Path,
+) -> Result<(), EditError> {
     match admission {
-        Ok(()) => std::fs::remove_file(&draft_path).map_err(|error| {
-            EditError::Failed(format!("edit was accepted but its explicit draft could not be removed: {error}"))
+        Ok(()) => std::fs::remove_file(draft_path).map_err(|error| {
+            EditError::Failed(format!(
+                "edit was accepted but its explicit draft could not be removed: {error}"
+            ))
         }),
         Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
             "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
@@ -1680,6 +1559,230 @@ pub(super) fn edit_path(
             draft_path.display()
         ))),
     }
+}
+
+impl WorkspaceFilesystem {
+    /// Resolves `relative` in the live row tree to its editable target and
+    /// prepares the admission step. No draft is created on refusal.
+    fn prepare_edit(&self, relative: &Path, grouped_row: bool) -> Result<PreparedEdit, EditError> {
+        let writer = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone()
+            .ok_or_else(|| "explicit edit requires an editor mount".to_owned())?;
+        let mut inode = ROOT_INODE;
+        {
+            let mut builder = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for component in relative.components() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err("edit path contains an unsupported component".into());
+                };
+                inode = builder
+                    .lookup_child(inode, name)?
+                    .ok_or_else(|| format!("edit path does not exist: {}", relative.display()))?;
+            }
+        }
+        let (save, initial_bytes, blob_edit) = {
+            let mut builder = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let node = builder
+                .nodes
+                .get(&inode)
+                .ok_or_else(|| "edit target disappeared".to_owned())?;
+            match &node.kind {
+                NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
+                NodeKind::Blob { graph, reference } => {
+                    let parent = node.parent;
+                    let graph = Arc::clone(graph);
+                    let reference = reference.clone();
+                    let document = builder
+                        .lookup_child(parent, OsStr::new("data.orna"))?
+                        .ok_or_else(|| "Blob row has no data.orna document".to_owned())?;
+                    let save = match &builder
+                        .nodes
+                        .get(&document)
+                        .ok_or_else(|| "Blob row document disappeared".to_owned())?
+                        .kind
+                    {
+                        NodeKind::Document { save, .. } => Arc::clone(save),
+                        _ => return Err("Blob row document is not editable".into()),
+                    };
+                    let file_name = relative
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    let field = save
+                        .blob_fields
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .find(|field| field.file_name == file_name)
+                        .cloned()
+                        .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
+                    let scope = graph
+                        .open_read_scope()
+                        .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
+                    let length = usize::try_from(reference.content_identity().length())
+                        .map_err(|_| "Blob length is not addressable".to_owned())?;
+                    let initial = graph
+                        .read_blob_range(&reference, 0..length as u64, &scope)
+                        .map_err(|error| format!("Blob content could not be read: {error:?}"))?
+                        .bytes()
+                        .to_vec();
+                    let expected = save
+                        .expected_baseline_row
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let image = Arc::new(VfsFileSnapshot::new(
+                        row_image_pin(&save.source.rows),
+                        Arc::<[u8]>::from([]),
+                    ));
+                    let target = writer
+                        .runtime
+                        .block_on(writer.cache.managed_file(image))
+                        .map_err(|error| format!("Blob edit target could not be opened: {error:?}"))?;
+                    let scratch = Arc::new(
+                        writer
+                            .runtime
+                            .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
+                    );
+                    (save, initial, Some((target, scratch, field, expected)))
+                }
+                _ => {
+                    return Err(if grouped_row {
+                        "edit --row requires a projected row document or Blob path".into()
+                    } else {
+                        "edit target is not a managed row document or Blob".into()
+                    });
+                }
+            }
+        };
+        let commit: Box<dyn FnOnce(&[u8], &Path) -> Result<(), EditError>> = match blob_edit {
+            Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path| {
+                writer
+                    .runtime
+                    .block_on(async {
+                        scratch.truncate(0).await.map_err(|error| {
+                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        })?;
+                        scratch.write_at(0, candidate).await.map_err(|error| {
+                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        })
+                    })
+                    .map_err(|error| retained_edit_error(&error, draft_path))?;
+                admit_edit_result(
+                    save.commit_blob_temporary(&target, &scratch, &field, expected),
+                    draft_path,
+                )
+            }),
+            None => {
+                let draft = Arc::new(
+                    writer
+                        .runtime
+                        .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
+                );
+                Box::new(move |candidate, draft_path| {
+                    writer
+                        .runtime
+                        .block_on(async {
+                            draft.truncate(0).await.map_err(|error| {
+                                format!("edited candidate exceeds draft limits: {error:?}")
+                            })?;
+                            draft.write_at(0, candidate).await.map_err(|error| {
+                                format!("edited candidate exceeds draft limits: {error:?}")
+                            })
+                        })
+                        .map_err(|error| retained_edit_error(&error, draft_path))?;
+                    admit_edit_result(save.commit_document(&draft), draft_path)
+                })
+            }
+        };
+        Ok(PreparedEdit {
+            initial_bytes,
+            commit,
+        })
+    }
+
+    /// Commits an explicit edit requested through the `user.orna.edit-commit`
+    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft`; the draft
+    /// must be a regular editor draft in this repository's recovery store.
+    fn commit_requested_edit(&self, request: &[u8]) -> Result<(), EditError> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let fields: Vec<&[u8]> = request.split(|byte| *byte == 0).collect();
+        let [mode, path, draft_bytes] = fields.as_slice() else {
+            return Err("edit request is malformed".into());
+        };
+        let grouped_row = match *mode {
+            b"0" => false,
+            b"1" => true,
+            _ => return Err("edit request names no edit mode".into()),
+        };
+        let writer = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone()
+            .ok_or_else(|| "explicit edit requires an editor mount".to_owned())?;
+        let drafts = writer
+            .repository
+            .runtime_paths()
+            .root()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        let draft = Path::new(OsStr::from_bytes(draft_bytes));
+        let in_store = draft.parent() == Some(drafts.as_path())
+            && draft
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("orna-edit-") && name.ends_with(".draft"));
+        if !in_store {
+            return Err("edit draft is outside the editor draft store".into());
+        }
+        let metadata = fs::symlink_metadata(draft)
+            .map_err(|error| format!("edit draft could not be inspected: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("edit draft is not a regular file".into());
+        }
+        let candidate = fs::read(draft)
+            .map_err(|error| format!("edited candidate could not be read: {error}"))?;
+        self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
+            .commit(&candidate, draft)
+    }
+}
+
+pub(super) fn edit_path(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    context: &HistoricalFormatContext,
+    path: &str,
+    grouped_row: bool,
+    row_baselines: Option<MountRowBaselines>,
+) -> Result<(), EditError> {
+    let writer = MountWriter::open(repository, commit, row_baselines)?;
+    let filesystem =
+        WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer))?;
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err("edit path must be relative to the projected row tree".into());
+    }
+    let prepared = filesystem.prepare_edit(relative, grouped_row)?;
+    let draft_path = run_editor_on_draft(repository.runtime_paths().root(), &prepared.initial_bytes)?;
+    let candidate = fs::read(&draft_path).map_err(|error| {
+        EditError::Failed(format!(
+            "edited candidate could not be read: {error}; draft retained at {}",
+            draft_path.display()
+        ))
+    })?;
+    prepared.commit(&candidate, &draft_path)
 }
 #[derive(Debug)]
 pub(super) enum UnmountPreparationError {
@@ -2365,6 +2468,39 @@ impl Filesystem for WorkspaceFilesystem {
         position: u32,
         reply: ReplyEmpty,
     ) {
+        if name.to_str() == Some("user.orna.edit-commit") {
+            if inode.0 != ROOT_INODE {
+                reply.error(Errno::ENODATA);
+                return;
+            }
+            if flags != 0 || position != 0 {
+                reply.error(Errno::EINVAL);
+                return;
+            }
+            let quiescing = self
+                .draft_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .quiescing;
+            if quiescing {
+                reply.error(Errno::EBUSY);
+                return;
+            }
+            // Commit runs without the draft-state lock so it cannot deadlock
+            // with the FUSE operations that take it (ORNA-VFS-015).
+            match self.commit_requested_edit(value) {
+                Ok(()) => reply.ok(),
+                Err(EditError::Stale(message)) => {
+                    eprintln!("explicit edit refused: {message}");
+                    reply.error(Errno::ESTALE);
+                }
+                Err(EditError::Failed(message)) => {
+                    eprintln!("explicit edit failed: {message}");
+                    reply.error(Errno::EIO);
+                }
+            }
+            return;
+        }
         let retain = match name.to_str() {
             Some("user.orna.unmount-quiesce") if inode.0 == ROOT_INODE => false,
             Some("user.orna.retain-drafts") if inode.0 == ROOT_INODE => true,

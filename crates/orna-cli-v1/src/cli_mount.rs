@@ -345,23 +345,29 @@ pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(),
     let repository = open_repository(endpoint)?;
     let path = Path::new(path);
     if path.is_absolute() {
-        let (edit_path, view) = mounted_edit_view(&repository, path, row)?;
-        let edit_path = edit_path.to_str().ok_or_else(|| {
-            mount_error("Edit was not accepted", "edit path is not valid UTF-8")
-        })?;
-        return crate::fuse_mount::edit_path(
-            &repository,
-            view.commit(),
-            view.context(),
-            edit_path,
-            row,
-            Some(view.row_baselines()),
-        )
-        .map_err(edit_refusal);
+        let (mountpoint, relative) = mounted_edit_target(&repository, path, row)?;
+        return edit_via_owner(&repository, &mountpoint, &relative, row);
+    }
+    // The writer lease is held by a live editor mount, so a second in-process
+    // writer would be refused (ORNA-TURSO-005). Route through that owner instead.
+    let mut writable = writable_repository_mounts(&repository)?;
+    if writable.len() > 1 {
+        return Err(mount_error(
+            "Edit was not accepted",
+            "more than one writable Orna mount serves this repository; unmount all but one",
+        ));
+    }
+    if let Some(mount) = writable.pop() {
+        return edit_via_owner(&repository, &mount.mountpoint, path, row);
     }
     let context = repository
         .open_format_context_at_selector("HEAD")
-        .map_err(|error| mount_error("Edit was not accepted", format!("workspace snapshot could not be pinned: {error:?}")))?;
+        .map_err(|error| {
+            mount_error(
+                "Edit was not accepted",
+                format!("workspace snapshot could not be pinned: {error:?}"),
+            )
+        })?;
     crate::fuse_mount::edit_path(
         &repository,
         context.commit(),
@@ -370,15 +376,133 @@ pub(super) fn run_edit(endpoint: &Endpoint, path: &str, row: bool) -> Result<(),
         row,
         None,
     )
-        .map_err(edit_refusal)
+    .map_err(edit_refusal)
+}
+
+/// Edits `relative` through the live editor mount at `mountpoint`: the CLI
+/// seeds the editor draft from the mounted bytes, then the owner commits the
+/// candidate with its own writer lease (ORNA-VFS-015).
+#[cfg(target_os = "linux")]
+fn edit_via_owner(
+    repository: &Repository,
+    mountpoint: &Path,
+    relative: &Path,
+    row: bool,
+) -> Result<(), Diagnostic> {
+    let initial = fs::read(mountpoint.join(relative)).map_err(|error| {
+        mount_error(
+            "Edit was not accepted",
+            format!("mounted entry could not be read: {error}"),
+        )
+    })?;
+    let draft = crate::fuse_mount::run_editor_on_draft(repository.runtime_paths().root(), &initial)
+        .map_err(edit_refusal)?;
+    let mut request = vec![if row { b'1' } else { b'0' }, 0];
+    request.extend_from_slice(relative.as_os_str().as_bytes());
+    request.push(0);
+    request.extend_from_slice(draft.as_os_str().as_bytes());
+    match rustix::fs::setxattr(
+        mountpoint,
+        "user.orna.edit-commit",
+        &request,
+        rustix::fs::XattrFlags::empty(),
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error == rustix::io::Errno::STALE => Err(edit_refusal(
+            crate::fuse_mount::EditError::Stale(format!(
+                "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+                draft.display()
+            )),
+        )),
+        Err(error) => Err(mount_error(
+            "Edit was not accepted",
+            format!(
+                "mounted workspace refused the edit ({error}); draft retained at {}",
+                draft.display()
+            ),
+        )),
+    }
+}
+
+/// One Orna FUSE mount from `/proc/self/mountinfo`.
+#[cfg(target_os = "linux")]
+struct OrnaFuseMount {
+    mountpoint: std::path::PathBuf,
+    read_only: bool,
+    view_id: String,
 }
 
 #[cfg(target_os = "linux")]
-fn mounted_edit_view(
+fn orna_fuse_mounts(mountinfo: &str) -> Vec<OrnaFuseMount> {
+    let mut mounts = Vec::new();
+    for line in mountinfo.lines() {
+        let Some((mount_fields, filesystem_fields)) = line.split_once(" - ") else {
+            continue;
+        };
+        let Some(mountpoint) = mount_fields.split_whitespace().nth(4) else {
+            continue;
+        };
+        let mut filesystem = filesystem_fields.split_whitespace();
+        if !filesystem
+            .next()
+            .is_some_and(|filesystem| filesystem.starts_with("fuse"))
+        {
+            continue;
+        }
+        let Some(source) = filesystem.next() else {
+            continue;
+        };
+        let Some(view_id) = source
+            .strip_prefix("orna-")
+            .filter(|_| is_orna_mount_source(source))
+        else {
+            continue;
+        };
+        let read_only = mount_fields
+            .split_whitespace()
+            .nth(5)
+            .is_some_and(|options| options.split(',').any(|option| option == "ro"));
+        mounts.push(OrnaFuseMount {
+            mountpoint: std::path::PathBuf::from(std::ffi::OsString::from_vec(
+                unescape_mountinfo_path(mountpoint),
+            )),
+            read_only,
+            view_id: view_id.to_owned(),
+        });
+    }
+    mounts
+}
+
+#[cfg(target_os = "linux")]
+fn read_orna_fuse_mounts() -> Result<Vec<OrnaFuseMount>, Diagnostic> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| mount_error("Mount table could not be read", error.to_string()))?;
+    Ok(orna_fuse_mounts(&mountinfo))
+}
+
+/// Writable Orna mounts whose view is registered to `repository`.
+#[cfg(target_os = "linux")]
+fn writable_repository_mounts(repository: &Repository) -> Result<Vec<OrnaFuseMount>, Diagnostic> {
+    let views: Vec<String> = repository
+        .mount_status()
+        .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?
+        .iter()
+        .map(MountStatus::view_hex)
+        .collect();
+    Ok(read_orna_fuse_mounts()?
+        .into_iter()
+        .filter(|mount| !mount.read_only && views.contains(&mount.view_id))
+        .collect())
+}
+
+/// Resolves an absolute edit path to the registered mount containing it and
+/// the mount-relative path to edit.
+#[cfg(target_os = "linux")]
+fn mounted_edit_target(
     repository: &Repository,
     path: &Path,
     row: bool,
-) -> Result<(std::path::PathBuf, MountView), Diagnostic> {
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Diagnostic> {
     if path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
@@ -388,73 +512,53 @@ fn mounted_edit_view(
             "mounted edit path may not contain parent traversal",
         ));
     }
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|error| mount_error("Mount table could not be read", error.to_string()))?;
-    let mut matched: Option<(usize, std::path::PathBuf, bool, String)> = None;
-    for line in mountinfo.lines() {
-        let Some((mount_fields, filesystem_fields)) = line.split_once(" - ") else {
-            continue;
-        };
-        let Some(mountpoint) = mount_fields.split_whitespace().nth(4) else {
-            continue;
-        };
-        let mut filesystem = filesystem_fields.split_whitespace();
-        if !filesystem.next().is_some_and(|filesystem| filesystem.starts_with("fuse")) {
-            continue;
-        }
-        let Some(source) = filesystem.next() else {
-            continue;
-        };
-        let Some(view_id) = source.strip_prefix("orna-").filter(|_| is_orna_mount_source(source)) else {
-            continue;
-        };
-        let read_only = mount_fields
-            .split_whitespace()
-            .nth(5)
-            .is_some_and(|options| options.split(',').any(|option| option == "ro"));
-        let mountpoint = std::path::PathBuf::from(std::ffi::OsString::from_vec(
-            unescape_mountinfo_path(mountpoint),
-        ));
-        let Ok(relative) = path.strip_prefix(&mountpoint) else {
-            continue;
-        };
-        let depth = mountpoint.components().count();
-        if matched
-            .as_ref()
-            .is_none_or(|(current_depth, _, _, _)| depth > *current_depth)
-        {
-            matched = Some((depth, relative.to_path_buf(), read_only, view_id.to_owned()));
-        }
-    }
-    let (_, relative, read_only, view_id) = matched.ok_or_else(|| {
+    let outside = || {
         mount_error(
             "Edit was not accepted",
             "absolute edit path must name an entry inside an active Orna workspace mount",
         )
-    })?;
-    if read_only {
+    };
+    let mut matched: Option<(usize, OrnaFuseMount, std::path::PathBuf)> = None;
+    for mount in read_orna_fuse_mounts()? {
+        let Ok(relative) = path.strip_prefix(&mount.mountpoint) else {
+            continue;
+        };
+        let depth = mount.mountpoint.components().count();
+        if matched
+            .as_ref()
+            .is_none_or(|(current, _, _)| depth > *current)
+        {
+            let relative = relative.to_path_buf();
+            matched = Some((depth, mount, relative));
+        }
+    }
+    let (_, mount, relative) = matched.ok_or_else(outside)?;
+    if mount.read_only {
         return Err(mount_error(
             "Edit was not accepted",
             "the selected workspace mount is read-only",
         ));
     }
     if relative.as_os_str().is_empty() {
+        return Err(outside());
+    }
+    let serves = repository
+        .mount_status()
+        .map_err(|error| mount_error("Mount status could not be read", error.to_string()))?
+        .iter()
+        .any(|status| status.view_hex() == mount.view_id);
+    if !serves {
         return Err(mount_error(
             "Edit was not accepted",
-            "absolute edit path must name an entry inside an active Orna workspace mount",
+            "the selected workspace mount belongs to another repository",
         ));
     }
-    let view = repository
-        .open_mount_view_by_id(&view_id)
-        .map_err(|error| mount_error("Mounted workspace view could not be reopened", error.to_string()))?;
-    Ok((
-        if row {
-            relative.join("data.orna")
-        } else {
-            relative
-        },
-        view,
-    ))
+    let relative = if row {
+        relative.join("data.orna")
+    } else {
+        relative
+    };
+    Ok((mount.mountpoint, relative))
 }
 
 #[cfg(not(target_os = "linux"))]
