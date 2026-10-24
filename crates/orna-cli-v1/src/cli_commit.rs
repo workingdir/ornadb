@@ -6,9 +6,7 @@
 //! committed identity inventory is reconciled into the store. An unborn
 //! branch's first commit creates the branch ref.
 
-use orna_repository_v1::relation_admission::{
-    OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError, StagedRelation,
-};
+use orna_repository_v1::relation_admission::{OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError};
 
 use super::*;
 
@@ -129,36 +127,24 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
                 )
             })?;
     let database_id = *staged.database_id().as_bytes();
-    let mut relations = Vec::new();
-    let mut names = BTreeMap::new();
-    for (namespace, module) in &analysis.modules {
-        let module_name = namespace.display();
-        for (name, symbol) in &module.symbols {
-            let admitted = symbol.kind == orna_semantic_v1::SymbolKind::Table
-                && symbol
-                    .table_schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.admission.is_some());
-            if !admitted {
-                continue;
-            }
-            let table = project
-                .source_table_schema_in_database(&identities, database_id, &module_name, name)
-                .map_err(|error| {
-                    staging_error(
-                        "staged table schema could not be built",
-                        format!("{name}: {error:?}"),
-                    )
-                })?;
-            names.insert(*table.table_object_id(), name.clone());
-            relations.push(StagedRelation::new(
-                *table.table_object_id(),
-                table.descriptor().clone(),
-            ));
-        }
-    }
+    let staged_relations = orna_application_v1::build_format3_store_relations(
+        &project,
+        &analysis,
+        &identities,
+        database_id,
+    )
+    .map_err(|error| {
+        staging_error(
+            "staged table schema could not be built",
+            format!("{}: {:?}", error.table(), error.error()),
+        )
+    })?;
     let admission = repository
-        .stage_store_admission(&staged, &relations, &identities.to_stored())
+        .stage_store_admission(
+            &staged,
+            staged_relations.relations(),
+            &identities.to_stored(),
+        )
         .map_err(|error| {
             relation_failure(error, "staged store could not admit the staged tables")
         })?;
@@ -167,7 +153,7 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
         .iter()
         .filter(|relation| **relation != OBJECT_IDENTITY_RELATION_ID)
         .map(|relation| {
-            let name = names.get(relation).map_or("", String::as_str);
+            let name = staged_relations.table_name(relation).unwrap_or("");
             format!(
                 "admitted table {name} as relation {}",
                 orna_repository_v1::Uuid::from_bytes(*relation).simple()
