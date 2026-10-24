@@ -103,20 +103,35 @@ fn extracted_row<'a>(rows: &'a [Value], key: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("the extractor recovers the {key} row"))
 }
 
-/// The stored field `name` of an extracted row.
-fn extracted_field<'a>(row: &'a Value, name: &str) -> &'a Value {
+/// The stored field at row index `index` of an extracted row. The source
+/// listing names a field by its index, which the extractor also records.
+fn extracted_field(row: &Value, index: u64) -> &Value {
     row["fields"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|field| field["name"] == name)
+        .find(|field| field["index"].as_u64() == Some(index))
         .map(|field| &field["value"])
-        .unwrap_or_else(|| panic!("the extracted row holds field {name}: {row}"))
+        .unwrap_or_else(|| panic!("the extracted row holds field index {index}: {row}"))
 }
 
 #[tokio::test]
 async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() {
     let (directory, repository, relation_id) = empty_format3_repository();
+    // Transitional (bead ornadb-5il1.413): the format-3 fixture commits the
+    // legacy .orna/object-identities.cbor sidecar, and the product's publish
+    // carries it into HEAD. ORNA-META-001 forbids that tracked entry, and this
+    // extractor rejects it. Drop the tracked sidecar here, before any runtime
+    // or publish step reads the repository, so the snapshot this test exports
+    // satisfies the format-3 rule.
+    git(
+        directory.path(),
+        &["rm", "--quiet", "--", ".orna/object-identities.cbor"],
+    );
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "drop legacy identity sidecar"],
+    );
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
@@ -238,11 +253,15 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
         String::from_utf8_lossy(&extracted.stderr)
     );
     let report: Value = serde_json::from_slice(&extracted.stdout).unwrap();
-    assert_eq!(report["commit"], snapshot.as_str(), "the extracted snapshot");
+    assert_eq!(
+        report["snapshot"]["commit"],
+        snapshot.as_str(),
+        "the extracted snapshot"
+    );
 
     // Rows and schema: the relation the source queried, with exactly the rows
     // the source listed.
-    let relations = report["relations"].as_array().unwrap();
+    let relations = report["snapshot"]["relations"].as_array().unwrap();
     let relation_report = relations
         .iter()
         .find(|entry| entry["relation_id"] == relation.as_str())
@@ -267,7 +286,7 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
     for listing in listings {
         let key = listing["key"].as_str().unwrap();
         let row = extracted_row(rows, key);
-        let field = listing["field"].as_str().unwrap();
+        let field = listing["field"].as_u64().unwrap();
         let blob = &extracted_field(row, field)["blob"];
         assert_eq!(blob["descriptor"], listing["descriptor"], "{key}: descriptor");
         assert_eq!(blob["length"], listing["length"], "{key}: length");
@@ -281,7 +300,7 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
     let blobs = report["blobs"].as_array().unwrap();
     for listing in listings {
         let key = listing["key"].as_str().unwrap();
-        let field = listing["field"].as_str().unwrap();
+        let field = listing["field"].as_u64().unwrap();
         let (_, bytes) = expected
             .iter()
             .find(|(name, _)| *name == key)
@@ -305,13 +324,18 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
 
     // Modules: every module the extractor reports is the blob the restored
     // copy's Git tree holds at that path.
-    for module in report["modules"].as_array().unwrap() {
+    for module in report["snapshot"]["modules"].as_array().unwrap() {
         let path = module["path"].as_str().unwrap();
         let content = git_output(&restored, &["show", &format!("{snapshot}:{path}")], None);
         assert_eq!(
-            hex(Sha256::digest(&content).as_slice()),
-            module["sha256"].as_str().unwrap(),
-            "{path}: the module matches the tree"
+            module["size"].as_u64(),
+            Some(content.len() as u64),
+            "{path}: the module size"
+        );
+        assert_eq!(
+            module["text"].as_str().unwrap().as_bytes(),
+            content.as_slice(),
+            "{path}: the module text matches the tree"
         );
     }
 }
