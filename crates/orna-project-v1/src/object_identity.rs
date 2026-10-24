@@ -12,7 +12,10 @@ use std::{
 };
 
 use num_bigint::BigInt;
-use orna_repository_v1::{GitCommitRef, Repository, RepositoryError, Uuid};
+use orna_repository_v1::{
+    GitCommitRef, Repository, RepositoryError, Uuid,
+    relation_admission::{StagedCandidate, StoredObjectIdentity},
+};
 use orna_semantic_v1::{
     Analysis, ModuleInput, Namespace, SourceUnitIdentity, Symbol, SymbolKind, TableAdmission,
     TableSchema, Type, declared_type,
@@ -24,40 +27,77 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{Raw, SchemaDescriptor, Value, domain_digest};
 
-/// Repository-relative committed location of the object identity inventory.
-pub const OBJECT_IDENTITY_MANIFEST_PATH: &str = ".orna/object-identities.cbor";
+/// Repository-relative location of the legacy identity sidecar. Format 3
+/// commits keep the inventory in the store (see [`ObjectIdentityManifest::read_committed`]);
+/// the worktree copy remains the input of explicit rename tooling.
+pub const OBJECT_IDENTITY_MANIFEST_PATH: &str =
+    orna_repository_v1::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH;
 const MAX_OBJECT_IDENTITY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
-const MANIFEST_VERSION: u64 = 1;
+/// Sidecar encoding version. Version 2 stores each kind's `sys.ObjectKind`
+/// ordinal (see [`ObjectKind::spec_ordinal`]); version 1 is the legacy
+/// internal code (see [`ObjectKind::legacy_code`]) and is read only for old commits.
+const MANIFEST_VERSION: u64 = 2;
+const LEGACY_MANIFEST_VERSION: u64 = 1;
+/// `sys.ObjectKind` ordinals (api/sys.json order) shared by several kinds.
+const SPEC_FIELD_ORDINAL: u64 = 9;
+const SPEC_VARIANT_ORDINAL: u64 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-#[repr(u64)]
 pub enum ObjectKind {
-    Table = 1,
+    Table,
     /// A table column, including primary-key columns (`Table.column`).
-    Field = 2,
-    Unit = 3,
+    Field,
+    Unit,
     /// A nominal user type, refined nominal type or enum (`Type`).
-    Type = 4,
+    Type,
     /// One enum variant (`Enum.variant`).
-    Variant = 5,
+    Variant,
     /// One field of a nominal record type (`Type.field`).
-    TypeField = 6,
+    TypeField,
     /// One payload field of an enum variant (`Enum.variant.field`).
-    VariantField = 7,
+    VariantField,
 }
 
 impl ObjectKind {
-    fn from_raw(raw: &Raw) -> Option<Self> {
-        match raw_int(raw)? {
-            1 => Some(Self::Table),
-            2 => Some(Self::Field),
-            3 => Some(Self::Unit),
-            4 => Some(Self::Type),
-            5 => Some(Self::Variant),
-            6 => Some(Self::TypeField),
-            7 => Some(Self::VariantField),
-            _ => None,
+    /// The `sys.ObjectKind` value this kind is stored under. Both nominal
+    /// fields and variant payload fields are `field`; they are told apart by
+    /// their owner when read (see [`records_from_spec_ordinals`]).
+    const fn spec_ordinal(self) -> u64 {
+        match self {
+            Self::Table => 2,
+            Self::Field => 3,
+            Self::Unit => 15,
+            Self::Type => 8,
+            Self::Variant => SPEC_VARIANT_ORDINAL,
+            Self::TypeField | Self::VariantField => SPEC_FIELD_ORDINAL,
         }
+    }
+
+    /// The internal code of sidecar version 1.
+    const fn legacy_code(self) -> u64 {
+        match self {
+            Self::Table => 1,
+            Self::Field => 2,
+            Self::Unit => 3,
+            Self::Type => 4,
+            Self::Variant => 5,
+            Self::TypeField => 6,
+            Self::VariantField => 7,
+        }
+    }
+
+    fn from_legacy_code(code: u64) -> Option<Self> {
+        [
+            Self::Table,
+            Self::Field,
+            Self::Unit,
+            Self::Type,
+            Self::Variant,
+            Self::TypeField,
+            Self::VariantField,
+        ]
+        .into_iter()
+        .find(|kind| kind.legacy_code() == code)
     }
 }
 
@@ -321,15 +361,24 @@ impl ObjectIdentityManifest {
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, ObjectIdentityError> {
+        self.encode_as(MANIFEST_VERSION, ObjectKind::spec_ordinal)
+    }
+
+    /// Encodes the inventory under `version`, storing each kind as `code` gives it.
+    fn encode_as(
+        &self,
+        version: u64,
+        code: fn(ObjectKind) -> u64,
+    ) -> Result<Vec<u8>, ObjectIdentityError> {
         validate_records(&self.records)?;
         let raw = Raw::Array(vec![
-            Raw::Int(MANIFEST_VERSION.into()),
+            Raw::Int(version.into()),
             Raw::Array(
                 self.records
                     .iter()
                     .map(|record| {
                         Raw::Array(vec![
-                            Raw::Int((record.kind as u64).into()),
+                            Raw::Int(code(record.kind).into()),
                             Raw::Text(record.qualified_name.clone()),
                             Raw::Bytes(record.id.to_vec()),
                             Raw::Bool(record.retired),
@@ -351,13 +400,16 @@ impl ObjectIdentityManifest {
         let Raw::Array(root) = value.raw() else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        if root.len() != 2 || raw_int(&root[0]) != Some(MANIFEST_VERSION) {
-            return Err(ObjectIdentityError::InvalidEncoding);
-        }
+        let version = match root.first().and_then(raw_int) {
+            Some(version @ (LEGACY_MANIFEST_VERSION | MANIFEST_VERSION)) if root.len() == 2 => {
+                version
+            }
+            _ => return Err(ObjectIdentityError::InvalidEncoding),
+        };
         let Raw::Array(entries) = &root[1] else {
             return Err(ObjectIdentityError::InvalidEncoding);
         };
-        let mut records = Vec::with_capacity(entries.len());
+        let mut rows = Vec::with_capacity(entries.len());
         for entry in entries {
             let Raw::Array(fields) = entry else {
                 return Err(ObjectIdentityError::InvalidEncoding);
@@ -365,8 +417,7 @@ impl ObjectIdentityManifest {
             if fields.len() != 4 {
                 return Err(ObjectIdentityError::InvalidEncoding);
             }
-            let kind =
-                ObjectKind::from_raw(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
+            let code = raw_int(&fields[0]).ok_or(ObjectIdentityError::InvalidEncoding)?;
             let Raw::Text(qualified_name) = &fields[1] else {
                 return Err(ObjectIdentityError::InvalidEncoding);
             };
@@ -380,16 +431,31 @@ impl ObjectIdentityManifest {
                 .as_slice()
                 .try_into()
                 .map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-            records.push(ObjectIdentity {
-                kind,
-                qualified_name: qualified_name.clone(),
-                id,
-                retired: *retired,
-            });
+            rows.push((code, qualified_name.clone(), id, *retired));
         }
+        let records = if version == LEGACY_MANIFEST_VERSION {
+            rows.into_iter()
+                .map(|(code, qualified_name, id, retired)| {
+                    Ok(ObjectIdentity {
+                        kind: ObjectKind::from_legacy_code(code)
+                            .ok_or(ObjectIdentityError::InvalidEncoding)?,
+                        qualified_name,
+                        id,
+                        retired,
+                    })
+                })
+                .collect::<Result<Vec<_>, ObjectIdentityError>>()?
+        } else {
+            records_from_spec_ordinals(rows)?
+        };
         let manifest = Self { records };
         validate_records(&manifest.records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
-        if manifest.encode()?.as_slice() != bytes {
+        let canonical = if version == LEGACY_MANIFEST_VERSION {
+            manifest.encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)?
+        } else {
+            manifest.encode()?
+        };
+        if canonical.as_slice() != bytes {
             return Err(ObjectIdentityError::InvalidEncoding);
         }
         Ok(manifest)
@@ -457,19 +523,114 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
-    /// Reads and validates the source identity inventory from one exact commit.
+    /// Applies only explicit semantic renames to this inventory, as
+    /// `orna mv` does before the renamed source is staged. Every other
+    /// record keeps its name, ID and retirement, so unstaged source edits
+    /// neither retire nor allocate identities; the next `orna commit`
+    /// reconciles the staged source as usual. Each rename must name an
+    /// active identity and a declaration `modules` contain, and a target
+    /// may not collide with another active identity.
+    pub fn with_renames(
+        &self,
+        modules: &[ModuleInput],
+        renames: &[ObjectIdentityRename],
+    ) -> Result<Self, ObjectIdentityError> {
+        let active = source_identity_keys(modules)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut records = self.records.clone();
+        apply_explicit_renames(&mut records, &active, renames)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records)?;
+        Ok(Self { records })
+    }
+
+    /// Reads and validates the committed identity inventory of one exact
+    /// commit.
+    ///
+    /// Format 3 keeps the inventory as a sealed system relation of
+    /// `.orna/store`, because tracked `.orna/` holds only `database.orna` and
+    /// `store` (ORNA-META-001) and stable IDs are committed metadata
+    /// (ORNA-OBJECT-002). The tracked sidecar is read only for a legacy
+    /// commit whose store has no inventory relation; when a commit has both,
+    /// the store is the authority.
     pub fn read_committed(
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_committed_object_identities(commit)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored);
+        }
         let bytes = repository
-            .read_committed_file(
-                commit,
-                OBJECT_IDENTITY_MANIFEST_PATH,
-                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
-            )
-            .map_err(|_| ObjectIdentityError::Io)?;
+            .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .ok_or(ObjectIdentityError::Io)?;
         Self::decode(&bytes)
+    }
+
+    /// Reads the inventory the staged candidate of the ordinary index
+    /// carries: its staged store's inventory relation, or else the legacy
+    /// sidecar its staged tree tracks. `Ok(None)` before any identity was
+    /// allocated, as for the first commit of a database.
+    pub fn read_staged(
+        repository: &Repository,
+        staged: &StagedCandidate,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_staged_object_identities(staged)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored).map(Some);
+        }
+        repository
+            .read_staged_legacy_identity_sidecar(staged, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .map(|bytes| Self::decode(&bytes))
+            .transpose()
+    }
+
+    /// The inventory as store rows for the sealed identity relation.
+    pub fn to_stored(&self) -> Vec<StoredObjectIdentity> {
+        self.records
+            .iter()
+            .map(|record| {
+                StoredObjectIdentity::new(
+                    record.id,
+                    record.kind.spec_ordinal(),
+                    record.qualified_name.clone(),
+                    record.retired,
+                )
+            })
+            .collect()
+    }
+
+    /// Rebuilds the inventory from the store rows of the sealed identity
+    /// relation, in the same canonical record order reconciliation uses.
+    fn from_stored(stored: &[StoredObjectIdentity]) -> Result<Self, ObjectIdentityError> {
+        let rows = stored
+            .iter()
+            .map(|identity| {
+                (
+                    identity.kind(),
+                    identity.qualified_name().to_owned(),
+                    *identity.id(),
+                    identity.retired(),
+                )
+            })
+            .collect();
+        let mut records = records_from_spec_ordinals(rows)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records).map_err(|_| ObjectIdentityError::InvalidEncoding)?;
+        Ok(Self { records })
     }
     /// Reads the manifest from the current worktree without allocating IDs.
     pub fn read_worktree(repository: &Repository) -> Result<Option<Self>, ObjectIdentityError> {
@@ -2166,6 +2327,50 @@ fn raw_int(raw: &Raw) -> Option<u64> {
     }
 }
 
+/// Rebuilds records from `(sys.ObjectKind ordinal, qualified name, id, retired)`
+/// rows. A `field` row is a variant payload field exactly when its owner (the
+/// name without its last segment) is a variant row; otherwise it is a type field.
+fn records_from_spec_ordinals(
+    rows: Vec<(u64, String, [u8; 16], bool)>,
+) -> Result<Vec<ObjectIdentity>, ObjectIdentityError> {
+    let variants: BTreeSet<&str> = rows
+        .iter()
+        .filter(|(code, ..)| *code == SPEC_VARIANT_ORDINAL)
+        .map(|(_, qualified_name, ..)| qualified_name.as_str())
+        .collect();
+    rows.iter()
+        .map(|(code, qualified_name, id, retired)| {
+            let kind = if *code == SPEC_FIELD_ORDINAL {
+                let (owner, _) = qualified_name
+                    .rsplit_once('.')
+                    .ok_or(ObjectIdentityError::InvalidEncoding)?;
+                if variants.contains(owner) {
+                    ObjectKind::VariantField
+                } else {
+                    ObjectKind::TypeField
+                }
+            } else {
+                [
+                    ObjectKind::Table,
+                    ObjectKind::Field,
+                    ObjectKind::Unit,
+                    ObjectKind::Type,
+                    ObjectKind::Variant,
+                ]
+                .into_iter()
+                .find(|kind| kind.spec_ordinal() == *code)
+                .ok_or(ObjectIdentityError::InvalidEncoding)?
+            };
+            Ok(ObjectIdentity {
+                kind,
+                qualified_name: qualified_name.clone(),
+                id: *id,
+                retired: *retired,
+            })
+        })
+        .collect()
+}
+
 fn validate_records(records: &[ObjectIdentity]) -> Result<(), ObjectIdentityError> {
     let mut active = BTreeSet::new();
     let mut ids = HashSet::new();
@@ -2263,6 +2468,76 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::read_worktree(&repository).unwrap(),
             Some(next)
+        );
+    }
+
+    /// `orna mv` moves only the renamed table and its fields: a table the
+    /// worktree dropped but the staged source still declares stays active
+    /// under its ID, and a new worktree declaration gets no ID yet.
+    #[test]
+    fn rename_only_updates_move_named_identities_and_leave_the_rest() {
+        let staged = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, }\npub table Clip(id: Str) { take: Int, }",
+        );
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&staged), None)
+            .expect("initial identities");
+        let worktree = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, }\npub table Note(id: Str) { body: Str, }",
+        );
+        let rename = ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive");
+
+        let renamed = previous
+            .with_renames(
+                std::slice::from_ref(&worktree),
+                std::slice::from_ref(&rename),
+            )
+            .expect("explicit rename");
+
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Archive"),
+            previous.id(ObjectKind::Table, "Media")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.payload"),
+            previous.id(ObjectKind::Field, "Media.payload")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.id"),
+            previous.id(ObjectKind::Field, "Media.id")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Media"), None);
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Clip"),
+            previous.id(ObjectKind::Table, "Clip")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Note"), None);
+        assert_eq!(renamed.records().len(), previous.records().len());
+        assert!(renamed.records().iter().all(|record| !record.is_retired()));
+
+        let colliding = ModuleInput::new("main.orna", "pub table Clip(id: Str) { payload: Blob, }");
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&colliding),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Clip"
+                )],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&staged),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Archive"
+                )],
+            ),
+            Err(ObjectIdentityError::InvalidSource),
         );
     }
 
@@ -2729,6 +3004,41 @@ mod tests {
         );
         SchemaDescriptor::decode(&schema.descriptor.encode().unwrap()).unwrap();
     }
+
+    #[test]
+    fn legacy_sidecar_codes_decode_to_spec_kinds_and_reencode_as_v2() {
+        let manifest = ObjectIdentityManifest {
+            records: vec![
+                ObjectIdentity {
+                    kind: ObjectKind::Type,
+                    qualified_name: "Shape".into(),
+                    id: [1; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::Variant,
+                    qualified_name: "Shape.circle".into(),
+                    id: [2; 16],
+                    retired: false,
+                },
+                ObjectIdentity {
+                    kind: ObjectKind::VariantField,
+                    qualified_name: "Shape.circle.radius".into(),
+                    id: [3; 16],
+                    retired: false,
+                },
+            ],
+        };
+        let legacy = manifest
+            .encode_as(LEGACY_MANIFEST_VERSION, ObjectKind::legacy_code)
+            .unwrap();
+        let decoded = ObjectIdentityManifest::decode(&legacy).unwrap();
+        assert_eq!(decoded, manifest);
+        let current = decoded.encode().unwrap();
+        assert_ne!(current, legacy);
+        assert_eq!(ObjectIdentityManifest::decode(&current).unwrap(), manifest);
+    }
+
     #[test]
     fn oversized_worktree_manifest_is_rejected_before_reading() {
         let directory = tempfile::tempdir().unwrap();
@@ -3556,11 +3866,40 @@ pub table Invoice(id: Str) {
             Err(SourceTableSchemaError::MissingIdentity)
         );
 
+        // A live relation is outside the serialisable subset (29-formats.md).
+        // Semantic analysis rejects it as a stored field type, so
+        // `source_table_schema` refuses that analysis, and the descriptor
+        // builder has no closed type node for the analysed field type either.
         let relation = [ModuleInput::new(
             "main.orna",
             "pub table Contact(id: Int) { relation: Relation<Int>, }",
         )];
-        let (_, schema) = source_descriptor(&relation, None, "main.orna", "Contact");
+        let analysis = orna_semantic_v1::analyze(&relation);
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            [(
+                orna_semantic_v1::DIAG_TYPE,
+                "stored table field type must be serialisable"
+            )]
+        );
+        let manifest = ObjectIdentityManifest::reconcile(&relation, None).unwrap();
+        assert_eq!(
+            manifest.source_table_schema(&relation, &analysis, None, "", "main.orna", "Contact"),
+            Err(SourceTableSchemaError::InvalidAnalysis)
+        );
+        let root = Namespace(Vec::new());
+        let field_type = &analysis.modules[&root].symbols["Contact"]
+            .table_schema
+            .as_ref()
+            .expect("Contact table schema")
+            .fields["relation"];
+        let sources = parse_source_modules(&relation).unwrap();
+        let schema = DescriptorBuilder::new(&manifest, &analysis, &sources, None)
+            .type_node(field_type, &root);
         assert_eq!(schema, Err(SourceTableSchemaError::UnsupportedType));
     }
 
@@ -3644,35 +3983,31 @@ pub table Invoice(id: Str) {
         );
     }
 
-    /// Pins the manifest and descriptor bytes, and the `orna.schema.v1`
-    /// digest, that the previous builder produced for a table it could
-    /// already encode, so lifecycle support cannot change existing schema
-    /// node identities.
-    #[test]
-    fn previously_supported_table_descriptor_bytes_are_stable() {
-        const MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
-        const DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
-        const SCHEMA_DIGEST: &str =
-            "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
-        let hex = |bytes: &[u8]| {
-            bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        let source = ModuleInput::new(
-            "main.orna",
-            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
-        );
-        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
-        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    /// Identity manifest of the `Media` table (Str key, Blob and `Float<MiB>`)
+    /// under fixed identities, as the previous builder wrote it: sidecar
+    /// version 1 with its private kind codes (table 1, field 2, unit 3).
+    const MEDIA_V1_MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
+    /// The same inventory as sidecar version 2, which stores each kind as its
+    /// `sys.ObjectKind` ordinal (api/sys.json: table 2, column 3, unit 15).
+    const MEDIA_MANIFEST: &str = "8202868402654d656469615011111111111111111111111111111111f48403684d656469612e69645021212121212121212121212121212121f484036d4d656469612e7061796c6f61645022222222222222222222222222222222f484036a4d656469612e73697a655023232323232323232323232323232323f4840f61425031313131313131313131313131313131f4840f634d69425032323232323232323232323232323232f4";
+    /// The closed schema descriptor and its `orna.schema.v1` digest that the
+    /// previous builder produced for `Media` under those identities.
+    const MEDIA_DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
+    const MEDIA_SCHEMA_DIGEST: &str =
+        "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn media_identity_manifest() -> ObjectIdentityManifest {
         let record = |kind: ObjectKind, name: &str, byte: u8| ObjectIdentity {
             kind,
             qualified_name: name.to_owned(),
             id: [byte; 16],
             retired: false,
         };
-        let manifest = ObjectIdentityManifest {
+        ObjectIdentityManifest {
             records: vec![
                 record(ObjectKind::Table, "Media", 0x11),
                 record(ObjectKind::Field, "Media.id", 0x21),
@@ -3681,9 +4016,18 @@ pub table Invoice(id: Str) {
                 record(ObjectKind::Unit, "B", 0x31),
                 record(ObjectKind::Unit, "MiB", 0x32),
             ],
-        };
-        assert_eq!(hex(&manifest.encode().unwrap()), MANIFEST);
+        }
+    }
 
+    /// Builds the `Media` schema from `manifest`'s identities and returns its
+    /// descriptor bytes and `orna.schema.v1` digest, both as hex.
+    fn media_schema_hex(manifest: &ObjectIdentityManifest) -> (String, String) {
+        let source = ModuleInput::new(
+            "main.orna",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
+        );
+        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
         let schema = manifest
             .source_table_schema(
                 std::slice::from_ref(&source),
@@ -3694,10 +4038,42 @@ pub table Invoice(id: Str) {
                 "Media",
             )
             .unwrap();
-        assert_eq!(hex(&schema.descriptor().encode().unwrap()), DESCRIPTOR);
-        assert_eq!(
+        (
+            hex(&schema.descriptor().encode().unwrap()),
             hex(&orna_value_v1::schema_identity(schema.descriptor()).unwrap()),
-            SCHEMA_DIGEST
-        );
+        )
+    }
+
+    /// Pins the identity manifest bytes, the closed schema descriptor bytes
+    /// and the `orna.schema.v1` digest of a table the previous builder could
+    /// already encode, so lifecycle support cannot change existing schema
+    /// node identities. The descriptor carries object IDs, not `sys.ObjectKind`
+    /// values (29-formats.md, closed storage schema descriptor), so the
+    /// sidecar's kind encoding cannot reach it.
+    #[test]
+    fn previously_supported_table_descriptor_bytes_are_stable() {
+        let manifest = media_identity_manifest();
+        assert_eq!(hex(&manifest.encode().unwrap()), MEDIA_MANIFEST);
+        let (descriptor, digest) = media_schema_hex(&manifest);
+        assert_eq!(descriptor, MEDIA_DESCRIPTOR);
+        assert_eq!(digest, MEDIA_SCHEMA_DIGEST);
+    }
+
+    /// ORNA-ROW-013, ORNA-EVOL-003: sidecar version 1 bytes, written before
+    /// identity rows stored `sys.ObjectKind` ordinals, keep their versioned
+    /// reader and decode to the same identities, so a legacy commit keeps the
+    /// exact schema descriptor and digest. The writer emits version 2 only.
+    #[test]
+    fn legacy_v1_manifest_bytes_decode_to_the_same_table_descriptor() {
+        let legacy = (0..MEDIA_V1_MANIFEST.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&MEDIA_V1_MANIFEST[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let decoded = ObjectIdentityManifest::decode(&legacy).unwrap();
+        assert_eq!(decoded, media_identity_manifest());
+        assert_eq!(hex(&decoded.encode().unwrap()), MEDIA_MANIFEST);
+        let (descriptor, digest) = media_schema_hex(&decoded);
+        assert_eq!(descriptor, MEDIA_DESCRIPTOR);
+        assert_eq!(digest, MEDIA_SCHEMA_DIGEST);
     }
 }

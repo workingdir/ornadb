@@ -1,4 +1,4 @@
-# 33. Diagnostic reference {#diagnostics}
+# 40. Diagnostic reference {#diagnostics}
 
 ## Invalid forms and corrections
 
@@ -70,4 +70,3 @@ The following diagnostic classifications apply to current source. Diagnostic cod
 | `ORNA091-E-FIELD-CONSTRAINT` | field uses `unique` or `check(...)` | write an owner-local table assertion |
 
 Diagnostics for secrets MUST redact sensitive values. Fixes MUST be token-aware: they may not rewrite anonymous-function `=>`, optional type suffixes `T?`, option coalescing `??`, or arbitrary ordinary pipelines merely because similar tokens occur nearby.
-

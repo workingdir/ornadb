@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
-use orna_project_v1::{ProjectLimits, ProjectLoadError, ProjectLoader};
-use orna_repository_v1::{ManagedFileChange, ManagedPath, Repository};
+use orna_project_v1::{LoadedProject, ProjectLimits, ProjectLoadError, ProjectLoader};
+use orna_repository_v1::{FormatContextError, ManagedFileChange, ManagedPath, Repository};
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile, analyze_with_catalogue};
 use tempfile::TempDir;
 
@@ -144,26 +144,43 @@ fn committed_project_carries_verified_source_snapshot_identity() {
     assert_eq!(worktree_project.source_snapshot_id(), None);
 }
 
+const FORMAT3_DATABASE: &str =
+    "{\n    repository_format: 3,\n    database_id: \"00000000-0000-4000-8000-000000000001\",\n}\n";
+
+/// Asserts the mixed-format refusal of one loose row path
+/// (ORNA-REPO-CONTEXT-004), with the path in the message.
+fn assert_loose_row_refused(error: ProjectLoadError, path: &str) {
+    let ProjectLoadError::FormatContext(refusal) = &error else {
+        panic!("{path}: {error:?}");
+    };
+    assert_eq!(
+        refusal,
+        &FormatContextError::MixedFormats {
+            path: path.to_owned()
+        }
+    );
+    assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-004");
+    assert!(error.to_string().contains(path), "{error}");
+}
+
+/// ORNA-REPO-004, ORNA-UPGRADE-003, Gate A: format 3 keeps rows only
+/// in `.orna/store`, so a committed format-3 snapshot that tracks a loose row
+/// file mixes formats. Loading it fails with ORNA-REPO-CONTEXT-004 naming the
+/// row file, before its bytes are read (these are not even UTF-8), instead of
+/// loading with the row silently skipped. The same snapshot without the file
+/// loads.
 #[test]
-fn format3_committed_rows_are_not_loaded_as_source_files() {
+fn format3_committed_snapshot_with_a_loose_row_mixes_formats() {
     let (directory, repository) = repository(&[
         ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
-        (
-            ".orna/database.orna",
-            "{\n    repository_format: 3,\n    database_id: \"00000000-0000-4000-8000-000000000001\",\n}\n",
-        ),
+        (".orna/database.orna", FORMAT3_DATABASE),
         (".orna/store/data", "format-3 row graph"),
     ]);
-    let row_path = directory.path().join("Music/london.orna");
-    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
-    fs::write(&row_path, [0xff; 73]).unwrap();
     commit_all(&directory);
-
-    let commit = repository.head().unwrap().unwrap();
+    let clean = repository.head().unwrap().unwrap();
     let project = ProjectLoader::default()
-        .load_committed_snapshot(&repository, &commit)
-        .unwrap();
-
+        .load_committed_snapshot(&repository, &clean)
+        .expect("a format-3 snapshot without loose rows loads");
     assert_eq!(
         project
             .identities()
@@ -173,6 +190,121 @@ fn format3_committed_rows_are_not_loaded_as_source_files() {
         ["main.orna"]
     );
     assert!(project.loose_rows().is_empty());
+
+    let row_path = directory.path().join("Music/london.orna");
+    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
+    fs::write(&row_path, [0xff; 73]).unwrap();
+    commit_all(&directory);
+    let mixed = repository.head().unwrap().unwrap();
+    let error = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &mixed)
+        .expect_err("a committed loose row mixes formats");
+    assert_loose_row_refused(error, "Music/london.orna");
+}
+
+/// ORNA-REPO-004, ORNA-UPGRADE-003, Gate A: a format-3 commit
+/// candidate that tracks a loose row file would publish a mixed snapshot, so
+/// loading it fails with ORNA-REPO-CONTEXT-004 naming the row file. A
+/// candidate that changes only source loads.
+#[test]
+fn format3_candidate_writing_a_loose_row_mixes_formats() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (".orna/database.orna", FORMAT3_DATABASE),
+        (".orna/store/data", "format-3 row graph"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let candidate = |path: &str, bytes: &str| {
+        repository
+            .build_private_commit(
+                &commit,
+                &[ManagedFileChange::new(
+                    ManagedPath::new(path).unwrap(),
+                    Some(bytes.as_bytes().to_vec()),
+                )],
+                "format-3 candidate",
+            )
+            .unwrap()
+    };
+
+    let source_change = candidate(
+        "main.orna",
+        "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n",
+    );
+    let project = ProjectLoader::default()
+        .load_private_candidate(&repository, &source_change)
+        .expect("a candidate without loose rows loads");
+    assert!(project.loose_rows().is_empty());
+
+    let path = "Music/paris.orna";
+    let added_row = candidate(path, "{\n    title: \"Added row\",\n}\n");
+    let error = ProjectLoader::default()
+        .load_private_candidate(&repository, &added_row)
+        .expect_err("a written loose row mixes formats");
+    assert_loose_row_refused(error, path);
+}
+
+/// The loose-row refusal recognises only row files: an unreached
+/// `<table>/<key>.orna`. A module a `use` reaches is a module even beside a
+/// table of the same name (ORNA-NS-002), and `dir/main.orna`, files beside a
+/// similarly named table, and non-`.orna` files are never rows. A format-3
+/// snapshot or candidate holding only those loads; adding an unreached row
+/// file under the table is refused.
+#[test]
+fn format3_modules_beside_a_table_are_not_loose_rows() {
+    let (directory, repository) = repository(&[
+        (
+            "main.orna",
+            "use sensors.input;\npub table sensors(id: Str) { name: Str, }\npub table Music(id: Str) { title: Str, }\n",
+        ),
+        ("sensors/input.orna", "pub fn reading(): Int = 1;\n"),
+        ("sensors/main.orna", "pub fn unused(): Int = 2;\n"),
+        ("sensors/notes.txt", "not a row\n"),
+        (
+            "Musicals/london.orna",
+            "{\n    title: \"Not a Music row\",\n}\n",
+        ),
+        (".orna/database.orna", FORMAT3_DATABASE),
+        (".orna/store/data", "format-3 row graph"),
+    ]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &commit)
+        .expect("a format-3 snapshot with modules beside a table loads");
+    assert_eq!(
+        project
+            .identities()
+            .iter()
+            .map(|identity| identity.logical_path())
+            .collect::<Vec<_>>(),
+        ["main.orna", "sensors/input.orna"]
+    );
+    assert!(project.loose_rows().is_empty());
+
+    let candidate = |path: &str, bytes: &str| {
+        repository
+            .build_private_commit(
+                &commit,
+                &[ManagedFileChange::new(
+                    ManagedPath::new(path).unwrap(),
+                    Some(bytes.as_bytes().to_vec()),
+                )],
+                "format-3 candidate",
+            )
+            .unwrap()
+    };
+    let module_edit = candidate("sensors/input.orna", "pub fn reading(): Int = 3;\n");
+    ProjectLoader::default()
+        .load_private_candidate(&repository, &module_edit)
+        .expect("editing a reached module under a table path is not a loose row");
+
+    let row_file = candidate("sensors/london.orna", "{\n    name: \"London\",\n}\n");
+    let error = ProjectLoader::default()
+        .load_private_candidate(&repository, &row_file)
+        .expect_err("an unreached file under the table is a loose row");
+    assert_loose_row_refused(error, "sensors/london.orna");
 }
 
 #[test]
@@ -247,6 +379,61 @@ fn loads_only_reachable_modules_in_deterministic_logical_order() {
         project.identities()[2].namespace(),
         ["sensors", "greenhouse"]
     );
+}
+
+/// Editors check unsaved buffers: an overlay replaces the saved module text
+/// and an overlay-only module is importable before it is written.
+#[test]
+fn overlays_replace_saved_modules_and_make_unsaved_imports_reachable() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub fn saved(): Int = 1;\n"),
+        ("unused.orna", "pub fn unused(): Int = 2;\n"),
+    ]);
+    let overlays = std::collections::BTreeMap::from([
+        (
+            "main.orna".to_owned(),
+            "use helpers;\npub fn edited(): Int = helpers.value();\n".to_owned(),
+        ),
+        (
+            "helpers.orna".to_owned(),
+            "pub fn value(): Int = 3;\n".to_owned(),
+        ),
+    ]);
+
+    let project = ProjectLoader::default()
+        .load_with_overlays(&repository, &overlays)
+        .unwrap();
+    let modules = project
+        .modules()
+        .iter()
+        .map(|module| (module.logical_path.as_str(), module.source.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modules,
+        [
+            ("helpers.orna", overlays["helpers.orna"].as_str()),
+            ("main.orna", overlays["main.orna"].as_str()),
+        ]
+    );
+    assert!(!directory.path().join("helpers.orna").exists());
+    let analysis = analyze_with_catalogue(project.modules(), &Catalogue::authoritative_core());
+    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+
+    let saved = ProjectLoader::default()
+        .load_with_overlays(&repository, &Default::default())
+        .unwrap();
+    assert_eq!(saved.modules().len(), 1);
+    assert_eq!(saved.modules()[0].source, "pub fn saved(): Int = 1;\n");
+    assert!(matches!(
+        ProjectLoader::default().load_with_overlays(
+            &repository,
+            &std::collections::BTreeMap::from([(
+                "main.orna".to_owned(),
+                "use missing;\n".to_owned()
+            )])
+        ),
+        Err(ProjectLoadError::ImportUnavailable)
+    ));
 }
 
 #[test]
@@ -912,6 +1099,48 @@ fn committed_snapshot_loader_enforces_source_module_limit_before_reads() {
     ));
 }
 
+/// Builds a commit whose root is a chain of trees in which every level holds
+/// two entries that name the same next tree. Git stores only about one object
+/// per level, but a listing that re-expands each reference sees `2^levels`
+/// leaves.
+fn tree_bomb_commit(directory: &TempDir, levels: usize) -> String {
+    let leaf = git_with_input(directory, &["hash-object", "-w", "--stdin"], "leaf\n");
+    let mut tree = git_with_input(directory, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+    for _ in 0..levels {
+        tree = git_with_input(
+            directory,
+            &["mktree"],
+            &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+        );
+    }
+    git_output(directory, &["commit-tree", &tree, "-m", "tree bomb"])
+        .trim()
+        .to_owned()
+}
+
+/// A hostile repository can make the shared-subtree listing exponential. The
+/// committed loader must reject it with the source limit diagnostic before it
+/// expands the tree.
+#[test]
+fn committed_snapshot_loader_rejects_shared_subtree_tree_bomb_before_expansion() {
+    let (directory, repository) =
+        repository(&[("main.orna", include_str!("fixtures/main_run.orna"))]);
+    commit_all(&directory);
+    let commit = tree_bomb_commit(&directory, 30);
+    git_output(&directory, &["update-ref", "HEAD", &commit]);
+    let commit = repository.resolve_snapshot(&commit).unwrap();
+    let loader = ProjectLoader::new(ProjectLimits {
+        max_modules: 1,
+        max_source_bytes: 1024,
+        max_source_modules: 1,
+    });
+
+    assert!(matches!(
+        loader.load_committed_snapshot(&repository, &commit),
+        Err(ProjectLoadError::SourceTreeLimit)
+    ));
+}
+
 /// The materialised store at `.orna/store` is database content, not source:
 /// the worktree loader neither walks nor counts it, and files that are not
 /// modules do not count against the source-module limit.
@@ -1069,6 +1298,9 @@ fn rejects_unreachable_symlinks_during_metadata_preflight() {
 }
 
 /// ORNA-REPO-004: rows for reachable tables are discovered through the production loader.
+/// The unreachable row is not a valid row unit either; loading still succeeds
+/// because files outside reachable table directories are never read
+/// (ORNA-REPO-003).
 #[test]
 fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     let (directory, repository) = repository(&[
@@ -1082,10 +1314,6 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             include_str!("fixtures/contact_42.orna"),
         ),
         (
-            "contacts/Contact/malformed.orna",
-            include_str!("fixtures/contact_malformed.orna"),
-        ),
-        (
             "unused/Contact/1.orna",
             include_str!("fixtures/unreachable_contact_row.orna"),
         ),
@@ -1093,7 +1321,7 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     commit_all(&directory);
 
     let worktree = ProjectLoader::default().load(&repository).unwrap();
-    assert_eq!(worktree.loose_rows().len(), 2);
+    assert_eq!(worktree.loose_rows().len(), 1);
     assert_eq!(
         worktree.loose_rows()[0].logical_path(),
         "contacts/Contact/42.orna"
@@ -1102,8 +1330,8 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
     assert_eq!(worktree.loose_rows()[0].key_path(), ["42.orna"]);
     assert_eq!(worktree.loose_rows()[0].parse_as(), "row_unit");
     assert_eq!(
-        worktree.loose_rows()[1].source(),
-        include_str!("fixtures/contact_malformed.orna")
+        worktree.loose_rows()[0].source(),
+        include_str!("fixtures/contact_42.orna")
     );
     assert!(
         !worktree
@@ -1122,11 +1350,58 @@ fn discovers_only_reachable_table_rows_with_opaque_path_metadata() {
             .iter()
             .map(|row| row.logical_path())
             .collect::<Vec<_>>(),
-        [
-            "contacts/Contact/42.orna",
-            "contacts/Contact/malformed.orna"
-        ]
+        ["contacts/Contact/42.orna"]
     );
+}
+
+/// ORNA-SOURCE-003: a reachable row file that is not exactly one record
+/// expression is rejected at load with the parser's row-unit code, in the
+/// worktree and in a committed snapshot alike; a valid sibling row does not
+/// hide it.
+#[test]
+fn rejects_malformed_reachable_row_unit_with_parser_code() {
+    let (directory, repository) = repository(&[
+        ("main.orna", include_str!("fixtures/main_contacts.orna")),
+        (
+            "contacts.orna",
+            include_str!("fixtures/contacts_table.orna"),
+        ),
+        (
+            "contacts/Contact/42.orna",
+            include_str!("fixtures/contact_42.orna"),
+        ),
+        (
+            "contacts/Contact/malformed.orna",
+            include_str!("fixtures/contact_malformed.orna"),
+        ),
+    ]);
+    commit_all(&directory);
+
+    let assert_rejected = |result: Result<LoadedProject, ProjectLoadError>| match result {
+        Err(ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        }) => {
+            assert_eq!(logical_path, "contacts/Contact/malformed.orna");
+            let first = diagnostics.first().expect("row unit diagnostic");
+            assert_eq!(first.code, "E8001");
+            assert!(
+                first
+                    .message
+                    .contains("row unit must contain one record expression"),
+                "{first:?}"
+            );
+            assert_eq!(
+                first.span.file.as_deref(),
+                Some("contacts/Contact/malformed.orna")
+            );
+        }
+        other => panic!("expected InvalidRowUnit, got {other:?}"),
+    };
+    assert_rejected(ProjectLoader::default().load(&repository));
+
+    let commit = repository.resolve_snapshot("HEAD").unwrap();
+    assert_rejected(ProjectLoader::default().load_committed_snapshot(&repository, &commit));
 }
 
 #[test]

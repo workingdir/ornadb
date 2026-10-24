@@ -101,11 +101,9 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
 
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -124,7 +122,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -134,7 +132,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -235,12 +233,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "{{ title: \"before\", content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"), }}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -267,7 +260,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &blob_captures,
-            source_row: None,
+            source_row: &row_source,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -278,7 +271,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -317,7 +310,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\ncp \"$ORNA_ROW_SOURCE\" \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -336,7 +329,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -353,7 +346,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     );
     assert!(mounted.child.wait().unwrap().success());
 
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -391,7 +384,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "row edit must retain the owner-issued Blob binding"
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
