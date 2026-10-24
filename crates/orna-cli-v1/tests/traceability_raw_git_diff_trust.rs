@@ -55,7 +55,7 @@ fn raw_git_diff_remains_available_to_a_local_invocation() {
         repository.path(),
         &["diff", "--no-color", "--", "source.orna"],
     );
-    let cli = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["diff", "--no-color", "--", "source.orna"])
         .current_dir(repository.path())
         .output()
