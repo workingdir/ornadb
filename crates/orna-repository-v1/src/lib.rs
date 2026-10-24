@@ -324,6 +324,17 @@ fn reviewed_candidate_runtime_intent_id(review: &ReviewedCandidateReview, messag
     intent
 }
 
+/// The commit gate's refusal as the commit's failure. A candidate that mixes
+/// formats keeps its format error, which names the tracked path that does not
+/// belong to format 3 (ORNA-META-001, ORNA-REPO-CONTEXT-004); any other
+/// invalid candidate is `InvalidCommitCandidate` (`sys.admin.assertion_failed`).
+fn commit_gate_refusal(error: FormatContextError) -> RepositoryError {
+    match error {
+        mixed @ FormatContextError::MixedFormats { .. } => RepositoryError::FormatContext(mixed),
+        _ => RepositoryError::InvalidCommitCandidate,
+    }
+}
+
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
@@ -4278,7 +4289,7 @@ impl Repository {
             return Err(RepositoryError::InvalidCommitCandidate);
         }
         self.validate_format3_index_tree(&review.index_tree)
-            .map_err(|_| RepositoryError::InvalidCommitCandidate)?;
+            .map_err(commit_gate_refusal)?;
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-p", old_head.as_str(), "-m"])
@@ -4369,6 +4380,11 @@ impl Repository {
         // Main's identity contract applies to the root commit too: a missing
         // identity fails before any commit object exists.
         self.require_configured_commit_identity()?;
+        // So does the commit gate: the first commit tracks no transitional
+        // `.orna/` entry either (ORNA-META-001), and a refused candidate leaves
+        // no commit object behind.
+        self.validate_format3_index_tree(&review.index_tree)
+            .map_err(commit_gate_refusal)?;
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-m"])
