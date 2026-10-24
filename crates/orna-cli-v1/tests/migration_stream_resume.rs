@@ -388,7 +388,7 @@ fn migration_carry_without_bridge_origin_refuses_open() {
 }
 
 #[test]
-fn stream_carry_import_refuses_a_destination_already_holding_carried_rows() {
+fn stream_carry_import_is_idempotent_and_refuses_rows_that_differ() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
     fs::create_dir(&source).unwrap();
@@ -402,14 +402,51 @@ fn stream_carry_import_refuses_a_destination_already_holding_carried_rows() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    runtime().block_on(async {
+    let recorded = runtime().block_on(async {
         let source_repository = Repository::discover(&source).unwrap();
         let carry = read_stream_carry(&source_repository)
             .await
             .expect("source stream state is carriable");
         let recorded = carry.continuity_record().expect("carry continuity is recorded");
         let destination_repository = Repository::discover(&destination).unwrap();
-        let again = import_stream_carry(&destination_repository, &carry, Some(&recorded)).await;
-        assert_eq!(again, Err(RuntimeError::MigrationCarryTargetNotEmpty));
+        import_stream_carry(&destination_repository, &carry, Some(&recorded))
+            .await
+            .expect("re-importing an identical carry is a no-op");
+        recorded
     });
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
+
+    runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        let destination_repository = Repository::discover(&destination).unwrap();
+        let differs = import_stream_carry(&destination_repository, &carry, Some(&recorded)).await;
+        assert_eq!(differs, Err(RuntimeError::MigrationCarryTargetDiffers));
+    });
+}
+
+#[test]
+fn migration_copy_retry_after_carry_recovers() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+    let first = run_copy(&source, &destination);
+    assert!(
+        first.status.success(),
+        "first copy must carry: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let retry = run_copy(&source, &destination);
+    assert!(
+        retry.status.success(),
+        "rerunning a completed carry must recover: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
 }

@@ -914,7 +914,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             Diagnostic::target_with_detail(
                 "E2100",
                 "migration stream checkpoints could not be carried",
-                "verify the destination continuity record and that the destination holds no carried checkpoints; the copy was prepared but no checkpoint was imported",
+                "verify the destination continuity record; a destination already holding different carried checkpoints is refused and no checkpoint was imported",
                 format!("{error:?}"),
             )
         })?;
