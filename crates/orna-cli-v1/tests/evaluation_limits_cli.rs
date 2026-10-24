@@ -37,7 +37,7 @@ fn initialized_project() -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("temporary Orna project");
     std::fs::write(directory.path().join("main.orna"), MAIN_MODULE).expect("main module");
     std::fs::write(directory.path().join("limits.orna"), LIMITS_MODULE).expect("limits module");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
@@ -52,7 +52,7 @@ fn initialized_project() -> tempfile::TempDir {
 }
 
 fn run_repl(directory: &std::path::Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())

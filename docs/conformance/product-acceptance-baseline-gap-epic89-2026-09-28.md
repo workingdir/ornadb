@@ -30,7 +30,7 @@ Exit 1 is ripgrep's no-match result for this query. This absence means those rel
 
 ## Repository evidence and disposition
 
-The repository release decision `docs/decisions/0047-first-one-zero-release.md` separately requires an accepted product baseline at `docs/releases/1.0-product-acceptance.md` before the protected 1.0.0-1 declaration/publication. It also names Debian release authorities and paths. These are repository release-governance decisions, not ORNA-* clauses in the frozen reference.
+The repository release decision `docs/decisions/archive/1.0/0047-first-one-zero-release.md` separately requires an accepted product baseline at `docs/releases/1.0-product-acceptance.md` before the protected 1.0.0-1 declaration/publication. It also names Debian release authorities and paths. These are repository release-governance decisions, not ORNA-* clauses in the frozen reference.
 
 At audited `origin/main` revision `e5fd4f049a65f8e513060ede58716f6904f2a820`, the path check returned:
 

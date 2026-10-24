@@ -2013,10 +2013,17 @@ pub fn decode_rov3_blob_metadata(bytes: &[u8]) -> Result<BlobMetadata> {
     if reader.at != bytes.len() {
         return Err(Error::TrailingBytes);
     }
+    blob_metadata_from_raw(&raw)
+}
+
+/// Projects an already-decoded ROV-3 Blob value to payload-free metadata: the
+/// same projection `decode_rov3_blob_metadata` applies to stored bytes. Callers
+/// that hold a decoded field value use this rather than re-encoding it.
+pub fn blob_metadata_from_raw(raw: &Raw) -> Result<BlobMetadata> {
     let Raw::Tag(ROV3_BLOB_TAG, payload) = raw else {
         return Err(Error::InvalidProfile);
     };
-    let fields = array(&payload)?;
+    let fields = array(payload)?;
     let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
@@ -4088,10 +4095,10 @@ pub fn parse_canonical_uuid_text(text: &str) -> Result<[u8; 16]> {
 }
 /// Encodes bytes with the RFC 4648 standard Base64 alphabet and mandatory
 /// padding. The output never contains whitespace.
-pub fn base64_encode(bytes: &[u8]) -> Result<String> {
+pub fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let groups = bytes.len().checked_add(2).ok_or(Error::Limit)? / 3;
-    let capacity = groups.checked_mul(4).ok_or(Error::Limit)?;
+    // `len.div_ceil(3) * 4` cannot overflow: slices are at most `isize::MAX` bytes.
+    let capacity = bytes.len().div_ceil(3) * 4;
     let mut output = String::with_capacity(capacity);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
@@ -4110,7 +4117,7 @@ pub fn base64_encode(bytes: &[u8]) -> Result<String> {
             None => '=',
         });
     }
-    Ok(output)
+    output
 }
 
 /// Decodes strict RFC 4648 standard Base64.
@@ -5540,7 +5547,7 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         }
         validate_raw(value, depth + 1)?;
     }
-    let mut keys = Vec::new();
+    let mut keys = BTreeSet::new();
     for child in array(&a[3])? {
         let Raw::Tag(60012, node) = child else {
             return Err(Error::InvalidTag);
@@ -5549,10 +5556,9 @@ fn validate_present(v: &Raw, depth: usize) -> Result<()> {
         let child_fields = array(node)?;
         if !matches!(child_fields[1], Raw::Null) {
             let k = encode_raw(&child_fields[1])?;
-            if keys.contains(&k) {
+            if !keys.insert(k) {
                 return Err(Error::DuplicateOrUnorderedMapKey);
             }
-            keys.push(k)
         }
     }
     Ok(())
@@ -5783,11 +5789,12 @@ fn validate_schema(raw: &Raw) -> Result<()> {
     if ids.windows(2).any(|x| x[0] >= x[1]) {
         return Err(Error::InvalidSchema);
     }
+    let id_set: BTreeSet<[u8; 16]> = ids.iter().copied().collect();
     let mut key_ids = Vec::new();
     let mut key_id_set = BTreeSet::new();
     for key in keys {
         let key = uuid_array(key)?;
-        if !ids.contains(&key) || !key_id_set.insert(key) {
+        if !id_set.contains(&key) || !key_id_set.insert(key) {
             return Err(Error::InvalidSchema);
         }
         key_ids.push(key);
@@ -5817,15 +5824,17 @@ fn validate_schema(raw: &Raw) -> Result<()> {
         }
         validate_definition(kind, &a[2])?;
     }
+    let definition_set: BTreeSet<[u8; 16]> = definition_ids.iter().copied().collect();
+    let unit_definition_set: BTreeSet<[u8; 16]> = unit_definition_ids.iter().copied().collect();
     for field in fields {
-        validate_type_refs(&array(field)?[2], &definition_ids, &unit_definition_ids)?;
+        validate_type_refs(&array(field)?[2], &definition_set, &unit_definition_set)?;
     }
     for definition in defs {
         validate_definition_refs(
             int_u64(&array(definition)?[1])?,
             &array(definition)?[2],
-            &definition_ids,
-            &unit_definition_ids,
+            &definition_set,
+            &unit_definition_set,
         )?;
     }
     validate_schema_constructibility(fields, defs, &definition_ids)?;
@@ -5833,8 +5842,8 @@ fn validate_schema(raw: &Raw) -> Result<()> {
 }
 fn validate_type_refs(
     node: &Raw,
-    definitions: &[[u8; 16]],
-    unit_definitions: &[[u8; 16]],
+    definitions: &BTreeSet<[u8; 16]>,
+    unit_definitions: &BTreeSet<[u8; 16]>,
 ) -> Result<()> {
     let a = array(node)?;
     match int_u64(&a[0])? {
@@ -5873,8 +5882,8 @@ fn validate_type_refs(
 fn validate_definition_refs(
     kind: u64,
     body: &Raw,
-    definitions: &[[u8; 16]],
-    unit_definitions: &[[u8; 16]],
+    definitions: &BTreeSet<[u8; 16]>,
+    unit_definitions: &BTreeSet<[u8; 16]>,
 ) -> Result<()> {
     match kind {
         0 => {
