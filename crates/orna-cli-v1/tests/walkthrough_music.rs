@@ -491,52 +491,51 @@ fn add_row_refuses_loose_row_in_format3_repository() {
     );
 }
 
-/// A format-3 fixture that still commits a legacy loose row file, which
-/// format-3 readers leave unread: changing that file is refused like adding
-/// one. `orna add --row` refuses the edited file, and once plain Git stages it
-/// `orna commit` refuses it too, so `HEAD` keeps the committed bytes
-/// (ORNA-REPO-CONTEXT-004).
+/// A format-3 snapshot that tracks a loose row file mixes formats, whoever
+/// committed it (ORNA-REPO-004, ORNA-UPGRADE-003; Gate A, "unknown/mixed formats
+/// fail early"). A database `orna init` and `orna commit` created gets a row
+/// file committed past `orna commit` with plain Git; the next `orna commit`,
+/// which changes only source, refuses the inherited row file with
+/// ORNA-REPO-CONTEXT-004 naming it, instead of carrying it forward unread,
+/// and moves neither `HEAD` nor a ref.
 #[test]
-fn commit_refuses_changed_loose_row_in_format3_repository() {
-    let (directory, repository, _relation_id, _context) =
-        format3::format3_repository_for_table_with_source_row(
-            MUSIC_SOURCE,
-            "music",
-            "music/london.orna",
-            LONDON_ROW,
-        );
-    let root = directory.path();
+fn commit_refuses_a_loose_row_already_in_a_format3_head() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("music");
+    let init = run(directory.path(), &["init", root.to_str().unwrap()]);
+    assert_eq!(init.status.code(), Some(0), "orna init failed: {}", stderr(&init));
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    let committed = run(&root, &["commit", "-m", "Declare music"]);
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "first commit failed: {}",
+        stderr(&committed)
+    );
+
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::write(root.join("music/london.orna"), LONDON_ROW).unwrap();
+    git(&root, &["add", "music/london.orna"]);
+    git(&root, &["commit", "--quiet", "-m", "Commit a loose row past orna commit"]);
+    let head = git_text(&root, &["rev-parse", "HEAD"]);
+    let refs = git_text(&root, &["for-each-ref"]);
+
     std::fs::write(
-        root.join("music/london.orna"),
-        "{ title: \"Live in London — remastered\", artist: \"Kieran\", }\n",
+        root.join("main.orna"),
+        format!("{MUSIC_SOURCE}pub fn answer(): Int = 42;\n"),
     )
     .unwrap();
-    let head = repository.head().unwrap().unwrap();
-    let staged = git_text(root, &["ls-files", "--stage"]);
-
-    let refused = run(root, &["add", "--row", "music", "\"london\""]);
+    git(&root, &["add", "main.orna"]);
+    let staged = git_text(&root, &["ls-files", "--stage"]);
+    let refused = run(&root, &["commit", "-m", "Change source only"]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(
-        git_text(root, &["ls-files", "--stage"]),
-        staged,
-        "nothing was staged"
-    );
-
-    git(root, &["add", "music/london.orna"]);
-    let refused = run(root, &["commit", "-m", "Retitle the recording"]);
-    assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(
-        repository.head().unwrap(),
-        Some(head.clone()),
-        "no commit was made"
-    );
-    assert_eq!(
-        git_text(
-            root,
-            &["show", &format!("{}:music/london.orna", head.as_str())]
-        ),
-        LONDON_ROW
-    );
+    assert_eq!(git_text(&root, &["rev-parse", "HEAD"]), head, "no commit was made");
+    assert_eq!(git_text(&root, &["for-each-ref"]), refs, "no ref moved");
+    assert_eq!(git_text(&root, &["ls-files", "--stage"]), staged, "the index is unchanged");
 }
 
 /// Format-1/2 repositories are loose-row based, so `orna add --row` on an
