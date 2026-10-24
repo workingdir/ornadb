@@ -4,14 +4,14 @@
 //! Both tests drive the stream-reference administration boundary the live host
 //! calls: the reference is pinned to the activation capture, and a committed
 //! activation makes that capture stale before the administrative call runs.
-use std::{path::PathBuf, process::Command};
+use std::{future::Future, path::PathBuf, process::Command};
 
 use orna_foundation_v1::{CanonicalValue, CwdCapture};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RequestIdentity,
     RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState,
-    StreamObservationRegistration, WriterLease,
+    StreamAdministrationOutcome, StreamObservationRegistration, WriterLease,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
@@ -183,42 +183,83 @@ async fn assert_stale_capture_row(
     assert!(!row.succeeded);
 }
 
+/// Runs one stale administrative call and replays it under the same
+/// invocation ID (ORNA-ADMIN-003). While the CWD is unchanged the replay is
+/// the original error, payload included. The row stores the class and the
+/// admitted generation, not the rejected capture, so after a later commit
+/// the replay is still `StaleCapture` and carries the capture current at
+/// replay. No replay appends a row or rewrites the recorded one.
+async fn assert_stale_call_replays_recorded_failure<F, Fut>(
+    fixture: &StaleStreamReference,
+    invocation_id: [u8; 16],
+    function: &str,
+    call: F,
+) where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<StreamAdministrationOutcome, RuntimeError>>,
+{
+    let current = fixture.state.capture().await.expect("current capture");
+    let error = call().await.expect_err("stale capture must fail");
+    assert_eq!(
+        error,
+        RuntimeError::StaleCapture {
+            current: Box::new(current.clone()),
+        },
+    );
+    assert_stale_capture_row(fixture, invocation_id, function).await;
+
+    let replay = call().await.expect_err("replayed stale capture must fail");
+    assert_eq!(replay, error, "replay must return the recorded failure");
+    assert_stale_capture_row(fixture, invocation_id, function).await;
+
+    let later = fixture
+        .state
+        .commit(
+            fixture.writer,
+            &current,
+            &mutation(7, b"later commit"),
+            [7; 32],
+            &NoFault,
+        )
+        .await
+        .expect("a later commit advances the CWD generation");
+    let replay = call().await.expect_err("replayed stale capture must fail");
+    assert_eq!(
+        replay,
+        RuntimeError::StaleCapture {
+            current: Box::new(later),
+        },
+        "the replayed rejection carries the capture current at replay",
+    );
+    assert_stale_capture_row(fixture, invocation_id, function).await;
+}
+
 #[tokio::test]
 async fn stale_pause_records_admitted_generation_and_replays_same_error() {
     let fixture = stale_stream_reference().await;
-    let pause = || {
-        fixture
-            .state
-            .pause_stream_reference_at_capture_with_invocation_id(
-                fixture.writer,
-                fixture.reference.clone(),
-                Some("maintenance boundary".into()),
-                &fixture.activation,
-                [8; 16],
-            )
-    };
-
-    let error = pause().await.expect_err("stale capture must fail");
-    assert!(
-        matches!(error, RuntimeError::StaleCapture { .. }),
-        "{error:?}"
-    );
-    assert_stale_capture_row(&fixture, [8; 16], "sys.admin.pause_stream_with_reason").await;
-
-    // Replay of the same invocation must reproduce the stored class. The row
-    // stores only the class (ORNA-ADMIN-001), so the replayed StaleCapture
-    // carries the capture current at replay: compare the class, not that payload.
-    let replay = pause().await.expect_err("replayed stale capture must fail");
-    assert!(
-        matches!(replay, RuntimeError::StaleCapture { .. }),
-        "{replay:?}"
-    );
+    assert_stale_call_replays_recorded_failure(
+        &fixture,
+        [8; 16],
+        "sys.admin.pause_stream_with_reason",
+        || {
+            fixture
+                .state
+                .pause_stream_reference_at_capture_with_invocation_id(
+                    fixture.writer,
+                    fixture.reference.clone(),
+                    Some("maintenance boundary".into()),
+                    &fixture.activation,
+                    [8; 16],
+                )
+        },
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn stale_resume_records_admitted_generation_and_replays_same_error() {
     let fixture = stale_stream_reference().await;
-    let resume = || {
+    assert_stale_call_replays_recorded_failure(&fixture, [9; 16], "sys.admin.resume_stream", || {
         fixture
             .state
             .resume_stream_reference_at_capture_with_invocation_id(
@@ -227,20 +268,6 @@ async fn stale_resume_records_admitted_generation_and_replays_same_error() {
                 &fixture.activation,
                 [9; 16],
             )
-    };
-
-    let error = resume().await.expect_err("stale capture must fail");
-    assert!(
-        matches!(error, RuntimeError::StaleCapture { .. }),
-        "{error:?}"
-    );
-    assert_stale_capture_row(&fixture, [9; 16], "sys.admin.resume_stream").await;
-
-    let replay = resume()
-        .await
-        .expect_err("replayed stale capture must fail");
-    assert!(
-        matches!(replay, RuntimeError::StaleCapture { .. }),
-        "{replay:?}"
-    );
+    })
+    .await;
 }
