@@ -5,6 +5,16 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
+  acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
+  baseline a peer has since accepted is refused: the peer's row stays and the
+  candidate is kept in recovery storage (ORNA-VFS-009). Unmount refuses, rather
+  than drops, a valid dirty draft that retention cannot keep, and a released
+  handle does not re-admit a refusal that a later accepted save resolved.
+  Earlier builds did not attempt acceptance at close and did not keep unsynced
+  drafts on release. `orna unmount` retries a busy FUSE mount for the same
+  grace window a termination-signal unmount already used, because the kernel
+  can report the mount busy for a few milliseconds after the final `close(2)`.
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with
