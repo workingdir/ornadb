@@ -1140,6 +1140,44 @@ impl StoreRootPin {
 }
 
 impl Repository {
+    /// Refuses runtime admission when the format recorded at `HEAD` is not a
+    /// format this build knows (ORNA-REPO-CONTEXT-003). It runs before any
+    /// worktree metadata is read or any runtime state is opened, so a committed
+    /// `HEAD` is never bypassed by the worktree (ORNA-UPGRADE-001).
+    ///
+    /// Fails closed: when `HEAD` tracks a `.orna/database.orna` or
+    /// `.orna/format.orna` record that does not classify as a known format,
+    /// whatever the cause (unknown number, string or overflowing integer,
+    /// syntax-broken or open record, unreadable tree), the gate refuses with
+    /// [`FormatContextError::UnknownFormat`]. It falls through only when `HEAD`
+    /// is unborn or tracks no format record at all. Those cases are decided by
+    /// [`Self::require_writable_head_format`] and the metadata checks after it.
+    pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
+        match self.open_format_context() {
+            Ok(_) => Ok(()),
+            Err(FormatContextError::UnknownFormat) => Err(FormatContextError::UnknownFormat),
+            Err(_) => self.refuse_unclassifiable_head_records(),
+        }
+    }
+
+    /// Decides a `HEAD` whose format context did not open. An unborn `HEAD`
+    /// (no pinnable snapshot) falls through. A `HEAD` that tracks any
+    /// `.orna/database.orna` or `.orna/format.orna` record, or whose metadata
+    /// cannot be read, is refused as an unknown format (fail closed).
+    fn refuse_unclassifiable_head_records(&self) -> Result<(), FormatContextError> {
+        let snapshot = match self.pin_snapshot("HEAD") {
+            Ok(snapshot) => snapshot,
+            Err(FormatContextError::SnapshotUnavailable) => return Ok(()),
+            Err(_) => return Err(FormatContextError::UnknownFormat),
+        };
+        match read_snapshot_metadata(self, &snapshot) {
+            Ok(metadata) if metadata.database.is_none() && metadata.legacy_format.is_none() => {
+                Ok(())
+            }
+            _ => Err(FormatContextError::UnknownFormat),
+        }
+    }
+
     /// Admits durable runtime writes only when the format recorded at `HEAD`
     /// has a writer. A format-1/2 `HEAD` is refused with
     /// [`LegacyWriteRefused`] (ORNA-UPGRADE-001, ORNA-UPGRADE-003), whatever
@@ -1577,6 +1615,11 @@ enum DatabaseRecord {
     LegacySidecar(DatabaseId),
 }
 
+/// Parses a `.orna/database.orna` record. Only the canonical format-3 record
+/// and the one-field legacy sidecar are admitted. A record that names format 1
+/// or 2 beside its `database_id` is refused as an unknown format, never read
+/// as a legacy layout: legacy layouts are read only from `.orna/format.orna`
+/// (ORNA-META-002; pinned by `refuses_legacy_format_numbers_inside_a_database_record`).
 fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextError> {
     let fields = parse_record(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
     if fields.len() == 1 && fields[0].name == "database_id" {
