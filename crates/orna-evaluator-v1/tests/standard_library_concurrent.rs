@@ -15,7 +15,7 @@ fn pinned_concurrent_module_imports_and_requires_its_clock_binding() {
             .submit(include_str!("fixtures/stdlib-call-concurrent-sleep-zhw5h.orna"))
             .unwrap_err()
             .code(),
-        "ORNA-EVAL-UNSUPPORTED"
+        "ORNA-REPL-EFFECT"
     );
 }
 

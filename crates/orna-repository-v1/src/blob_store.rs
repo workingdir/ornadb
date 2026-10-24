@@ -337,7 +337,8 @@ impl GearChunker {
 }
 
 /// Streaming raw-content digest state.  The state never includes annotations
-/// or native Git object headers.
+/// or native Git object headers; a domain-separated digest starts from its
+/// domain prefix and still counts only the content in its length.
 pub struct ContentDigest {
     hasher: Sha256,
     length: u64,
@@ -355,6 +356,16 @@ impl ContentDigest {
             hasher: Sha256::new(),
             length: 0,
         }
+    }
+
+    /// A digest of `domain`, NUL and the streamed content: a format-3 domain
+    /// digest such as the `orna.schema.v3` schema identity (store-format-3
+    /// section 5). The length counts the content only.
+    pub(crate) fn domain_separated(domain: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(domain.as_bytes());
+        hasher.update([0]);
+        Self { hasher, length: 0 }
     }
 
     pub fn update(&mut self, bytes: &[u8]) -> Result<(), BlobStoreError> {

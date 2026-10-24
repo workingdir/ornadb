@@ -22,6 +22,7 @@ mod cli_status;
 mod cli_serve;
 mod media_range;
 mod repl;
+mod sys_host;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -56,7 +57,9 @@ use orna_runtime_v1::{
     QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
     RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
 };
-use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use orna_sys_v1::{
+    EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
+};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -118,11 +121,14 @@ fn write_cli_line(
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "CLI output could not be written",
-                "check the output stream, then retry the command",
-            )
+            Diagnostic {
+                code: "E2200",
+                title: Cow::Borrowed("CLI output could not be written"),
+                help: "check the output stream, then retry the command",
+                exit: Exit::Presentation,
+                detail: None,
+                body: None,
+            }
         })
 }
 #[allow(
@@ -212,10 +218,25 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
-    if let orna_project_v1::ProjectLoadError::InvalidModule {
-        logical_path,
-        diagnostics,
-    } = &error
+    if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
+        return Diagnostic::target(
+            "E2100",
+            "committed source tree exceeds the fixed walk limit",
+            "reduce the committed tree's entry count, nesting depth or path length, then run check again",
+        );
+    }
+    let invalid_unit = match &error {
+        orna_project_v1::ProjectLoadError::InvalidModule {
+            logical_path,
+            diagnostics,
+        }
+        | orna_project_v1::ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        } => Some((logical_path, diagnostics)),
+        _ => None,
+    };
+    if let Some((logical_path, diagnostics)) = invalid_unit
         && let Some(first) = diagnostics.first()
     {
         // The first parser diagnostic is the primary code: it is the spec code
@@ -256,6 +277,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
+        },
+        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
+            code: "ORNA-S011-AMBIGUOUS",
+            title: "standard import name is ambiguous",
+            explanation:
+                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            help: "import the functions under distinct names or use their qualified paths",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
@@ -930,6 +958,21 @@ fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
     }
 }
 
+fn pure_sys_host_context(
+    endpoint: &Endpoint,
+    std_snapshot: StdSnapshotPin,
+) -> Option<SysHostContext> {
+    let path = local_project_path(endpoint).ok()?;
+    let repository = orna_repository_v1::Repository::discover(path).ok()?;
+    let (identity, _) = runtime_identity(&repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Run,
+        std_snapshot,
+    ))
+}
+
 fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
@@ -1118,7 +1161,8 @@ fn unpublished_mutation_count(
 
 fn runtime_publication_metadata_rows(
     endpoint: &Endpoint,
-) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    std_snapshot: StdSnapshotPin,
+) -> Result<(RuntimePublicationMetadataRows, SysHostContext), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1128,6 +1172,12 @@ fn runtime_publication_metadata_rows(
         )
     })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let sys_host_context = sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Embedded,
+        std_snapshot,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1147,7 +1197,7 @@ fn runtime_publication_metadata_rows(
                 "retry the invocation after checking local runtime state",
             )
         })?;
-    runtime
+    let rows = runtime
         .block_on(state.publication_metadata_rows())
         .map_err(|_| {
             Diagnostic::target(
@@ -1155,7 +1205,8 @@ fn runtime_publication_metadata_rows(
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
-        })
+        })?;
+    Ok((rows, sys_host_context))
 }
 
 fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
@@ -1749,7 +1800,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: project.standard_profile().map(|profile| {
                     // Verify the full graph-bound bundle in the durable
                     // evaluator while loading only import-reachable modules.
@@ -1764,6 +1815,19 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             negative_cases: Vec::new(),
         },
     }
+}
+
+/// The bounded pure path receives reachable standard modules through
+/// `load_standard_sources`, which verifies them against the captured profile.
+/// The project unit therefore carries neither those source units nor a
+/// standard dependency that the bounded evaluator would reject.
+fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let mut execution = execution_project(project);
+    execution
+        .modules
+        .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
+    execution.expectations.environment.stdlib = None;
+    execution
 }
 
 fn runtime_identity(
@@ -1864,6 +1928,7 @@ fn run_project_function(
             endpoint,
             target,
             &execution,
+            sys_host::std_snapshot_pin(&project),
             color_enabled,
         );
     }
@@ -1885,7 +1950,13 @@ fn run_project_stream_invocation(
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
+    run_project_stream_invocation_with_project(
+        endpoint,
+        root_entry,
+        &execution,
+        sys_host::std_snapshot_pin(&project),
+        color_enabled,
+    )
 }
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
@@ -1926,6 +1997,7 @@ fn run_project_invocation_with_arguments(
             "retry the durable project invocation",
         )
     })?;
+    let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
     let owner_id = invocation_owner_id(identity);
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -1939,19 +2011,26 @@ fn run_project_invocation_with_arguments(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_request_with_arguments(
-                orna_conformance_v1::RuntimeTarget {
-                    repository: &repository,
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
                     identity,
-                    owner_id,
-                    initial_digest,
-                },
-                request,
-                fingerprint,
-                &project,
-                root_entry,
-                arguments,
-            ),
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_request_with_arguments(
+                    orna_conformance_v1::RuntimeTarget {
+                        repository: &repository,
+                        identity,
+                        owner_id,
+                        initial_digest,
+                    },
+                    request,
+                    fingerprint,
+                    &project,
+                    root_entry,
+                    arguments,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -1962,15 +2041,24 @@ fn run_project_invocation_with_arguments(
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => {
-            let mut rejection = Diagnostic::target(
-                "E2200",
-                "durable project invocation was rejected",
-                "the project transaction failed atomically; no partial changes were committed",
-            );
-            rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
-            Err(rejection)
-        }
+        StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
+            Some(mut published) => {
+                published.detail = Some(
+                    "the project transaction failed atomically; no partial changes were committed"
+                        .into(),
+                );
+                published
+            }
+            None => {
+                let mut rejection = Diagnostic::target(
+                    "E2200",
+                    "durable project invocation was rejected",
+                    "the project transaction failed atomically; no partial changes were committed",
+                );
+                rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+                rejection
+            }
+        }),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -1989,6 +2077,7 @@ fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    std_snapshot: StdSnapshotPin,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -2012,14 +2101,21 @@ fn run_project_stream_invocation_with_project(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_stream(
-                &repository,
-                identity,
-                owner_id,
-                initial_digest,
-                project,
-                root_entry,
-            ),
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
+                    identity,
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_stream(
+                    &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                    project,
+                    root_entry,
+                ),
         )
         .map_err(|_| {
             Diagnostic::target(
@@ -2042,12 +2138,32 @@ fn run_project_stream_invocation_with_project(
         )),
     }
 }
+
+/// Publishes a runtime failure under its catalogued Orna code, with the
+/// catalogue title and help. Uncatalogued evaluator codes return `None` so each
+/// caller keeps its own fallback; no unpublished code is promoted.
+fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Option<Diagnostic> {
+    let documentation = diagnostic_documentation(diagnostic.code())?;
+    Some(Diagnostic {
+        code: documentation.code,
+        title: Cow::Borrowed(documentation.title),
+        help: documentation.help,
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    })
+}
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    // Single-module projects that import pinned standard modules keep the
+    // authority route only when they need publication metadata; the authority
+    // admits only the user module and cannot load standard bodies. Pure ones take
+    // the bounded path below, which loads those bodies through the verified profile.
+    let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
@@ -2060,7 +2176,7 @@ fn run_pure_invocation(
         if identity.namespace() == namespace {
             let authority =
                 ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
-            let admitted = authority
+            let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
                     Diagnostic::target_with_detail(
@@ -2069,9 +2185,22 @@ fn run_pure_invocation(
                         "fix the first reported source contract error, then run check again",
                         error.to_string(),
                     )
-                })?;
+                });
+            let admitted = match admission {
+                Ok(admitted) => Some(admitted),
+                // The bounded path reports the analysis error for std-importing projects.
+                Err(_) if std_imports => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(admitted) = admitted
+                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+            {
             if admitted.requires_publication_metadata() {
-                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
+                let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                    endpoint,
+                    sys_host::std_snapshot_pin(&project),
+                )?;
+                let authority = authority.with_sys_host_context(sys_host_context);
                 let activation = authority
                     .evaluate_staged_with_publication_rows(
                         &admitted,
@@ -2093,6 +2222,11 @@ fn run_pure_invocation(
                     ));
                 }
             } else {
+                let std_snapshot = sys_host::std_snapshot_pin(&project);
+                let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                    Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                    None => authority,
+                };
                 authority
                     .evaluate(&admitted, &Environment::new())
                     .map_err(|error| {
@@ -2106,6 +2240,7 @@ fn run_pure_invocation(
             }
             write_success_line("invocation completed", color_enabled)?;
             return Ok(());
+            }
         }
     }
     let catalogue = semantic_catalogue(&project)?;
@@ -2119,10 +2254,47 @@ fn run_pure_invocation(
     }
 
     let mut evaluator = BoundedEvaluator::default();
-    match evaluator.evaluate_project(&execution_project(&project)) {
+    if let Some(profile) = project.standard_profile() {
+        // Admission supplies the runtime-reachable closure (requested roots plus
+        // `main`) and the profile must accept exactly that key set, so every
+        // supplied module digest is verified before any body is evaluated.
+        let sources = project.standard_sources().to_vec();
+        match evaluator.load_standard_sources(profile, sources) {
+            StageOutcome::Passed => {}
+            StageOutcome::Cancelled(diagnostic) => {
+                return Err(cancellation_diagnostic(&diagnostic));
+            }
+            StageOutcome::Failed(diagnostic) => {
+                return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                    Diagnostic::target_with_detail(
+                        "ORNA-S010-IMPORT",
+                        "imported module is unavailable",
+                        "use a captured standard dependency or remove the import",
+                        format!("standard dependency load rejected with {}", diagnostic.code()),
+                    )
+                }));
+            }
+            StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                ));
+            }
+        }
+    }
+    match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+        StageOutcome::Failed(diagnostic) => {
+            return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "one-shot invocation requires an executable function-only project",
+                    "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
+                )
+            }));
+        }
+        StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
                 "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
@@ -2132,7 +2304,11 @@ fn run_pure_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| Diagnostic::unavailable(
+            "requested invocation is not available",
+            "define a reachable zero-argument pure function with the requested name",
+        ))),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
@@ -2246,7 +2422,14 @@ fn repl_transactions(
         project,
         commit,
         format_context,
-        authority: ApplicationAuthority::new(catalogue, Limits::default()),
+        authority: ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
+            sys_host::sys_host_context(
+                repository.worktree(),
+                identity,
+                RuntimeMode::Repl,
+                sys_host::std_snapshot_pin(workspace_project),
+            ),
+        ),
         runtime,
         identity,
         initial_digest,
@@ -2273,6 +2456,22 @@ fn same_repl_project_inputs(
         && workspace.standard_modules() == committed.standard_modules()
 }
 
+/// The activation facts a project REPL session reports through
+/// `sys.rt.info()`. `None` leaves the session unattached, so the evaluator
+/// reports `sys.version.incompatible` rather than inventing host facts.
+fn repl_sys_host_context(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Option<SysHostContext> {
+    let (identity, _) = runtime_identity(repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Repl,
+        sys_host::std_snapshot_pin(project),
+    ))
+}
+
 fn repl_runtime(
     repository: Option<orna_repository_v1::Repository>,
 ) -> Result<ReplRuntime, Diagnostic> {
@@ -2286,6 +2485,10 @@ fn repl_runtime(
             Limits::default(),
         )
             .map_err(|error| repl_session_error(&error))?;
+        let session = match repl_sys_host_context(repository, &project) {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        };
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
     } else {
@@ -2360,15 +2563,22 @@ impl ReplSnapshotSessionLoader<'_> {
         self.repository.ok_or(())
     }
 
-    fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
+    fn admit(&self, project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
         // Admit the project's own pinned standard sources; uncaptured imports
         // remain inadmissible because the project has no standard profile.
-        AdmittedReplSession::from_loaded_project(
+        let session = AdmittedReplSession::from_loaded_project(
             project,
             project.standard_sources().iter().cloned(),
             Limits::default(),
         )
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+        let context = self
+            .repository
+            .and_then(|repository| repl_sys_host_context(repository, project));
+        Ok(match context {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        })
     }
 }
 
@@ -2384,7 +2594,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load(self.repository()?)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
@@ -2392,7 +2602,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Ref(reference) => {
                 let repository = self.repository()?;
@@ -2400,7 +2610,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
         };
         self.host_bindings.borrow_mut().take();
@@ -2826,6 +3036,25 @@ fn initialize_repository(
         .map_err(|error| repository_init_diagnostic(&error))?;
     write_success_line("initialized Orna repository", color_enabled)
 }
+/// Maps a fetch failure to its documented exit status: an unavailable remote is a
+/// connection failure (3) and a malformed advertisement is a protocol failure (7);
+/// every other fetch refusal keeps the target status.
+fn fetch_failure(error: &orna_repository_v1::FetchError) -> Diagnostic {
+    let exit = match error {
+        orna_repository_v1::FetchError::RemoteUnavailable => Exit::Connection,
+        orna_repository_v1::FetchError::MalformedAdvertisement => Exit::Protocol,
+        _ => Exit::Target,
+    };
+    Diagnostic {
+        code: "E2100",
+        title: Cow::Borrowed("Git fetch failed"),
+        help: "check the configured remote and retry `fetch`",
+        exit,
+        detail: Some(error.to_string()),
+        body: None,
+    }
+}
+
 fn run_fetch(
     endpoint: &Endpoint,
     remote: &str,
@@ -2852,14 +3081,7 @@ fn run_fetch(
     )?;
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "Git fetch failed",
-                "check the configured remote and retry `fetch`",
-                error.to_string(),
-            )
-        })?;
+        .map_err(|error| fetch_failure(&error))?;
     if let Some(continuity) = report.continuity() {
         if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);

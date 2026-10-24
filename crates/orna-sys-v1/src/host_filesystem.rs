@@ -42,6 +42,10 @@ pub enum CaptureFileError {
     UnauthorizedRoot,
     InvalidPath,
     SourceUnavailable,
+    /// The requested byte bound is negative or otherwise outside the range a
+    /// capture length can take (`sys.blob.bounds`). Callers that accept an
+    /// `Int` bound construct this before the provider is reached.
+    BoundOutOfRange,
     LimitExceeded,
     SourceChanged,
 }
@@ -57,6 +61,7 @@ impl CaptureFileError {
             Self::UnauthorizedRoot | Self::InvalidPath | Self::SourceUnavailable => {
                 "sys.blob.source_denied"
             }
+            Self::BoundOutOfRange => "sys.blob.bounds",
             Self::LimitExceeded => "sys.blob.limit",
             Self::SourceChanged => "sys.blob.source_changed",
         }
@@ -94,8 +99,10 @@ impl FilesystemProviderError {
 /// one component at a time and acts on the final entry through its open parent
 /// directory, so renaming the root or swapping a component for a symbolic link
 /// can make an operation fail but cannot redirect it outside the root.
-/// Absolute paths, parent traversal, symbolic links and Git metadata (`.git`,
-/// in any letter case and at any depth) are refused; only `symlink_metadata`
+/// Absolute paths, parent traversal, symbolic links and Git metadata names are
+/// refused at any depth: `.git` in any letter case and the Windows and macOS
+/// spellings Git refuses, such as `.git.` and `git~1` (see
+/// [`orna_foundation_v1::is_git_metadata_component`]). Only `symlink_metadata`
 /// reports a final link, without following it. Platforms without a
 /// handle-relative implementation refuse every operation as unavailable.
 #[derive(Clone, Debug)]
@@ -545,7 +552,9 @@ impl<'a> RootedPath<'a> {
         let path = Path::new(path);
         for component in path.components() {
             match component {
-                Component::Normal(name) if !is_git_metadata(name.as_encoded_bytes()) => {}
+                Component::Normal(name)
+                    if !orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes()) => {
+                }
                 Component::CurDir => {}
                 Component::Normal(_)
                 | Component::ParentDir
@@ -564,13 +573,6 @@ impl<'a> RootedPath<'a> {
             _ => None,
         })
     }
-}
-
-/// Git's metadata directory, or a linked worktree's `.git` file, is never part
-/// of a granted root. Every letter case is refused, as Git itself refuses
-/// them, because case-insensitive filesystems treat them as one name.
-fn is_git_metadata(name: &[u8]) -> bool {
-    name.eq_ignore_ascii_case(b".git")
 }
 
 /// Handle-relative implementations of every filesystem operation.
@@ -595,7 +597,7 @@ mod beneath {
         io::Errno,
     };
 
-    use super::{CaptureFileError, FilesystemProviderError, RootedPath, is_git_metadata};
+    use super::{CaptureFileError, FilesystemProviderError, RootedPath};
 
     /// Opens one directory component, never through a link.
     const DIRECTORY: OFlags = OFlags::RDONLY
@@ -897,7 +899,7 @@ mod beneath {
         while let Some(entry) = entries.read() {
             let entry = entry.map_err(filesystem_failure)?;
             let name = entry.file_name().to_bytes();
-            if matches!(name, b"." | b"..") || is_git_metadata(name) {
+            if matches!(name, b"." | b"..") || orna_foundation_v1::is_git_metadata_component(name) {
                 continue;
             }
             if names.len() == max_entries {

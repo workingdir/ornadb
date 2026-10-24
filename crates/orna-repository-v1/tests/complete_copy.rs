@@ -740,3 +740,42 @@ fn complete_copy_reconstructs_large_blob_after_source_and_origin_are_gone() {
     let restored_sha256: [u8; 32] = hasher.finalize().into();
     assert_eq!(restored_sha256, expected_sha256, "restored raw blob hash");
 }
+
+#[test]
+fn complete_copy_refuses_a_dependency_path_that_names_git_metadata() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+    let archive = root.path().join("archive");
+    export_complete_copy(&repository, "HEAD", &archive, &[]).expect("export complete copy");
+    let document = fs::read_to_string(archive.join("manifest.tsv")).expect("read manifest");
+
+    // Restore fetches each dependency into its path inside the copy and
+    // materialising checks it out there, so a `.git` path would write the
+    // dependency's files, hooks included, into a Git directory.
+    for (index, hostile) in [".git", "deps/.git", "deps/.GIT", "deps/git~1"]
+        .into_iter()
+        .enumerate()
+    {
+        let tampered = root.path().join(format!("tampered-{index}"));
+        copy_archive(&archive, &tampered);
+        let tampered_document =
+            document.replace("dependency\tdeps/std\t", &format!("dependency\t{hostile}\t"));
+        assert_ne!(tampered_document, document, "the dependency path changed");
+        fs::write(tampered.join("manifest.tsv"), &tampered_document).expect("write manifest");
+        let destination = root.path().join(format!("copy-{index}"));
+        let error = restore_complete_copy(&tampered, &destination)
+            .expect_err("a dependency path naming git metadata is refused");
+        assert!(
+            matches!(
+                error,
+                orna_repository_v1::complete_copy::CompleteCopyError::InvalidArchive(
+                    "dependency line"
+                )
+            ),
+            "{hostile:?} is refused while the manifest is read: {error}"
+        );
+        assert!(!destination.exists(), "nothing is restored for {hostile:?}");
+    }
+}
