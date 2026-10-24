@@ -45,16 +45,19 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
     ] {
         command.env_remove(name);
     }
-    command.args(arguments).output().expect("CLI process starts")
+    command
+        .args(arguments)
+        .output()
+        .expect("CLI process starts")
 }
 
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("Git output is UTF-8")
 }
 
-/// A repository whose committed `HEAD` records an unknown format, with
-/// format-3 metadata written over it in the worktree only.
-fn unknown_head_with_format_three_worktree() -> TempDir {
+/// Commits `committed` under `.orna/` on `HEAD` of a fresh repository, then
+/// writes `worktree_database` over `.orna/database.orna` in the worktree only.
+fn repository_with_head(committed: &[(&str, &str)], worktree_database: &str) -> TempDir {
     let directory = TempDir::new().expect("temporary repository");
     let root = directory.path();
     git(root, &["init", "--quiet", "--initial-branch=main"]);
@@ -63,16 +66,22 @@ fn unknown_head_with_format_three_worktree() -> TempDir {
     git(root, &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("main.orna"), "pub fn main(): Int = 42;\n").unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
-    fs::write(root.join(".orna/database.orna"), UNKNOWN_HEAD_FORMAT_RECORD).unwrap();
+    for (name, content) in committed {
+        fs::write(root.join(".orna").join(name), content).unwrap();
+    }
     git(root, &["add", "."]);
-    git(root, &["commit", "--quiet", "-m", "unknown format snapshot"]);
+    git(
+        root,
+        &["commit", "--quiet", "-m", "committed format snapshot"],
+    );
 
-    fs::write(
-        root.join(".orna/database.orna"),
-        format!("{{\n    repository_format: 3,\n    database_id: \"{DATABASE_ID}\",\n}}\n"),
-    )
-    .unwrap();
+    fs::write(root.join(".orna/database.orna"), worktree_database).unwrap();
     directory
+}
+
+/// A format-3 `database.orna` for [`DATABASE_ID`].
+fn format_three_database() -> String {
+    format!("{{\n    repository_format: 3,\n    database_id: \"{DATABASE_ID}\",\n}}\n")
 }
 
 /// Every byte of the local runtime state, so a refused run can prove it
@@ -110,7 +119,10 @@ fn git_state(root: &Path) -> (String, String, String) {
 /// and before any existing runtime state is opened or changed.
 #[tokio::test]
 async fn run_refuses_unknown_committed_format() {
-    let directory = unknown_head_with_format_three_worktree();
+    let directory = repository_with_head(
+        &[("database.orna", UNKNOWN_HEAD_FORMAT_RECORD)],
+        &format_three_database(),
+    );
     let root = directory.path();
     let repository = Repository::discover(root).unwrap();
 
@@ -126,8 +138,7 @@ async fn run_refuses_unknown_committed_format() {
     let runtime_before = runtime_state_files(&repository);
     let git_before = git_state(root);
 
-    let Err(RuntimeError::UnknownHeadFormat(refusal)) =
-        repository_runtime_identity(&repository)
+    let Err(RuntimeError::UnknownHeadFormat(refusal)) = repository_runtime_identity(&repository)
     else {
         panic!("a committed unknown HEAD format must refuse runtime admission");
     };
@@ -143,4 +154,54 @@ async fn run_refuses_unknown_committed_format() {
     );
     assert_eq!(git_state(root), git_before);
     assert_eq!(runtime_state_files(&repository), runtime_before);
+}
+
+/// Every committed `HEAD` shape that names a format this build does not know
+/// is refused at admission, whatever its other fields, and whatever format-3
+/// metadata the worktree holds (ORNA-UPGRADE-001).
+#[test]
+fn refuses_every_unknown_committed_head_shape() {
+    let format_four_with_extra_field = format!(
+        "{{\n    repository_format: 4,\n    database_id: \"{DATABASE_ID}\",\n    profile: \"extra\",\n}}\n"
+    );
+    let shapes: [(&str, &str, String); 3] = [
+        (
+            "database.orna",
+            "format 4 with an extra field",
+            format_four_with_extra_field,
+        ),
+        (
+            "database.orna",
+            "format 99 without database_id",
+            "{\n    repository_format: 99,\n}\n".to_owned(),
+        ),
+        (
+            "format.orna",
+            "legacy format.orna naming format 4",
+            "{\n    repository_format: 4,\n}\n".to_owned(),
+        ),
+    ];
+    for (file, label, content) in shapes {
+        let directory = repository_with_head(&[(file, content.as_str())], &format_three_database());
+        let repository = Repository::discover(directory.path()).unwrap();
+        let Err(RuntimeError::UnknownHeadFormat(refusal)) =
+            repository_runtime_identity(&repository)
+        else {
+            panic!("{label}: a committed unknown HEAD format must refuse runtime admission");
+        };
+        assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-003", "{label}");
+    }
+}
+
+/// A committed format-3 `HEAD` still admits the runtime through the normal
+/// identity path once the HEAD gate has passed.
+#[test]
+fn admits_committed_format_three_head() {
+    let database = format_three_database();
+    let directory = repository_with_head(&[("database.orna", database.as_str())], &database);
+    let repository = Repository::discover(directory.path()).unwrap();
+    assert!(
+        repository_runtime_identity(&repository).is_ok(),
+        "a committed format-3 HEAD must admit the runtime"
+    );
 }

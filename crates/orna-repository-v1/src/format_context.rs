@@ -1596,7 +1596,11 @@ fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextEr
             .count()
             != 1
     {
-        return Err(FormatContextError::MetadataInvalid);
+        return Err(if declares_unknown_format(&fields) {
+            FormatContextError::UnknownFormat
+        } else {
+            FormatContextError::MetadataInvalid
+        });
     }
     let repository_format = fields
         .iter()
@@ -1660,11 +1664,32 @@ const LEGACY_FORMAT_RECORDS: [(RepositoryFormat, &[(&str, LegacyRecordValue)]); 
 
 pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
     let fields = parse_record(bytes).map_err(|()| FormatContextError::MetadataInvalid)?;
-    LEGACY_FORMAT_RECORDS
+    if let Some(format) = LEGACY_FORMAT_RECORDS
         .iter()
         .find(|(_, expected)| is_closed_record(&fields, expected))
         .map(|(format, _)| *format)
-        .ok_or(FormatContextError::MetadataInvalid)
+    {
+        return Ok(format);
+    }
+    Err(if declares_unknown_format(&fields) {
+        FormatContextError::UnknownFormat
+    } else {
+        FormatContextError::MetadataInvalid
+    })
+}
+
+/// Repository format numbers this build reads: 1 and 2 are legacy, 3 is final.
+const KNOWN_REPOSITORY_FORMATS: [i64; 3] = [1, 2, 3];
+
+/// Whether a parsed `.orna` record declares a `repository_format` integer that
+/// no format this build knows names (ORNA-UPGRADE-001). Such a record is
+/// refused as an unknown format, whatever its other fields.
+fn declares_unknown_format(fields: &[RecordField]) -> bool {
+    fields
+        .iter()
+        .filter(|field| field.name == "repository_format")
+        .filter_map(|field| integer_literal(&field.value))
+        .any(|format| !KNOWN_REPOSITORY_FORMATS.contains(&format))
 }
 
 /// Whether `fields` holds each expected field exactly once, with its value,
