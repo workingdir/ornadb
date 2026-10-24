@@ -64,14 +64,12 @@ pub enum Error {
     InvalidMessage,
     UnknownMandatoryExtension,
     InvalidValue,
-    UnsupportedValueProfile,
 }
 
 impl Error {
     pub const fn code(self) -> &'static str {
         match self {
             Self::Limit => "wire.limit",
-            Self::UnsupportedValueProfile => "sys.codec.unsupported_value_profile",
             Self::Unsupported | Self::UnknownMandatoryExtension => "wire.unsupported",
             _ => "wire.invalid_message",
         }
@@ -1651,7 +1649,7 @@ fn validate_diagnostic(node: &Node) -> Result<()> {
 
 fn canonical_value(node: &Node) -> Result<CanonicalValue> {
     if contains_profile_tag(node) {
-        return Err(Error::UnsupportedValueProfile);
+        return Err(Error::InvalidValue);
     }
     if contains_protected_value(node) {
         return Err(Error::InvalidValue);
@@ -1678,8 +1676,9 @@ fn contains_protected_value(node: &Node) -> bool {
 }
 
 /// Format-3 profile tags 60110..=60113 (`orna_value_v1::OVB2_BLOB_TAG` through
-/// `ROV3_OVERFLOW_TAG`) are not portable wire values; the wire refuses them
-/// with the sys profile code rather than a generic invalid-tag error.
+/// `ROV3_OVERFLOW_TAG`) are not portable wire values; the wire refuses them as
+/// `wire.invalid_message` before any effect. The sys profile code stays at the
+/// sys/value/evaluator layers (SPEC-QUESTIONS.md).
 fn contains_profile_tag(node: &Node) -> bool {
     match node {
         Node::Tag(tag, value) => matches!(*tag, 60_110..=60_113) || contains_profile_tag(value),
@@ -3841,25 +3840,43 @@ mod tests {
 
     #[test]
     fn legacy_wire_rejects_format3_blob_tags() {
-        // OVB-2/ROV-3/SOV-3 blob profile tags (60110..=60113) are not portable
-        // wire values, at top level or nested in a result, event or property.
-        for tag in 60_110..=60_113 {
-            let direct = Node::Tag(tag, Box::new(Node::Text("x".into())));
+        // OVB-2/ROV-3/SOV-3 profile tags (60110..=60113) are not portable wire
+        // values. The protocol keeps its existing outcome: the envelope is
+        // rejected at decode, before any effect, as wire.invalid_message.
+        let request = Envelope {
+            request: Some(id(1)),
+            watch: Some(id(2)),
+            message: Message::Event {
+                revision: 0,
+                action: id(3),
+                value: value(),
+                fingerprint: digest(1),
+            },
+            extensions: BTreeMap::new(),
+        };
+        let encoded = request.encode(Limits::default()).unwrap();
+        assert_eq!(Envelope::decode(&encoded, Limits::default()).unwrap(), request);
+        // The event value is the text "ok" (0x62 'o' 'k'); replace it with each
+        // profile tag wrapping null, keeping the surrounding envelope bytes.
+        let text_ok = [0x62, b'o', b'k'];
+        let positions: Vec<usize> = encoded
+            .windows(text_ok.len())
+            .enumerate()
+            .filter(|(_, window)| *window == text_ok)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 1, "event value must be unique in the envelope");
+        for tag in 60_110_u16..=60_113 {
+            let [hi, lo] = tag.to_be_bytes();
+            let mut tampered = encoded[..positions[0]].to_vec();
+            tampered.extend_from_slice(&[0xD9, hi, lo, 0xF6]);
+            tampered.extend_from_slice(&encoded[positions[0] + text_ok.len()..]);
             assert_eq!(
-                canonical_value(&direct),
-                Err(Error::UnsupportedValueProfile),
+                Envelope::decode(&tampered, Limits::default()),
+                Err(Error::InvalidValue),
                 "tag {tag}"
             );
-            let nested = Node::Array(vec![Node::Map(vec![(
-                Node::Text("asset".into()),
-                Node::Tag(tag, Box::new(Node::Null)),
-            )])]);
-            assert_eq!(
-                canonical_value(&nested),
-                Err(Error::UnsupportedValueProfile),
-                "nested tag {tag}"
-            );
-            assert_eq!(Error::UnsupportedValueProfile.code(), "sys.codec.unsupported_value_profile");
+            assert_eq!(Error::InvalidValue.code(), "wire.invalid_message");
         }
     }
 
