@@ -136,6 +136,9 @@ jobs:
       - name: Prove representation-independent Blob equality
         run: cargo test --locked -p orna-evaluator-v1 --lib blob_equality_ignores_representation_and_respects_annotation
 
+      - name: Prove sys.blob reflection on ROV-3 descriptor-only and self-equality
+        run: cargo test --locked -p orna-evaluator-v1 --lib rov3_descriptor_only_is_unavailable_and_self_equal
+
       - name: Prove final-vector VFS path components
         run: cargo test --locked -p orna-runtime-v1 --test final_vector_paths
 
