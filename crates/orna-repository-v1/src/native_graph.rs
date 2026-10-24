@@ -1670,27 +1670,7 @@ impl NativeGraphContext {
             .key()
             .canonical_bytes()
             .map_err(|_| GraphError::NonCanonicalData)?;
-        let canonical_fields = match row.value() {
-            crate::row_store::RowValue::Inline { encoded, .. } => {
-                scope.charge_structured_metadata_read(encoded.len() as u64)?;
-                encoded.clone()
-            }
-            crate::row_store::RowValue::Overflow(reference) => {
-                let root = reference
-                    .native_root()
-                    .ok_or(GraphError::UnsupportedRowValueForm)?;
-                let mut objects = ObjectBudget::new(
-                    scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
-                    scope.max_objects,
-                    Arc::clone(&scope.objects_used),
-                    scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
-                    Arc::clone(&scope.metadata_used),
-                );
-                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
-                    .encoded_value
-                    .ok_or(GraphError::ContextMismatch)?
-            }
-        };
+        let canonical_fields = self.stored_row_fields(row, scope)?;
 
         binding
             .descriptor()
@@ -1720,6 +1700,38 @@ impl NativeGraphContext {
             canonical_fields,
             fields,
         })
+    }
+
+    /// The complete canonical ROV3 field tuple of one row of this graph. An
+    /// inline value is its own encoding; an overflow value is read back from
+    /// its verified kind-3 node. Blob payload chunks are never fetched.
+    pub(crate) fn stored_row_fields(
+        &self,
+        row: &crate::row_store::AdmittedRow,
+        scope: &RepositoryReadScope,
+    ) -> Result<Vec<u8>, GraphError> {
+        scope.authorize(self)?;
+        match row.value() {
+            crate::row_store::RowValue::Inline { encoded, .. } => {
+                scope.charge_structured_metadata_read(encoded.len() as u64)?;
+                Ok(encoded.clone())
+            }
+            crate::row_store::RowValue::Overflow(reference) => {
+                let root = reference
+                    .native_root()
+                    .ok_or(GraphError::UnsupportedRowValueForm)?;
+                let mut objects = ObjectBudget::new(
+                    scope.max_objects.min(MAX_FULL_VERIFY_OBJECTS),
+                    scope.max_objects,
+                    Arc::clone(&scope.objects_used),
+                    scope.metadata_quota.min(MAX_FULL_METADATA_BYTES),
+                    Arc::clone(&scope.metadata_used),
+                );
+                self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)
+            }
+        }
     }
 
     fn decode_persisted_row_value(
@@ -4667,7 +4679,7 @@ fn git_tree_cmp(left: &ParsedGitTreeEntry, right: &ParsedGitTreeEntry) -> std::c
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -4675,6 +4687,23 @@ fn hex_encode(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+/// The inverse of [`hex_encode`]: exactly its lowercase, even-length
+/// spelling, so every byte string has one accepted form.
+pub(crate) fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    let digit = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    };
+    let (pairs, []) = text.as_bytes().as_chunks::<2>() else {
+        return None;
+    };
+    pairs
+        .iter()
+        .map(|[high, low]| Some((digit(*high)? << 4) | digit(*low)?))
+        .collect()
 }
 
 fn scratch_content_ref(owner_id: &[u8; 16], pin_id: &[u8; 16]) -> String {

@@ -7,6 +7,11 @@
 //! *evaluator* record is a canonical map from field name to value, key fields
 //! included. The functions here perform these conversions for committed-table reads and
 //! evaluator-form mutations; `orna-storage-v1` keeps its own descriptor-level projection.
+//!
+//! A stored tuple keeps each ROV-3 Blob reference exactly as committed. That
+//! reference has no portable evaluator value, so an evaluator record carries
+//! [`blob_placeholder`] in its place, and [`restore_stored_blobs`] writes the
+//! committed reference back when the row is stored again.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -16,7 +21,9 @@ use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, KeyRange, Repository, RepositoryFormatContext};
 use orna_runtime_v1::TableObjectId;
 use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
-use orna_value_v1::{decode_canonical_storage_value, Raw, Value};
+use orna_value_v1::{
+    decode_canonical_storage_value, encode_canonical_storage_value, Raw, Value, ROV3_BLOB_TAG,
+};
 
 use crate::ProjectLoader;
 
@@ -37,8 +44,19 @@ impl std::error::Error for TableStorageError {}
 pub struct CommittedTable {
     /// Stored-field names in the order every stored tuple lists its values.
     pub storage_order: Vec<String>,
-    /// `(runtime key, stored tuple)` pairs in ascending runtime-key order.
+    /// `(runtime key, stored tuple)` pairs in ascending runtime-key order. A
+    /// stored tuple is the committed one, Blob references included.
     pub rows: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl CommittedTable {
+    /// The committed stored tuple of the row at `runtime_key`.
+    pub fn stored_row(&self, runtime_key: &[u8]) -> Option<&[u8]> {
+        self.rows
+            .binary_search_by(|(key, _)| key.as_slice().cmp(runtime_key))
+            .ok()
+            .map(|index| self.rows[index].1.as_slice())
+    }
 }
 
 /// Reads every table's committed rows at `commit`, keyed in the runtime keyspace.
@@ -81,16 +99,18 @@ pub fn committed_tables(
             }
             let next_lower = page.last().map(|row| row.key().clone());
             for row in page.into_iter().skip(usize::from(lower.is_some())) {
+                // The committed descriptor validates the whole stored tuple,
+                // Blob references included, so the tuple is kept as stored.
                 let decoded = graph
                     .decode_admitted_row_fields(&row, binding, &read_scope)
                     .map_err(|_| TableStorageError)?;
-                let Raw::Array(stored_values) =
-                    decode_canonical_storage_value(decoded.canonical_fields())
-                        .map_err(|_| TableStorageError)?
-                else {
-                    return Err(TableStorageError);
-                };
-                if stored_values.len() != decoded.fields().len() {
+                if decoded.fields().len() != storage_order.len()
+                    || decoded
+                        .fields()
+                        .iter()
+                        .zip(&storage_order)
+                        .any(|(field, name)| field_names.get(field.field_id()) != Some(name))
+                {
                     return Err(TableStorageError);
                 }
                 let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
@@ -99,22 +119,10 @@ pub fn committed_tables(
                 // Reject a key whose shape does not match the primary key declaration.
                 key_values(admission.keys.len(), key_value.raw())?;
                 let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
-                let mut by_name = BTreeMap::new();
-                for (field, value) in decoded.fields().iter().zip(stored_values) {
-                    let name = field_names.get(field.field_id()).ok_or(TableStorageError)?;
-                    Value::new(value.clone()).map_err(|_| TableStorageError)?;
-                    if by_name.insert(name.clone(), value).is_some() {
-                        return Err(TableStorageError);
-                    }
-                }
-                let storage_row = storage_order
-                    .iter()
-                    .map(|name| by_name.remove(name).ok_or(TableStorageError))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let row_value = Value::new(Raw::Array(storage_row))
-                    .and_then(|value| value.encode())
-                    .map_err(|_| TableStorageError)?;
-                if committed.insert(runtime_key, row_value).is_some() {
+                if committed
+                    .insert(runtime_key, decoded.canonical_fields().to_vec())
+                    .is_some()
+                {
                     return Err(TableStorageError);
                 }
             }
@@ -135,6 +143,7 @@ pub fn committed_tables(
 }
 
 /// Converts one table's runtime rows into evaluator records, ordered by evaluator key.
+/// Each present Blob field reads as its [`blob_placeholder`].
 pub fn evaluator_rows(
     table: &CommittedTable,
     schema: &TableSchema,
@@ -142,11 +151,12 @@ pub fn evaluator_rows(
     let (key_names, text_primary_key) = evaluator_keying(schema)?;
     let mut rows = BTreeMap::new();
     for (runtime_key, storage_row) in &table.rows {
+        let storage_row = portable_storage_row(storage_row, &table.storage_order, schema)?;
         let (key_bytes, record) = evaluator_row_with_keying(
             &key_names,
             text_primary_key,
             runtime_key,
-            storage_row,
+            &storage_row,
             &table.storage_order,
         )?;
         if rows.insert(key_bytes, record).is_some() {
@@ -178,6 +188,135 @@ fn evaluator_row_with_keying(
     let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
     let record = evaluator_record(key_names, &key_bytes, storage_order, storage_row)?;
     Ok((key_bytes, record))
+}
+
+/// The OVB tag of an option value: `[0]` when absent, `[1, value]` when present.
+const OPTION_TAG: u64 = 60_013;
+
+/// Whether a field of this type stores a Blob reference when present: a
+/// `Blob` field always does, and a `Blob?` field unless it is absent.
+pub fn holds_blob(ty: &Type) -> bool {
+    let is_blob = |ty: &Type| matches!(ty, Type::Named(name) if name == "Blob");
+    match ty {
+        Type::Optional(inner) => is_blob(inner.as_ref()),
+        _ => is_blob(ty),
+    }
+}
+
+/// The portable evaluator value that stands in for a present Blob of a field
+/// typed `ty`: an empty byte string, wrapped as the present option for `Blob?`.
+pub fn blob_placeholder(ty: &Type) -> Raw {
+    let placeholder = Raw::Bytes(Vec::new());
+    if matches!(ty, Type::Optional(_)) {
+        Raw::Tag(
+            OPTION_TAG,
+            Box::new(Raw::Array(vec![Raw::Int(BigInt::from(1)), placeholder])),
+        )
+    } else {
+        placeholder
+    }
+}
+
+/// The present value a Blob-holding field stores, or `None` for an absent
+/// `Blob?`.
+fn present_blob<'a>(ty: &Type, value: &'a Raw) -> Result<Option<&'a Raw>, TableStorageError> {
+    if !matches!(ty, Type::Optional(_)) {
+        return Ok(Some(value));
+    }
+    let Raw::Tag(OPTION_TAG, option) = value else {
+        return Err(TableStorageError);
+    };
+    let Raw::Array(parts) = option.as_ref() else {
+        return Err(TableStorageError);
+    };
+    match parts.as_slice() {
+        [Raw::Int(state)] if *state == BigInt::from(0) => Ok(None),
+        [Raw::Int(state), present] if *state == BigInt::from(1) => Ok(Some(present)),
+        _ => Err(TableStorageError),
+    }
+}
+
+/// One stored tuple in portable form: each present Blob reference becomes its
+/// [`blob_placeholder`], and every other value must already be portable.
+fn portable_storage_row(
+    storage_row: &[u8],
+    storage_order: &[String],
+    schema: &TableSchema,
+) -> Result<Vec<u8>, TableStorageError> {
+    let Raw::Array(values) =
+        decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+    else {
+        return Err(TableStorageError);
+    };
+    if values.len() != storage_order.len() {
+        return Err(TableStorageError);
+    }
+    let values = values
+        .into_iter()
+        .zip(storage_order)
+        .map(|(value, name)| {
+            let ty = schema.fields.get(name).ok_or(TableStorageError)?;
+            if !holds_blob(ty) {
+                return Ok(value);
+            }
+            match present_blob(ty, &value)? {
+                Some(Raw::Tag(ROV3_BLOB_TAG, _)) => Ok(blob_placeholder(ty)),
+                Some(_) => Err(TableStorageError),
+                None => Ok(value),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::new(Raw::Array(values))
+        .and_then(|value| value.encode())
+        .map_err(|_| TableStorageError)
+}
+
+/// Writes committed Blob references back into a stored tuple projected from an
+/// evaluator record. `source` is the stored tuple of the row the record was
+/// read from, if any. A field holding its [`blob_placeholder`] takes that row's
+/// committed reference unchanged, and an absent `Blob?` stays absent. Any
+/// other Blob field value is rejected: an evaluator record cannot name a
+/// stored Blob reference of its own.
+pub fn restore_stored_blobs(
+    stored: &[u8],
+    storage_order: &[String],
+    schema: &TableSchema,
+    source: Option<&[u8]>,
+) -> Result<Vec<u8>, TableStorageError> {
+    let types = storage_order
+        .iter()
+        .map(|name| schema.fields.get(name).ok_or(TableStorageError))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !types.iter().any(|ty| holds_blob(ty)) {
+        return Ok(stored.to_vec());
+    }
+    let decode = |bytes: &[u8]| match decode_canonical_storage_value(bytes) {
+        Ok(Raw::Array(values)) if values.len() == storage_order.len() => Ok(values),
+        _ => Err(TableStorageError),
+    };
+    let mut values = decode(stored)?;
+    let source = source.map(decode).transpose()?;
+    for (index, ty) in types.into_iter().enumerate() {
+        if !holds_blob(ty) || present_blob(ty, &values[index])?.is_none() {
+            continue;
+        }
+        // Sound only while contains_blob_value and handle_contextual_blob_insert reject non-tag Blobs.
+        if values[index] != blob_placeholder(ty) {
+            return Err(TableStorageError);
+        }
+        let committed = source
+            .as_ref()
+            .map(|values| &values[index])
+            .ok_or(TableStorageError)?;
+        if !matches!(
+            present_blob(ty, committed)?,
+            Some(Raw::Tag(ROV3_BLOB_TAG, _))
+        ) {
+            return Err(TableStorageError);
+        }
+        values[index] = committed.clone();
+    }
+    encode_canonical_storage_value(&Raw::Array(values)).map_err(|_| TableStorageError)
 }
 
 /// The admitted table schemas a module header declares, keyed by table name. A table whose
@@ -476,6 +615,101 @@ mod tests {
         assert_eq!(
             Value::decode(&on).expect("date").raw(),
             &Raw::Map(vec![(Raw::Text("on".to_owned()), date())])
+        );
+    }
+
+    fn stored_blob(seed: u8) -> Raw {
+        Raw::Tag(
+            ROV3_BLOB_TAG,
+            Box::new(Raw::Array(vec![
+                Raw::Int(23.into()),
+                Raw::Bytes(vec![seed; 32]),
+                Raw::Text("audio/mpeg".to_owned()),
+                Raw::Null,
+                Raw::Bytes(vec![seed; 20]),
+            ])),
+        )
+    }
+
+    fn option(value: Option<Raw>) -> Raw {
+        let parts = match value {
+            Some(value) => vec![Raw::Int(1.into()), value],
+            None => vec![Raw::Int(0.into())],
+        };
+        Raw::Tag(OPTION_TAG, Box::new(Raw::Array(parts)))
+    }
+
+    fn storage(values: Vec<Raw>) -> Vec<u8> {
+        encode_canonical_storage_value(&Raw::Array(values)).expect("stored tuple encodes")
+    }
+
+    fn media_schema() -> TableSchema {
+        TableSchema {
+            fields: BTreeMap::from([
+                ("id".to_owned(), Type::Text),
+                ("title".to_owned(), Type::Text),
+                ("content".to_owned(), Type::Named("Blob".into())),
+                (
+                    "cover".to_owned(),
+                    Type::Optional(Box::new(Type::Named("Blob".into()))),
+                ),
+            ]),
+            admission: None,
+            conversions: Vec::new(),
+            currency: false,
+        }
+    }
+
+    #[test]
+    fn committed_blob_references_survive_the_evaluator_round_trip() {
+        let schema = media_schema();
+        let order = vec!["content".to_owned(), "cover".to_owned(), "title".to_owned()];
+        let committed = storage(vec![
+            stored_blob(1),
+            option(Some(stored_blob(2))),
+            Raw::Text("Live in London".to_owned()),
+        ]);
+        let portable = portable_storage_row(&committed, &order, &schema).expect("portable");
+        assert_eq!(
+            Value::decode(&portable).expect("portable tuple").raw(),
+            &Raw::Array(vec![
+                blob_placeholder(&Type::Named("Blob".into())),
+                blob_placeholder(&Type::Optional(Box::new(Type::Named("Blob".into())))),
+                Raw::Text("Live in London".to_owned()),
+            ])
+        );
+        assert_eq!(
+            restore_stored_blobs(&portable, &order, &schema, Some(&committed)).expect("restored"),
+            committed
+        );
+
+        // An absent `Blob?` stays absent and needs no committed reference.
+        let absent = storage(vec![
+            stored_blob(1),
+            option(None),
+            Raw::Text("t".to_owned()),
+        ]);
+        let portable = portable_storage_row(&absent, &order, &schema).expect("portable");
+        assert_eq!(
+            restore_stored_blobs(&portable, &order, &schema, Some(&absent)).expect("restored"),
+            absent
+        );
+
+        // A placeholder needs the committed row it was read from.
+        assert!(restore_stored_blobs(&portable, &order, &schema, None).is_err());
+        // An evaluator value other than the placeholder cannot become a Blob.
+        let invented = encode(Raw::Array(vec![
+            Raw::Bytes(vec![7]),
+            option(None),
+            Raw::Text("t".to_owned()),
+        ]));
+        assert!(restore_stored_blobs(&invented, &order, &schema, Some(&absent)).is_err());
+        // A table without Blob fields passes its tuple through unchanged.
+        let titles = vec!["title".to_owned()];
+        let plain = encode(Raw::Array(vec![Raw::Text("t".to_owned())]));
+        assert_eq!(
+            restore_stored_blobs(&plain, &titles, &schema, None).expect("plain"),
+            plain
         );
     }
 }

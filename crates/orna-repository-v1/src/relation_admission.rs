@@ -33,15 +33,19 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, IndexGeneration, IndexTreeRef,
+    HistoricalFormatContext,
     PrivateCommit, Repository, RepositoryError, RepositoryFormat, RepositoryFormatContext, Uuid,
     bind_tree_entry_in_index,
     blob_store::GearChunker,
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        StoreRelationEntry, sync_object_files,
+        StoreRelationEntry, hex_decode, hex_encode, sync_object_files,
     },
-    row_store::{KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowValue, TypedKey},
+    row_store::{
+        KeyRange, MAX_ROW_RANGE_LIMIT, ROW_INLINE_LIMIT, RowDependency, RowEntry, RowValue,
+        TypedKey, ValueOverflowRef,
+    },
 };
 
 /// Stable relation UUID of the sealed object-identity inventory: the
@@ -75,6 +79,28 @@ pub const LEGACY_OBJECT_IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.c
 
 const STORE_PATH: &str = ".orna/store";
 const STAGED_CANDIDATE_MESSAGE: &str = "orna: staged candidate";
+
+/// Stable relation UUID of the sealed explicit-rekey log (ORNA-EVOL-007,
+/// ORNA-MUT-010): one row per logical rekey a publication committed. It is
+/// the UUIDv8 derived from SHA-256 of `orna.system-relation.v1`, NUL and
+/// `orna.object-rekey`.
+pub const OBJECT_REKEY_RELATION_ID: [u8; 16] = [
+    0x17, 0xb5, 0xc3, 0x0d, 0xc4, 0x72, 0x8b, 0xba, 0xb6, 0xf2, 0x09, 0xdb, 0x6f, 0xad, 0x56, 0x1f,
+];
+/// Field UUIDs of the rekey descriptor, derived like the relation UUID from
+/// `orna.object-rekey.<field>`.
+const REKEY_ORDINAL_FIELD: [u8; 16] = [
+    0x0a, 0xa4, 0x2f, 0xc2, 0xc7, 0xeb, 0x8d, 0x3e, 0xa1, 0x50, 0xf0, 0xec, 0xe1, 0xdf, 0x2d, 0xd5,
+];
+const REKEY_OLD_KEY_FIELD: [u8; 16] = [
+    0x57, 0x3e, 0xe3, 0x4b, 0x3c, 0x58, 0x84, 0xb5, 0xa8, 0xc2, 0x0f, 0x05, 0xbc, 0x79, 0x67, 0xb4,
+];
+const REKEY_NEW_KEY_FIELD: [u8; 16] = [
+    0xb0, 0xfa, 0x34, 0xe6, 0x82, 0xc0, 0x87, 0xb9, 0x96, 0xcf, 0x6a, 0x10, 0x74, 0xe1, 0x27, 0xc2,
+];
+const REKEY_RELATION_FIELD: [u8; 16] = [
+    0xe1, 0x13, 0x1f, 0x2c, 0xf6, 0x74, 0x82, 0x24, 0x96, 0x75, 0xdd, 0x1b, 0x86, 0xbf, 0x9f, 0x25,
+];
 
 /// Failures of store bootstrap, relation admission and identity reads.
 #[derive(Debug)]
@@ -118,6 +144,8 @@ pub enum RelationAdmissionError {
     },
     /// An identity record is not a valid inventory entry.
     InvalidIdentity,
+    /// A rekey log record is not a valid system relation entry.
+    InvalidRekeyLog,
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -162,6 +190,7 @@ impl std::fmt::Display for RelationAdmissionError {
                 Uuid::from_bytes(*relation_id)
             ),
             Self::InvalidIdentity => formatter.write_str("an object identity record is invalid"),
+            Self::InvalidRekeyLog => formatter.write_str("an object rekey log record is invalid"),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -317,6 +346,322 @@ pub fn object_identity_descriptor() -> Result<SchemaDescriptor, RelationAdmissio
         (Raw::Int(4.into()), Raw::Array(Vec::new())),
     ]))
     .map_err(|_| RelationAdmissionError::InvalidIdentity)
+}
+
+/// The sealed closed descriptor of the rekey log relation. Its key is the
+/// dense publication ordinal; its stored fields are the old canonical key,
+/// the new canonical key and the relation UUID, in ascending field-UUID order.
+/// A stored `Blob` field must hold a ROV-3 content reference, so the canonical
+/// ORP key bytes are stored as their lowercase hex `Str` spelling instead.
+pub fn object_rekey_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
+    let field = |id: [u8; 16], name: &str, primitive: &str, role: u64| {
+        Raw::Array(vec![
+            uuid_value(id),
+            Raw::Text(name.to_owned()),
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.to_owned())]),
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    };
+    SchemaDescriptor::new(Raw::Map(vec![
+        (Raw::Int(0.into()), Raw::Int(1.into())),
+        (Raw::Int(1.into()), uuid_value(OBJECT_REKEY_RELATION_ID)),
+        (
+            Raw::Int(2.into()),
+            Raw::Array(vec![uuid_value(REKEY_ORDINAL_FIELD)]),
+        ),
+        (
+            Raw::Int(3.into()),
+            Raw::Array(vec![
+                field(REKEY_ORDINAL_FIELD, "ordinal", "Int", 0),
+                field(REKEY_OLD_KEY_FIELD, "old_key", "Str", 1),
+                field(REKEY_NEW_KEY_FIELD, "new_key", "Str", 1),
+                field(REKEY_RELATION_FIELD, "relation", "Uuid", 1),
+            ]),
+        ),
+        (Raw::Int(4.into()), Raw::Array(Vec::new())),
+    ]))
+    .map_err(|_| RelationAdmissionError::InvalidRekeyLog)
+}
+
+/// One committed logical rekey (ORNA-EVOL-007, ORNA-MUT-010): its dense
+/// publication ordinal, the stable relation it moved a row in, and the exact
+/// canonical old and new row addresses. Ordinals run from zero in publication
+/// order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedRekey {
+    ordinal: u64,
+    relation_id: [u8; 16],
+    old_key: Vec<u8>,
+    new_key: Vec<u8>,
+}
+
+impl CommittedRekey {
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn old_key(&self) -> &[u8] {
+        &self.old_key
+    }
+
+    pub fn new_key(&self) -> &[u8] {
+        &self.new_key
+    }
+
+    /// The row key: the ordinal as a canonical Int.
+    fn row_key(&self) -> TypedKey {
+        TypedKey::UInt(self.ordinal)
+    }
+
+    /// The stored fields in descriptor (field-UUID) order: `old_key` and
+    /// `new_key` as their lowercase hex spellings, then `relation`.
+    fn row_fields(&self) -> Result<Vec<u8>, RelationAdmissionError> {
+        Value::new(Raw::Array(vec![
+            Raw::Text(hex_encode(&self.old_key)),
+            Raw::Text(hex_encode(&self.new_key)),
+            uuid_value(self.relation_id),
+        ]))
+        .and_then(|value| value.encode())
+        .map_err(|_| RelationAdmissionError::InvalidRekeyLog)
+    }
+
+    fn from_row(key: &TypedKey, fields: &[u8]) -> Result<Self, RelationAdmissionError> {
+        // The writer emits the ordinal as `UInt`, the one spelling a
+        // non-negative canonical Int key decodes to.
+        let TypedKey::UInt(ordinal) = key else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let Raw::Array(values) = decode_canonical_storage_value(fields)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?
+        else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let [
+            Raw::Text(old_key),
+            Raw::Text(new_key),
+            Raw::Tag(37, relation),
+        ] = values.as_slice()
+        else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let Raw::Bytes(relation) = relation.as_ref() else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let relation_id = <[u8; 16]>::try_from(relation.as_slice())
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let old_key = canonical_key_from_hex(old_key)?;
+        let new_key = canonical_key_from_hex(new_key)?;
+        if old_key == new_key {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        }
+        Ok(Self {
+            ordinal: *ordinal,
+            relation_id,
+            old_key,
+            new_key,
+        })
+    }
+}
+
+/// Decodes one rekey log address: the canonical lowercase hex spelling
+/// `hex_encode` writes, naming a canonical ORP key.
+fn canonical_key_from_hex(text: &str) -> Result<Vec<u8>, RelationAdmissionError> {
+    let key = hex_decode(text).ok_or(RelationAdmissionError::InvalidRekeyLog)?;
+    TypedKey::decode_canonical(&key).map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+    Ok(key)
+}
+
+/// Reads the whole rekey log of one format-3 snapshot, validating each row
+/// against the sealed descriptor and checking the ordinals are dense.
+fn read_rekey_rows(
+    format: &HistoricalFormatContext,
+) -> Result<Vec<CommittedRekey>, RelationAdmissionError> {
+    let rows = format.load_row_map(OBJECT_REKEY_RELATION_ID)?;
+    let graph = format.open_native_graph(&rows)?;
+    let descriptor = object_rekey_descriptor()?;
+    if graph.read_schema_descriptor(&graph.open_read_scope()?)? != descriptor {
+        return Err(RelationAdmissionError::InvalidRekeyLog);
+    }
+    let mut log = Vec::new();
+    let mut lower = None;
+    loop {
+        // A fresh scope per page keeps every bounded range read inside its
+        // own object budget.
+        let scope = graph.open_read_scope()?;
+        let range = KeyRange::new(lower.clone(), None, MAX_ROW_RANGE_LIMIT)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let page = graph.range_rows(&range, &scope)?;
+        let full = page.len() == MAX_ROW_RANGE_LIMIT;
+        for row in &page {
+            // An address too large to inline arrives as an overflow value, so
+            // the tuple is read back through the graph rather than the page.
+            let fields = graph.stored_row_fields(row, &scope)?;
+            let key = row
+                .key()
+                .canonical_bytes()
+                .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+            descriptor
+                .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key, &fields)
+                .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+            let rekey = CommittedRekey::from_row(row.key(), &fields)?;
+            if rekey.ordinal != log.len() as u64 {
+                return Err(RelationAdmissionError::InvalidRekeyLog);
+            }
+            log.push(rekey);
+        }
+        if !full {
+            break;
+        }
+        // Ordinals are dense, so the next page starts at the next ordinal.
+        lower = Some(TypedKey::UInt(log.len() as u64));
+    }
+    if log.len() as u64 != rows.version().row_count().unwrap_or(u64::MAX) {
+        return Err(RelationAdmissionError::InvalidRekeyLog);
+    }
+    Ok(log)
+}
+
+/// Writes the rekey log's schema node and its complete row map.
+fn write_rekey_relation(
+    writer: &mut NodeWriter<'_>,
+    log: &[CommittedRekey],
+) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let descriptor = object_rekey_descriptor()?;
+    let (schema_oid, schema_digest) = write_schema_node(writer, &descriptor)?;
+    let mut rows = Vec::with_capacity(log.len());
+    for rekey in log {
+        let key = rekey.row_key();
+        let key_bytes = key
+            .canonical_bytes()
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let fields = rekey.row_fields()?;
+        descriptor
+            .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key_bytes, &fields)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let value = rekey_row_value(writer, fields)?;
+        rows.push(RowEntry::new(key, value));
+    }
+    rows.sort_by(|left, right| left.key().cmp(right.key()));
+    let primary_root = NativeGraphContext::build_canonical_ordered_map(
+        &rows_domain(&OBJECT_REKEY_RELATION_ID, &schema_digest),
+        &rows,
+        &mut |node| writer.node(node),
+    )?;
+    Ok(StoreRelationEntry {
+        relation_id: OBJECT_REKEY_RELATION_ID,
+        schema_oid,
+        primary_root,
+        secondary_root: None,
+        row_count: rows.len() as u64,
+    })
+}
+
+/// The stored value of one rekey log row. A tuple of at most 8 KiB is inline;
+/// a larger one uses the tag-60113 overflow form (store-format-3 §3, §5): a
+/// kind-3 node holding its length, its SOV-3 digest and the byte index of the
+/// complete ROV-3 tuple. A rekey row holds only `Str` and `Uuid` values, so the
+/// tuple is its own SOV-3 encoding and exposes no dependency index.
+fn rekey_row_value(
+    writer: &mut NodeWriter<'_>,
+    fields: Vec<u8>,
+) -> Result<RowValue, RelationAdmissionError> {
+    if fields.len() <= ROW_INLINE_LIMIT {
+        return RowValue::decode_canonical_fields(fields)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog);
+    }
+    let encoded_length = fields.len() as u64;
+    let semantic_digest: [u8; 32] = Sha256::digest(&fields).into();
+    let byte_root = write_byte_index(writer, &fields)?.ok_or(GraphError::InvalidByteIndex)?;
+    let root = writer.node(&NodeData::ValueOverflow {
+        encoded_length,
+        semantic_digest,
+        byte_root: byte_root.clone(),
+        dependency_root: None,
+    })?;
+    let reference =
+        ValueOverflowRef::from_native_node(root, encoded_length, semantic_digest, byte_root, None)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+    Ok(RowValue::overflow(reference))
+}
+
+impl Repository {
+    /// Appends a publication's logical rekeys to the sealed rekey log of
+    /// `store_root` and returns the new store root. The log is rebuilt whole
+    /// from the prior rows the base snapshot `format` carries plus the new
+    /// ones, and every other relation entry of `store_root` is kept. An empty
+    /// publication leaves the store untouched.
+    pub fn append_rekey_log(
+        &self,
+        format: &HistoricalFormatContext,
+        store_root: &NativeOid,
+        rekeys: &[crate::PublicationLogicalRowRekey],
+    ) -> Result<NativeOid, RelationAdmissionError> {
+        if rekeys.is_empty() {
+            return Ok(store_root.clone());
+        }
+        let database_id = *format
+            .database_id()
+            .ok_or(RelationAdmissionError::InvalidRekeyLog)?
+            .as_bytes();
+        let entries = NativeGraphContext::read_store_relations(
+            self,
+            store_root.algorithm(),
+            database_id,
+            store_root,
+        )?;
+        let mut log = if entries
+            .iter()
+            .any(|entry| entry.relation_id == OBJECT_REKEY_RELATION_ID)
+        {
+            read_rekey_rows(format)?
+        } else {
+            Vec::new()
+        };
+        for rekey in rekeys {
+            log.push(CommittedRekey {
+                ordinal: log.len() as u64,
+                relation_id: rekey.relation_id(),
+                old_key: rekey.old_address().to_vec(),
+                new_key: rekey.new_address().to_vec(),
+            });
+        }
+        let mut writer = NodeWriter::new(self)?;
+        let rekey_entry = write_rekey_relation(&mut writer, &log)?;
+        let mut merged = entries
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry))
+            .collect::<BTreeMap<_, _>>();
+        merged.insert(OBJECT_REKEY_RELATION_ID, rekey_entry);
+        let merged = merged.into_values().collect::<Vec<_>>();
+        let root = write_store_root(&mut writer, database_id, &merged)?;
+        writer.sync()?;
+        Ok(root)
+    }
+
+    /// The committed rekey log of a format-3 snapshot, in publication order.
+    /// Empty when the snapshot has no rekey log.
+    pub fn read_committed_rekeys(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<CommittedRekey>, RelationAdmissionError> {
+        let format = self.open_format_context_at_selector(commit.as_str())?;
+        let Some(database_id) = format.database_id() else {
+            return Ok(Vec::new());
+        };
+        if format.repository_format() != RepositoryFormat::Format3
+            || !self
+                .store_relations_in(commit.as_str(), *database_id.as_bytes())?
+                .contains(&OBJECT_REKEY_RELATION_ID)
+        {
+            return Ok(Vec::new());
+        }
+        read_rekey_rows(&format)
+    }
 }
 
 /// One source table the staged candidate admits: its stable relation UUID
@@ -958,7 +1303,10 @@ fn admit_relations(
     let mut admitted = Vec::new();
     for relation in relations {
         let relation_id = relation.relation_id;
-        if relation_id == OBJECT_IDENTITY_RELATION_ID || !staged.insert(relation_id) {
+        if relation_id == OBJECT_IDENTITY_RELATION_ID
+            || relation_id == OBJECT_REKEY_RELATION_ID
+            || !staged.insert(relation_id)
+        {
             return Err(RelationAdmissionError::DuplicateRelation { relation_id });
         }
         let (schema_oid, schema_digest) = write_schema_node(writer, &relation.descriptor)?;
@@ -1003,7 +1351,10 @@ fn admit_relations(
         let mut dropped = Vec::new();
         for (relation_id, entry) in &entries {
             let relation_id = *relation_id;
-            if relation_id == OBJECT_IDENTITY_RELATION_ID || staged.contains(&relation_id) {
+            if relation_id == OBJECT_IDENTITY_RELATION_ID
+                || relation_id == OBJECT_REKEY_RELATION_ID
+                || staged.contains(&relation_id)
+            {
                 continue;
             }
             if committed.contains_key(&relation_id) {
@@ -1439,6 +1790,82 @@ mod tests {
             Uuid::from_bytes(OBJECT_IDENTITY_RELATION_ID).get_version_num(),
             8
         );
+        assert_eq!(OBJECT_REKEY_RELATION_ID, system_uuid("orna.object-rekey"));
+        assert_eq!(
+            REKEY_ORDINAL_FIELD,
+            system_uuid("orna.object-rekey.ordinal")
+        );
+        assert_eq!(
+            REKEY_OLD_KEY_FIELD,
+            system_uuid("orna.object-rekey.old_key")
+        );
+        assert_eq!(
+            REKEY_NEW_KEY_FIELD,
+            system_uuid("orna.object-rekey.new_key")
+        );
+        assert_eq!(
+            REKEY_RELATION_FIELD,
+            system_uuid("orna.object-rekey.relation")
+        );
+        // The descriptor and the row codec list fields in this order.
+        assert!(REKEY_ORDINAL_FIELD < REKEY_OLD_KEY_FIELD);
+        assert!(REKEY_OLD_KEY_FIELD < REKEY_NEW_KEY_FIELD);
+        assert!(REKEY_NEW_KEY_FIELD < REKEY_RELATION_FIELD);
+    }
+
+    #[test]
+    fn rekey_rows_round_trip_through_the_sealed_descriptor() {
+        let descriptor = object_rekey_descriptor().expect("sealed descriptor is valid");
+        let text_key = |text: &str| TypedKey::Text(text.to_owned()).canonical_bytes().unwrap();
+        let rekey = CommittedRekey {
+            ordinal: 3,
+            relation_id: [0x11; 16],
+            old_key: text_key("london"),
+            new_key: text_key("paris"),
+        };
+        let row_key = rekey.row_key();
+        let key = row_key.canonical_bytes().unwrap();
+        assert_eq!(key, [0x03]);
+        let fields = rekey.row_fields().unwrap();
+        descriptor
+            .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key, &fields)
+            .expect("a rekey row matches the sealed descriptor");
+        assert_eq!(CommittedRekey::from_row(&row_key, &fields).unwrap(), rekey);
+        assert_eq!(
+            CommittedRekey::from_row(&TypedKey::decode_canonical(&key).unwrap(), &fields).unwrap(),
+            rekey
+        );
+        assert!(matches!(
+            CommittedRekey::from_row(&TypedKey::Text("3".to_owned()), &fields),
+            Err(RelationAdmissionError::InvalidRekeyLog)
+        ));
+
+        let row = |old: &str, new: &str| {
+            Value::new(Raw::Array(vec![
+                Raw::Text(old.to_owned()),
+                Raw::Text(new.to_owned()),
+                uuid_value([0x11; 16]),
+            ]))
+            .and_then(|value| value.encode())
+            .unwrap()
+        };
+        let old = hex_encode(&text_key("london"));
+        let new = hex_encode(&text_key("paris"));
+        for fields in [
+            // Only the lowercase spelling is canonical.
+            row(&old.to_uppercase(), &new),
+            // An odd-length spelling names no byte string.
+            row(&old[1..], &new),
+            // A non-shortest Int is not a canonical ORP key.
+            row("1800", &new),
+            // A rekey moves a row to a different address.
+            row(&old, &old),
+        ] {
+            assert!(matches!(
+                CommittedRekey::from_row(&row_key, &fields),
+                Err(RelationAdmissionError::InvalidRekeyLog)
+            ));
+        }
     }
 
     #[test]
