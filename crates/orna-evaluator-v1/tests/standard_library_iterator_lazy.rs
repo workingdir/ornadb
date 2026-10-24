@@ -23,7 +23,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 
 fn pinned_functions() -> Functions {
     let mut functions = BTreeMap::new();
-    for (path, source) in orna_standard::reference_standard_sources_v1() {
+    for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
         let parsed = orna_syntax_v1::parse_module(&source);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
         let module = path
@@ -66,7 +66,7 @@ fn pinned_iterator_nominals() -> NominalDefinitions {
 
 #[test]
 fn pinned_iterator_and_lazy_modules_are_snapshot_bound_and_catalogued() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
             path == "std/collection.orna"

@@ -19,7 +19,7 @@ fn payload_environment() -> Environment {
 }
 
 fn random_hash_snapshot_session() -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| matches!(path.as_str(), "std/random.orna" | "std/hash.orna"))
         .collect::<Vec<_>>();
