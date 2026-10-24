@@ -108,6 +108,30 @@ fn set_quiesce(fixture: &EditorMount, value: &[u8]) -> rustix::io::Result<()> {
     )
 }
 
+/// Asks the mount to retain every unresolved draft, as `orna` does before an
+/// unmount. An error means at least one candidate could not be kept.
+fn retain_drafts(fixture: &EditorMount) -> rustix::io::Result<()> {
+    let root = mount_root(fixture);
+    rustix::fs::setxattr(
+        root.as_path(),
+        "user.orna.retain-drafts",
+        b"1",
+        rustix::fs::XattrFlags::empty(),
+    )
+}
+
+/// Puts a regular file where the recovery store directory belongs, so every
+/// retain attempt fails. The caller removes the file to restore the store.
+fn block_retained_store(fixture: &EditorMount) -> PathBuf {
+    let blocker = fixture
+        .repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1");
+    std::fs::write(&blocker, b"not a directory").expect("block the recovery store");
+    blocker
+}
+
 /// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
 /// returns EINVAL, stays visible to its own handle, and is never admitted.
 #[tokio::test]
@@ -230,32 +254,207 @@ async fn dup_descriptors_share_one_draft_and_one_acceptance() {
     assert!(fresh_view(&fixture).contains("Dup later"));
 }
 
-/// ORNA-VFS-007/008: a close flush of an unsynced draft is not acceptance; the
-/// close succeeds, a new open sees only accepted state, and the close leaves no
-/// draft guard set.
+/// ORNA-VFS-007/008, EDIT-1 step 5: a close flush of a dirty draft attempts the
+/// same acceptance as fsync, and the close succeeds. The accepted candidate is
+/// visible to a new open, leaves no draft guard, and retains no draft.
 #[tokio::test]
-async fn close_flush_of_unsynced_draft_is_not_acceptance_and_close_succeeds() {
+async fn close_flush_accepts_dirty_draft_once() {
     if !require_fuse_or_skip() {
         return;
     }
     let fixture = start_editor_mount(false).await;
     let mut file = open_rw(&fixture);
-    replace_draft(&mut file, &row("Never synced"));
+    replace_draft(&mut file, &row("Closed dirty"));
     let dup = file.try_clone().expect("dup the handle");
     drop(dup);
+    assert!(
+        fresh_view(&fixture).contains("Closed dirty"),
+        "the close flush of a dirty draft accepts it",
+    );
     drop(file);
+    assert!(fresh_view(&fixture).contains("Closed dirty"));
+    await_draft_guard(&fixture, b'0', "an accepted close leaves no draft guard").await;
+    assert!(
+        retained_drafts(&fixture.repository).is_empty(),
+        "an accepted close retains no draft",
+    );
+    let mut later = open_rw(&fixture);
+    replace_draft(&mut later, &row("After close"));
+    later
+        .sync_all()
+        .expect("a handle opened after the close acceptance still syncs");
+    assert!(fresh_view(&fixture).contains("After close"));
+}
 
+/// ORNA-VFS-007/009: a close flush whose acceptance is refused has its error
+/// ignored by the application. The durable row stays unchanged and the refused
+/// candidate is retained as a recoverable draft that holds the draft guard.
+#[tokio::test]
+async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &invalid_row("Refused on close"));
+    drop(file);
     assert!(
         fresh_view(&fixture).contains("Original"),
-        "a new open after close sees only accepted state",
+        "a refused close flush leaves the accepted row unchanged",
     );
-    assert!(!fresh_view(&fixture).contains("Never synced"));
+    assert!(!fresh_view(&fixture).contains("Refused on close"));
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Refused on close")),
+        "the refused candidate is retained in recovery storage",
+    );
+    await_draft_guard(&fixture, b'1', "the retained refusal holds the draft guard").await;
+}
+
+/// ORNA-VFS-008/009: a dirty handle whose baseline a peer has since accepted is
+/// stale. Its close flush is refused, the peer's accepted row is kept, and the
+/// stale candidate is retained. This test does not observe the close(2) errno.
+#[tokio::test]
+async fn stale_close_flush_keeps_peer_row_and_retains_candidate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut stale = open_rw(&fixture);
+    replace_draft(&mut stale, &row("Stale close draft"));
+    let mut winner = open_rw(&fixture);
+    replace_draft(&mut winner, &row("Winner accepted"));
+    winner
+        .sync_all()
+        .expect("the peer's fsync accepts its candidate");
+    drop(winner);
+    drop(stale);
+    assert!(
+        fresh_view(&fixture).contains("Winner accepted"),
+        "the peer's accepted row is kept",
+    );
+    assert!(!fresh_view(&fixture).contains("Stale close draft"));
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Stale close draft")),
+        "the stale candidate is retained in recovery storage",
+    );
+    await_draft_guard(
+        &fixture,
+        b'1',
+        "the retained stale candidate holds the draft guard",
+    )
+    .await;
+}
+
+/// ORNA-VFS-008/009: a stale fsync refusal keeps the handle open. A peer's later
+/// accepted save from a fresh baseline resolves that refusal, so dropping the
+/// still-open stale handle must not re-insert the refusal and leave the draft
+/// guard set.
+#[tokio::test]
+async fn stale_refusal_resolved_by_later_peer_accept_leaves_guard_clear_on_drop() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut stale = open_rw(&fixture);
+    replace_draft(&mut stale, &row("Stale refused"));
+    let mut winner = open_rw(&fixture);
+    replace_draft(&mut winner, &row("Winner accepted"));
+    winner
+        .sync_all()
+        .expect("the peer's fsync accepts its candidate");
+    drop(winner);
+    assert!(stale.sync_all().is_err(), "a stale fsync is refused");
+    await_draft_guard(
+        &fixture,
+        b'1',
+        "the refused stale candidate holds the draft guard",
+    )
+    .await;
+    let mut fresh = open_rw(&fixture);
+    replace_draft(&mut fresh, &row("Fresh after refusal"));
+    fresh
+        .sync_all()
+        .expect("a fresh baseline accepts its candidate");
+    assert!(fresh_view(&fixture).contains("Fresh after refusal"));
+    drop(fresh);
+    drop(stale);
     await_draft_guard(
         &fixture,
         b'0',
-        "closing an unsynced draft must not leave the draft guard set",
+        "the stale handle leaves no draft state once a peer resolved it",
     )
     .await;
+}
+
+/// ORNA-VFS-009, EDIT-1 step 5: a dirty valid draft that unmount retention keeps
+/// is recovery data only. The durable row is read before retention, because
+/// retention quiesces the mount and later opens are refused. Closing the
+/// retained handle leaves the candidate in recovery storage: retention cleared
+/// the unresolved handle, so the close path has no candidate to commit.
+#[tokio::test]
+async fn retained_dirty_draft_is_not_accepted_by_close() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Retained unsynced"));
+    assert!(
+        fresh_view(&fixture).contains("Original"),
+        "the durable row is unchanged before retention",
+    );
+    retain_drafts(&fixture).expect("a valid dirty draft is retained");
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Retained unsynced")),
+        "the dirty candidate is kept in recovery storage",
+    );
+    drop(file);
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Retained unsynced")),
+        "closing a retained handle leaves the candidate in recovery storage",
+    );
+}
+
+/// ORNA-VFS-009: when recovery storage refuses a dirty valid draft, retention
+/// fails with EIO and the candidate stays in memory as an unresolved draft. The
+/// draft guard stays set and quiesce is refused until a retry keeps the bytes.
+#[tokio::test]
+async fn refused_retention_keeps_candidate_until_a_retry_succeeds() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Retained valid"));
+    let blocker = block_retained_store(&fixture);
+    assert_eq!(
+        retain_drafts(&fixture).expect_err("a refused store fails the retention"),
+        rustix::io::Errno::IO,
+        "a candidate recovery storage refuses makes retention fail with EIO",
+    );
+    await_draft_guard(&fixture, b'1', "a refused candidate holds the draft guard").await;
+    assert_eq!(
+        set_quiesce(&fixture, b"1").expect_err("quiesce is refused while a draft is unresolved"),
+        rustix::io::Errno::BUSY,
+        "an unretained candidate blocks quiesce",
+    );
+    std::fs::remove_file(&blocker).expect("unblock the recovery store");
+    retain_drafts(&fixture).expect("a retry keeps the candidate once storage works");
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Retained valid")),
+        "the retried candidate is kept in recovery storage",
+    );
+    drop(file);
 }
 
 /// ORNA-VFS-008: a rejected draft that is closed without a successful sync
@@ -285,11 +484,12 @@ async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
 
 /// ORNA-VFS-008: a child process that inherits the handle's open file
 /// description (the shared-description effect of dup/fork) writes through it;
-/// the parent's sync acknowledges that write, and a later unsynced parent write
-/// is not acknowledged. A literal `fork(2)` cannot be called here because the
+/// the parent's sync acknowledges that write. A later unsynced parent write is
+/// not acknowledged by any fsync, but the close flush attempts it as dirty state
+/// (EDIT-1 step 5). A literal `fork(2)` cannot be called here because the
 /// crate forbids `unsafe_code`; this gap is recorded on the Gate E bead.
 #[tokio::test]
-async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_is_not() {
+async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_is_flushed_on_close() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -318,10 +518,9 @@ async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_
     replace_draft(&mut file, &row("Parent unsynced"));
     drop(file);
     let accepted = fresh_view(&fixture);
-    assert!(accepted.contains("Inherited child"));
     assert!(
-        !accepted.contains("Parent unsynced"),
-        "the parent's unsynced write after the shared handle was used must not be acknowledged",
+        accepted.contains("Parent unsynced") && !accepted.contains("Inherited child"),
+        "the close flush accepts the parent's dirty candidate once, superseding the child's row",
     );
 }
 

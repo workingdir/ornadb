@@ -5,6 +5,14 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
+  acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
+  baseline a peer has since accepted is refused: the peer's row stays and the
+  candidate is kept in recovery storage (ORNA-VFS-009). Unmount refuses, rather
+  than drops, a valid dirty draft that retention cannot keep, and a released
+  handle does not re-admit a refusal that a later accepted save resolved.
+  Earlier builds did not attempt acceptance at close and did not keep unsynced
+  drafts on release.
 - A malformed format-3 native graph now reports a typed `GraphMalformed` cause
   under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
   faults such as overlapping child ranges, broken counts, over-wide fanout, and
