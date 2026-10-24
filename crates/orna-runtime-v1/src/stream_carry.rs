@@ -221,7 +221,7 @@ pub async fn read_stream_carry(source: &Repository) -> Result<StreamCarry, Strea
         Vec::new()
     };
     let history = if tables.contains("stream_checkpoint_history") {
-        read_history(&connection)
+        read_history(&connection, "stream_checkpoint_history")
             .await
             .map_err(StreamCarryError::Runtime)?
     } else {
@@ -278,8 +278,12 @@ pub async fn import_stream_carry(
 
     let (identity, digest) = migration_copy_runtime_identity(destination)?;
     let state = RuntimeState::open(destination, identity, digest).await?;
-    if carried_rows_present(&state.connection).await? {
-        return Err(RuntimeError::MigrationCarryTargetNotEmpty);
+    let present = read_carry_target(&state.connection).await?;
+    if present == *carry {
+        return Ok(());
+    }
+    if present != StreamCarry::default() {
+        return Err(RuntimeError::MigrationCarryTargetDiffers);
     }
     let transaction = state
         .connection
@@ -345,19 +349,6 @@ pub async fn import_stream_carry(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     Ok(())
-}
-
-async fn carried_rows_present(connection: &Connection) -> Result<bool, RuntimeError> {
-    for table in [
-        "stream_checkpoint",
-        "stream_checkpoint_migration_bridge",
-        "stream_checkpoint_migration_archive",
-    ] {
-        if count_rows(connection, table).await? > 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 async fn read_source_generation(connection: &Connection) -> Result<(i64, Vec<u8>), RuntimeError> {
@@ -445,10 +436,10 @@ async fn read_checkpoints(connection: &Connection) -> Result<Vec<CheckpointRow>,
     Ok(checkpoints)
 }
 
-async fn read_history(connection: &Connection) -> Result<Vec<HistoryRow>, RuntimeError> {
+async fn read_history(connection: &Connection, table: &str) -> Result<Vec<HistoryRow>, RuntimeError> {
     let mut rows = connection
         .query(
-            "SELECT key_id, version, committed_position, snapshot, generation_digest, transition FROM stream_checkpoint_history ORDER BY key_id, version",
+            &format!("SELECT key_id, version, committed_position, snapshot, generation_digest, transition FROM {table} ORDER BY key_id, version"),
             (),
         )
         .await
@@ -469,4 +460,38 @@ async fn read_history(connection: &Connection) -> Result<Vec<HistoryRow>, Runtim
         });
     }
     Ok(history)
+}
+
+/// Reads the rows a carry writes into the destination, in `StreamCarry` order.
+async fn read_carry_target(connection: &Connection) -> Result<StreamCarry, RuntimeError> {
+    Ok(StreamCarry {
+        checkpoints: read_checkpoints(connection).await?,
+        bridges: read_bridges(connection).await?,
+        history: read_history(connection, "stream_checkpoint_migration_archive").await?,
+    })
+}
+
+async fn read_bridges(connection: &Connection) -> Result<Vec<BridgeRow>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT key_id, origin_version, origin_position, source_generation, source_generation_digest FROM stream_checkpoint_migration_bridge ORDER BY key_id",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut bridges = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        bridges.push(BridgeRow {
+            key_id: row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            origin_version: row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            origin_position: row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_generation: row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            source_generation_digest: row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        });
+    }
+    Ok(bridges)
 }
