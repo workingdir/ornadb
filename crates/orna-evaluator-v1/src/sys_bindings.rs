@@ -1138,6 +1138,7 @@ fn blob_reflection_failure(error: ValueError) -> EvaluationError {
     match error {
         ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
         ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
+        ValueError::ContentCollision => redacted_error("sys.blob.collision"),
         ValueError::InvalidContext => redacted_error("sys.blob.reference_context"),
         _ => redacted_error("ORNA-EVAL-VALUE"),
     }
@@ -1832,16 +1833,20 @@ mod tests {
                 _ => panic!("same_content returns Bool"),
             }
         };
-        // ORNA-BLOB-005: a descriptor-only ROV-3 value has no shared admitted
-        // witness with inline OVB-2 bytes, so the reflection reports explicit
-        // unavailability instead of inventing a content comparison.
-        assert!(
-            dispatch_blob_reflection(
-                "sys.blob.same_content",
-                &[rov3.clone(), ovb2.clone()],
-            )
-            .is_err()
+        let same_content_code = |left: &ContextValue, right: &ContextValue| {
+            dispatch_blob_reflection("sys.blob.same_content", &[left.clone(), right.clone()])
+                .err()
+                .map(|error| error.code().to_owned())
+        };
+        // ORNA-BLOB-005: a decoded ROV-3 value is descriptor-only (spec 34:536,
+        // descriptive decoding never revives operational authority), so with no
+        // shared admitted witness it reports explicit unavailability.
+        assert_eq!(
+            same_content_code(&rov3, &ovb2),
+            Some("sys.blob.unavailable".to_owned())
         );
+        // Same descriptor in the same admitted context is a shared witness.
+        assert!(same_content(&rov3, &rov3));
         // Annotations are ignored when comparing exact inline OVB-2 bytes.
         assert!(same_content(&ovb2, &ovb2_annotated));
 
@@ -1851,10 +1856,13 @@ mod tests {
             ValueFormat::Ovb2,
         )
         .unwrap();
-        assert!(!same_content(&rov3, &other));
+        // Different identities are decided without reading bytes.
+        assert!(!same_content(&ovb2, &other));
 
-        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[]);
-        assert!(undeclared.is_err());
+        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[])
+            .err()
+            .map(|error| error.code().to_owned());
+        assert_eq!(undeclared, Some("ORNA-EVAL-ARGUMENT".to_owned()));
         assert!(is_blob_host_operation("sys.blob.suffix"));
         assert!(!is_blob_host_operation("sys.blob.capture_file"));
     }

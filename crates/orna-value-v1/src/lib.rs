@@ -60,6 +60,7 @@ pub enum Error {
     InvalidOid,
     ContentUnavailable,
     ContentDigestMismatch,
+    ContentCollision,
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
@@ -1099,6 +1100,7 @@ impl Blob {
         })
     }
 
+
     pub fn from_semantic_commitment(
         identity: ContentIdentity,
         media_type: &str,
@@ -1287,6 +1289,20 @@ impl Blob {
         Ok(result)
     }
 
+    /// Two descriptor-backed blobs share a descriptor OID inside one admitted
+    /// context, so they name the same content and need no streaming (ORNA-BLOB-005).
+    fn shares_descriptor_witness(&self, other: &Self) -> bool {
+        match (&self.content, &other.content, &self.context, &other.context) {
+            (
+                BlobContent::Descriptor(left),
+                BlobContent::Descriptor(right),
+                Some(left_context),
+                Some(right_context),
+            ) => left == right && Arc::ptr_eq(&left_context.inner, &right_context.inner),
+            _ => false,
+        }
+    }
+
     /// Compare exact bytes while ignoring annotation metadata.
     pub fn same_content(&self, other: &Self) -> Result<bool> {
         if self.identity != other.identity {
@@ -1300,7 +1316,7 @@ impl Blob {
                 Err(Error::ContentDigestMismatch)
             };
         }
-        if same_content_source(&self.content, &other.content) {
+        if same_content_source(&self.content, &other.content) || self.shares_descriptor_witness(other) {
             return Ok(true);
         }
         let mut left_digest = Sha256::new();
@@ -1312,7 +1328,7 @@ impl Blob {
             let left = read_content_range(self, offset, size)?;
             let right = read_content_range(other, offset, size)?;
             if left != right {
-                return Err(Error::ContentDigestMismatch);
+                return Err(Error::ContentCollision);
             }
             left_digest.update(&left);
             right_digest.update(&right);
