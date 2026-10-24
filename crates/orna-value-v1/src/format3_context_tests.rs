@@ -1266,6 +1266,30 @@ fn table_reference_accepts_each_permitted_key_shape() {
 }
 
 #[test]
+fn table_reference_to_keyless_table_unit_key_decodes_and_round_trips() {
+    // Keyless tables carry a Unit key (29-formats.md:37; grammar/orna.ebnf:38-39).
+    // Stored rows with such references must still decode after the 60021 key rule.
+    let unit = Raw::Tag(60014, Box::new(Raw::Array(vec![])));
+    let reference = Value::table_reference([1; 16], [2; 16], unit.clone()).unwrap();
+    let bytes = reference.encode().unwrap();
+    let decoded = Value::decode(&bytes).unwrap();
+    assert_eq!(decoded, reference);
+    assert!(Value::new(Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), unit])),
+    ))
+    .is_ok());
+    assert_eq!(
+        compare_primary_keys(&reference, &reference).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+}
+
+// DEFERRED DECISION (follow-up bead ornadb-3cb3): a pinned 60010 component is
+// still base-accepted inside tuple primary keys. KEY-003/005 and 07-tables.md:270
+// do not list 60010 as permitted, so this asserts the current base behaviour
+// only until the bead decides; it does not endorse it.
+#[test]
 fn tuple_primary_key_with_pinned_reference_keeps_base_behaviour() {
     // Base accepts and compares 60010 components inside tuple primary keys;
     // only Value::table_reference applies the strict snapshot-free rule.

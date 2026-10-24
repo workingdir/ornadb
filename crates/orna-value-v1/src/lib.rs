@@ -2545,17 +2545,20 @@ fn is_primary_key_component(raw: &Raw) -> bool {
     )
 }
 
-/// Strict identity rule for [`Value::table_reference`] only: the permitted-key
-/// clauses of 07-tables.md:272-281 applied recursively. A stored reference
-/// identity must be snapshot-free (08-relations.md:31), so pinned references
-/// (60010), Float and malformed 60008/60015/60021 keys are refused here. Tuple
-/// primary keys keep base acceptance for pinned (60010) components, which the
-/// spec does not yet address. Every decoded 60021 key must pass this rule
-/// (see `validate_tag`).
+/// Strict identity rule for [`Value::table_reference`] and for decoded 60021
+/// keys: the permitted-key clauses of 07-tables.md:272-281 applied recursively.
+/// A stored reference identity must be snapshot-free (08-relations.md:31), so
+/// pinned references (60010), Float and malformed 60008/60015/60021 keys are
+/// refused. The Unit key (60014, empty array) is admitted because a reference
+/// to a keyless table carries it (grammar/orna.ebnf:38-39; 29-formats.md:37;
+/// stored admission in `validate_table_reference_value`). Tuple primary keys
+/// keep base acceptance for pinned (60010) components; that is a deferred
+/// decision (see `table_reference_decode_rejects_non_permitted_key`).
 fn is_permitted_key(raw: &Raw) -> bool {
     match raw {
         Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
         Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
+        Raw::Tag(60014, payload) => matches!(payload.as_ref(), Raw::Array(values) if values.is_empty()),
         Raw::Tag(60008, payload) => matches!(
             payload.as_ref(),
             Raw::Array(values) if matches!(
@@ -2630,6 +2633,14 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
                 .then(compare_key_component(left_key, right_key)?)
                 .then(compare_raw_order(left_snapshot, right_snapshot)?)
+        }
+        // Unit (60014) is the sole key of a keyless table (29-formats.md:37):
+        // one possible value, so two Units compare Equal.
+        (Raw::Tag(60014, left), Raw::Tag(60014, right)) => {
+            if !array(left)?.is_empty() || !array(right)?.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            Ordering::Equal
         }
         (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
             compare_key_components(array(left)?, array(right)?)?
