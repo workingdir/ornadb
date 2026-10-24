@@ -7618,7 +7618,7 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if !crate::sys_bindings::is_blob_annotation_operation(operation) {
+        if !crate::sys_bindings::is_blob_host_operation(operation) {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let table = orna_sys_v1::system_dispatch_table();
@@ -7675,6 +7675,13 @@ impl Context<'_, '_> {
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
             supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+        }
+        if crate::sys_bindings::is_blob_reflection_operation(operation) {
+            return crate::sys_bindings::dispatch_blob_reflection(
+                operation,
+                &supplied_values,
+                self.cancellation,
+            );
         }
         let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
         Value::from_context_value(&annotated, self, 0)
@@ -7975,7 +7982,7 @@ impl Context<'_, '_> {
         // callable, and a resolved non-Blob function never falls through.
         #[cfg(feature = "system-host-bindings")]
         let declared = match resolved_function.as_deref() {
-            Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
+            Some(name) if crate::sys_bindings::is_blob_host_operation(name) => {
                 Some(name.to_owned())
             }
             Some(_) => None,
@@ -7983,7 +7990,7 @@ impl Context<'_, '_> {
                 .as_deref()
                 .filter(|name| {
                     !scope.0.contains_key("sys")
-                        && crate::sys_bindings::is_blob_annotation_operation(name)
+                        && crate::sys_bindings::is_blob_host_operation(name)
                 })
                 .map(str::to_owned),
         }
