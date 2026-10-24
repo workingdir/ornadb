@@ -52,6 +52,7 @@ use editor_mount::{
 const EIO: i32 = 5;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
+const EPERM: i32 = 1;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -869,6 +870,35 @@ async fn blob_descriptor_edits_are_refused_instead_of_dropped() {
         fs::read(session.row("london").join("content.mp3")).unwrap(),
         b"london-mp3-bytes",
         "metadata saves keep the captured content"
+    );
+    session.finish();
+}
+
+/// ORNA-VFS-024 / EDIT-1 (41-vfs.md:42-44, 103-105): a Blob projection has no
+/// private candidate, so a write-intent open, including `O_TRUNC`, is refused
+/// with EPERM. The stored Blob is not truncated by the refused open.
+#[tokio::test]
+async fn blob_write_open_is_refused_with_eperm_and_not_truncated() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) =
+        media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
+    let blob = session.row("london").join("content.mp3");
+    assert_errno(
+        OpenOptions::new().write(true).open(&blob),
+        EPERM,
+        "a Blob write-open is refused",
+    );
+    assert_errno(
+        OpenOptions::new().write(true).truncate(true).open(&blob),
+        EPERM,
+        "a Blob O_TRUNC open is refused",
+    );
+    assert_eq!(
+        fs::read(&blob).unwrap(),
+        b"london-mp3-bytes",
+        "a refused Blob open leaves the stored content unchanged",
     );
     session.finish();
 }
