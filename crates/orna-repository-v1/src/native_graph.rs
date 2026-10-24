@@ -3109,7 +3109,7 @@ impl NativeGraphContext {
         }
         let value = canonical_value_bytes(&CborValue::Array(vec![
             CborValue::Bytes(schema_oid.as_bytes().to_vec()),
-            CborValue::Bytes(old_primary.as_bytes().to_vec()),
+            CborValue::Bytes(primary_root.as_bytes().to_vec()),
             CborValue::Null,
             CborValue::Unsigned(row_count),
         ]));
