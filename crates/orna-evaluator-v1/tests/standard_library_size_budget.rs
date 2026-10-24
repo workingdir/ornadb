@@ -15,8 +15,9 @@ use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
 use orna_value_v1::Raw;
 
-const MODULES: [&str; 5] = [
+const MODULES: [&str; 6] = [
     "std/collection.orna",
+    "std/list.orna",
     "std/text.orna",
     "std/text/slicing.orna",
     "std/text/lines.orna",
@@ -43,7 +44,7 @@ fn limits(size: usize) -> Limits {
 /// `xs` holds `0..size`, `letters` holds `size` scalars and `page` holds
 /// `size / 10` lines of nine scalars, each ending in LF.
 fn session(size: usize) -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();
@@ -183,12 +184,12 @@ fn slicing(size: usize) {
                 ),
             ),
             check(
-                "collection.take",
-                format!("collection.take(xs, {half}) == {}", ints(0..half)),
+                "take",
+                format!("take(xs, {half}) == {}", ints(0..half)),
             ),
             check(
-                "collection.drop",
-                format!("collection.drop(xs, {half}) == {}", ints(half..size)),
+                "drop",
+                format!("drop(xs, {half}) == {}", ints(half..size)),
             ),
         ],
     );
@@ -230,12 +231,12 @@ fn text_split(size: usize) {
         vec![
             check(
                 "text.split scalars",
-                format!("collection.count(text.split(letters, \"\")) == {size}"),
+                format!("count(text.split(letters, \"\")) == {size}"),
             ),
             check(
                 "text.split separator",
                 format!(
-                    "collection.count(text.split(page, \"\\n\")) == {}",
+                    "count(text.split(page, \"\\n\")) == {}",
                     lines + 1
                 ),
             ),
@@ -262,19 +263,16 @@ fn collection_helpers(size: usize) {
         size,
         vec![
             check(
-                "collection.filter",
-                format!("collection.filter(xs, value => value % 2 == 0) == {even}"),
+                "filter",
+                format!("filter(xs, value => value % 2 == 0) == {even}"),
             ),
             check(
-                "collection.map",
-                format!(
-                    "collection.map(xs, value => value + 1) == {}",
-                    ints(1..size + 1)
-                ),
+                "map",
+                format!("map(xs, value => value + 1) == {}", ints(1..size + 1)),
             ),
             check(
-                "collection.flat_map",
-                "collection.flat_map(xs, value => [value]) == xs".to_owned(),
+                "flat_map",
+                "flat_map(xs, value => [value]) == xs".to_owned(),
             ),
             check(
                 "collection.partition",
@@ -284,9 +282,9 @@ fn collection_helpers(size: usize) {
                 "collection.chunk",
                 "let chunked = collection.chunk(xs, 10);".to_owned(),
                 format!(
-                    "collection.count(chunked) == {chunks} \
-                     && collection.take(chunked, 1) == [{}] \
-                     && collection.drop(chunked, {}) == [{}]",
+                    "count(chunked) == {chunks} \
+                     && take(chunked, 1) == [{}] \
+                     && drop(chunked, {}) == [{}]",
                     ints(0..10),
                     chunks - 1,
                     ints(last_chunk..size)
@@ -300,7 +298,7 @@ fn collection_helpers(size: usize) {
                 "collection.window",
                 "let windows = collection.window(xs, 3);".to_owned(),
                 format!(
-                    "collection.count(windows) == {} && collection.drop(windows, {}) == [{}]",
+                    "count(windows) == {} && drop(windows, {}) == [{}]",
                     size - 2,
                     size - 3,
                     ints(size - 3..size)
@@ -310,16 +308,16 @@ fn collection_helpers(size: usize) {
                 "collection.zip",
                 "let zipped = collection.zip(xs, xs);".to_owned(),
                 format!(
-                    "collection.count(zipped) == {size} \
-                     && collection.drop(zipped, {last}) == [({last}, {last})]"
+                    "count(zipped) == {size} \
+                     && drop(zipped, {last}) == [({last}, {last})]"
                 ),
             ),
             bound(
                 "collection.pairs",
                 "let paired = collection.pairs(xs);".to_owned(),
                 format!(
-                    "collection.count(paired) == {last} \
-                     && collection.drop(paired, {}) == [({}, {last})]",
+                    "count(paired) == {last} \
+                     && drop(paired, {}) == [({}, {last})]",
                     size - 2,
                     size - 2
                 ),
@@ -328,24 +326,22 @@ fn collection_helpers(size: usize) {
                 "collection.split_when",
                 "let groups = collection.split_when(xs, value => value % 10 == 0);".to_owned(),
                 format!(
-                    "collection.count(groups) == {chunks} && collection.drop(groups, {}) == [{}]",
+                    "count(groups) == {chunks} && drop(groups, {}) == [{}]",
                     chunks - 1,
                     ints(last_chunk..size)
                 ),
             ),
             check(
-                "collection.every/exists/one",
+                "every/exists/one",
                 format!(
-                    "collection.every(xs, value => value >= 0) \
-                     && collection.exists(xs, value => value == {last}) \
-                     && collection.one(xs, value => value == {half}) == {half}"
+                    "every(xs, value => value >= 0) \
+                     && exists(xs, value => value == {last}) \
+                     && one(xs, value => value == {half}) == {half}"
                 ),
             ),
             check(
-                "collection.union",
-                format!(
-                    "collection.union(collection.take(xs, {half}), collection.drop(xs, {half})) == xs"
-                ),
+                "union",
+                format!("union(take(xs, {half}), drop(xs, {half})) == xs"),
             ),
         ],
     );
