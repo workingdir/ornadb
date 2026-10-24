@@ -257,6 +257,7 @@ impl ConformanceAdapter for SemanticAdapter {
     }
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         TransactionalEvaluator::default()
+            .with_fixture_catalogue()
             .execute_duplicate_key_fixture(unit)
             .unwrap_or_else(Self::unsupported_runtime)
     }
@@ -1886,14 +1887,38 @@ pub struct TransactionalEvaluator {
     mutation_scope: [u8; 32],
     sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     explain_catalogue: Option<ActivationExplainCatalogue>,
+    admission: AdmissionCatalogue,
+}
+
+/// Catalogue that admission checks user modules against. `Production` is the
+/// authoritative core catalogue; `ConformanceFixture` additionally reserves the
+/// conformance fixture namespaces and is opted into by the conformance harness
+/// only, through [`TransactionalEvaluator::with_fixture_catalogue`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionCatalogue {
+    Production,
+    ConformanceFixture,
+}
+
+impl AdmissionCatalogue {
+    fn base(self) -> Catalogue {
+        match self {
+            Self::Production => Catalogue::authoritative_core(),
+            Self::ConformanceFixture => Catalogue::authoritative_fixture(),
+        }
+    }
 }
 
 impl TransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). The conformance harness
+    /// opts into the fixture catalogue with [`Self::with_fixture_catalogue`].
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
             entry: entry.into(),
             limits,
+            admission: AdmissionCatalogue::Production,
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
@@ -1901,6 +1926,16 @@ impl TransactionalEvaluator {
             sys_host: None,
             explain_catalogue: None,
         }
+    }
+
+    /// Opts this evaluator into the conformance fixture catalogue. Production
+    /// evaluators never use it. The only callers are the conformance harness
+    /// (`CompositeEvaluator::default` in `main.rs` and
+    /// `SemanticAdapter::evaluate`), which need `execute_duplicate_key_fixture`.
+    #[must_use]
+    pub fn with_fixture_catalogue(mut self) -> Self {
+        self.admission = AdmissionCatalogue::ConformanceFixture;
+        self
     }
 
     fn with_activation_time(mut self, activation_time: SystemTime) -> Self {
@@ -1942,7 +1977,7 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return *outcome,
         };
@@ -1964,7 +1999,7 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let mut admitted = match admit_transaction_source(unit, self.limits, "bad") {
+        let mut admitted = match admit_transaction_source(unit, self.limits, "bad", self.admission) {
             Ok(value) => value,
             Err(outcome) => return Some(*outcome),
         };
@@ -2168,6 +2203,7 @@ pub struct DurableTransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
     sys_host: Option<std::sync::Arc<SysHostAttachment>>,
+    admission: AdmissionCatalogue,
     #[cfg(test)]
     activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
@@ -2244,12 +2280,16 @@ impl std::fmt::Display for PendingPublicationError {
 impl std::error::Error for PendingPublicationError {}
 
 impl DurableTransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). It has no fixture
+    /// catalogue opt-in.
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
             entry: entry.into(),
             limits,
             sys_host: None,
+            admission: AdmissionCatalogue::Production,
             #[cfg(test)]
             activation_time_observer: None,
         }
@@ -2275,7 +2315,7 @@ impl DurableTransactionalEvaluator {
         if !root_entry.contains('.') {
             return false;
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(_) => return false,
         };
@@ -2312,7 +2352,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -2486,7 +2526,7 @@ impl DurableTransactionalEvaluator {
             return replay_or_fence_request(start.request);
         }
 
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => {
                 let outcome = *outcome;
@@ -2661,7 +2701,7 @@ impl DurableTransactionalEvaluator {
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
         };
 
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
         };
@@ -2830,7 +2870,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project transaction roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -2975,7 +3015,7 @@ impl DurableTransactionalEvaluator {
             )
             .await;
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => {
                 return terminalize_observed_outcome(
@@ -3062,7 +3102,7 @@ impl DurableTransactionalEvaluator {
                 "main.ingest",
             )
             .await?;
-        let admitted = match admit_transaction_project(&project, self.limits, "main.ingest") {
+        let admitted = match admit_transaction_project(&project, self.limits, "main.ingest", self.admission) {
             Ok(admitted) => admitted,
             Err(_) => return Ok((outcome, false, None, 0, false)),
         };
@@ -3479,7 +3519,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project stream roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -3548,7 +3588,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project stream roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -4230,7 +4270,7 @@ impl DurableTransactionalEvaluator {
     /// state or beginning delivery. Callers must use an explicit execution
     /// entry point to acquire a lease, poll the source, and invoke callbacks.
     pub fn admit_list_stream_source(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        match admit_list_stream_source(unit, self.limits, &self.entry) {
+        match admit_list_stream_source(unit, self.limits, &self.entry, self.admission) {
             Ok(_) => StageOutcome::Passed,
             Err(outcome) => *outcome,
         }
@@ -4248,7 +4288,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let mut bridge = match admit_list_stream_source(unit, self.limits, &self.entry) {
+        let mut bridge = match admit_list_stream_source(unit, self.limits, &self.entry, self.admission) {
             Ok(bridge) => bridge,
             Err(outcome) => return Ok(*outcome),
         };
@@ -4509,7 +4549,7 @@ pub fn transactional_table_candidate_validator(
     cwd_generation: orna_repository_v1::CwdGeneration,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
-    let admitted = admit_transaction_source_inner(unit, limits, entry, false)
+    let admitted = admit_transaction_source_inner(unit, limits, entry, false, AdmissionCatalogue::Production)
         .map_err(|failure| *failure)?;
     Ok(Box::new(TransactionalTableCandidateValidator::new(
         cwd_generation,
@@ -4580,7 +4620,7 @@ pub fn transactional_loaded_project_candidate_validator(
             negative_cases: Vec::new(),
         },
     };
-    let admitted = admit_transaction_project(&project, limits, "")
+    let admitted = admit_transaction_project(&project, limits, "", AdmissionCatalogue::Production)
         .map_err(|failure| *failure)?;
     let candidate_table_fields = candidate_table_fields_in_stable_id_order(
         loaded,
@@ -5020,6 +5060,7 @@ fn admit_list_stream_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
     let AdmittedTransaction {
         functions,
@@ -5029,7 +5070,7 @@ fn admit_list_stream_source(
         mut table_assertions,
         module_assertions,
         ..
-    } = admit_transaction_source(unit, limits, entry)?;
+    } = admit_transaction_source(unit, limits, entry, admission)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -6446,8 +6487,9 @@ fn admit_transaction_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
-    admit_transaction_source_inner(unit, limits, entry, true)
+    admit_transaction_source_inner(unit, limits, entry, true, admission)
 }
 
 fn admit_transaction_source_inner(
@@ -6455,6 +6497,7 @@ fn admit_transaction_source_inner(
     limits: EvaluatorLimits,
     entry: &str,
     require_entry: bool,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
     if let Err(error) = limits.check_source(&unit.source) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6472,7 +6515,7 @@ fn admit_transaction_source_inner(
             unit.source_id.clone(),
             unit.source.clone(),
         )],
-        &Catalogue::authoritative_fixture(),
+        &admission.base(),
         SystemProviders::Production,
     );
     if let Some(summary) = analysis
@@ -6541,6 +6584,7 @@ fn admit_transaction_project(
     project: &ProjectUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
     let standard_sources = project
         .modules
@@ -6572,11 +6616,12 @@ fn admit_transaction_project(
                 .verify_source(logical_path, source)
                 .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
         }
-        Catalogue::authoritative_fixture()
+        admission
+            .base()
             .with_standard_sources(&profile, sources)
             .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?
     } else {
-        Catalogue::authoritative_fixture()
+        admission.base()
     };
     let application_modules = project
         .modules
@@ -9967,6 +10012,7 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 #[cfg(test)]
 mod transaction_admission_tests {
     use super::{
+        AdmissionCatalogue,
         SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
         TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
         TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
@@ -10287,16 +10333,20 @@ mod transaction_admission_tests {
 
         let outcome = evaluator.execute_source(&unit);
         match outcome {
-            // The authoritative fixture currently reports the unresolved-name
-            // boundary for a `std.net.http.get` call in an ordinary helper
-            // body, rather than a propagated `ORNA-EVAL-EFFECT` summary. The
-            // admission boundary must still reject before activation; this
-            // records that precise observed diagnostic until the catalogue can
-            // resolve the helper body transitively.
+            // The single-source effect gate in `admit_transaction_source_inner`
+            // reads the first `main` symbol in `analysis.modules`, which is
+            // ordered by namespace and also holds the catalogue modules. The
+            // production core catalogue declares no `main`, so the gate reads
+            // the user module's `main`, whose summary carries the `network`
+            // effect propagated from `fetch_remote`, and rejects with
+            // `ORNA-EVAL-EFFECT` before table activation. Under the fixture
+            // catalogue the effectless fixture value `bank.main` sorts before
+            // the user namespace, so the gate checked `bank.main` and passed,
+            // and the run failed later with `ORNA-EVAL-NAME` instead.
             StageOutcome::Failed(diagnostic) => assert_eq!(
                 diagnostic.code(),
-                "ORNA-EVAL-NAME",
-                "the current authoritative catalogue rejection must remain fail-closed"
+                "ORNA-EVAL-EFFECT",
+                "admission must reject the user entry's propagated network effect"
             ),
             outcome => panic!(
                 "a transitive external effect must be rejected before table activation: {outcome:?}"
@@ -10336,7 +10386,7 @@ mod transaction_admission_tests {
             },
         };
 
-        match admit_transaction_project(&project, Limits::default(), "main.seed") {
+        match admit_transaction_project(&project, Limits::default(), "main.seed", AdmissionCatalogue::Production) {
             Err(outcome) => assert!(matches!(
                 *outcome,
                 StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-EFFECT"
@@ -11076,6 +11126,7 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
         admitted_transaction_module, lower_relation_bindings,
@@ -11343,7 +11394,7 @@ mod durable_tests {
             source: r#"pub table Note(id: Int) { text: Str, } fn resolved_text() = "resolved"; fn main() { Note.insert({ id: 9, text: resolved_text() }); }"#.into(),
         };
         let initial_digest = [11; 32];
-        let admitted = super::admit_transaction_source(&unit, Limits::default(), "main")
+        let admitted = super::admit_transaction_source(&unit, Limits::default(), "main", AdmissionCatalogue::Production)
             .expect("source is parser, resolver, and typecheck admitted");
         let mut preview = TransactionalEvaluator::new("main", Limits::default());
         let mutations = preview
@@ -12863,7 +12914,7 @@ fn checkpoint_atomicity_bridge(
     limits: EvaluatorLimits,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, RuntimeError> {
-    let admitted = admit_transaction_project(project, limits, "main.ingest")
+    let admitted = admit_transaction_project(project, limits, "main.ingest", AdmissionCatalogue::Production)
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
     admit_project_list_stream(project, &admitted, "main.ingest", identity)
         .map_err(|_| RuntimeError::RecoveryInvalid)
@@ -12884,6 +12935,7 @@ fn checkpoint_atomicity_stream_error(error: orna_runtime_v1::StreamStepError) ->
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
         StageOutcome, admit_project_list_stream, admit_transaction_project,
         stream_handler_diagnostic, substitute_list_item, table_key,
@@ -12971,7 +13023,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            &admit_transaction_project(&project, Limits::default(), "main.ingest")
+            &admit_transaction_project(&project, Limits::default(), "main.ingest", AdmissionCatalogue::Production)
                 .expect("project admission"),
             "main.ingest",
             identity(),
@@ -13100,7 +13152,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            &admit_transaction_project(&project, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&project, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),
@@ -13167,7 +13219,7 @@ mod list_stream_tests {
 
         let first_bridge = admit_project_list_stream(
             &first,
-            &admit_transaction_project(&first, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&first, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("first project admission"),
             "sensors.ingest",
             identity(),
@@ -13196,7 +13248,7 @@ mod list_stream_tests {
 
         let changed_bridge = admit_project_list_stream(
             &changed,
-            &admit_transaction_project(&changed, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&changed, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("changed project admission"),
             "sensors.ingest",
             identity(),
@@ -13300,7 +13352,7 @@ mod list_stream_tests {
         let expected = authoritative_sensor_project();
         let bridge = admit_project_list_stream(
             &expected,
-            &admit_transaction_project(&expected, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&expected, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),

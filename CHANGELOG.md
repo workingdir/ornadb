@@ -112,6 +112,13 @@ been published.
   and `SystemDiagnosticAdapterError`). Also removed
   `SysHostBindingRegistry::with_explain_catalogue` and
   `CaptureFileError::code`.
+- Removed the unreachable `orna-core` catalogue bridge from `orna-runtime-v1`:
+  `CatalogueAdmission::from_artifact`,
+  `RuntimeState::commit_validated_catalogue_table_request_activation_with_revision_pair`
+  and `RuntimeState::catalogue_revision_pair_at`. Nothing called them, so every
+  catalogue admission already recorded no revision pair. `orna-runtime-v1` no
+  longer depends on `orna-core`. The `runtime_catalogue_revision_binding` table
+  stays in the state schema, so existing `state.db` files open unchanged.
 - Opening a repository format context reads only the root tree, the `.orna`
   tree and its metadata blobs, through one long-lived `git cat-file
   --batch-command` reader per repository handle. It no longer lists the whole
@@ -371,6 +378,12 @@ been published.
   alias or shim. Build output is `target/<profile>/orna`, and the Linux package
   and release paths, CI, and the command examples in the README and docs name
   `orna`.
+- `TransactionalEvaluator` and `DurableTransactionalEvaluator` now admit
+  transactions against the production catalogue by default, so a user module
+  whose path matches a conformance fixture namespace, such as
+  `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
+  conformance fixture catalogue is an explicit harness opt-in only, through
+  `TransactionalEvaluator::with_fixture_catalogue`.
 
 ## 1.0.0 — release inventory (publication pending)
 
