@@ -43,7 +43,7 @@ BASELINE = WORKSPACE_ROOT / "scripts/known-test-failures.toml"
 ITEMS = WORKSPACE_ROOT / "scripts/gate-evidence-items.toml"
 SCHEMA = "ornadb-gate-evidence/1"
 # Bump when flags, record fields or output formats change, so CI logs show which interface ran.
-RECORDER_VERSION = "2"
+RECORDER_VERSION = "3"
 STATES = ("passed", "failed", "not-executed", "unavailable")
 # Worst first: a gate or item takes the first state any of its parts has.
 STATE_PRECEDENCE = ("failed", "unavailable", "not-executed", "passed")
@@ -142,6 +142,8 @@ class KnownFailure:
     bead: str
     reason: str
     record: str = "*"
+    # The test fails only on some runs, so a pass does not show the entry is stale.
+    intermittent: bool = False
 
     def matches(self, failure: Failure, record: str) -> bool:
         return fnmatch.fnmatchcase(record, self.record) and (self.package, self.target, self.test) == (
@@ -158,6 +160,7 @@ class KnownFailure:
             "bead": self.bead,
             "reason": self.reason,
             "record": self.record,
+            "intermittent": self.intermittent,
         }
 
 
@@ -452,7 +455,8 @@ def load_baseline(path: Path) -> list[KnownFailure]:
     """Load and validate the known-failure baseline.
 
     An entry names one test with `test`, or several tests of one target that share
-    a bead and reason with `tests`.
+    a bead and reason with `tests`. `intermittent = true` marks tests that fail only
+    on some runs.
     """
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     unexpected = set(data) - {"failure"}
@@ -464,7 +468,7 @@ def load_baseline(path: Path) -> list[KnownFailure]:
         where = f"{path.name}: failure {index}"
         keys = set(entry)
         missing = {"package", "target", "bead", "reason"} - keys
-        extra = keys - {"package", "target", "test", "tests", "bead", "reason", "record"}
+        extra = keys - {"package", "target", "test", "tests", "bead", "reason", "record", "intermittent"}
         if missing or extra or ("test" in keys) == ("tests" in keys):
             raise EvidenceError(
                 f"{where}: needs package, target, bead, reason and one of test or tests; "
@@ -485,12 +489,15 @@ def load_baseline(path: Path) -> list[KnownFailure]:
         record = str(entry.get("record", "*"))
         if not record or not re.fullmatch(r"[a-z0-9*?-]+", record):
             raise EvidenceError(f"{where}: record must be a record ID or glob")
+        intermittent = entry.get("intermittent", False)
+        if not isinstance(intermittent, bool):
+            raise EvidenceError(f"{where}: intermittent must be true or false")
         for test in tests:
             key = (package, target, test, record)
             if key in seen:
                 raise EvidenceError(f"{where}: duplicate entry for {package} {target} {test}")
             seen.add(key)
-            entries.append(KnownFailure(package, target, test, bead, reason.strip(), record))
+            entries.append(KnownFailure(package, target, test, bead, reason.strip(), record, intermittent))
     return entries
 
 
@@ -509,12 +516,14 @@ def classify(
 
 
 def baseline_status(entry: KnownFailure, record: str, targets: list[dict], failures: list[dict]) -> str | None:
-    """Return observed, passed, or None when this record did not execute the entry's target."""
+    """Return observed, passed, missing (the entry's target finished without the test), or None
+    when this record did not execute the entry's target."""
     if not fnmatch.fnmatchcase(record, entry.record):
         return None
     key = (entry.package, entry.target, entry.test)
     if any((failure["package"], failure["target"], failure["test"]) == key for failure in failures):
         return "observed"
+    missing = False
     for target in targets:
         if (target["package"], target["target"]) != (entry.package, entry.target) or not target["completed"]:
             continue
@@ -523,7 +532,9 @@ def baseline_status(entry: KnownFailure, record: str, targets: list[dict], failu
                 return "passed"
         elif target["tests"].get(entry.test) == "passed":
             return "passed"
-    return None
+        elif entry.test not in target["tests"]:
+            missing = True
+    return "missing" if missing else None
 
 
 def prepare_command(command: list[str]) -> list[str]:
@@ -1112,7 +1123,7 @@ def markdown(summary: dict) -> str:
         lines += [f"- {problem}" for problem in summary["problems"]]
     lines += ["", "### Known failures", "", "| Entry | Bead | Status |", "|---|---|---|"]
     for entry in summary["baseline"]:
-        status = entry["status"]
+        status = entry["status"] + (" (intermittent)" if entry["intermittent"] else "")
         lines.append(f"| `{entry['package']} {entry['target']} {entry['test']}` | {entry['bead']} | {status} |")
     return "\n".join(lines) + "\n"
 
@@ -1140,13 +1151,19 @@ def command_summarize(arguments: argparse.Namespace) -> int:
             for row in record["baseline"]
             if (row["package"], row["target"], row["test"], row["record"]) == (entry.package, entry.target, entry.test, entry.record)
         ]
-        status = "observed" if "observed" in statuses else "passed" if "passed" in statuses else "not-executed"
+        status = next((state for state in ("observed", "passed", "missing") if state in statuses), "not-executed")
         entries.append({**entry.as_json(), "status": status})
     if arguments.expect_commit:
         problems += [
             f"known failure {entry['test']} passed on {arguments.expect_commit}: remove its baseline entry"
             for entry in entries
-            if entry["status"] == "passed"
+            if entry["status"] == "passed" and not entry["intermittent"]
+        ]
+        problems += [
+            f"known failure {entry['test']} is not a test of {entry['package']} {entry['target']} on "
+            f"{arguments.expect_commit}: remove or rename its baseline entry"
+            for entry in entries
+            if entry["status"] == "missing"
         ]
     summary = {
         "schema": SCHEMA,
