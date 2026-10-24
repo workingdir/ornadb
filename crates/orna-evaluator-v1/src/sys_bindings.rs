@@ -1095,7 +1095,8 @@ pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
 /// `media_type` and `suffix` read only the canonical annotation without
 /// hydrating payload bytes. `same_content` compares exact bytes under the
 /// content rules and may stream them, so an unreadable side fails with its
-/// portable `sys.blob.*` code. Arity comes from the generated contract.
+/// portable `sys.blob.*` code. Arity is fixed by the reflection contract
+/// declared for each operation, not by this dispatcher.
 pub(crate) fn dispatch_blob_reflection(
     operation: &str,
     arguments: &[ContextValue],
@@ -1728,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn sys_blob_reflection_on_rov3_and_ovb2() {
+    fn rov3_descriptor_only_is_unavailable_and_self_equal() {
         struct PayloadResolver(Vec<u8>);
 
         impl orna_value_v1::BlobResolver for PayloadResolver {
@@ -1847,9 +1848,11 @@ mod tests {
                 .err()
                 .map(|error| error.code().to_owned())
         };
-        // ORNA-BLOB-005: a decoded ROV-3 value is descriptor-only (spec 34:536,
-        // descriptive decoding never revives operational authority), so with no
-        // shared admitted witness it reports explicit unavailability.
+        // ORNA-BLOB-005: explicit unavailability is an allowed outcome. A decoded
+        // ROV-3 value is descriptor-only and carries no content binding, so with
+        // no shared admitted witness it reports `sys.blob.unavailable`. This is a
+        // deliberate scope decision; losing the Reference binding on the ROV-3
+        // round trip is tracked separately (see the linked P2 bead).
         assert_eq!(
             same_content_code(&rov3, &ovb2),
             Some("sys.blob.unavailable".to_owned())
@@ -1874,5 +1877,39 @@ mod tests {
         assert_eq!(undeclared, Some("ORNA-EVAL-ARGUMENT".to_owned()));
         assert!(is_blob_host_operation("sys.blob.suffix"));
         assert!(!is_blob_host_operation("sys.blob.capture_file"));
+    }
+
+    #[test]
+    fn blob_collision_maps_to_portable_code() {
+        assert_eq!(
+            blob_reflection_failure(ValueError::ContentCollision).code(),
+            "sys.blob.collision"
+        );
+    }
+
+    #[test]
+    fn blob_same_content_observes_cancellation_without_partial_result() {
+        let left = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"same".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        let right = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"same".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        token.request();
+        let error = dispatch_blob_reflection(
+            "sys.blob.same_content",
+            &[left, right],
+            Some(&token),
+        )
+        .err()
+        .expect("a requested cancellation must fail the comparison");
+        assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
     }
 }
