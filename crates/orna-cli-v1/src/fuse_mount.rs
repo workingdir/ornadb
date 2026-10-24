@@ -1558,11 +1558,20 @@ fn admit_edit_result(
     draft_path: &Path,
 ) -> Result<(), EditError> {
     match admission {
-        Ok(()) => std::fs::remove_file(draft_path).map_err(|error| {
-            EditError::Failed(format!(
-                "edit was accepted but its explicit draft could not be removed: {error}"
-            ))
-        }),
+        Ok(()) => {
+            // The commit is durable, so the owner reports acceptance even when the
+            // explicit draft cannot be removed (ORNA-ADMIN-003). The leftover draft
+            // is named in the warning for the operator to remove.
+            if let Err(error) = std::fs::remove_file(draft_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "warning: edit was accepted but its explicit draft could not be removed: {error}; remove {} by hand",
+                        draft_path.display()
+                    );
+                }
+            }
+            Ok(())
+        }
         Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
             "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
             draft_path.display()
@@ -1814,12 +1823,8 @@ pub(super) fn edit_path(
     }
     let prepared = filesystem.prepare_edit(relative, grouped_row)?;
     let draft_path = run_editor_on_draft(repository.runtime_paths().root(), &prepared.initial_bytes)?;
-    let candidate = fs::read(&draft_path).map_err(|error| {
-        EditError::Failed(format!(
-            "edited candidate could not be read: {error}; draft retained at {}",
-            draft_path.display()
-        ))
-    })?;
+    let candidate = read_regular_draft(&draft_path)
+        .map_err(|error| retained_edit_error(&error, &draft_path))?;
     prepared.commit(&candidate, &draft_path, grouped_row)
 }
 #[derive(Debug)]
@@ -6012,5 +6017,29 @@ mod hardening_tests {
         std::fs::remove_file(&draft).unwrap();
         std::fs::write(&draft, b"candidate").unwrap();
         assert_eq!(super::read_regular_draft(&draft).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn accepted_edit_reports_success_even_when_its_draft_cannot_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        // A directory at the draft path makes remove_file fail after a durable commit.
+        let undeletable = directory.path().join("orna-edit-1.draft");
+        std::fs::create_dir(&undeletable).unwrap();
+        assert!(super::admit_edit_result(Ok(()), &undeletable).is_ok());
+        assert!(undeletable.is_dir(), "the undeletable draft is left in place");
+        // A draft that is already gone is still an accepted edit.
+        let gone = directory.path().join("orna-edit-2.draft");
+        assert!(super::admit_edit_result(Ok(()), &gone).is_ok());
+    }
+
+    #[test]
+    fn accepted_edit_removes_its_draft_and_refusals_retain_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let draft = directory.path().join("orna-edit-3.draft");
+        std::fs::write(&draft, b"candidate").unwrap();
+        assert!(super::admit_edit_result(Err(super::DocumentCommitError::Stale), &draft).is_err());
+        assert!(draft.exists(), "a refused edit retains its draft");
+        assert!(super::admit_edit_result(Ok(()), &draft).is_ok());
+        assert!(!draft.exists(), "an accepted edit removes its draft");
     }
 }
