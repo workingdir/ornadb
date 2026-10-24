@@ -13,9 +13,15 @@ use crate::{RuntimeError, RuntimeIdentity};
 /// metadata (ORNA-UPGRADE-001). A format-1/2 `HEAD` has no row writer
 /// (ORNA-UPGRADE-003), so it is refused with
 /// [`RuntimeError::LegacyHeadReadOnly`] before any runtime state is opened.
+/// A `HEAD` that records an unknown format is refused first with
+/// [`RuntimeError::UnknownHeadFormat`] (ORNA-REPO-CONTEXT-003), so the worktree
+/// metadata is never consulted to admit it.
 pub fn repository_runtime_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
+    repository
+        .require_known_head_format()
+        .map_err(RuntimeError::UnknownHeadFormat)?;
     repository
         .require_writable_head_format()
         .map_err(RuntimeError::LegacyHeadReadOnly)?;
