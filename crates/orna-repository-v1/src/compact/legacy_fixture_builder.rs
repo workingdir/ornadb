@@ -1,14 +1,35 @@
 //! Builds the committed legacy format-1 compact golden repository.
 //!
 //! Compiled only under the `legacy-fixture-writer` feature; production builds
-//! never contain it (ORNA-UPGRADE-003). Format-1 snapshots are produced solely
-//! by this test-only writer, through the same
-//! `Repository::prepare_compact_publication` path that the compact reader
-//! admits, and then made `HEAD` the way an older build left them.
+//! never contain it (ORNA-UPGRADE-003).
+//!
+//! Independence: this builder does NOT call `Repository::prepare_compact_publication`,
+//! `CompactManifest`, `CompactSegment` or `canonical_key_extrema`, and it does not
+//! reset `HEAD` to a candidate commit. It writes the 1.0.0 layout
+//! (`.orna/storage/T/{policy.orna,manifest.orna,shards/,data/xx/seg.parquet}`,
+//! 1.0.0 `source/23-storage.md` lines 88-106) directly with plain files and
+//! `git add`/`git commit`, computing segment checksums, git blob IDs and key
+//! bounds itself from the typed row values.
+//!
+//! Shared with production and therefore NOT independent: the canonical OVB
+//! encoder (`orna_foundation_v1::CanonicalValue`), the base64 helper, the
+//! date-key mapping (`compact_date_value`) and the Parquet page-checksum helper
+//! (`legacy_fixture_writer::with_page_checksums`). The record text shapes follow
+//! the record grammar the production reader admits, because that grammar is
+//! what the reader must parse.
+//!
+//! Fixed commit dates make the committed bundle bytes reproducible for a given
+//! git release; the bundle test pins its SHA-256.
 //!
 //! The fixture covers key-only compact tables for `Int` (INT64), `Str`
 //! (BYTE_ARRAY STRING, `utf8`) and `Date` (INT32 DATE), each with a committed
 //! Parquet page-checksum profile, plus a committed gitlink.
+//!
+//! Known remaining gap (not fixed in this slice): the manifest `min_key`/`max_key`
+//! and shard entry bounds are written as hex text of the canonical key bytes, exactly
+//! as the production codec writes and parses them. 1.0.0 `23-storage.md:214,216`
+//! says key values use the table key schema (typed values), so this fixture does
+//! not match the spec on those fields.
 
 use std::{fs, path::Path, process::Command, sync::Arc};
 
@@ -26,11 +47,7 @@ use parquet::{
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{
-    CompactManifest, CompactSegment, CompactSegmentRole, canonical_key_extrema,
-    compact_date_value, legacy_fixture_writer::with_page_checksums,
-};
-use crate::{ManagedPath, Repository};
+use super::{compact_date_value, legacy_fixture_writer::with_page_checksums};
 
 const TABLE_NAMESPACE: u64 = 0x018f_0000_0000_7100;
 const FIELD_NAMESPACE: u64 = 0x018f_0000_0000_7200;
@@ -40,12 +57,44 @@ const FORMAT_1: &str =
 const GITLINK_PATH: &str = "vendor/stdlib";
 const AUTHOR_NAME: &str = "orna-fixture";
 const AUTHOR_EMAIL: &str = "orna-fixture@example.invalid";
+/// Fixed author and committer time (`1767225600` = 2026-01-01T00:00:00Z).
+const FIXED_TIME: &str = "1767225600 +0000";
+const PROFILE: &str = "compact-storage-v1";
+const ENCODER: &str = "test-encoder-v1";
+const GENERATION: u64 = 1;
+const NEXT_GENERATION: u64 = 2;
+const SHARD_NUMBER: u64 = 0;
+const SHARD_FILE: &str = "shards/00000000.orna";
 
 /// One physical segment of a fixture table. A table holds one variant only.
 enum Column {
     Int(Vec<i64>),
     Date(Vec<i32>),
     Str(Vec<&'static str>),
+}
+
+/// Typed primary key of one row. Ordering is the value ordering of the key
+/// type; all rows of one table share one variant.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum Key {
+    Int(i64),
+    Date(i32),
+    Str(&'static str),
+}
+
+impl Key {
+    /// Canonical logical key bytes, as the compact reader stores bounds.
+    fn canonical(&self) -> Vec<u8> {
+        let raw = match self {
+            Self::Int(value) => OvbRaw::Int((*value).into()),
+            Self::Date(days) => compact_date_value(*days).expect("date key"),
+            Self::Str(value) => OvbRaw::Text((*value).to_owned()),
+        };
+        CanonicalValue::new(raw)
+            .expect("canonical key")
+            .encode()
+            .expect("canonical key encoding")
+    }
 }
 
 impl Column {
@@ -74,25 +123,12 @@ impl Column {
         }
     }
 
-    fn row_count(&self) -> usize {
+    fn keys(&self) -> Vec<Key> {
         match self {
-            Self::Int(values) => values.len(),
-            Self::Date(values) => values.len(),
-            Self::Str(values) => values.len(),
+            Self::Int(values) => values.iter().map(|value| Key::Int(*value)).collect(),
+            Self::Date(values) => values.iter().map(|value| Key::Date(*value)).collect(),
+            Self::Str(values) => values.iter().map(|value| Key::Str(*value)).collect(),
         }
-    }
-
-    /// Canonical logical key of row `index`, as the compact reader compares it.
-    fn key(&self, index: usize) -> Vec<u8> {
-        let raw = match self {
-            Self::Int(values) => OvbRaw::Int(values[index].into()),
-            Self::Date(values) => compact_date_value(values[index]).expect("date key"),
-            Self::Str(values) => OvbRaw::Text(values[index].to_owned()),
-        };
-        CanonicalValue::new(raw)
-            .expect("canonical key")
-            .encode()
-            .expect("canonical key encoding")
     }
 
     fn parquet(
@@ -112,7 +148,7 @@ impl Column {
         let metadata = vec![
             KeyValue::new(
                 "orna.profile".to_owned(),
-                Some("compact-storage-v1".to_owned()),
+                Some(PROFILE.to_owned()),
             ),
             KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
             KeyValue::new(
@@ -129,10 +165,7 @@ impl Column {
                 "orna.columns.ovb".to_owned(),
                 Some(orna_value_v1::base64_encode(columns)),
             ),
-            KeyValue::new(
-                "orna.encoder".to_owned(),
-                Some("test-encoder-v1".to_owned()),
-            ),
+            KeyValue::new("orna.encoder".to_owned(), Some(ENCODER.to_owned())),
         ];
         let properties = Arc::new(
             WriterProperties::builder()
@@ -186,42 +219,6 @@ impl Column {
         bytes[footer + 1] = 0x02;
         with_page_checksums(bytes)
     }
-
-    fn segment(
-        &self,
-        table: Uuid,
-        field: Uuid,
-        schema: &SchemaDescriptor,
-        segment_id: Uuid,
-    ) -> CompactSegment {
-        let path = ManagedPath::new(format!(
-            ".orna/storage/{table}/data/{}/{segment_id}.parquet",
-            &segment_id.to_string()[..2]
-        ))
-        .expect("segment path");
-        let columns = columns_for(field, self.type_name(), self.encoding());
-        let keys = (0..self.row_count())
-            .map(|index| self.key(index))
-            .collect::<Vec<_>>();
-        let (min_key, max_key) =
-            canonical_key_extrema(keys.iter().map(Vec::as_slice)).expect("key extrema");
-        let bytes = self.parquet(table, schema, field, &columns);
-        CompactSegment::new(
-            segment_id,
-            CompactSegmentRole::Data,
-            schema_fingerprint(schema),
-            "test-encoder-v1",
-            path,
-            bytes,
-            min_key.to_vec(),
-            max_key.to_vec(),
-            u64::try_from(self.row_count()).expect("row count"),
-            columns,
-            true,
-            false,
-        )
-        .expect("compact segment")
-    }
 }
 
 /// Writes the complete legacy format-1 golden repository into `root`.
@@ -251,13 +248,7 @@ pub fn write_legacy_format1_fixture(root: &Path) {
 
     for (ordinal, segments) in fixture_tables().iter().enumerate() {
         let number = u64::try_from(ordinal + 1).expect("table number");
-        publish_table(
-            root,
-            table_id(number),
-            field_id(number),
-            number,
-            segments,
-        );
+        publish_table(root, table_id(number), field_id(number), number, segments);
     }
 
     let head = git(root, &["rev-parse", "HEAD"]);
@@ -282,50 +273,119 @@ fn fixture_tables() -> Vec<Vec<Column>> {
     ]
 }
 
+/// Writes one table's committed 1.0.0 compact layout as one commit.
 fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &[Column]) {
     let type_name = segments[0].type_name();
     let schema = table_schema(table, field, type_name);
     let schema_digest = schema_fingerprint(&schema);
-    let compact_segments = segments
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
-            let ordinal = (number << 16) | u64::try_from(index + 1).expect("segment number");
-            let segment_id =
-                Uuid::from_u64_pair(SEGMENT_NAMESPACE, ordinal | 0x8000_0000_0000_0000);
-            column.segment(table, field, &schema, segment_id)
-        })
-        .collect::<Vec<_>>();
+    let table_root = format!(".orna/storage/{table}");
+    let table_dir = root.join(&table_root);
+    fs::create_dir_all(table_dir.join("shards")).unwrap();
+    fs::write(table_dir.join("policy.orna"), policy_record(table)).unwrap();
 
-    let repository = Repository::discover(root).expect("repository");
-    let head = repository.head().expect("head").expect("committed head");
-    let base = repository
-        .read_compact_manifest(&head, table)
-        .expect("manifest")
-        .unwrap_or_else(|| CompactManifest::empty(table, schema_digest));
-    let intent = *table.as_bytes();
-    let plan = repository
-        .prepare_compact_publication(
-            &head,
-            repository.index_generation().expect("index generation"),
-            base,
-            intent,
-            [intent[0]; 32],
-            &compact_segments,
-            "orna: publish compact runtime data",
-        )
-        .expect("compact publication");
-    // The fixture is a committed older-build publication: make the candidate
-    // the committed HEAD exactly as an older build left it.
-    git(
-        root,
-        &[
-            "reset",
-            "--quiet",
-            "--hard",
-            plan.candidate_commit().as_str(),
-        ],
+    let mut entries = Vec::new();
+    let mut all_keys = Vec::new();
+    for (index, column) in segments.iter().enumerate() {
+        let ordinal = (number << 16) | u64::try_from(index + 1).expect("segment number");
+        let segment_id = Uuid::from_u64_pair(SEGMENT_NAMESPACE, ordinal | 0x8000_0000_0000_0000);
+        let relative = format!(
+            "{table_root}/data/{}/{segment_id}.parquet",
+            &segment_id.to_string()[..2]
+        );
+        let file = root.join(&relative);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let columns = columns_for(field, type_name, column.encoding());
+        let bytes = column.parquet(table, &schema, field, &columns);
+        fs::write(&file, &bytes).unwrap();
+        let keys = column.keys();
+        entries.push(EntryRecord {
+            segment_id,
+            relative_path: relative.clone(),
+            git_object_id: git(root, &["hash-object", "-w", &relative]),
+            sha256: Sha256::digest(&bytes).into(),
+            min_key: keys.iter().min().expect("non-empty segment").canonical(),
+            max_key: keys.iter().max().expect("non-empty segment").canonical(),
+            row_count: keys.len(),
+            compressed_bytes: bytes.len(),
+            columns,
+        });
+        all_keys.extend(keys);
+    }
+
+    let shard = shard_record(&schema_digest, &entries).into_bytes();
+    fs::write(table_dir.join(SHARD_FILE), &shard).unwrap();
+    let manifest = manifest_record(
+        table,
+        &schema_digest,
+        &all_keys.iter().min().expect("keys").canonical(),
+        &all_keys.iter().max().expect("keys").canonical(),
+        entries.len(),
+        &Sha256::digest(&shard).into(),
     );
+    fs::write(table_dir.join("manifest.orna"), manifest).unwrap();
+
+    git(root, &["add", "--all"]);
+    git(root, &["commit", "--quiet", "-m", "orna: publish compact runtime data"]);
+}
+
+/// One shard entry, before it is rendered into `shards/00000000.orna`.
+struct EntryRecord {
+    segment_id: Uuid,
+    relative_path: String,
+    git_object_id: String,
+    sha256: [u8; 32],
+    min_key: Vec<u8>,
+    max_key: Vec<u8>,
+    row_count: usize,
+    compressed_bytes: usize,
+    columns: Vec<u8>,
+}
+
+/// `policy.orna` content is spec-silent in 1.0.0 (`23-storage.md` names the
+/// file in the layout tree only); this minimal record is a fixture choice.
+fn policy_record(table: Uuid) -> String {
+    format!("{{profile: \"{PROFILE}\", table: \"{table}\"}}\n")
+}
+
+fn shard_record(schema: &[u8; 32], entries: &[EntryRecord]) -> String {
+    let mut output = String::from("{entries: [");
+    for (index, entry) in entries.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&format!(
+            "{{segment_id: \"{}\", role: \"data\", generation: {GENERATION}, schema_id: \"{}\", profile_version: 1, encoder_version: \"{ENCODER}\", relative_path: \"{}\", git_object_id: \"{}\", sha256: \"{}\", min_key: \"{}\", max_key: \"{}\", min_event_time: null, max_event_time: null, row_count: {}, compressed_bytes: {}, columns: \"{}\", row_group_index: true, bloom: false}}",
+            entry.segment_id,
+            hex_digest(schema),
+            entry.relative_path,
+            entry.git_object_id,
+            hex_digest(&entry.sha256),
+            hex_digest(&entry.min_key),
+            hex_digest(&entry.max_key),
+            entry.row_count,
+            entry.compressed_bytes,
+            orna_value_v1::base64_encode(&entry.columns),
+        ));
+    }
+    output.push_str("]}\n");
+    output
+}
+
+fn manifest_record(
+    table: Uuid,
+    schema: &[u8; 32],
+    min_key: &[u8],
+    max_key: &[u8],
+    entries: usize,
+    shard_sha256: &[u8; 32],
+) -> String {
+    format!(
+        "{{profile: \"{PROFILE}\", table: \"{table}\", schema: \"{}\", next_generation: {NEXT_GENERATION}, shards: [{{number: {SHARD_NUMBER}, min_key: \"{}\", max_key: \"{}\", entries: {entries}, file: \"{SHARD_FILE}\", hash: \"{}\"}}]}}\n",
+        hex_digest(schema),
+        hex_digest(min_key),
+        hex_digest(max_key),
+        hex_digest(shard_sha256),
+    )
 }
 
 fn table_id(number: u64) -> Uuid {
@@ -398,16 +458,34 @@ fn hex_digest(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Runs git with fixed author/committer times so bundle bytes are reproducible.
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(directory)
+        .env("GIT_AUTHOR_DATE", FIXED_TIME)
+        .env("GIT_COMMITTER_DATE", FIXED_TIME)
         .args(arguments)
         .output()
         .expect("git");
     assert!(
         output.status.success(),
-        "git {arguments:?}: {}",
+        "git {arguments:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("git output").trim().to_owned()
+    String::from_utf8(output.stdout)
+        .expect("git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cmp::Ordering;
+    use super::*;
+
+    #[test]
+    fn key_order_is_value_order_for_negative_dates_and_ints() {
+        assert_eq!(Key::Int(-3).cmp(&Key::Int(2)), Ordering::Less);
+        assert_eq!(Key::Date(-1).cmp(&Key::Date(0)), Ordering::Less);
+    }
 }

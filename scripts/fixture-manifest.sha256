@@ -150,7 +150,7 @@ b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cl
 77356591ab6e9597f4651e8a13eb5b79ea7f74c3628d340f08780c5ccf0777b1  crates/orna-cli-v1/tests/fixtures/init/preserved.orna
 e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cli-v1/tests/fixtures/init/version-1.orna
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
-f8b78d88c13df169160723b33b3b95ec0397d10bf79ec096051f99817a7e9120  crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle
+315b989c25e1bdb46f446cc2531b488a08b0a8c076fa5ec9f3bac04639779c7f  crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle
 6ec32696932b34a8d30ebe7bdcda8885e2c07ec8f67fb52655d7ab80aa29d1f7  crates/orna-cli-v1/tests/fixtures/lib002-core-only.orna
 5dc2bc9624d60a07f38ba830bf28851c87dd5da9279d2d3432b40eb1293b5bc4  crates/orna-cli-v1/tests/fixtures/media/edit-cycle-bundle-files.txt
 87f1e75d48c9f4d0e1ffbdb5df55e69daf95c1bbbb53a8a43f0d55fd256595b3  crates/orna-cli-v1/tests/fixtures/media/empty-media-main.orna
