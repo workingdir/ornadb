@@ -412,3 +412,17 @@ fn stored_field_rejects_alias_chain_through_ambiguous_name() {
     ]);
     assert_rejects_secret(&analysis);
 }
+
+#[test]
+// Specified: ORNA-SECRET-001; a name imported from a module that does not export it as a Type
+// must never be accepted as a stored value. The import is unresolved, so it is rejected.
+fn stored_field_rejects_import_of_name_module_does_not_export_as_type() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Missing};\n\npub table Account(id: Uuid) {\n    token: Missing,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Int;\n"),
+    ]);
+    assert!(!analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
