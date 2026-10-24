@@ -140,7 +140,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
         .await
         .unwrap();
     assert_eq!(admin_one.rows().len(), 2);
-    assert_eq!(admin_one.rows()[0].observed_generation, 0);
+    assert_eq!(admin_one.rows()[0].observed_generation, Some(0));
     assert_eq!(admin_one.rows()[0].function, "sys.admin.pause_stream");
     assert_eq!(admin_one.rows()[1].function, "sys.admin.reset_checkpoint");
     assert_eq!(admin_one.snapshot_id(), generation_one.snapshot_id());
@@ -233,7 +233,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
         .await
         .unwrap();
     assert_eq!(admin_two.rows().len(), 3);
-    assert_eq!(admin_two.rows()[2].observed_generation, 1);
+    assert_eq!(admin_two.rows()[2].observed_generation, Some(1));
     let resets_two = state
         .checkpoint_reset_audits_at(&key, &generation_two)
         .await

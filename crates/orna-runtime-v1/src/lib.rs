@@ -4479,8 +4479,11 @@ fn admin_reference_descriptor(
 /// A `failure:stale_capture` row replays the capture that rejected the call,
 /// stored in `admin_invocation_stale_capture`, so the replayed error equals the
 /// recorded one after later commits advance the CWD. Rows written before that
-/// table replay the CWD capture current at replay time. A `failure:unobservable`
-/// row replays as `RecoveryInvalid`: its CWD capture could not be read.
+/// table replay the CWD capture current at replay time. A
+/// `failure:unobservable:<class>` row (its CWD capture could not be read)
+/// replays that class. Its `stale_capture` class replays as `RecoveryInvalid`,
+/// because the rejecting capture was never stored. A bare legacy
+/// `failure:unobservable` row replays as `RecoveryInvalid`.
 async fn replay_admin_stream_result(
     connection: &Connection,
     receipt: &AdminInvocationAudit,
@@ -4494,6 +4497,9 @@ async fn replay_admin_stream_result(
             return Err(RuntimeError::StaleCapture {
                 current: Box::new(current),
             });
+        }
+        if let Some(class) = failure.strip_prefix("unobservable:") {
+            return Err(admin_failure_from_class(class));
         }
         return Err(admin_failure_from_class(failure));
     }
@@ -6333,8 +6339,8 @@ impl RuntimeState {
     /// any capture records the generation current when its failure is
     /// recorded. A `failure:stale_capture` row also stores the rejecting
     /// capture. If that capture cannot be read, the row records a NULL
-    /// generation with `failure:unobservable`; the caller still returns the
-    /// original error.
+    /// generation with `failure:unobservable:<class>`, where `<class>` is the
+    /// stable class of the original error; the caller still returns that error.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
@@ -6372,7 +6378,7 @@ impl RuntimeState {
                 .ok(),
         };
         let (terminal_outcome, stale_capture) = match (observed_generation, error) {
-            (None, _) => ("failure:unobservable".to_owned(), None),
+            (None, error) => (format!("failure:unobservable:{}", admin_failure_class(error)), None),
             (Some(_), RuntimeError::StaleCapture { current }) => {
                 ("failure:stale_capture".to_owned(), Some(&**current))
             }
@@ -41244,8 +41250,117 @@ mod tests {
         let audits = state.admin_invocation_audits().await.unwrap();
         assert_eq!(audits.len(), 1, "the failed call still gets one row: {audits:?}");
         assert_eq!(audits[0].observed_generation, None);
-        assert_eq!(audits[0].terminal_outcome, "failure:unobservable");
+        assert_eq!(audits[0].terminal_outcome, "failure:unobservable:recovery_invalid");
         assert!(!audits[0].succeeded);
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_replays_recorded_class() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let cases: [(&str, RuntimeError); 4] = [
+            ("failure:unobservable:invalid_digest", RuntimeError::InvalidDigest),
+            ("failure:unobservable:stale_capture", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable:fault_injected", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable", RuntimeError::RecoveryInvalid),
+        ];
+        for (index, (outcome, expected)) in cases.into_iter().enumerate() {
+            let invocation = [80 + index as u8; 16];
+            state
+                .connection
+                .execute(
+                    "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (?1, 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, NULL, ?2, 0, 0)",
+                    (invocation.to_vec(), outcome),
+                )
+                .await
+                .unwrap();
+            let receipt = state
+                .admin_invocation_audits()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|audit| audit.invocation_id == invocation)
+                .unwrap();
+            match replay_admin_stream_result(&state.connection, &receipt).await {
+                Err(error) => assert_eq!(error, expected, "{outcome}"),
+                Ok(_) => panic!("{outcome} must replay its failure"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_migration_keeps_legacy_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        // Rebuild the pre-1.1.0 shape: observed_generation NOT NULL and no
+        // stale-capture child table.
+        state
+            .connection
+            .execute_batch(
+                "DROP TABLE admin_invocation_stale_capture;
+                 DROP TABLE admin_invocation_checkpoint_result;
+                 DROP TABLE admin_invocation_audit;
+                 CREATE TABLE admin_invocation_audit (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                     function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                     observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+                     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                 );
+                 CREATE TABLE admin_invocation_checkpoint_result (
+                     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+                     version INTEGER NOT NULL CHECK (version >= 0),
+                     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                 );
+                 INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'02020202020202020202020202020202', 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, 7, 'paused', 1, 0);
+                 INSERT INTO admin_invocation_checkpoint_result (invocation_id, version, committed_position)
+                     VALUES (x'02020202020202020202020202020202', 3, 'pos');",
+            )
+            .await
+            .unwrap();
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        // Raw counts: the decoder requires coherent checkpoint-reset rows, and
+        // this test is about storage fidelity, not decoding.
+        macro_rules! count {
+            ($sql:expr) => {{
+                let mut rows = state.connection.query($sql, ()).await.unwrap();
+                rows.next().await.unwrap().expect("count row").get::<i64>(0).unwrap()
+            }};
+        }
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation = 7 AND terminal_outcome = 'paused'"),
+            1,
+            "legacy audit row keeps its generation"
+        );
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_checkpoint_result WHERE version = 3 AND committed_position = 'pos'"),
+            1,
+            "checkpoint result child is kept"
+        );
+        // The rebuilt table accepts an unobservable row with a NULL generation.
+        state
+            .connection
+            .execute_batch(
+                "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'04040404040404040404040404040404', 'sys.admin.pause_stream', 'x', x'01010101010101010101010101010101', 1, NULL, 'failure:unobservable:recovery_invalid', 0, 0);",
+            )
+            .await
+            .unwrap();
+        // A second run is a no-op and keeps both rows.
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation IS NULL"),
+            1,
+            "NULL generation row is accepted"
+        );
+        assert_eq!(count!("SELECT COUNT(*) FROM admin_invocation_audit"), 2, "migration keeps every row");
     }
 
     #[test]
