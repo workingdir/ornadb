@@ -1140,6 +1140,21 @@ impl StoreRootPin {
 }
 
 impl Repository {
+    /// Refuses runtime admission when the format recorded at `HEAD` is not a
+    /// format this build knows (ORNA-REPO-CONTEXT-003). It runs before any
+    /// worktree metadata is read or any runtime state is opened, so a committed
+    /// `HEAD` that names an unknown format is never bypassed by the worktree.
+    ///
+    /// An unborn `HEAD`, a legacy `HEAD` and every other `HEAD` metadata
+    /// failure are decided by [`Self::require_writable_head_format`] and the
+    /// metadata checks that follow.
+    pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
+        match self.open_format_context() {
+            Err(error @ FormatContextError::UnknownFormat) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     /// Admits durable runtime writes only when the format recorded at `HEAD`
     /// has a writer. A format-1/2 `HEAD` is refused with
     /// [`LegacyWriteRefused`] (ORNA-UPGRADE-001, ORNA-UPGRADE-003), whatever
