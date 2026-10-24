@@ -3686,6 +3686,75 @@ fn publication_refuses_to_replace_a_retained_journal() {
 }
 
 #[test]
+fn retained_journal_with_moved_head_is_stale_and_keeps_batch() {
+    // ORNA-PUB-009: a HEAD that moved past this publisher's expected head is a
+    // lost CAS and reports StaleHead, checked before the retained-journal
+    // pending outcome. ORNA-PUB-006: the retained batch is not released.
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let retained_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"retained row\n".to_vec()),
+            )],
+            "orna: retained publication",
+        )
+        .unwrap();
+    let retained = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        retained_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [71; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"retained row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&retained).unwrap();
+
+    let replacement_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"replacement row\n".to_vec()),
+            )],
+            "orna: replacement publication",
+        )
+        .unwrap();
+    let mut replacement = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        replacement_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [72; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"replacement row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    git(root.path(), &["commit", "--allow-empty", "-m", "moved head"]);
+    let moved_head = repo.head().unwrap();
+    assert_ne!(moved_head, Some(head));
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &replacement_candidate, &mut replacement),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), moved_head);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(retained));
+}
+
+#[test]
 fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
