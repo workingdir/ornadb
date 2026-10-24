@@ -33,10 +33,12 @@ from scripts.orna_extract import (
     ExtractionError,
     Float,
     GearBoundaries,
+    BlobOutput,
     GitObjects,
     Tag,
     UnavailableObject,
     _InvalidMedia,
+    Graph,
     canonical_annotation,
     commit_tree,
     decode_canonical,
@@ -446,6 +448,81 @@ class TreeParsingTests(unittest.TestCase):
             commit_tree(b"parent " + oid.encode() + b"\n", 20, "commit")
         with self.assertRaises(ExtractionError):
             commit_tree(b"tree abcd\n", 20, "commit")
+
+
+class StoreRejectionTests(unittest.TestCase):
+    """Refusals of the native graph, each built as real git objects (store-format-3.md).
+
+    Every test names a guarded check in orna_extract.py; each was shown to fail
+    when its check is disabled by a one-line mutation.
+    """
+
+    WIDTH = 20
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._directory.name)
+        self.repository = make_repository(self.root / "repo", {"main.orna": b"module main\n"})
+        self.objects = GitObjects(self.repository, "test", self.WIDTH)
+        self.graph = Graph(self.objects, BlobOutput(self.root / "out"))
+        self.empty_tree = git(self.repository, "mktree", stdin=b"").decode().strip()
+
+    def tearDown(self) -> None:
+        self.objects.close()
+        self._directory.cleanup()
+
+    def write_blob(self, data: bytes) -> str:
+        return git(self.repository, "hash-object", "-w", "--stdin", stdin=data).decode().strip()
+
+    def write_node(self, data: bytes, children: dict[str, str]) -> str:
+        """A node envelope: a data blob, plus a refs tree naming each child by its own id."""
+        entries = [f"100644 blob {self.write_blob(data)}\tdata"]
+        if children:
+            lines = "".join(f"{mode} {oid}\t{oid}\n" for oid, mode in children.items())
+            refs = git(self.repository, "mktree", stdin=lines.encode()).decode().strip()
+            entries.append(f"040000 tree {refs}\trefs")
+        return git(self.repository, "mktree", stdin="".join(f"{entry}\n" for entry in entries).encode()).decode().strip()
+
+    def relation_leaf(self, domain: list, keys: list[bytes]) -> str:
+        relation = [bytes.fromhex(self.empty_tree), bytes.fromhex(self.empty_tree), None, 1]
+        return self.write_node(encode([1, 1, domain, [[key, relation] for key in keys]]), {self.empty_tree: "040000 tree"})
+
+    def test_a_chunk_that_does_not_match_its_recorded_digest_is_refused(self) -> None:
+        chunk = b"the bytes the index names"
+        chunk_oid = self.write_blob(chunk)
+        recorded = hashlib.sha256(b"other bytes").digest()
+        root = self.write_node(
+            encode([1, 4, 0, len(chunk), [[len(chunk), bytes.fromhex(chunk_oid), recorded]]]),
+            {chunk_oid: "100644 blob"},
+        )
+        with self.assertRaisesRegex(ExtractionError, "corrupt chunk"):
+            self.graph.byte_index(root, len(chunk), lambda _: None, "test")
+
+    def test_keys_out_of_logical_order_in_one_page_are_refused(self) -> None:
+        domain = ["relations", bytes(16)]
+        root = self.relation_leaf(domain, [b"\x02" * 16, b"\x01" * 16])
+        with self.assertRaisesRegex(ExtractionError, "out of logical key order"):
+            self.graph.ordered_map(root, domain, "test")
+
+    def test_pages_that_are_not_the_canonical_grouping_are_refused(self) -> None:
+        domain = ["relations", bytes(16)]
+        first = self.relation_leaf(domain, [b"\x01" * 16])
+        second = self.relation_leaf(domain, [b"\x02" * 16])
+        root = self.write_node(
+            encode([1, 2, domain, 1, [[b"\x01" * 16, bytes.fromhex(first), 1], [b"\x02" * 16, bytes.fromhex(second), 1]]]),
+            {first: "040000 tree", second: "040000 tree"},
+        )
+        # Canonical ORP-1 keeps two small entries in one page; the two single-entry pages are not that grouping.
+        with self.assertRaisesRegex(ExtractionError, "not the canonical ORP-1 partition"):
+            self.graph.ordered_map(root, domain, "test")
+
+    def test_an_unregistered_tag_inside_a_node_is_refused_by_the_repository_reader(self) -> None:
+        domain = ["rows", b"\x11" * 16, b"\x22" * 32]
+        unregistered = b"\xd9\xea\x7a\x00"  # tag 60026 around 0; the registry admits 60000..60025 only
+        data = b"\x84\x01\x01" + encode(domain) + b"\x81\x82" + encode(1) + b"\x81" + unregistered
+        root = self.write_node(data, {})
+        with self.assertRaisesRegex(ExtractionError, "unregistered CBOR tag 60026"):
+            self.graph.ordered_map(root, domain, "test")
 
 
 class CommandLineTests(unittest.TestCase):
