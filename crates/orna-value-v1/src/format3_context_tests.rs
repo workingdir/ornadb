@@ -1143,22 +1143,61 @@ fn table_reference_equality_is_identity_only() {
 }
 
 #[test]
-fn table_reference_mixed_key_types_order_by_table_before_keys() {
+fn table_reference_keys_across_tables_are_not_ordered() {
+    // 08-relations.md:31 defines identity equality only; no spec clause orders
+    // references to different tables, so ordering is rejected (spec-silent).
     let int_key = Value::table_reference([1; 16], [2; 16], Raw::Int(5.into())).unwrap();
     let text_key_later_table =
         Value::table_reference([1; 16], [3; 16], Raw::Text("a".into())).unwrap();
+    let other_database =
+        Value::table_reference([9; 16], [2; 16], Raw::Int(5.into())).unwrap();
+    assert!(compare_primary_keys(&int_key, &text_key_later_table).is_err());
+    assert!(compare_primary_keys(&text_key_later_table, &int_key).is_err());
+    assert!(compare_primary_keys(&int_key, &other_database).is_err());
+
+    // Same database and table: ordering follows the referenced key.
+    let smaller = Value::table_reference([1; 16], [2; 16], Raw::Int(4.into())).unwrap();
     assert_eq!(
-        compare_primary_keys(&int_key, &text_key_later_table).unwrap(),
+        compare_primary_keys(&smaller, &int_key).unwrap(),
         std::cmp::Ordering::Less
-    );
-    assert_eq!(
-        compare_primary_keys(&text_key_later_table, &int_key).unwrap(),
-        std::cmp::Ordering::Greater
     );
     let text_key_same_table =
         Value::table_reference([1; 16], [2; 16], Raw::Text("a".into())).unwrap();
     assert!(compare_primary_keys(&int_key, &text_key_same_table).is_err());
 }
+
+#[test]
+fn table_reference_decode_rejects_non_permitted_key() {
+    let float_key = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Float(0)])),
+    );
+    // Decode must apply the same key rule as the constructor (07-tables.md:283-287).
+    assert!(Value::new(float_key.clone()).is_err());
+    // Also inside a tuple primary key, which is composed of permitted values.
+    assert!(Value::new(Raw::Array(vec![float_key])).is_err());
+
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
+    let pinned_key = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid(1),
+            uuid(2),
+            Raw::Tag(
+                60010,
+                Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
+            ),
+        ])),
+    );
+    assert!(Value::new(pinned_key).is_err());
+
+    let permitted = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into())])),
+    );
+    assert!(Value::new(permitted).is_ok());
+}
+
 
 fn uuid(byte: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))

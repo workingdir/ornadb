@@ -2549,8 +2549,9 @@ fn is_primary_key_component(raw: &Raw) -> bool {
 /// clauses of 07-tables.md:272-281 applied recursively. A stored reference
 /// identity must be snapshot-free (08-relations.md:31), so pinned references
 /// (60010), Float and malformed 60008/60015/60021 keys are refused here. Tuple
-/// primary keys do not use this rule; they keep the base acceptance and
-/// comparison (open question Q47 in the spec-questions log).
+/// primary keys keep base acceptance for pinned (60010) components, which the
+/// spec does not yet address. Every decoded 60021 key must pass this rule
+/// (see `validate_tag`).
 fn is_permitted_key(raw: &Raw) -> bool {
     match raw {
         Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
@@ -2642,11 +2643,13 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
             let [right_db, right_table, right_key] = right.as_slice() else {
                 return Err(Error::InvalidValue);
             };
-            let identity = uuid_array(left_db)?
-                .cmp(&uuid_array(right_db)?)
-                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?));
-            if identity != Ordering::Equal {
-                return Ok(identity);
+            if uuid_array(left_db)? != uuid_array(right_db)?
+                || uuid_array(left_table)? != uuid_array(right_table)?
+            {
+                // Spec-silent: 08-relations.md:31 defines identity equality for
+                // references but no ordering across tables. Reject rather than
+                // invent one.
+                return Err(Error::InvalidValue);
             }
             compare_key_component(left_key, right_key)?
         }
@@ -5352,6 +5355,11 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             }
             uuid_array(&a[0])?;
             uuid_array(&a[1])?;
+            // ORNA-KEY-003/005 (07-tables.md:283-287): a reference key component
+            // must be a permitted key value, on decode as well as construction.
+            if !is_permitted_key(&a[2]) {
+                return Err(Error::InvalidTag);
+            }
         }
         60022 => {
             let a = array(v)?;
