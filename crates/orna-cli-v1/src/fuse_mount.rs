@@ -2885,8 +2885,13 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
-        // EDIT-1 (41-vfs.md:42-44): a Blob projection has no private candidate, so a
-        // write-intent open, including O_TRUNC, is refused with EPERM (41-vfs.md:103-105).
+        // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
+        // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
+        // without truncating or replacing the blob. EPERM is the unsupported-mutation
+        // errno (profiles/vfs-1.md:139; 41-vfs.md:103-105), and unsupported operations
+        // return an explicit errno, never fake success (profiles/vfs-1.md:104-106).
+        // Other non-candidate Blob writes in this mount return EROFS; the errno split
+        // is spec-admissible but not yet unified (flagged for owner decision).
         let write_mode =
             flags.0 & libc::O_ACCMODE != libc::O_RDONLY || flags.0 & libc::O_TRUNC != 0;
         let mut state = self
