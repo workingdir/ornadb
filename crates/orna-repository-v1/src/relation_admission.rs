@@ -146,6 +146,11 @@ pub enum RelationAdmissionError {
     InvalidIdentity,
     /// A rekey log record is not a valid system relation entry.
     InvalidRekeyLog,
+    /// A source file to restage is not a regular file the captured index
+    /// tracks, or it names Orna metadata.
+    SourceNotStaged {
+        path: String,
+    },
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -191,6 +196,10 @@ impl std::fmt::Display for RelationAdmissionError {
             ),
             Self::InvalidIdentity => formatter.write_str("an object identity record is invalid"),
             Self::InvalidRekeyLog => formatter.write_str("an object rekey log record is invalid"),
+            Self::SourceNotStaged { path } => write!(
+                formatter,
+                "{path} is not a source file the index tracks; stage it with `git add`"
+            ),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -825,7 +834,7 @@ impl Repository {
         let (entries, admitted) =
             admit_relations(&mut writer, base, &committed, relations, Some(identities))?;
         let store_root = write_store_root(&mut writer, database_id, &entries)?;
-        self.install_staged_store_root(&writer, staged, store_root, admitted)
+        self.install_staged_store_root(&writer, staged, store_root, admitted, &[])
     }
 
     /// Restages only the identity inventory of the staged store, as an
@@ -835,14 +844,20 @@ impl Repository {
     /// table relation must stay owned by an active identity, so a rename
     /// cannot orphan committed rows. A staged index without a store gets one
     /// holding only the inventory; one whose `HEAD` commits relations it
-    /// lacks is refused as unstaged. The store is installed under the same
-    /// guards as [`Self::stage_store_admission`]: the captured index and
-    /// `HEAD` must be unchanged, and the legacy identity sidecar leaves the
-    /// index.
+    /// lacks is refused as unstaged.
+    ///
+    /// `sources` replaces the staged bytes of source files the captured index
+    /// already tracks, keeping each file's mode, so the renamed declaration
+    /// is staged with the inventory that names it, as `git mv` stages a
+    /// move. Every other staged and unstaged path is kept. The store and the
+    /// sources are installed as one index update under the same guards as
+    /// [`Self::stage_store_admission`]: the captured index and `HEAD` must be
+    /// unchanged, and the legacy identity sidecar leaves the index.
     pub fn stage_object_identities(
         &self,
         staged: &StagedCandidate,
         identities: &[StoredObjectIdentity],
+        sources: &[(&str, &[u8])],
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let database_id = *staged.database_id.as_bytes();
         let mut writer = NodeWriter::new(self)?;
@@ -874,6 +889,16 @@ impl Repository {
                 relation_id: *relation_id,
             });
         }
+        let mut blobs = Vec::with_capacity(sources.len());
+        for (path, bytes) in sources {
+            let path = crate::ManagedPath::new(path)?;
+            if path.as_path().starts_with(".orna") {
+                return Err(RelationAdmissionError::SourceNotStaged {
+                    path: path.as_path().display().to_string(),
+                });
+            }
+            blobs.push((path, writer.blob(bytes)?));
+        }
         entries.insert(
             OBJECT_IDENTITY_RELATION_ID,
             write_identity_relation(&mut writer, identities)?,
@@ -885,7 +910,7 @@ impl Repository {
         };
         let entries = entries.into_values().collect::<Vec<_>>();
         let store_root = write_store_root(&mut writer, database_id, &entries)?;
-        self.install_staged_store_root(&writer, staged, store_root, admitted)
+        self.install_staged_store_root(&writer, staged, store_root, admitted, &blobs)
     }
 
     /// The schema node of each relation `HEAD`'s store commits; empty on an
@@ -904,17 +929,20 @@ impl Repository {
             .collect())
     }
 
-    /// Binds `store_root` at `.orna/store` in the ordinary index, unless the
-    /// index already stages exactly that store and no legacy sidecar.
+    /// Binds `store_root` at `.orna/store` in the ordinary index, with the
+    /// `sources` blobs at their paths, unless the index already stages
+    /// exactly that store, no source change and no legacy sidecar.
     fn install_staged_store_root(
         &self,
         writer: &NodeWriter<'_>,
         staged: &StagedCandidate,
         store_root: NativeOid,
         admitted: Vec<[u8; 16]>,
+        sources: &[(crate::ManagedPath, NativeOid)],
     ) -> Result<StoreAdmission, RelationAdmissionError> {
         let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
-        if staged.store_root.as_ref() == Some(&store_root) && !sidecar_staged {
+        if staged.store_root.as_ref() == Some(&store_root) && !sidecar_staged && sources.is_empty()
+        {
             return Ok(StoreAdmission {
                 store_root,
                 admitted,
@@ -922,7 +950,7 @@ impl Repository {
             });
         }
         writer.sync()?;
-        self.install_staged_store(staged, &store_root)?;
+        self.install_staged_store(staged, &store_root, sources)?;
         Ok(StoreAdmission {
             store_root,
             admitted,
@@ -1259,18 +1287,20 @@ impl Repository {
     }
 
     /// Replaces the ordinary index's `.orna/store` entry with `store_root`
-    /// and drops the legacy identity sidecar, while holding the coordination
-    /// lock and Git's own `index.lock`. A retained publication or checkout
-    /// recovery record owns the index and store worktree until its recovery
-    /// completes, so staging refuses before touching either (22-publication
-    /// recovery table, ORNA-PUB-007; CHECKOUT-3 step 7). The captured index
-    /// and `HEAD` must be unchanged, and the new index is installed by an
-    /// atomic rename. If the index cannot be installed after the store
-    /// worktree moved, the worktree is moved back to the captured store.
+    /// and each `sources` path's staged blob, and drops the legacy identity
+    /// sidecar, while holding the coordination lock and Git's own
+    /// `index.lock`. A retained publication or checkout recovery record owns
+    /// the index and store worktree until its recovery completes, so staging
+    /// refuses before touching either (22-publication recovery table,
+    /// ORNA-PUB-007; CHECKOUT-3 step 7). The captured index and `HEAD` must be
+    /// unchanged, and the new index is installed by an atomic rename. If the
+    /// index cannot be installed after the store worktree moved, the worktree
+    /// is moved back to the captured store.
     fn install_staged_store(
         &self,
         staged: &StagedCandidate,
         store_root: &NativeOid,
+        sources: &[(crate::ManagedPath, NativeOid)],
     ) -> Result<(), RelationAdmissionError> {
         let _coordination = self.acquire_coordination_lock()?;
         self.require_no_pending_publication_recovery_locked()?;
@@ -1314,6 +1344,9 @@ impl Repository {
                     .args(["update-index", "--force-remove", "--"])
                     .arg(LEGACY_OBJECT_IDENTITY_SIDECAR_PATH);
                 self.run(remove)?;
+            }
+            for (path, blob) in sources {
+                self.replace_staged_blob(&candidate_index, path, blob)?;
             }
             let mut write_tree = self.command();
             write_tree
@@ -1368,6 +1401,49 @@ impl Repository {
         })();
         let _ = fs::remove_file(&candidate_index);
         result
+    }
+
+    /// Points the stage-0 entry of `path` in `index` at `blob`, keeping its
+    /// file mode. The path must already be a tracked regular file, so a
+    /// rename never adds, removes or retypes a staged path.
+    fn replace_staged_blob(
+        &self,
+        index: &Path,
+        path: &crate::ManagedPath,
+        blob: &NativeOid,
+    ) -> Result<(), RelationAdmissionError> {
+        let not_staged = || RelationAdmissionError::SourceNotStaged {
+            path: path.as_path().display().to_string(),
+        };
+        let text = path.as_path().to_str().ok_or_else(not_staged)?;
+        let mut list = self.command();
+        list.env("GIT_INDEX_FILE", index)
+            .args(["ls-files", "--stage", "-z", "--"])
+            .arg(path.as_path());
+        let listed = self.run(list)?.stdout;
+        let mut entries = listed.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
+        let entry = entries.next().ok_or_else(not_staged)?;
+        if entries.next().is_some() {
+            return Err(not_staged());
+        }
+        let entry = std::str::from_utf8(entry).map_err(|_| not_staged())?;
+        let (header, listed_path) = entry.split_once('\t').ok_or_else(not_staged)?;
+        let mut fields = header.split(' ');
+        let (Some(mode @ ("100644" | "100755")), Some(_), Some("0"), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(not_staged());
+        };
+        if listed_path != text {
+            return Err(not_staged());
+        }
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--cacheinfo"])
+            .arg(format!("{mode},{},{text}", blob.to_hex()));
+        self.run(update)?;
+        Ok(())
     }
 }
 
@@ -2353,6 +2429,7 @@ mod tests {
             .stage_object_identities(
                 &staged,
                 &[StoredObjectIdentity::new(music, 1, "Table0", true)],
+                &[],
             )
             .expect_err("a retired owner orphans its relation");
         assert!(matches!(
@@ -2361,13 +2438,35 @@ mod tests {
         ));
         assert_eq!(git(root, &["status", "--porcelain"]), "");
 
+        // Neither metadata nor an untracked path is a source to restage.
+        for path in [".orna/database.orna", "untracked.orna"] {
+            assert!(matches!(
+                repository
+                    .stage_object_identities(
+                        &staged,
+                        &identities_for(&[music]),
+                        &[(path, b"x".as_slice())],
+                    )
+                    .expect_err("only tracked source files are restaged"),
+                RelationAdmissionError::SourceNotStaged { .. }
+            ));
+        }
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+        // The renamed source is staged with the inventory, keeping its mode,
+        // and the worktree copy is left alone.
+        const RENAMED: &[u8] = b"pub table Archive(id: Str) { title: Str, }\n";
+        let worktree_before = fs::read(root.join("main.orna")).unwrap();
         let renamed = vec![StoredObjectIdentity::new(music, 1, "Archive", false)];
         let admission = repository
-            .stage_object_identities(&staged, &renamed)
+            .stage_object_identities(&staged, &renamed, &[("main.orna", RENAMED)])
             .expect("restage the renamed inventory");
         assert!(admission.changed());
         assert!(admission.admitted().is_empty());
         assert_eq!(music_entry(admission.store_root()), committed_entry);
+        assert_eq!(git(root, &["show", ":main.orna"]).as_bytes(), RENAMED);
+        assert!(git(root, &["ls-files", "--stage", "--", "main.orna"]).starts_with("100644 "));
+        assert_eq!(fs::read(root.join("main.orna")).unwrap(), worktree_before);
         let restaged = repository.capture_staged_candidate().unwrap();
         assert_eq!(
             repository.read_staged_object_identities(&restaged).unwrap(),
@@ -2375,7 +2474,7 @@ mod tests {
         );
         assert!(
             !repository
-                .stage_object_identities(&restaged, &renamed)
+                .stage_object_identities(&restaged, &renamed, &[])
                 .unwrap()
                 .changed()
         );
@@ -2383,7 +2482,8 @@ mod tests {
             repository
                 .stage_object_identities(
                     &staged,
-                    &[StoredObjectIdentity::new(music, 1, "Backup", false)]
+                    &[StoredObjectIdentity::new(music, 1, "Backup", false)],
+                    &[],
                 )
                 .expect_err("the first capture is stale"),
             RelationAdmissionError::StaleIndex
