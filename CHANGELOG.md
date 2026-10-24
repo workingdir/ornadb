@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Publishing row changes to a format-3 table merges them into the table's row
+  map in one pass instead of shifting every later row once per change.
+  Publication sends changes in encoded key order, which for `Str` keys is not
+  key order, so placing the rows of one large `Str`-keyed publication no longer
+  takes time quadratic in the table size. The written row map is unchanged.
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
