@@ -46,10 +46,10 @@ const IMAGE_IMPORT_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, the
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, the
 /// same way the other CLI tests do.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
