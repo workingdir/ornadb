@@ -18596,7 +18596,10 @@ mod base64_accept_table {
 mod blob_equality_tests {
     use super::*;
 
-    struct PayloadResolver(Vec<u8>);
+    struct PayloadResolver {
+        payload: Vec<u8>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
 
     impl orna_value_v1::BlobResolver for PayloadResolver {
         fn read_range(
@@ -18605,12 +18608,14 @@ mod blob_equality_tests {
             offset: u64,
             length: u64,
         ) -> orna_value_v1::Result<Vec<u8>> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let start = usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
             let length = usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
             let end = start
                 .checked_add(length)
                 .ok_or(orna_value_v1::Error::InvalidRange)?;
-            self.0
+            self.payload
                 .get(start..end)
                 .map(<[u8]>::to_vec)
                 .ok_or(orna_value_v1::Error::InvalidRange)
@@ -18630,8 +18635,11 @@ mod blob_equality_tests {
     fn blob_equality_ignores_representation_and_respects_annotation() {
         let payload = b"payload";
         let database = [1; 16];
-        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
-            std::sync::Arc::new(PayloadResolver(payload.to_vec()));
+        let probe = std::sync::Arc::new(PayloadResolver {
+            payload: payload.to_vec(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> = probe.clone();
         let context = Format3Context::from_persisted(
             database,
             orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
@@ -18650,6 +18658,7 @@ mod blob_equality_tests {
                 orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
             )
             .unwrap();
+        let reads_before = probe.reads.load(std::sync::atomic::Ordering::SeqCst);
         let rov3_blob = orna_value_v1::Blob::from_reference_with_annotation(
             reference,
             "application/octet-stream",
@@ -18704,6 +18713,9 @@ mod blob_equality_tests {
         // content. ORNA-BLOB-005 permits explicit unavailability here.
         assert!(blob_aware_eq(&rov3, &ovb2).is_err());
         assert!(blob_aware_eq(&ovb2, &rov3).is_err());
+        // Operator `==` path: a descriptor-only ROV-3 value equals itself through
+        // its shared descriptor witness (ORNA-BLOB-005).
+        assert!(blob_aware_eq(&rov3, &rov3).unwrap());
 
         // The same bytes under a different annotation are not equal.
         let annotated_blob = orna_value_v1::Blob::from_bytes_with_annotation(
@@ -18730,6 +18742,11 @@ mod blob_equality_tests {
                 &Value::String("a".to_owned()),
             )
             .unwrap()
+        );
+        // Equality over descriptor-only ROV-3 never resolves bytes.
+        assert_eq!(
+            probe.reads.load(std::sync::atomic::Ordering::SeqCst),
+            reads_before
         );
     }
 
