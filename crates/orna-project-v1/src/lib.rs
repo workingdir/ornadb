@@ -42,9 +42,9 @@ pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH,
 };
 pub use table_storage::{
-    CommittedTable, TableStorageError, admitted_table_schemas, committed_tables,
-    evaluator_rows, has_text_primary_key, runtime_key_from_evaluator, storage_row_from_record,
-    stored_field_names,
+    CommittedTable, TableStorageError, admitted_table_schemas, blob_placeholder, committed_tables,
+    evaluator_rows, has_text_primary_key, holds_blob, restore_stored_blobs,
+    runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
 };
 
 pub use attachments::{
