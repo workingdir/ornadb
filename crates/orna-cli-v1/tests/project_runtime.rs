@@ -1687,8 +1687,21 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     let catalogue = project
         .production_catalogue()
         .expect("production catalogue from the pinned standard profile");
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     assert!(analysis.is_ok(), "analysis through production catalogue failed");
+    let core_only = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    assert!(
+        !core_only.is_ok(),
+        "core-only catalogue must not resolve the pinned standard closure"
+    );
 
     let check = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
