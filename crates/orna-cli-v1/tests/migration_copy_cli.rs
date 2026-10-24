@@ -548,7 +548,11 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
                 .repository_format_number(),
             format
         );
-        assert_eq!(migrated.require_writable_head_format(), Ok(()));
+        let refusal = migrated
+            .require_writable_head_format()
+            .expect_err("a prepared copy is not writable through ordinary runtime writes");
+        assert_eq!(refusal.format(), format);
+        assert_eq!(migrated.require_migration_carry_head_format(), Ok(()));
 
         let retry = run_copy(&source, &destination, "0", &git_trace);
         assert!(
