@@ -5,6 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A format-3 snapshot that tracks a loose row file (an unreached
+  `<table>/<key>.orna`) no longer loads with the row silently skipped:
+  loading the committed snapshot or a commit candidate fails with
+  `ORNA-REPO-CONTEXT-004` naming the file (ORNA-REPO-004, ORNA-UPGRADE-003).
+  A module a `use` reaches under a table's directory is still a module.
+  `orna commit` now also refuses a row file that `HEAD` already tracks, not
+  only one the commit adds or changes. The CLI test fixtures no longer commit
+  loose rows into format-3 repositories; row sources go straight into the
+  store.
 - Format-3 schema nodes record the Orna 1.1.0 schema identity, SHA-256 of
   `orna.schema.v3`, NUL and the closed storage descriptor, and every row map
   binds it. Earlier development builds recorded the descriptor's plain

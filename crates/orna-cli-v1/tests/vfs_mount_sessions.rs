@@ -724,18 +724,11 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
         let capture = format!(
             "sys.blob.annotate(sys.blob.capture_file({root}, \"{key}.mp3\", 65536), \"audio/mpeg\")"
         );
-        documents.push((
-            format!("Music/{key}.orna"),
-            format!("{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"),
-        ));
+        documents.push(format!("{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"));
         captures.push(capture);
     }
-    let sources = documents
-        .iter()
-        .map(|(path, document)| (path.as_str(), document.as_str()))
-        .collect::<Vec<_>>();
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(MEDIA_SOURCE, "Music", &sources);
+        format3::format3_repository_with_context(MEDIA_SOURCE, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -757,11 +750,12 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
     let capture_rows = rows
         .iter()
         .zip(&blob_fields)
+        .zip(&documents)
         .zip(0xa0_u8..)
-        .map(|((&(key, _, _), fields), ordinal)| media_commit::SourceCaptureRow {
+        .map(|(((&(key, _, _), fields), document), ordinal)| media_commit::SourceCaptureRow {
             key,
             blob_fields: fields,
-            source_row: None,
+            source_row: document,
             ordinal,
             insert_only: true,
         })
