@@ -11,7 +11,9 @@ use std::{
 };
 
 use orna_project_v1::{ObjectIdentityManifest, ObjectKind};
-use orna_repository_v1::Repository;
+use orna_repository_v1::{
+    ManagedFileChange, ManagedPath, PublicationJournal, PublicationJournalEntry, Repository,
+};
 use tempfile::TempDir;
 
 const SOURCE: &str = "pub table Media(id: Str) { payload: Blob, size: Int, }";
@@ -71,6 +73,11 @@ fn assert_cli_success(output: &Output, step: &str) {
 
 /// `orna init`, `source` as `main.orna`, and the first `orna commit`.
 fn committed_project(source: &str) -> (TempDir, PathBuf, ObjectIdentityManifest) {
+    committed_project_with(&[("main.orna", source)])
+}
+
+/// `orna init`, the given source modules, and the first `orna commit`.
+fn committed_project_with(modules: &[(&str, &str)]) -> (TempDir, PathBuf, ObjectIdentityManifest) {
     let directory = tempfile::tempdir().expect("project directory");
     let root = directory.path().join("media");
     assert_cli_success(
@@ -86,8 +93,11 @@ fn committed_project(source: &str) -> (TempDir, PathBuf, ObjectIdentityManifest)
         &["config", "user.email", "orna-test@example.invalid"],
     );
     git(&root, &["config", "commit.gpgsign", "false"]);
-    fs::write(root.join("main.orna"), source).expect("source file");
-    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    for (path, source) in modules {
+        fs::write(root.join(path), source).expect("source file");
+        git(&root, &["add", path]);
+    }
+    git(&root, &["add", ".orna/database.orna"]);
     assert_cli_success(
         &run_cli(&root, &["commit", "-m", "initial source"]),
         "orna commit",
@@ -146,21 +156,69 @@ fn mv_renames_a_committed_table_and_preserves_table_and_child_field_ids() {
         assert_eq!(renamed.id(kind, old), None);
     }
     assert!(renamed.records().iter().all(|record| !record.is_retired()));
-    // Nothing is committed; the source is an unstaged change and only the
-    // store is staged.
+    // Nothing is committed. As after `git mv`, the renamed source is staged
+    // with the restaged store, so the worktree matches the index.
     assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&root, &["diff", "--name-only"]), "main.orna\n");
+    assert_eq!(git(&root, &["show", ":main.orna"]), RENAMED);
+    assert_eq!(git(&root, &["diff", "--name-only"]), "");
     let staged = git(&root, &["diff", "--cached", "--name-only"]);
     assert!(
-        !staged.is_empty() && staged.lines().all(|path| path.starts_with(".orna/store/")),
+        staged.lines().any(|path| path == "main.orna")
+            && staged
+                .lines()
+                .all(|path| path == "main.orna" || path.starts_with(".orna/store/")),
         "{staged}"
     );
     assert!(!root.join(".orna/object-identities.cbor").exists());
 }
 
-/// A run interrupted after the source write resumes: the source already
-/// names the new table, so `mv` stages only the inventory and leaves the
-/// source file in place.
+/// A table in a nested module is named by its module namespace, and the
+/// rename edits and stages that module only.
+#[test]
+fn mv_renames_a_table_in_a_nested_module() {
+    const MAIN: &str = "use warehouse;\n";
+    const WAREHOUSE: &str = "pub table Media(id: Str) { size: Int, }\n";
+    let (_directory, root, initial) =
+        committed_project_with(&[("main.orna", MAIN), ("warehouse.orna", WAREHOUSE)]);
+    assert!(initial.id(ObjectKind::Table, "warehouse.Media").is_some());
+
+    let output = run_cli(&root, &["mv", "warehouse.Media", "Archive"]);
+    assert_cli_success(&output, "orna mv");
+
+    const RENAMED_WAREHOUSE: &str = "pub table Archive(id: Str) { size: Int, }\n";
+    assert_eq!(
+        fs::read_to_string(root.join("warehouse.orna")).unwrap(),
+        RENAMED_WAREHOUSE
+    );
+    assert_eq!(git(&root, &["show", ":warehouse.orna"]), RENAMED_WAREHOUSE);
+    assert_eq!(git(&root, &["show", ":main.orna"]), MAIN);
+    let renamed = staged_identities(&root);
+    for (old, new, kind) in [
+        ("warehouse.Media", "warehouse.Archive", ObjectKind::Table),
+        (
+            "warehouse.Media.id",
+            "warehouse.Archive.id",
+            ObjectKind::Field,
+        ),
+        (
+            "warehouse.Media.size",
+            "warehouse.Archive.size",
+            ObjectKind::Field,
+        ),
+    ] {
+        assert!(initial.id(kind, old).is_some());
+        assert_eq!(renamed.id(kind, new), initial.id(kind, old), "{old} moves");
+    }
+    assert_cli_success(
+        &run_cli(&root, &["commit", "-m", "rename"]),
+        "orna commit after mv",
+    );
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+}
+
+/// A run interrupted after the source write resumes: the worktree already
+/// names the new table, so `mv` leaves that file in place, stages the same
+/// rename of the staged module and moves the table and field identities.
 #[test]
 fn mv_resumes_after_the_source_was_renamed() {
     let (_directory, root, initial) = committed_project(SOURCE);
@@ -172,10 +230,18 @@ fn mv_resumes_after_the_source_was_renamed() {
     assert_cli_success(&output, "resumed orna mv");
 
     assert_eq!(fs::read_to_string(&source_path).unwrap(), RENAMED);
-    assert_eq!(
-        staged_identities(&root).id(ObjectKind::Table, "Archive"),
-        initial.id(ObjectKind::Table, "Media")
-    );
+    assert_eq!(git(&root, &["show", ":main.orna"]), RENAMED);
+    let renamed = staged_identities(&root);
+    for (old, new, kind) in [
+        ("Media", "Archive", ObjectKind::Table),
+        ("Media.id", "Archive.id", ObjectKind::Field),
+        ("Media.payload", "Archive.payload", ObjectKind::Field),
+        ("Media.size", "Archive.size", ObjectKind::Field),
+    ] {
+        assert!(initial.id(kind, old).is_some());
+        assert_eq!(renamed.id(kind, new), initial.id(kind, old), "{old} moves");
+        assert_eq!(renamed.id(kind, old), None);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -206,24 +272,72 @@ fn mv_leaves_everything_unchanged_when_the_source_write_fails() {
     assert_refused_without_changes(&output, &root, &source, &index);
 }
 
-/// The inventory cannot be staged while another writer holds Git's index
-/// lock, so the source write is rolled back and the index is untouched.
+/// The source is written before the index is updated. A retained
+/// publication journal owns the index (ORNA-PUB-007), so installing the
+/// restaged store is refused after the source write; `mv` names that cause
+/// and puts the source back, leaving the index untouched.
 #[test]
 fn mv_restores_the_source_when_staging_the_inventory_fails() {
     let (_directory, root, initial) = committed_project(SOURCE);
-    let source = fs::read(root.join("main.orna")).unwrap();
+    let source_path = root.join("main.orna");
+    let source = fs::read(&source_path).unwrap();
+    #[cfg(unix)]
+    let source_inode = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&source_path).unwrap().ino()
+    };
     let index = index_bytes(&root);
-    let lock = root.join(".git/index.lock");
-    fs::write(&lock, b"").expect("hold Git's index lock");
+    let repository = Repository::discover(&root).expect("repository");
+    let head = repository.head().unwrap().expect("committed HEAD");
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let candidate = repository
+        .build_private_commit(
+            &head,
+            &[ManagedFileChange::new(
+                managed.clone(),
+                Some(b"candidate row\n".to_vec()),
+            )],
+            "orna: publish runtime data",
+        )
+        .unwrap();
+    let journal = PublicationJournal::new_with_runtime_intent(
+        head,
+        candidate.commit().clone(),
+        repository
+            .index_generation()
+            .unwrap()
+            .tree()
+            .unwrap()
+            .clone(),
+        [7; 16],
+        vec![PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(b"candidate row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repository.write_publication_journal(&journal).unwrap();
 
     let output = run_cli(&root, &["mv", "Media", "Archive"]);
 
-    fs::remove_file(&lock).unwrap();
-    assert_refused_without_changes(&output, &root, &source, &index);
-    assert_eq!(
-        staged_identities(&root).id(ObjectKind::Table, "Media"),
-        initial.id(ObjectKind::Table, "Media")
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("interrupted publication"),
+        "the refusal comes from installing the restaged store: {stderr}"
     );
+    assert_refused_without_changes(&output, &root, &source, &index);
+    // The source file was replaced and then restored, not left untouched.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(fs::metadata(&source_path).unwrap().ino(), source_inode);
+    }
+    assert_eq!(
+        repository.read_publication_journal().unwrap(),
+        Some(journal)
+    );
+    assert_eq!(staged_identities(&root), initial);
 }
 
 #[test]

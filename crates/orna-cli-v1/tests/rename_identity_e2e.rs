@@ -125,10 +125,15 @@ fn initialized_database(directory: &TempDir, source: &str) -> PathBuf {
     root
 }
 
-/// Stages the reviewed source with Git and commits it with `orna commit`,
-/// returning the `admitted table` lines it prints as `(table, relation)`.
+/// Stages the reviewed source with Git and commits it with `orna commit`.
 fn commit_source(root: &Path, message: &str) -> Vec<(String, String)> {
     git(root, &["add", "main.orna", ".orna/database.orna"]);
+    orna_commit(root, message)
+}
+
+/// Commits the index with `orna commit`, returning the `admitted table`
+/// lines it prints as `(table, relation)`.
+fn orna_commit(root: &Path, message: &str) -> Vec<(String, String)> {
     let committed = orna(root, &["commit", "-m", message]);
     assert_success(&committed, "orna commit");
     String::from_utf8_lossy(&committed.stdout)
@@ -205,23 +210,29 @@ fn mv_then_commit_keeps_the_table_object_id_and_its_relation() {
         "{}",
         transcript(&renamed)
     );
-    // ORNA-OBJECT-003: the rename is a reviewable change, not a commit. The
-    // source edit is left in the worktree and only the inventory is staged;
+    // ORNA-OBJECT-003, ORNA-CLI-001: like `git mv`, the rename is staged
+    // for review and nothing is committed. The worktree and the index both
+    // hold the renamed source, the store inventory is restaged with it, and
     // no sidecar is written.
     assert_eq!(git(&root, &["rev-parse", "HEAD"]), head_before_mv);
     assert_eq!(
         fs::read_to_string(root.join("main.orna")).unwrap(),
         ARCHIVE_SOURCE
     );
+    assert_eq!(git(&root, &["show", ":main.orna"]), ARCHIVE_SOURCE);
     assert!(!root.join(".orna/object-identities.cbor").exists());
-    assert_eq!(git(&root, &["diff", "--name-only"]), "main.orna\n");
+    assert_eq!(git(&root, &["diff", "--name-only"]), "");
     let staged = git(&root, &["diff", "--cached", "--name-only"]);
     assert!(
-        !staged.is_empty() && staged.lines().all(|path| path.starts_with(".orna/store/")),
-        "mv stages only the store: {staged}"
+        staged.lines().any(|path| path == "main.orna")
+            && staged
+                .lines()
+                .all(|path| path == "main.orna" || path.starts_with(".orna/store/")),
+        "mv stages the source and the store: {staged}"
     );
 
-    let recommitted = commit_source(&root, "Rename Music to Archive");
+    // No `git add` is needed: `orna commit` takes the staged rename.
+    let recommitted = orna_commit(&root, "Rename Music to Archive");
     assert_eq!(
         recommitted,
         Vec::<(String, String)>::new(),
@@ -292,4 +303,39 @@ fn mv_before_the_first_commit_refuses_without_changing_anything() {
     );
     assert_eq!(git(&root, &["ls-files", "--stage"]), staged_before);
     assert!(!root.join(".orna/object-identities.cbor").exists());
+}
+
+/// Like `git mv`, `orna mv` stages only the rename: an unrelated unstaged
+/// edit to the same module stays unstaged, and `orna commit` straight after
+/// `mv` commits the renamed declaration without that edit, keeping the
+/// table's relation.
+#[test]
+fn mv_stages_only_the_rename_and_leaves_other_edits_unstaged() {
+    const EDITED: &str = "\npub table Music(id: Str) { title: Str, }\n";
+    const EDITED_RENAMED: &str = "\npub table Archive(id: Str) { title: Str, }\n";
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    let [(_, relation)] = commit_source(&root, "Declare Music")
+        .try_into()
+        .expect("orna commit admits the Music table");
+    fs::write(root.join("main.orna"), EDITED).unwrap();
+
+    let renamed = orna(&root, &["mv", "Music", "Archive"]);
+    assert_success(&renamed, "orna mv");
+
+    assert_eq!(
+        fs::read_to_string(root.join("main.orna")).unwrap(),
+        EDITED_RENAMED
+    );
+    assert_eq!(git(&root, &["show", ":main.orna"]), ARCHIVE_SOURCE);
+    assert_eq!(git(&root, &["diff", "--name-only"]), "main.orna\n");
+
+    assert_eq!(orna_commit(&root, "Rename Music to Archive"), Vec::new());
+    assert_eq!(git(&root, &["show", "HEAD:main.orna"]), ARCHIVE_SOURCE);
+    assert_eq!(git(&root, &["status", "--porcelain"]), " M main.orna\n");
+    let after = head_identities(&root);
+    assert_eq!(
+        after.id(ObjectKind::Table, "Archive").map(relation_hex),
+        Some(relation)
+    );
 }
