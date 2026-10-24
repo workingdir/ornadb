@@ -111,8 +111,13 @@ ac51439e3e77db06b68f2216aeb2a6e05c66e084e4b516206db05ac24628c401  crates/orna-ap
 59881f931b0cf3fccade8d45bc512b73b9542da96852266716186a1d966f17ca  crates/orna-application-v1/tests/fixtures/table-rekey-successive-inserted-destinations.orna
 a6ca224a43637d923a7f0a5ea9daa3f4e9c10d8c22451184af616b9d0c95a2a6  crates/orna-application-v1/tests/fixtures/table-update-rekey.orna
 3a6136cfe3eb71977eaf1f8c5119841aec7e8f161366aa9530c08f9fec12becf  crates/orna-application-v1/tests/fixtures/typed-sys-cancel.orna
+91062002b20ddd2c4ffb7c835596ed3869e81cabe85ad80b7806c624d2952b88  crates/orna-cli-v1/tests/fixtures/captured-standard-collection.orna
+53ffc2859a9e150b5d8f6aa271f3c250a7275e120ae5d7e693c83f98b0385113  crates/orna-cli-v1/tests/fixtures/captured-standard-list.orna
 b3711d0746280137a2f5ce469efecd0ac2cb76b5349263c0b3fb2c270ad5f3ad  crates/orna-cli-v1/tests/fixtures/captured-standard-main.orna
 666c5fd37750c47fe301fd06dfef74851103f6da7eb9d2b27d88bcaf02afaea8  crates/orna-cli-v1/tests/fixtures/captured-standard-math.orna
+4d4aecdeb4cc894577be5bf93d978b4a0c8e12192c14fb3c80652b2e6212b6a2  crates/orna-cli-v1/tests/fixtures/captured-standard-multi-main.orna
+83c27fa659a02a58259a322d3d6dffe97d01140e15eca1b2dfa0a5f15ff68334  crates/orna-cli-v1/tests/fixtures/captured-standard-multi-tiny.orna
+4a37cd3e6f2b8d22e12d21f489ceec199f2157bd446790ae3458e376762f69b5  crates/orna-cli-v1/tests/fixtures/captured-standard-negative-take-main.orna
 330cd38e8d99a312342a488abd169902d890d00edcbcdcaa7bf6ce583eee7de8  crates/orna-cli-v1/tests/fixtures/captured-standard-parent.orna
 8f0bf948dc130ba4f904a865be0f92f771f204a844a69b574cdcddf134252f68  crates/orna-cli-v1/tests/fixtures/catalogue-count-no-args-ogx1.orna
 b8c00d075002cadfa7d055979c26d5f34e4b3d7f5a1300f5d2a226cf24655f67  crates/orna-cli-v1/tests/fixtures/catalogue-delete-ogd1.orna
@@ -247,7 +252,6 @@ a3465472c8c2edfdb23899f9358b0fb02565316461834fb9eca94b1ee65dbc68  crates/orna-cl
 14ad1faec0c8b09d5e0d8be057b52a1424f8fd34f8463088d921ff624442bcb9  crates/orna-cli-v1/tests/fixtures/run/sys-enum-mismatch-library.orna
 6680eedf2960d2d93241ff971f30a4d23fc69c020fefa3d84b2701a276f53087  crates/orna-cli-v1/tests/fixtures/secret-surface.orna
 5e73231e4b336b1f4b5644fd068255f48e054b292abfd7957ac34192e0b264fb  crates/orna-cli-v1/tests/fixtures/sensors-deliver.orna
-42d6640afd17c8bdc1d7c3ed9116ec91234859111600dd2553560d6ad2a7246d  crates/orna-cli-v1/tests/fixtures/serve-entry.orna
 46568370695b7289cc89502256ffd5987d9dfddaf68bbba23bf9217200687d22  crates/orna-cli-v1/tests/fixtures/serve-no-autoload.orna
 74d2e177bff6a43976f8ef6684889c68b456b1e14b9870042d003c6d954756e1  crates/orna-cli-v1/tests/fixtures/status-hyperlinks/changed path.orna
 0675c7ebc9d6cae22e8874ef6698a5bad66261e7aef2984221f4a00a106fcbca  crates/orna-cli-v1/tests/fixtures/status-short.orna
