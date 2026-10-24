@@ -1069,14 +1069,16 @@ impl NativeGraphContext {
             })
             .collect()
     }
-    /// Applies ordered mutations to the pinned primary ORP-1 root and returns
-    /// the new root together with the object accounting of the pass.
+    /// Applies a batch of row mutations to the pinned primary ORP-1 root and
+    /// returns the new root together with the object accounting of the pass.
     ///
     /// Mutations apply in the canonical order: deletes, then rekeys (a delete
     /// of the old key plus an insert of the new one), then inserts. Each
     /// mutation is checked against the pinned root, so a delete of an absent
     /// key or an insert of a present one is rejected instead of silently
-    /// changing the row set.
+    /// changing the row set. The batch may arrive in any order: it is sorted
+    /// by logical key and merged into the pinned rows instead of shifting
+    /// every later row once per mutation.
     ///
     /// The pass rebuilds the canonical complete ORP-1 pages for the domain.
     /// The boundary rule is position-independent, so every page the mutation
@@ -7301,69 +7303,166 @@ struct BranchCandidate {
     row_count: u64,
 }
 
-/// Applies one maintenance pass in the canonical order: deletes, then rekeys,
-/// then inserts. Every mutation is checked against the row set the pinned root
-/// actually held, so an absent delete/rekey source or a colliding insert is
-/// rejected rather than silently changing which rows exist.
+/// Applies one maintenance pass with the meaning of applying every delete,
+/// then every rekey, then every insert, one at a time and each kind in batch
+/// order, to the rows the pinned root holds. A delete or rekey source that is
+/// absent by then is `RowKeyAbsent`, a rekey onto a present key or an insert
+/// of a present key is `DuplicateRowKey`, and the first failure in that order
+/// is the one reported, so a batch never silently changes which rows exist.
+///
+/// `rows` arrive strictly ascending, as the ORP-1 reader validated them, and
+/// leave that way. The batch may come in any order: publication sends it in
+/// canonical key byte order, which for Text keys is length-first rather than
+/// logical. Shifting the row vector once per mutation would make a bulk load
+/// quadratic, so deletes and rekey sources resolve by binary search to pinned
+/// positions that one compaction pass removes, and the rekey targets and the
+/// inserts, sorted together by logical key, merge into the remaining rows in
+/// one more pass. Apart from sorting the batch, each row moves at most twice
+/// and each mutation costs a few logarithmic lookups.
 fn apply_row_index_mutations(
     rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
     mutations: &[RowIndexMutation],
 ) -> Result<Vec<LogicalRowRekey>, GraphError> {
-    let mut logical_rekeys = Vec::new();
+    // Pinned positions the batch removes: deleted rows and rekey sources.
+    let mut removed = BTreeSet::new();
     for mutation in mutations {
         let RowIndexMutation::Delete { key } = mutation else {
             continue;
         };
-        let index = locate_row(rows, key)?.ok_or(GraphError::RowKeyAbsent)?;
-        rows.remove(index);
+        let index = locate_row(rows, key).ok_or(GraphError::RowKeyAbsent)?;
+        // A second delete of one key finds it already gone.
+        if !removed.insert(index) {
+            return Err(GraphError::RowKeyAbsent);
+        }
     }
+
+    // Every rekey target present so far, with the pinned position whose value
+    // it carries. A target never shares its key with a pinned row that is
+    // still present: its rekey found the key absent, and later rekeys only
+    // remove pinned rows.
+    let mut targets = BTreeMap::<&crate::row_store::TypedKey, usize>::new();
+    let mut logical_rekeys = Vec::new();
     for mutation in mutations {
         let RowIndexMutation::Rekey { from, to } = mutation else {
             continue;
         };
-        let index = locate_row(rows, from)?.ok_or(GraphError::RowKeyAbsent)?;
-        if locate_row(rows, to)?.is_some() {
+        let pinned = |key: &crate::row_store::TypedKey| {
+            locate_row(rows, key).filter(|index| !removed.contains(index))
+        };
+        // `from` is an earlier rekey's target or a pinned row, never both.
+        let earlier_target = targets.get(from).copied();
+        let source = earlier_target
+            .or_else(|| pinned(from))
+            .ok_or(GraphError::RowKeyAbsent)?;
+        if targets.contains_key(to) || pinned(to).is_some() {
             return Err(GraphError::DuplicateRowKey);
         }
-        let (_, value) = rows.remove(index);
-        let insertion = locate_insertion(rows, to);
-        rows.insert(insertion, (to.clone(), value));
+        if earlier_target.is_some() {
+            targets.remove(from);
+        } else {
+            removed.insert(source);
+        }
+        targets.insert(to, source);
         logical_rekeys.push(LogicalRowRekey {
             old_address: from.clone(),
             new_address: to.clone(),
         });
     }
-    for mutation in mutations {
-        let RowIndexMutation::Insert { key, value } = mutation else {
-            continue;
-        };
-        let insertion = locate_insertion(rows, key);
-        if rows
-            .get(insertion)
-            .is_some_and(|(existing, _)| existing == key)
-        {
-            return Err(GraphError::DuplicateRowKey);
+
+    // One pass compacts every removed row out; a rekey source hands its value
+    // to the target that now carries it.
+    let target_of = targets
+        .into_iter()
+        .map(|(key, source)| (source, key))
+        .collect::<BTreeMap<_, _>>();
+    let inserts = mutations
+        .iter()
+        .filter(|mutation| matches!(mutation, RowIndexMutation::Insert { .. }))
+        .count();
+    let mut added = Vec::with_capacity(target_of.len() + inserts);
+    if !removed.is_empty() {
+        // Compaction moves each row at most once.
+        #[cfg(test)]
+        record_row_moves(rows.len());
+        let mut pending = removed.iter().copied().peekable();
+        let mut position = 0usize;
+        let extracted = rows.extract_if(.., |_| {
+            let hit = pending.next_if_eq(&position).is_some();
+            position += 1;
+            hit
+        });
+        // Removed rows come out in position order, which is `removed`'s order.
+        for (index, (_, value)) in removed.iter().zip(extracted) {
+            if let Some(target) = target_of.get(index) {
+                added.push((*target, value));
+            }
         }
-        rows.insert(insertion, (key.clone(), value.clone()));
     }
+    added.extend(mutations.iter().filter_map(|mutation| match mutation {
+        RowIndexMutation::Insert { key, value } => Some((key, value.clone())),
+        _ => None,
+    }));
+    // Targets collide with neither the remaining rows nor each other, so two
+    // equal keys here always involve an insert.
+    added.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    merge_added_rows(rows, added)?;
     Ok(logical_rekeys)
 }
 
+/// Merges `added`, ascending by logical key, into the ascending `rows`. An
+/// added key equal to a row already there, or to the added row before it, is
+/// `DuplicateRowKey`. The rows between two added keys move as one run, so
+/// every row moves once however the added keys interleave with the rows.
+fn merge_added_rows(
+    rows: &mut Vec<(crate::row_store::TypedKey, crate::row_store::RowValue)>,
+    added: Vec<(&crate::row_store::TypedKey, crate::row_store::RowValue)>,
+) -> Result<(), GraphError> {
+    if added.is_empty() {
+        return Ok(());
+    }
+    let mut remaining = std::mem::take(rows).into_iter();
+    let mut merged = Vec::with_capacity(remaining.len() + added.len());
+    for (key, value) in added {
+        let below = remaining
+            .as_slice()
+            .partition_point(|(existing, _)| existing < key);
+        merged.extend(remaining.by_ref().take(below));
+        if merged.last().is_some_and(|(previous, _)| previous == key)
+            || remaining
+                .as_slice()
+                .first()
+                .is_some_and(|(next, _)| next == key)
+        {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        merged.push((key.clone(), value));
+    }
+    merged.extend(remaining);
+    #[cfg(test)]
+    record_row_moves(merged.len());
+    *rows = merged;
+    Ok(())
+}
+
+/// The position of `key` among the ascending pinned `rows`.
 fn locate_row(
     rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
     key: &crate::row_store::TypedKey,
-) -> Result<Option<usize>, GraphError> {
-    Ok(rows
-        .binary_search_by(|(existing, _)| existing.cmp(key))
-        .ok())
+) -> Option<usize> {
+    rows.binary_search_by(|(existing, _)| existing.cmp(key))
+        .ok()
 }
 
-fn locate_insertion(
-    rows: &[(crate::row_store::TypedKey, crate::row_store::RowValue)],
-    key: &crate::row_store::TypedKey,
-) -> usize {
-    rows.binary_search_by(|(existing, _)| existing.cmp(key))
-        .unwrap_or_else(|index| index)
+#[cfg(test)]
+thread_local! {
+    /// Rows `apply_row_index_mutations` moved while compacting and merging on
+    /// this thread, so a test can bound a pass's row moves without timing it.
+    static ROW_MOVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_row_moves(count: usize) {
+    ROW_MOVES.set(ROW_MOVES.get() + count);
 }
 
 /// Groups branch children into canonical ORP-1 branch pages: accumulate until
@@ -9435,6 +9534,427 @@ mod persisted_orp_tests {
 a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b907a12043fed3ab9727a7671bc2cf984bee2f
 688b927aafa299404d1a556273512bfaf6fc5df1 0 2 1 0 06a46d3af2a9e016cfeeed1c84fd3aa635ba63330b698da834af83821ae9bcc1
 ";
+
+    /// Publication hands `maintain_row_index` its batch in canonical key byte
+    /// order, which for Text keys is length-first rather than logical, so
+    /// 20,000 inserts into a 20,000-row table land all over the pinned rows.
+    /// The pass must build the root that a complete canonical build of the
+    /// final rows builds, and move each row a bounded number of times:
+    /// shifting the row vector once per insert moves about 3 * 10^8 rows here.
+    #[test]
+    fn text_key_bulk_insert_in_canonical_byte_order_merges_in_linear_moves() {
+        const ROWS: usize = 20_000;
+        let (_directory, mut graph) = capture_test_context();
+        let pinned_value =
+            RowValue::decode_canonical_fields(vec![0x80]).expect("empty field tuple");
+        let inserted_value =
+            RowValue::decode_canonical_fields(vec![0x81, 0xf5]).expect("one-field tuple");
+        // Unpadded decimal keys: "10" sorts before "9" logically, but after it
+        // as canonical bytes, whose length prefix comes first.
+        let key = |index: usize| TypedKey::Text(index.to_string());
+        let seed = (0..ROWS)
+            .map(|index| RowIndexMutation::Insert {
+                key: key(2 * index),
+                value: pinned_value.clone(),
+            })
+            .collect::<Vec<_>>();
+        maintain_and_repin(&mut graph, &seed);
+
+        let mut inserted_keys = (0..ROWS)
+            .map(|index| key(2 * index + 1))
+            .collect::<Vec<_>>();
+        inserted_keys.sort_by_cached_key(|key| key.canonical_bytes().expect("canonical Text key"));
+        assert!(
+            inserted_keys.windows(2).any(|pair| pair[0] > pair[1]),
+            "canonical byte order of the inserts must differ from their logical order"
+        );
+        let inserts = inserted_keys
+            .into_iter()
+            .map(|key| RowIndexMutation::Insert {
+                key,
+                value: inserted_value.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let scope = graph.open_read_scope().expect("owner read scope");
+        ROW_MOVES.set(0);
+        let maintenance = graph
+            .maintain_row_index(&inserts, &scope)
+            .expect("merge 20,000 inserts into 20,000 rows");
+        let moves = ROW_MOVES.get();
+        assert_eq!(maintenance.row_count(), 2 * ROWS as u64);
+        // Each inserted row is placed at least once, so fewer moves would mean
+        // the pass no longer counts the rows it moves.
+        assert!(
+            (ROWS..=2 * (ROWS + ROWS)).contains(&moves),
+            "merging {ROWS} inserts into {ROWS} rows moved {moves} rows"
+        );
+
+        let mut final_rows = (0..2 * ROWS)
+            .map(|index| {
+                let value = if index % 2 == 0 {
+                    &pinned_value
+                } else {
+                    &inserted_value
+                };
+                crate::row_store::RowEntry::new(key(index), value.clone())
+            })
+            .collect::<Vec<_>>();
+        final_rows.sort_by(|left, right| left.key().cmp(right.key()));
+        let domain = rows_domain_for_version(graph.row_snapshot.version());
+        let mut written = BTreeSet::new();
+        let full_build =
+            NativeGraphContext::build_canonical_ordered_map(&domain, &final_rows, &mut |node| {
+                graph.write_native_node(node, &mut written)
+            })
+            .expect("complete canonical build of the final rows");
+        assert_eq!(maintenance.primary_root(), &full_build);
+    }
+
+    /// The pass as it was first written: every delete, then every rekey, then
+    /// every insert, each applied by shifting the row vector. It is the
+    /// oracle the merging pass must agree with, rows and error alike.
+    fn one_at_a_time_row_index_mutations(
+        rows: &mut Vec<(TypedKey, RowValue)>,
+        mutations: &[RowIndexMutation],
+    ) -> Result<Vec<LogicalRowRekey>, GraphError> {
+        let search = |rows: &[(TypedKey, RowValue)], key: &TypedKey| {
+            rows.binary_search_by(|(existing, _)| existing.cmp(key))
+        };
+        let mut logical_rekeys = Vec::new();
+        for mutation in mutations {
+            if let RowIndexMutation::Delete { key } = mutation {
+                let index = search(rows, key).map_err(|_| GraphError::RowKeyAbsent)?;
+                rows.remove(index);
+            }
+        }
+        for mutation in mutations {
+            if let RowIndexMutation::Rekey { from, to } = mutation {
+                let index = search(rows, from).map_err(|_| GraphError::RowKeyAbsent)?;
+                if search(rows, to).is_ok() {
+                    return Err(GraphError::DuplicateRowKey);
+                }
+                let (_, value) = rows.remove(index);
+                let insertion = search(rows, to).unwrap_or_else(|index| index);
+                rows.insert(insertion, (to.clone(), value));
+                logical_rekeys.push(LogicalRowRekey {
+                    old_address: from.clone(),
+                    new_address: to.clone(),
+                });
+            }
+        }
+        for mutation in mutations {
+            if let RowIndexMutation::Insert { key, value } = mutation {
+                let insertion = search(rows, key).unwrap_or_else(|index| index);
+                if rows
+                    .get(insertion)
+                    .is_some_and(|(existing, _)| existing == key)
+                {
+                    return Err(GraphError::DuplicateRowKey);
+                }
+                rows.insert(insertion, (key.clone(), value.clone()));
+            }
+        }
+        Ok(logical_rekeys)
+    }
+
+    /// The cases a merge is most likely to get wrong, each with the outcome
+    /// applying the batch one mutation at a time gives.
+    #[test]
+    fn merged_row_index_mutations_keep_one_at_a_time_outcomes() {
+        let text = |key: &str| TypedKey::Text(key.to_owned());
+        let rows = |entries: &[(&str, u8)]| {
+            entries
+                .iter()
+                .map(|&(key, value)| {
+                    let value = RowValue::inline(vec![value], Vec::new()).expect("inline value");
+                    (text(key), value)
+                })
+                .collect::<Vec<_>>()
+        };
+        let delete = |key: &str| RowIndexMutation::Delete { key: text(key) };
+        let rekey = |from: &str, to: &str| RowIndexMutation::Rekey {
+            from: text(from),
+            to: text(to),
+        };
+        let insert = |key: &str, value: u8| RowIndexMutation::Insert {
+            key: text(key),
+            value: RowValue::inline(vec![value], Vec::new()).expect("inline value"),
+        };
+        // "aa" sorts between "a" and "b" logically but after "b" as bytes.
+        let pinned = rows(&[("a", 1), ("aa", 2), ("b", 3), ("ba", 4)]);
+        let cases = [
+            (
+                vec![delete("a"), delete("a")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            // Deletes apply before inserts, so the absent delete is reported.
+            (
+                vec![insert("a", 9), delete("zz")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            // Rekeys fail in batch order.
+            (
+                vec![rekey("b", "aa"), rekey("zz", "c")],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (
+                vec![rekey("zz", "c"), rekey("b", "aa")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            (vec![rekey("a", "a")], Err(GraphError::DuplicateRowKey)),
+            // A deleted row is no rekey source.
+            (
+                vec![delete("a"), rekey("a", "c")],
+                Err(GraphError::RowKeyAbsent),
+            ),
+            (
+                vec![rekey("a", "c"), rekey("c", "bb")],
+                Ok(rows(&[("aa", 2), ("b", 3), ("ba", 4), ("bb", 1)])),
+            ),
+            // Two rows swap keys through a free one.
+            (
+                vec![rekey("a", "x"), rekey("b", "a"), rekey("x", "b")],
+                Ok(rows(&[("a", 3), ("aa", 2), ("b", 1), ("ba", 4)])),
+            ),
+            (
+                vec![delete("b"), rekey("a", "b")],
+                Ok(rows(&[("aa", 2), ("b", 1), ("ba", 4)])),
+            ),
+            // Updates as publication sends them: by canonical key bytes, each
+            // key's delete before its insert.
+            (
+                vec![delete("b"), insert("b", 9), delete("aa"), insert("aa", 8)],
+                Ok(rows(&[("a", 1), ("aa", 8), ("b", 9), ("ba", 4)])),
+            ),
+            (
+                vec![insert("a", 7), rekey("a", "c")],
+                Ok(rows(&[("a", 7), ("aa", 2), ("b", 3), ("ba", 4), ("c", 1)])),
+            ),
+            (
+                vec![rekey("a", "c"), insert("c", 7)],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (
+                vec![insert("c", 7), insert("ab", 6), insert("c", 5)],
+                Err(GraphError::DuplicateRowKey),
+            ),
+            (vec![insert("ba", 7)], Err(GraphError::DuplicateRowKey)),
+            (
+                vec![insert("c", 7), insert("", 6), insert("ab", 5)],
+                Ok(rows(&[
+                    ("", 6),
+                    ("a", 1),
+                    ("aa", 2),
+                    ("ab", 5),
+                    ("b", 3),
+                    ("ba", 4),
+                    ("c", 7),
+                ])),
+            ),
+        ];
+        for (mutations, expected) in cases {
+            let mut merged = pinned.clone();
+            let outcome = apply_row_index_mutations(&mut merged, &mutations).map(|_| merged);
+            assert_eq!(outcome, expected, "merged pass over {mutations:?}");
+            let mut reference = pinned.clone();
+            let outcome =
+                one_at_a_time_row_index_mutations(&mut reference, &mutations).map(|_| reference);
+            assert_eq!(outcome, expected, "one-at-a-time pass over {mutations:?}");
+        }
+
+        let mut chained = pinned.clone();
+        let rekeys = apply_row_index_mutations(
+            &mut chained,
+            &[rekey("a", "c"), delete("b"), rekey("c", "b")],
+        )
+        .expect("rekey chain onto a deleted key");
+        assert_eq!(
+            rekeys,
+            [
+                LogicalRowRekey {
+                    old_address: text("a"),
+                    new_address: text("c"),
+                },
+                LogicalRowRekey {
+                    old_address: text("c"),
+                    new_address: text("b"),
+                },
+            ]
+        );
+        assert_eq!(chained, rows(&[("aa", 2), ("b", 1), ("ba", 4)]));
+    }
+
+    /// splitmix64, so a fixed seed replays the same cases on every run.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut mixed = self.0;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            mixed ^ (mixed >> 31)
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+
+        /// One of `keys`, a non-negative Int spelled `Int` or `UInt` at random.
+        fn key_from(&mut self, keys: &[TypedKey]) -> TypedKey {
+            match &keys[self.below(keys.len())] {
+                TypedKey::Int(value) if *value >= 0 && self.below(2) == 0 => {
+                    TypedKey::UInt(value.unsigned_abs())
+                }
+                key => key.clone(),
+            }
+        }
+    }
+
+    /// Seeded random batches of deletes, rekeys, inserts and delete-plus-insert
+    /// updates over small key universes, so batches repeat keys, name absent
+    /// ones and collide with each other. Text keys of up to four letters
+    /// order differently as canonical bytes than logically, Int keys come
+    /// spelled `Int` and `UInt`, and half the batches arrive in publication's
+    /// canonical-byte order. The merging pass must leave exactly the rows
+    /// (key spelling included) and rekeys of the one-at-a-time reference, or
+    /// fail with exactly its error, and move rows at most twice per pinned row
+    /// and mutation whatever the batch holds.
+    #[test]
+    fn merged_row_index_mutations_match_the_one_at_a_time_reference() {
+        let mut rng = SplitMix64(0x0374_5eed_0374_5eed);
+        let mut values = 0u32;
+        let mut value = || {
+            values += 1;
+            RowValue::inline(values.to_be_bytes().to_vec(), Vec::new()).expect("inline value")
+        };
+        let (mut ok, mut ok_with_rekeys, mut absent, mut duplicate) = (0, 0, 0, 0);
+        for case in 0..4_000 {
+            let universe = if case % 2 == 0 {
+                let letters = 2 + rng.below(3) as u8;
+                let mut level = vec![String::new()];
+                let mut keys = level.clone();
+                for _ in 0..1 + rng.below(4) {
+                    level = level
+                        .iter()
+                        .flat_map(|prefix| {
+                            (b'a'..b'a' + letters)
+                                .map(move |letter| format!("{prefix}{}", char::from(letter)))
+                        })
+                        .collect();
+                    keys.extend(level.iter().cloned());
+                }
+                keys.into_iter().map(TypedKey::Text).collect::<Vec<_>>()
+            } else {
+                let span = 2 + rng.below(40) as i64;
+                (-span..span).map(TypedKey::Int).collect()
+            };
+            let density = 1 + rng.below(9);
+            let mut pinned = Vec::new();
+            let mut free = Vec::new();
+            for key in &universe {
+                if rng.below(10) < density {
+                    let key = rng.key_from(std::slice::from_ref(key));
+                    pinned.push((key, value()));
+                } else {
+                    free.push(key.clone());
+                }
+            }
+            pinned.sort_by(|left, right| left.0.cmp(&right.0));
+            let present = pinned
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            // Mostly a present key for deletes and rekey sources and a free
+            // one for inserts and rekey targets, sometimes any key at all.
+            let pick = |rng: &mut SplitMix64, preferred: &[TypedKey]| {
+                if preferred.is_empty() || rng.below(3) == 0 {
+                    rng.key_from(&universe)
+                } else {
+                    rng.key_from(preferred)
+                }
+            };
+            let mut batch = Vec::new();
+            for _ in 0..rng.below(25) {
+                match rng.below(10) {
+                    0..=2 => batch.push(RowIndexMutation::Delete {
+                        key: pick(&mut rng, &present),
+                    }),
+                    3..=4 => {
+                        let from = pick(&mut rng, &present);
+                        let to = pick(&mut rng, &free);
+                        batch.push(RowIndexMutation::Rekey { from, to });
+                    }
+                    5..=7 => batch.push(RowIndexMutation::Insert {
+                        key: pick(&mut rng, &free),
+                        value: value(),
+                    }),
+                    _ => {
+                        let key = pick(&mut rng, &present);
+                        batch.push(RowIndexMutation::Delete { key: key.clone() });
+                        batch.push(RowIndexMutation::Insert {
+                            key,
+                            value: value(),
+                        });
+                    }
+                }
+            }
+            if rng.below(2) == 0 {
+                // Publication's order: canonical key bytes, and a key's delete
+                // before its insert.
+                batch.sort_by_cached_key(|mutation| {
+                    let (RowIndexMutation::Delete { key }
+                    | RowIndexMutation::Insert { key, .. }
+                    | RowIndexMutation::Rekey { from: key, .. }) = mutation;
+                    key.canonical_bytes().expect("canonical key")
+                });
+            }
+
+            let mut merged_rows = pinned.clone();
+            ROW_MOVES.set(0);
+            let merged = apply_row_index_mutations(&mut merged_rows, &batch);
+            let moves = ROW_MOVES.get();
+            assert!(
+                moves <= 2 * (pinned.len() + batch.len()),
+                "case {case}: {moves} row moves for {pinned:?} with {batch:?}"
+            );
+            let mut reference_rows = pinned.clone();
+            let reference = one_at_a_time_row_index_mutations(&mut reference_rows, &batch);
+            match (&merged, &reference) {
+                (Ok(merged_rekeys), Ok(reference_rekeys)) => {
+                    // Debug output keeps the Int/UInt spelling equality ignores.
+                    assert_eq!(
+                        format!("{merged_rows:?} {merged_rekeys:?}"),
+                        format!("{reference_rows:?} {reference_rekeys:?}"),
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    ok += 1;
+                    ok_with_rekeys += usize::from(!merged_rekeys.is_empty());
+                }
+                (Err(merged_error), Err(reference_error)) => {
+                    assert_eq!(
+                        merged_error, reference_error,
+                        "case {case}: {pinned:?} with {batch:?}"
+                    );
+                    match reference_error {
+                        GraphError::RowKeyAbsent => absent += 1,
+                        GraphError::DuplicateRowKey => duplicate += 1,
+                        other => panic!("case {case}: unexpected {other:?}"),
+                    }
+                }
+                _ => panic!(
+                    "case {case}: merged {merged:?} but one at a time {reference:?} \
+                     for {pinned:?} with {batch:?}"
+                ),
+            }
+        }
+        // Each outcome is exercised, not only the easy one.
+        assert!(
+            ok >= 400 && ok_with_rekeys >= 100 && absent >= 400 && duplicate >= 400,
+            "ok {ok} (with rekeys {ok_with_rekeys}), absent {absent}, duplicate {duplicate}"
+        );
+    }
 
     #[test]
     fn publication_transaction_commit_supports_metadata_lookup_without_payload_read() {
