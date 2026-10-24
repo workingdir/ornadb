@@ -2471,6 +2471,174 @@ fn validate_limits(limits: Limits) -> Result<(), EvaluationError> {
         Ok(())
     }
 }
+
+/// Equality for `==` and `!=`: Blob values are compared by their annotation and
+/// exact content, not by OVB-2 or format-3 representation. Lists, tuples and
+/// options are compared element-wise so that a Blob nested inside them is
+/// decided the same way. Every other pair keeps ordinary structural equality.
+fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
+    match (left, right) {
+        (Value::List(left), Value::List(right)) => {
+            blob_aware_seq_eq(left.as_slice(), right.as_slice())
+        }
+        (Value::Tuple(left), Value::Tuple(right)) => blob_aware_seq_eq(left, right),
+        (Value::Option(left), Value::Option(right)) => match (left.as_deref(), right.as_deref()) {
+            (None, None) => Ok(true),
+            (Some(left), Some(right)) => blob_aware_eq(left, right),
+            _ => Ok(false),
+        },
+        (Value::Record(left), Value::Record(right)) => {
+            if left.len() != right.len() {
+                return Ok(false);
+            }
+            for ((left_key, left), (right_key, right)) in left.iter().zip(right) {
+                if left_key != right_key || !blob_aware_eq(left, right)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Value::NominalRecord {
+                type_id: left_type,
+                fields: left_fields,
+            },
+            Value::NominalRecord {
+                type_id: right_type,
+                fields: right_fields,
+            },
+        ) => {
+            if left_type != right_type || left_fields.len() != right_fields.len() {
+                return Ok(false);
+            }
+            for ((left_key, left), (right_key, right)) in left_fields.iter().zip(right_fields) {
+                if left_key != right_key || !blob_aware_eq(left, right)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Value::Enum {
+                type_id: left_type,
+                variant_id: left_variant,
+                payload: left_payload,
+            },
+            Value::Enum {
+                type_id: right_type,
+                variant_id: right_variant,
+                payload: right_payload,
+            },
+        ) => {
+            if left_type != right_type || left_variant != right_variant {
+                return Ok(false);
+            }
+            match (left_payload.as_deref(), right_payload.as_deref()) {
+                (None, None) => Ok(true),
+                (Some(left), Some(right)) => blob_aware_eq(left, right),
+                _ => Ok(false),
+            }
+        }
+        (
+            Value::Range {
+                lower: left_lower,
+                upper: left_upper,
+                upper_inclusive: left_inclusive,
+            },
+            Value::Range {
+                lower: right_lower,
+                upper: right_upper,
+                upper_inclusive: right_inclusive,
+            },
+        ) => {
+            if left_inclusive != right_inclusive {
+                return Ok(false);
+            }
+            Ok(optional_blob_aware_eq(left_lower.as_deref(), right_lower.as_deref())?
+                && optional_blob_aware_eq(left_upper.as_deref(), right_upper.as_deref())?)
+        }
+        (
+            Value::Stream {
+                values: left_values,
+                source_label: left_label,
+                source_digest: left_digest,
+                position: left_position,
+                provider: left_provider,
+            },
+            Value::Stream {
+                values: right_values,
+                source_label: right_label,
+                source_digest: right_digest,
+                position: right_position,
+                provider: right_provider,
+            },
+        ) => {
+            if left_label != right_label
+                || left_digest != right_digest
+                || left_position != right_position
+                || left_provider != right_provider
+            {
+                return Ok(false);
+            }
+            blob_aware_seq_eq(left_values, right_values)
+        }
+        (
+            Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
+            Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
+        ) => {
+            let left = annotated_blob(left)?;
+            let right = annotated_blob(right)?;
+            left.value_eq(&right).map_err(blob_equality_error)
+        }
+        _ => Ok(left == right),
+    }
+}
+
+fn blob_aware_seq_eq(left: &[Value], right: &[Value]) -> Result<bool, EvaluationError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right) {
+        if !blob_aware_eq(left, right)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn optional_blob_aware_eq(
+    left: Option<&Value>,
+    right: Option<&Value>,
+) -> Result<bool, EvaluationError> {
+    match (left, right) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => blob_aware_eq(left, right),
+        _ => Ok(false),
+    }
+}
+
+/// Reads an annotated Blob value into its exact Blob, whichever representation
+/// carries it. An OVB-2 Blob is validated from its raw wire value first.
+fn annotated_blob(value: &Value) -> Result<orna_value_v1::Blob, EvaluationError> {
+    let context_value = match value {
+        Value::AnnotatedBlob(raw) => ContextValue::new(ValueFormat::Ovb2, raw.clone()),
+        Value::ContextualBlob(value) => Ok(value.clone()),
+        _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
+    }
+    .map_err(blob_equality_error)?;
+    context_value.blob().map_err(blob_equality_error)
+}
+
+/// Maps Blob comparison failures to the portable codes the Blob contracts name.
+fn blob_equality_error(failure: ValueError) -> EvaluationError {
+    match failure {
+        ValueError::ContentUnavailable => error("sys.blob.unavailable"),
+        ValueError::ContentDigestMismatch => error("sys.blob.corrupt"),
+        ValueError::InvalidContext => error("sys.blob.reference_context"),
+        _ => error("ORNA-EVAL-VALUE"),
+    }
+}
+
 fn error(code: &'static str) -> EvaluationError {
     // No parser diagnostic, source text, span, input value, or filesystem data
     // crosses this boundary.
@@ -5519,7 +5687,7 @@ impl Context<'_, '_> {
             }
             let equal = match (&left, &right) {
                 (Value::Float(left), Value::Float(right)) => float_ordinary_eq(*left, *right),
-                _ => left == right,
+                _ => blob_aware_eq(&left, &right)?,
             };
             return Ok(Value::Bool(if op == "==" { equal } else { !equal }));
         }
@@ -18421,5 +18589,260 @@ mod base64_accept_table {
         for &(input, accepted) in cases {
             assert_eq!(decode_base64(input).is_ok(), accepted, "input {input:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod blob_equality_tests {
+    use super::*;
+
+    struct PayloadResolver {
+        payload: Vec<u8>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl orna_value_v1::BlobResolver for PayloadResolver {
+        fn read_range(
+            &self,
+            _reference: &orna_value_v1::ContentReference,
+            offset: u64,
+            length: u64,
+        ) -> orna_value_v1::Result<Vec<u8>> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let start = usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+            let length = usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+            let end = start
+                .checked_add(length)
+                .ok_or(orna_value_v1::Error::InvalidRange)?;
+            self.payload
+                .get(start..end)
+                .map(<[u8]>::to_vec)
+                .ok_or(orna_value_v1::Error::InvalidRange)
+        }
+    }
+
+    fn annotated_ovb2(blob: &orna_value_v1::Blob) -> Value {
+        Value::AnnotatedBlob(
+            ContextValue::from_blob(blob, ValueFormat::Ovb2)
+                .unwrap()
+                .raw()
+                .clone(),
+        )
+    }
+
+    #[test]
+    fn blob_equality_ignores_representation_and_respects_annotation() {
+        let payload = b"payload";
+        let database = [1; 16];
+        let probe = std::sync::Arc::new(PayloadResolver {
+            payload: payload.to_vec(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> = probe.clone();
+        let context = Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let reference = context
+            .reference(
+                orna_value_v1::ContentIdentity::from_bytes(payload),
+                orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+            )
+            .unwrap();
+        let reads_before = probe.reads.load(std::sync::atomic::Ordering::SeqCst);
+        let rov3_blob = orna_value_v1::Blob::from_reference_with_annotation(
+            reference,
+            "application/octet-stream",
+            None,
+        )
+        .unwrap();
+        let rov3 = Value::ContextualBlob(
+            ContextValue::from_blob(&rov3_blob, ValueFormat::Rov3).unwrap(),
+        );
+        let ovb2_blob = orna_value_v1::Blob::from_bytes_with_annotation(
+            payload.to_vec(),
+            "application/octet-stream",
+            None,
+        )
+        .unwrap();
+        let ovb2 = annotated_ovb2(&ovb2_blob);
+
+        // Equal bytes and annotation compare exactly, including when nested in
+        // containers. Two independently built OVB-2 values share no Arc, so this
+        // exercises the exact content path rather than pointer identity.
+        let ovb2_again = annotated_ovb2(&orna_value_v1::Blob::from_bytes_with_annotation(
+            payload.to_vec(),
+            "application/octet-stream",
+            None,
+        )
+        .unwrap());
+        assert!(blob_aware_eq(&ovb2, &ovb2_again).unwrap());
+        assert!(
+            blob_aware_eq(
+                &Value::Tuple(vec![ovb2.clone()]),
+                &Value::Tuple(vec![ovb2_again.clone()]),
+            )
+            .unwrap()
+        );
+        assert!(
+            blob_aware_eq(
+                &Value::Option(Some(Box::new(ovb2.clone()))),
+                &Value::Option(Some(Box::new(ovb2_again.clone()))),
+            )
+            .unwrap()
+        );
+        assert!(
+            blob_aware_eq(
+                &Value::List(List::from(vec![ovb2.clone()])),
+                &Value::List(List::from(vec![ovb2_again.clone()])),
+            )
+            .unwrap()
+        );
+
+        // A descriptor-only ROV-3 value carries a descriptor but no admitted
+        // bytes in this evaluation, so it has no shared witness with OVB-2
+        // content. ORNA-BLOB-005 permits explicit unavailability here.
+        assert!(blob_aware_eq(&rov3, &ovb2).is_err());
+        assert!(blob_aware_eq(&ovb2, &rov3).is_err());
+        // Operator `==` path: a descriptor-only ROV-3 value equals itself through
+        // its shared descriptor witness (ORNA-BLOB-005).
+        assert!(blob_aware_eq(&rov3, &rov3).unwrap());
+
+        // The same bytes under a different annotation are not equal.
+        let annotated_blob = orna_value_v1::Blob::from_bytes_with_annotation(
+            payload.to_vec(),
+            "audio/mp4",
+            Some("m4b"),
+        )
+        .unwrap();
+        assert!(!blob_aware_eq(&rov3, &annotated_ovb2(&annotated_blob)).unwrap());
+
+        // Different bytes under the same annotation are not equal.
+        let other_blob = orna_value_v1::Blob::from_bytes_with_annotation(
+            b"other!!".to_vec(),
+            "application/octet-stream",
+            None,
+        )
+        .unwrap();
+        assert!(!blob_aware_eq(&rov3, &annotated_ovb2(&other_blob)).unwrap());
+
+        // Non-Blob values keep ordinary equality.
+        assert!(
+            blob_aware_eq(
+                &Value::String("a".to_owned()),
+                &Value::String("a".to_owned()),
+            )
+            .unwrap()
+        );
+        // Equality over descriptor-only ROV-3 never resolves bytes.
+        assert_eq!(
+            probe.reads.load(std::sync::atomic::Ordering::SeqCst),
+            reads_before
+        );
+    }
+
+    #[test]
+    fn blob_self_equality_and_nested_exact_content() {
+        let payload = b"payload";
+        let make = |bytes: &[u8]| {
+            annotated_ovb2(
+                &orna_value_v1::Blob::from_bytes_with_annotation(
+                    bytes.to_vec(),
+                    "application/octet-stream",
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let left = make(payload);
+        // Self-equality of an OVB-2 value holds.
+        assert!(blob_aware_eq(&left, &left).unwrap());
+
+        // Independently built, equal-content OVB-2 values nested in each
+        // compound shape compare equal by exact content (no shared Arc).
+        let enum_of = |blob: Value| Value::Enum {
+            type_id: Raw::Text("E".into()),
+            variant_id: Raw::Text("V".into()),
+            payload: Some(Box::new(blob)),
+        };
+        let record_of = |blob: Value| Value::NominalRecord {
+            type_id: Raw::Text("R".into()),
+            fields: vec![(Raw::Text("b".into()), blob)],
+        };
+        let stream_of = |blob: Value| Value::Stream {
+            values: vec![blob],
+            source_label: "s".to_owned(),
+            source_digest: [0; 32],
+            position: 0,
+            provider: None,
+        };
+        assert!(blob_aware_eq(&enum_of(left.clone()), &enum_of(make(payload))).unwrap());
+        assert!(blob_aware_eq(&record_of(left.clone()), &record_of(make(payload))).unwrap());
+        assert!(blob_aware_eq(&stream_of(left.clone()), &stream_of(make(payload))).unwrap());
+
+        // Equal length, different bytes: not equal in any nested shape.
+        let other = make(b"paylaod");
+        assert_eq!(payload.len(), b"paylaod".len());
+        assert!(!blob_aware_eq(&left, &other).unwrap());
+        assert!(!blob_aware_eq(&enum_of(left.clone()), &enum_of(other.clone())).unwrap());
+        assert!(!blob_aware_eq(&record_of(left.clone()), &record_of(other.clone())).unwrap());
+        assert!(!blob_aware_eq(&stream_of(left), &stream_of(other)).unwrap());
+    }
+
+    #[test]
+    fn blob_equality_recurses_into_compound_values() {
+        let blob = annotated_ovb2(
+            &orna_value_v1::Blob::from_bytes_with_annotation(
+                b"payload".to_vec(),
+                "application/octet-stream",
+                None,
+            )
+            .unwrap(),
+        );
+        let record = |key: &str, value: Value| {
+            Value::Record(std::collections::BTreeMap::from([(key.to_owned(), value)]))
+        };
+
+        assert!(blob_aware_eq(&record("a", blob.clone()), &record("a", blob.clone())).unwrap());
+        assert!(!blob_aware_eq(&record("a", blob.clone()), &record("b", blob.clone())).unwrap());
+        assert!(
+            blob_aware_eq(
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+            )
+            .unwrap()
+        );
+        assert!(
+            !blob_aware_eq(
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: true,
+                },
+            )
+            .unwrap()
+        );
     }
 }
