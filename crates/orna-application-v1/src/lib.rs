@@ -64,6 +64,8 @@ mod repl_transaction;
 mod browser_profile;
 pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::ReplTransactionScope;
+mod format3_store;
+pub use format3_store::{Format3TableSchemaError, StagedRelations, build_format3_store_relations};
 
 const DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST\0";
 const TABLE_ID_DIGEST_DOMAIN: &[u8] = b"ORNA-ACTIVATION-DIGEST-TABLE-IDENTITIES\0";
