@@ -5,8 +5,9 @@
 # record `failed`; this file only stops it from failing the job.
 #
 # Each entry names the bead that owns the fix. Delete the entry in the change
-# that makes the test pass; the nightly summary reports entries whose test now
-# passes. Never add an entry to hide a regression.
+# that makes the test pass. The nightly summary fails when a listed test passes
+# (unless the entry is intermittent) or is no longer a test of its target.
+# Never add an entry to hide a regression.
 #
 #   package       Cargo package, or "workspace" for a whole-workspace check
 #   target        lib, doc, bin:NAME, test:NAME or check:NAME
@@ -14,6 +15,7 @@
 #   bead          bead that owns the fix
 #   reason        why it fails, and where the failure was observed
 #   record        optional record ID or glob the entry is limited to (default: every record)
+#   intermittent  optional; true when the test fails only on some runs, so a pass is expected
 
 [[failure]]
 package = "workspace"
@@ -31,18 +33,12 @@ bead = "ornadb-5il1.6"
 reason = "The one-million-row case has never finished; a local run was killed after 1,800 s with no result."
 
 [[failure]]
-package = "orna-sys-v1"
-target = "test:planner_predicate_decorrelation_cost_identity_sodmd"
-test = "changing_the_selected_index_rekeys_the_decorrelation_cost_fold_chain"
-bead = "ornadb-5il1.30"
-reason = "The pinned join-fold identity is not reproduced by current fold composition (bead reproduction on main)."
-
-[[failure]]
 package = "orna-cli-v1"
 target = "test:req_vfs"
 test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
 bead = "ornadb-9aj6"
 reason = "Fails intermittently in a full req_vfs run on main."
+intermittent = true
 
 [[failure]]
 package = "orna-repository-v1"
@@ -50,6 +46,7 @@ target = "lib"
 test = "tests::runtime_owner_chain_survives_repeated_startup_crashes"
 bead = "ornadb-mmsa.37"
 reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite."
+intermittent = true
 
 [[failure]]
 package = "orna-cli-v1"
@@ -57,6 +54,7 @@ target = "test:publication_crash_matrix"
 test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary"
 bead = "ornadb-aflz"
 reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:284)."
+intermittent = true
 
 [[failure]]
 package = "orna-cli-v1"
@@ -64,6 +62,7 @@ target = "test:publication_crash_matrix"
 test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work"
 bead = "ornadb-aflz"
 reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520."
+intermittent = true
 
 [[failure]]
 package = "workspace"
@@ -73,44 +72,10 @@ bead = "ornadb-5il1.256"
 reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."
 
 [[failure]]
-package = "orna-application-v1"
-target = "test:async_source_effect"
-test = "live_application_reads_publication_relations_from_durable_runtime_rows"
-bead = "ornadb-5il1.255"
-reason = "Fails on main at cf1c6aa82; CI never ran this crate."
-
-[[failure]]
-package = "orna-application-v1"
-target = "test:system_administration_conformance"
-test = "explicit_admin_capability_returns_host_outcome_for_fixture_source"
-bead = "ornadb-5il1.255"
-reason = "Fails on main at cf1c6aa82; CI never ran this crate."
-
-[[failure]]
-package = "orna-project-v1"
-target = "test:project_loader"
-tests = [
-  "committed_project_carries_verified_source_snapshot_identity",
-  "legacy_database_sidecar_does_not_hide_committed_source_rows",
-]
-bead = "ornadb-5il1.171"
-reason = "Fails on main at cf1c6aa82; the fixtures load a module-level `pub let`, which is not a 1.1.0 top-level item."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:publication_metadata"
-test = "storage_and_maintenance_expose_effective_publication_state"
-bead = "ornadb-5il1.138"
-reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
-
-[[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
 tests = [
-  "authoritative_fixture_resolves_attached_tables_connectors_and_modules",
   "chained_extension_omissions_keep_sibling_depth_labels_scoped",
-  "checkpoint_and_failure_cas_admission_requires_typed_versions",
-  "closed_literal_addition_diagnostics_preserve_published_meaning",
   "finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_names",
   "late_paired_omission_rolls_back_only_crossed_nested_sibling_depths",
   "multi_level_paired_boundary_depths_stay_stable_through_selector_storms",
@@ -137,34 +102,10 @@ tests = [
   "paired_reproductions_remain_stable_across_alternating_storm_orders",
   "paired_rollback_omissions_keep_extension_depth_identities",
   "paired_tuple_identity_survives_sequential_three_way_omission_chains",
-  "qualified_integer_aggregate_admission_requires_compatible_pinned_exports",
   "sequential_three_way_tuple_folds_anchor_late_rebound_widths",
   "sparse_paired_rebind_chains_preserve_identity_across_omitted_rows",
-  "table_rows_reject_overlapping_protocol_implementations",
   "tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms",
   "unknown_paired_width_suppresses_sibling_pin_promotion",
-  "while_requires_a_boolean_condition_preserves_body_effects_and_validates_transfers",
-]
-bead = "ornadb-5il1.138"
-reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:system_storage_contract"
-tests = [
-  "storage_profile_and_preference_are_independently_typed",
-  "storage_profile_and_preference_cannot_be_conflated",
-]
-bead = "ornadb-5il1.138"
-reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:v1_review_regressions"
-tests = [
-  "generic_calls_retain_callee_effect_and_failure_summaries",
-  "nominal_from_requires_a_nominal_constructor_result",
-  "undeclared_table_and_nominal_field_types_require_unresolved_diagnostic",
 ]
 bead = "ornadb-5il1.138"
 reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
@@ -194,20 +135,6 @@ reason = "Fails on main; conformance and traceability crates still need the 1.1.
 package = "orna-conformance-v1"
 target = "test:expected_diagnostics_payload_audit"
 test = "every_invalid_sidecar_matches_the_emitted_diagnostic_payload"
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-conformance-v1"
-target = "test:publication_bundle_validation_kpki"
-test = "api_index_names_match_the_declared_system_api_surface"
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-conformance-v1"
-target = "test:reference_corpus"
-test = "requirement_evidence_keeps_all_authoritative_not_executed_markers"
 bead = "ornadb-5il1.266"
 reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
 
@@ -399,13 +326,6 @@ tests = [
 ]
 bead = "ornadb-5il1.207"
 reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-project-v1"
-target = "lib"
-test = "object_identity::tests::portable_scalar_spellings_map_to_closed_primitives_and_unsupported_types_fail"
-bead = "ornadb-5il1.148"
-reason = "Fails on main; ObjectIdentityManifest and scalar-spelling codec is not unified in the project loader."
 
 [[failure]]
 package = "orna-semantic-v1"
