@@ -10,7 +10,7 @@ const SLICING_MODULES: [&str; 3] = [
 ];
 
 fn session() -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| SLICING_MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();

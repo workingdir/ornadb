@@ -7,7 +7,7 @@ use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::Raw;
 
 fn sources() -> Vec<(String, String)> {
-    orna_standard::reference_standard_sources_v1()
+    orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
             path == "std/error.orna"
