@@ -2467,6 +2467,7 @@ pub struct Repository {
     worktree: PathBuf,
     runtime: RuntimePaths,
     objects: std::sync::Arc<object_reader::ObjectReader>,
+    coordination_lock_wait: std::time::Duration,
 }
 
 /// Binds a candidate tree entry at its exact index position.
@@ -2548,7 +2549,19 @@ impl Repository {
             objects: std::sync::Arc::new(object_reader::ObjectReader::new(worktree.clone())),
             worktree,
             runtime: RuntimePaths { root: runtime },
+            coordination_lock_wait: COORDINATION_LOCK_WAIT,
         })
+    }
+
+    /// Overrides how long publication waits for the coordination lock before
+    /// reporting `RepositoryBusy`. Production uses `COORDINATION_LOCK_WAIT`;
+    /// tests use this to keep contended-lock cases short or to allow a slow
+    /// winner on a loaded runner.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_coordination_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        self.coordination_lock_wait = wait;
+        self
     }
 
     pub fn worktree(&self) -> &Path {
@@ -8365,7 +8378,7 @@ impl Repository {
         &self,
     ) -> Result<CoordinationLock, RepositoryError> {
         let file = self.open_coordination_lock_file()?;
-        let deadline = std::time::Instant::now() + COORDINATION_LOCK_WAIT;
+        let deadline = std::time::Instant::now() + self.coordination_lock_wait;
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(CoordinationLock { file }),
@@ -8378,9 +8391,7 @@ impl Repository {
                     if std::time::Instant::now() >= deadline {
                         return Err(RepositoryError::RepositoryBusy);
                     }
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        std::thread::sleep(COORDINATION_LOCK_POLL);
-                    }
+                    std::thread::sleep(COORDINATION_LOCK_POLL);
                 }
                 Err(_) => return Err(RepositoryError::LocalStateUnavailable),
             }
