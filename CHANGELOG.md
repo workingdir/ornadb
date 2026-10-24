@@ -6,15 +6,18 @@ been published.
 
 ## Unreleased
 - `orna mv OLD NEW` works in a database made by `orna init` once its first
-  `orna commit` exists. It renames the table in source, leaving that edit
-  unstaged for review, and stages only the store's identity inventory, so the
-  table and its fields keep their IDs. The next `orna commit` of the renamed
-  source keeps the table's relation and its published rows (ORNA-OBJECT-003).
+  `orna commit` exists. Like `git mv`, it stages the rename and commits
+  nothing. The table's declaration is renamed in the worktree module and in
+  its staged copy, and the store's identity inventory is restaged in the same
+  index update, so the table and its fields keep their IDs. Other unstaged
+  edits to the module stay unstaged. `orna commit` right after `mv` keeps the
+  table's relation and its published rows (ORNA-OBJECT-003, ORNA-CLI-001).
   `orna mv` no longer reads or writes `.orna/object-identities.cbor` and no
   longer moves loose-row directories, which format 3 does not have. Before the
-  first commit it refuses with E2101 because no identity is recorded yet. If
-  the inventory cannot be staged, the source edit is rolled back. The Rust
-  API adds `Repository::stage_object_identities` and
+  first commit it refuses with E2101 because no identity is staged yet. If the
+  index update is refused, the source edit is rolled back. The Rust API adds
+  `Repository::stage_object_identities`,
+  `RelationAdmissionError::SourceNotStaged` and
   `ObjectIdentityManifest::with_renames`.
 - Deleted the old-stack island crates `orna-client`, `orna-artifact`, `orna-protocol`, `orna-standard` and `orna-runtime-tty` (deletion programme step 7). None had a production caller: their only remaining dependents were the `orna-application-v1` dev-dependency (now removed) and each other. The `orna-standard` snapshot oracle `v1_profile.rs` is ported to `crates/orna-evaluator-v1/tests/standard_profile_v1.rs` (imports rewired to `orna-standard-sources`, fixtures moved alongside); `orna-standard-sources` remains the canonical source. The `just` recipes for the removed demos, Qt runtime and Studio shell (`runtime-tty-demo`, `client-*-demo`, `demo-suite`, `runtime-qt-*`, `studio-qt-*`, `runtime-suite`, `runtime-display-suite`, `runtime-abi-header-check`, `runtime-abi-parity`) were removed with them.
 - The `orna` CLI no longer links `orna-client` (and its HTTP, WebSocket and Qt-ABI dependencies) for the `:watch` types. `live_presentation` moved unchanged from `orna-client` into `orna-live-v1`, which the CLI already depends on (deletion programme step 4). The public API of `orna-client` no longer exports `live_presentation`; import it from `orna-live-v1` instead.

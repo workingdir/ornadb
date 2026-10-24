@@ -231,11 +231,13 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
 }
 
 /// Renames one table in source and moves its identity in the staged store
-/// inventory (ORNA-OBJECT-003). The source edit stays an unstaged worktree
-/// change for review; only the inventory is staged, so the next reviewed
-/// `orna commit` of the renamed source keeps the table and field ObjectIds
-/// and with them the table's relation. A run interrupted after the source
-/// write resumes from the renamed source.
+/// inventory (ORNA-OBJECT-003). Like `git mv`, the rename is staged for
+/// review and nothing is committed: the worktree module and its staged copy
+/// get the same declaration-name edit, and the inventory is restaged in the
+/// same index update, so the next `orna commit` keeps the table and field
+/// ObjectIds and with them the table's relation. Other unstaged edits stay
+/// unstaged. A run interrupted after the source write resumes from the
+/// renamed source.
 #[allow(
     clippy::too_many_lines,
     reason = "the source edit and the staged inventory update must remain one auditable sequence"
@@ -291,75 +293,12 @@ fn run_mv(
                 "use the table's qualified name from the current source project",
             )
         })?;
-    let source = &modules[module_index].source;
-    let parsed = orna_syntax_v1::parse_module(source);
-    if !parsed.is_ok() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "table source could not be parsed",
-            "fix the source module, then retry mv",
-        ));
-    }
-    let mut matching_old = parsed.value.items.iter().filter(|item| {
-        matches!(
-            &item.declaration,
-            orna_syntax_v1::Declaration::Table { name, .. } if name == old_leaf
-        )
-    });
-    let old_item = matching_old.next();
-    if matching_old.next().is_some() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "source table name is ambiguous",
-            "use a project with one table declaration for the selected qualified name",
-        ));
-    }
-    let source_already_renamed = old_item.is_none();
-    let item = if let Some(item) = old_item {
-        item
-    } else {
-        let mut matching_new = parsed.value.items.iter().filter(|item| {
-            matches!(
-                &item.declaration,
-                orna_syntax_v1::Declaration::Table { name, .. } if name == new_leaf
-            )
-        });
-        let Some(item) = matching_new.next() else {
-            return Err(Diagnostic::target(
-                "E2101",
-                "source table was not found",
-                "use an active table declaration recorded in the object identity manifest",
-            ));
-        };
-        if matching_new.next().is_some() {
-            return Err(Diagnostic::target(
-                "E2101",
-                "source table name is ambiguous",
-                "use a project with one table declaration for the selected qualified name",
-            ));
-        }
-        item
-    };
-    let original_source = if source_already_renamed {
-        None
-    } else {
-        let name_span = table_declaration_name_span(source, &item.span, old_leaf).ok_or_else(|| {
-            Diagnostic::target(
-                "E2101",
-                "table declaration name could not be located",
-                "fix the source module, then retry mv",
-            )
-        })?;
-        let original_source = std::mem::take(&mut modules[module_index].source);
-        let mut updated_source = String::with_capacity(
-            original_source.len() - (name_span.end - name_span.start) + new_leaf.len(),
-        );
-        updated_source.push_str(&original_source[..name_span.start]);
-        updated_source.push_str(new_leaf);
-        updated_source.push_str(&original_source[name_span.end..]);
-        modules[module_index].source = updated_source;
-        Some(original_source)
-    };
+    let original_source = renamed_table_source(&modules[module_index].source, old_leaf, new_leaf)
+        .map_err(|title| {
+            Diagnostic::target("E2101", title, "fix the source module, then retry mv")
+        })?
+        .map(|updated| std::mem::replace(&mut modules[module_index].source, updated));
+    let source_already_renamed = original_source.is_none();
 
     let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
@@ -384,6 +323,21 @@ fn run_mv(
     let staged = repository
         .capture_staged_candidate()
         .map_err(mv_staging_error)?;
+    let logical_path = modules[module_index].logical_path.clone();
+    let staged_source = repository
+        .read_private_candidate_file(
+            staged.candidate(),
+            &logical_path,
+            orna_project_v1::ProjectLimits::default().max_source_bytes,
+        )
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| mv_staged_source_error("the table's source module is not staged"))?;
+    // The staged module gets the same declaration-name edit as the
+    // worktree, so the index stays a consistent candidate, as after `git mv`.
+    // Other unstaged edits to the module stay unstaged.
+    let staged_rename =
+        renamed_table_source(&staged_source, old_leaf, new_leaf).map_err(mv_staged_source_error)?;
     let previous = orna_project_v1::ObjectIdentityManifest::read_staged(&repository, &staged)
         .map_err(|error| {
             Diagnostic::target_with_detail(
@@ -447,7 +401,14 @@ fn run_mv(
         }
     }
 
-    if let Err(error) = repository.stage_object_identities(&staged, &next.to_stored()) {
+    let staged_sources = staged_rename
+        .as_deref()
+        .map(|updated| (logical_path.as_str(), updated.as_bytes()))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        repository.stage_object_identities(&staged, &next.to_stored(), &staged_sources)
+    {
         let source_restored = original_source.as_deref().is_none_or(|original| {
             restore_source_after_failed_write(
                 &source_path,
@@ -476,6 +437,63 @@ fn mv_usage() -> Diagnostic {
         "E1002",
         "invalid table rename names",
         "use `mv TABLE NEW_NAME` within the table's existing module namespace",
+    )
+}
+
+/// The module source with table `old_leaf` renamed to `new_leaf`, or `None`
+/// when it already declares `new_leaf` and no `old_leaf`, as after an
+/// interrupted `mv`. The error is the diagnostic title.
+fn renamed_table_source(
+    source: &str,
+    old_leaf: &str,
+    new_leaf: &str,
+) -> Result<Option<String>, &'static str> {
+    let parsed = orna_syntax_v1::parse_module(source);
+    if !parsed.is_ok() {
+        return Err("table source could not be parsed");
+    }
+    let tables = |leaf: &str| {
+        parsed
+            .value
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.declaration,
+                    orna_syntax_v1::Declaration::Table { name, .. } if name == leaf
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    match tables(old_leaf).as_slice() {
+        [item] => {
+            let name_span = table_declaration_name_span(source, &item.span, old_leaf)
+                .ok_or("table declaration name could not be located")?;
+            let mut updated = String::with_capacity(
+                source.len() - (name_span.end - name_span.start) + new_leaf.len(),
+            );
+            updated.push_str(&source[..name_span.start]);
+            updated.push_str(new_leaf);
+            updated.push_str(&source[name_span.end..]);
+            Ok(Some(updated))
+        }
+        [] => match tables(new_leaf).len() {
+            1 => Ok(None),
+            0 => Err("source table was not found"),
+            _ => Err("source table name is ambiguous"),
+        },
+        _ => Err("source table name is ambiguous"),
+    }
+}
+
+/// The staged copy of the table's module cannot take the rename: it is not
+/// staged, or it does not declare the table under either name.
+fn mv_staged_source_error(title: &'static str) -> Diagnostic {
+    Diagnostic::target_with_detail(
+        "E2101",
+        "the staged source module cannot take the rename",
+        "stage the table's source module with `git add`, then retry mv",
+        title.to_owned(),
     )
 }
 
@@ -658,13 +676,13 @@ fn mv_source_path_error() -> Diagnostic {
     )
 }
 
-/// Nothing staged records the table's identity yet: a database before its
-/// first `orna commit` has no inventory, and a rename without committed
-/// identity metadata would be a delete plus create (ORNA-OBJECT-004).
+/// The index stages no object identities yet: a database before its first
+/// `orna commit` has no inventory, and a rename without identity metadata
+/// would be a delete plus create (ORNA-OBJECT-004).
 fn mv_identity_missing_error() -> Diagnostic {
     Diagnostic::target(
         "E2101",
-        "table has no committed object identity",
+        "no staged object identities record the table",
         "commit the table with `orna commit -m MESSAGE` before using mv",
     )
 }
@@ -675,6 +693,9 @@ fn mv_staging_error(error: RelationAdmissionError) -> Diagnostic {
     use orna_repository_v1::RepositoryError;
     match error {
         RelationAdmissionError::EmptyIndex => mv_identity_missing_error(),
+        RelationAdmissionError::SourceNotStaged { .. } => {
+            mv_staged_source_error("the table's source module is not staged")
+        }
         RelationAdmissionError::StaleIndex => Diagnostic::target(
             "E2100",
             "the index changed while mv was staging object identities",
