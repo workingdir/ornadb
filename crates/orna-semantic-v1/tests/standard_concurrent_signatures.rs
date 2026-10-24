@@ -3,7 +3,7 @@
 //! callback results, and literal callback lists with mismatching result types
 //! are rejected.
 
-use orna_semantic_v1::{Analysis, Catalogue, DIAG_TYPE, ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{Analysis, Catalogue, DIAG_TYPE, EffectKind, ModuleInput, analyze_with_catalogue};
 
 fn analysis(source: &str) -> Analysis {
     analyze_with_catalogue(
@@ -30,6 +30,24 @@ pub fn pause(): Null = concurrent.sleep(1.second);
     );
 
     assert_eq!(diagnostics(&analysis), Vec::<(&str, &str)>::new());
+}
+
+/// ORNA-CONCUR-002 / effect classification: `sleep` is the clock/waiting host
+/// effect (09-standard-library.md:128; effects.rs host_effect). The catalogue
+/// entry is a type signature with no effect field, so the effect is asserted on
+/// the analysed symbol produced by the real pipeline.
+#[test]
+fn sleep_carries_the_clock_host_effect() {
+    let analysis = analysis(
+        r#"
+use std.concurrent as concurrent;
+pub fn pause(): Null = concurrent.sleep(1.second);
+"#,
+    );
+
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+    let module = analysis.modules.values().next().expect("concurrency module");
+    assert!(module.symbols["pause"].effects.effects.contains(&EffectKind::Clock));
 }
 
 #[test]
