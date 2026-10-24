@@ -3015,3 +3015,15 @@ fn legacy_authoritative_read_refuses_format_two_commits_without_mutation() {
     ));
     assert_eq!(git_state(&repo, root.path()), before);
 }
+
+#[test]
+fn legacy_authoritative_read_keeps_the_snapshot_cause_for_an_unknown_commit() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let unknown = GitCommitRef::from_verified_commit("1".repeat(40), 40).unwrap();
+    // The pin's own refusal is reported, not collapsed into a migration error.
+    assert!(matches!(
+        repo.read_legacy_authoritative_tables(&unknown),
+        Err(RepositoryError::SnapshotNotFound | RepositoryError::InvalidSelector)
+    ));
+}

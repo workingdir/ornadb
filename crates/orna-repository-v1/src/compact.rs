@@ -3002,12 +3002,27 @@ impl Repository {
         &self,
         commit: &GitCommitRef,
     ) -> Result<Vec<LegacyAuthoritativeTable>, RepositoryError> {
+        // A snapshot that cannot be resolved keeps its own error; any other
+        // context failure is a format-migration refusal.
+        fn pin_or_context_error(
+            error: crate::init::format_context::FormatContextError,
+        ) -> RepositoryError {
+            match error {
+                crate::init::format_context::FormatContextError::SnapshotUnavailable => {
+                    RepositoryError::SnapshotNotFound
+                }
+                crate::init::format_context::FormatContextError::SnapshotInvalid => {
+                    RepositoryError::InvalidSelector
+                }
+                _ => RepositoryError::InvalidFormatMigration,
+            }
+        }
         let snapshot = self
             .pin_snapshot(commit.as_str())
-            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+            .map_err(pin_or_context_error)?;
         let context = self
             .open_format_context_at(&snapshot)
-            .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+            .map_err(pin_or_context_error)?;
         if context.repository_format() != crate::RepositoryFormat::Legacy1 {
             return Err(RepositoryError::InvalidFormatMigration);
         }
