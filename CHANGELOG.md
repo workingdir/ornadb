@@ -376,6 +376,12 @@ been published.
   alias or shim. Build output is `target/<profile>/orna`, and the Linux package
   and release paths, CI, and the command examples in the README and docs name
   `orna`.
+- `TransactionalEvaluator` and `DurableTransactionalEvaluator` now admit
+  transactions against the production catalogue by default, so a user module
+  whose path matches a conformance fixture namespace, such as
+  `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
+  conformance fixture catalogue is an explicit harness opt-in only, through
+  `TransactionalEvaluator::with_fixture_catalogue`.
 
 ## 1.0.0 — release inventory (publication pending)
 
