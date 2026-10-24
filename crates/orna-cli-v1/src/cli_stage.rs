@@ -107,7 +107,10 @@ fn require_row_file_layout(repository: &Repository, logical: &str) -> Result<(),
         },
         // An unborn branch has no committed format yet: its first commit
         // takes the format-3 metadata `orna init` wrote.
-        None => matches!(orna_repository_v1::inspect_metadata(repository), Ok(Some(_))),
+        None => matches!(
+            orna_repository_v1::inspect_metadata(repository),
+            Ok(Some(_))
+        ),
     };
     if !format3 {
         return Ok(());
