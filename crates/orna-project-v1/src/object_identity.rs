@@ -523,6 +523,31 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
+    /// Applies only explicit semantic renames to this inventory, as
+    /// `orna mv` does before the renamed source is staged. Every other
+    /// record keeps its name, ID and retirement, so unstaged source edits
+    /// neither retire nor allocate identities; the next `orna commit`
+    /// reconciles the staged source as usual. Each rename must name an
+    /// active identity and a declaration `modules` contain, and a target
+    /// may not collide with another active identity.
+    pub fn with_renames(
+        &self,
+        modules: &[ModuleInput],
+        renames: &[ObjectIdentityRename],
+    ) -> Result<Self, ObjectIdentityError> {
+        let active = source_identity_keys(modules)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut records = self.records.clone();
+        apply_explicit_renames(&mut records, &active, renames)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records)?;
+        Ok(Self { records })
+    }
+
     /// Reads and validates the committed identity inventory of one exact
     /// commit.
     ///
@@ -2446,6 +2471,76 @@ mod tests {
         );
     }
 
+    /// `orna mv` moves only the renamed table and its fields: a table the
+    /// worktree dropped but the staged source still declares stays active
+    /// under its ID, and a new worktree declaration gets no ID yet.
+    #[test]
+    fn rename_only_updates_move_named_identities_and_leave_the_rest() {
+        let staged = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, }\npub table Clip(id: Str) { take: Int, }",
+        );
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&staged), None)
+            .expect("initial identities");
+        let worktree = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, }\npub table Note(id: Str) { body: Str, }",
+        );
+        let rename = ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive");
+
+        let renamed = previous
+            .with_renames(
+                std::slice::from_ref(&worktree),
+                std::slice::from_ref(&rename),
+            )
+            .expect("explicit rename");
+
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Archive"),
+            previous.id(ObjectKind::Table, "Media")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.payload"),
+            previous.id(ObjectKind::Field, "Media.payload")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.id"),
+            previous.id(ObjectKind::Field, "Media.id")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Media"), None);
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Clip"),
+            previous.id(ObjectKind::Table, "Clip")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Note"), None);
+        assert_eq!(renamed.records().len(), previous.records().len());
+        assert!(renamed.records().iter().all(|record| !record.is_retired()));
+
+        let colliding = ModuleInput::new("main.orna", "pub table Clip(id: Str) { payload: Blob, }");
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&colliding),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Clip"
+                )],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&staged),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Archive"
+                )],
+            ),
+            Err(ObjectIdentityError::InvalidSource),
+        );
+    }
+
     #[test]
     fn explicit_rename_mappings_reject_invalid_sources_and_targets() {
         let media = ModuleInput::new("main.orna", "pub table Media(id: Str) { payload: Blob, }");
@@ -3771,11 +3866,40 @@ pub table Invoice(id: Str) {
             Err(SourceTableSchemaError::MissingIdentity)
         );
 
+        // A live relation is outside the serialisable subset (29-formats.md).
+        // Semantic analysis rejects it as a stored field type, so
+        // `source_table_schema` refuses that analysis, and the descriptor
+        // builder has no closed type node for the analysed field type either.
         let relation = [ModuleInput::new(
             "main.orna",
             "pub table Contact(id: Int) { relation: Relation<Int>, }",
         )];
-        let (_, schema) = source_descriptor(&relation, None, "main.orna", "Contact");
+        let analysis = orna_semantic_v1::analyze(&relation);
+        assert_eq!(
+            analysis
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+                .collect::<Vec<_>>(),
+            [(
+                orna_semantic_v1::DIAG_TYPE,
+                "stored table field type must be serialisable"
+            )]
+        );
+        let manifest = ObjectIdentityManifest::reconcile(&relation, None).unwrap();
+        assert_eq!(
+            manifest.source_table_schema(&relation, &analysis, None, "", "main.orna", "Contact"),
+            Err(SourceTableSchemaError::InvalidAnalysis)
+        );
+        let root = Namespace(Vec::new());
+        let field_type = &analysis.modules[&root].symbols["Contact"]
+            .table_schema
+            .as_ref()
+            .expect("Contact table schema")
+            .fields["relation"];
+        let sources = parse_source_modules(&relation).unwrap();
+        let schema = DescriptorBuilder::new(&manifest, &analysis, &sources, None)
+            .type_node(field_type, &root);
         assert_eq!(schema, Err(SourceTableSchemaError::UnsupportedType));
     }
 
@@ -3859,35 +3983,31 @@ pub table Invoice(id: Str) {
         );
     }
 
-    /// Pins the manifest and descriptor bytes, and the `orna.schema.v1`
-    /// digest, that the previous builder produced for a table it could
-    /// already encode, so lifecycle support cannot change existing schema
-    /// node identities.
-    #[test]
-    fn previously_supported_table_descriptor_bytes_are_stable() {
-        const MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
-        const DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
-        const SCHEMA_DIGEST: &str =
-            "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
-        let hex = |bytes: &[u8]| {
-            bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        let source = ModuleInput::new(
-            "main.orna",
-            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
-        );
-        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
-        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
+    /// Identity manifest of the `Media` table (Str key, Blob and `Float<MiB>`)
+    /// under fixed identities, as the previous builder wrote it: sidecar
+    /// version 1 with its private kind codes (table 1, field 2, unit 3).
+    const MEDIA_V1_MANIFEST: &str = "8201868401654d656469615011111111111111111111111111111111f48402684d656469612e69645021212121212121212121212121212121f484026d4d656469612e7061796c6f61645022222222222222222222222222222222f484026a4d656469612e73697a655023232323232323232323232323232323f4840361425031313131313131313131313131313131f48403634d69425032323232323232323232323232323232f4";
+    /// The same inventory as sidecar version 2, which stores each kind as its
+    /// `sys.ObjectKind` ordinal (api/sys.json: table 2, column 3, unit 15).
+    const MEDIA_MANIFEST: &str = "8202868402654d656469615011111111111111111111111111111111f48403684d656469612e69645021212121212121212121212121212121f484036d4d656469612e7061796c6f61645022222222222222222222222222222222f484036a4d656469612e73697a655023232323232323232323232323232323f4840f61425031313131313131313131313131313131f4840f634d69425032323232323232323232323232323232f4";
+    /// The closed schema descriptor and its `orna.schema.v1` digest that the
+    /// previous builder produced for `Media` under those identities.
+    const MEDIA_DESCRIPTOR: &str = "a5000101d82550111111111111111111111111111111110281d8255021212121212121212121212121212121038385d825502121212121212121212121212121212162696482006353747200810085d8255022222222222222222222222222222222677061796c6f6164820064426c6f6201810085d82550232323232323232323232323232323236473697a658307820065466c6f6174d8255032323232323232323232323232323232018100048183d8255032323232323232323232323232323232038681011a00100000010001f4";
+    const MEDIA_SCHEMA_DIGEST: &str =
+        "554f46c098c0604e2177711c207eed49c75deea6c628d4323202dee5554837a9";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn media_identity_manifest() -> ObjectIdentityManifest {
         let record = |kind: ObjectKind, name: &str, byte: u8| ObjectIdentity {
             kind,
             qualified_name: name.to_owned(),
             id: [byte; 16],
             retired: false,
         };
-        let manifest = ObjectIdentityManifest {
+        ObjectIdentityManifest {
             records: vec![
                 record(ObjectKind::Table, "Media", 0x11),
                 record(ObjectKind::Field, "Media.id", 0x21),
@@ -3896,9 +4016,18 @@ pub table Invoice(id: Str) {
                 record(ObjectKind::Unit, "B", 0x31),
                 record(ObjectKind::Unit, "MiB", 0x32),
             ],
-        };
-        assert_eq!(hex(&manifest.encode().unwrap()), MANIFEST);
+        }
+    }
 
+    /// Builds the `Media` schema from `manifest`'s identities and returns its
+    /// descriptor bytes and `orna.schema.v1` digest, both as hex.
+    fn media_schema_hex(manifest: &ObjectIdentityManifest) -> (String, String) {
+        let source = ModuleInput::new(
+            "main.orna",
+            include_str!("../tests/fixtures/vfs-blob-mib.orna"),
+        );
+        let analysis = orna_semantic_v1::analyze(std::slice::from_ref(&source));
+        assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
         let schema = manifest
             .source_table_schema(
                 std::slice::from_ref(&source),
@@ -3909,10 +4038,42 @@ pub table Invoice(id: Str) {
                 "Media",
             )
             .unwrap();
-        assert_eq!(hex(&schema.descriptor().encode().unwrap()), DESCRIPTOR);
-        assert_eq!(
+        (
+            hex(&schema.descriptor().encode().unwrap()),
             hex(&orna_value_v1::schema_identity(schema.descriptor()).unwrap()),
-            SCHEMA_DIGEST
-        );
+        )
+    }
+
+    /// Pins the identity manifest bytes, the closed schema descriptor bytes
+    /// and the `orna.schema.v1` digest of a table the previous builder could
+    /// already encode, so lifecycle support cannot change existing schema
+    /// node identities. The descriptor carries object IDs, not `sys.ObjectKind`
+    /// values (29-formats.md, closed storage schema descriptor), so the
+    /// sidecar's kind encoding cannot reach it.
+    #[test]
+    fn previously_supported_table_descriptor_bytes_are_stable() {
+        let manifest = media_identity_manifest();
+        assert_eq!(hex(&manifest.encode().unwrap()), MEDIA_MANIFEST);
+        let (descriptor, digest) = media_schema_hex(&manifest);
+        assert_eq!(descriptor, MEDIA_DESCRIPTOR);
+        assert_eq!(digest, MEDIA_SCHEMA_DIGEST);
+    }
+
+    /// ORNA-ROW-013, ORNA-EVOL-003: sidecar version 1 bytes, written before
+    /// identity rows stored `sys.ObjectKind` ordinals, keep their versioned
+    /// reader and decode to the same identities, so a legacy commit keeps the
+    /// exact schema descriptor and digest. The writer emits version 2 only.
+    #[test]
+    fn legacy_v1_manifest_bytes_decode_to_the_same_table_descriptor() {
+        let legacy = (0..MEDIA_V1_MANIFEST.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&MEDIA_V1_MANIFEST[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let decoded = ObjectIdentityManifest::decode(&legacy).unwrap();
+        assert_eq!(decoded, media_identity_manifest());
+        assert_eq!(hex(&decoded.encode().unwrap()), MEDIA_MANIFEST);
+        let (descriptor, digest) = media_schema_hex(&decoded);
+        assert_eq!(descriptor, MEDIA_DESCRIPTOR);
+        assert_eq!(digest, MEDIA_SCHEMA_DIGEST);
     }
 }

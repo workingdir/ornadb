@@ -1,12 +1,12 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
-use orna_value_v1::Raw;
-use orna_standard::{
+use orna_standard_sources::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_OPTION_PATH_V1,
     REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, reference_standard_sources_v1,
 };
+use orna_value_v1::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
@@ -15,6 +15,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn prelude_sources() -> Vec<(String, String)> {
     let wanted = [
         REFERENCE_STANDARD_COLLECTION_PATH_V1,
+        "std/list.orna",
         REFERENCE_STANDARD_OPTION_PATH_V1,
         REFERENCE_STANDARD_PRELUDE_PATH_V1,
         REFERENCE_STANDARD_TEXT_PATH_V1,

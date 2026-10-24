@@ -1,1 +1,0 @@
-pub fn protocol_fixture(value: Int): Int = value;

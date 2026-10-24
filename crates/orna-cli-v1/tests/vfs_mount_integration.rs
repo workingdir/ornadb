@@ -258,12 +258,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
         "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -286,7 +281,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x80,
         insert_only: true,
     }];
@@ -309,27 +304,47 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     );
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
+    let historical_rows = format3::committed_store_rows(&repository, relation_id);
+    // Advance HEAD past the historical commit by publishing a retitled store
+    // row, so a mount that followed HEAD would show the newer title. Rows
+    // live only in the store (ORNA-REPO-004).
     let revised_row = format!(
-        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: {capture},\n    cover: null,\n}}\n"
     );
-    std::fs::write(
-        repository_directory.path().join("Music/london.orna"),
-        &revised_row,
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let revised_context = format3::format3_context_for_snapshot(&repository, current.as_str());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &revised_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &blob_captures,
+            source_row: &revised_row,
+            ordinal: 0x84,
+            insert_only: false,
+        }],
     )
-    .unwrap();
-    format3::git(repository_directory.path(), &["add", "Music/london.orna"]);
-    format3::git(
-        repository_directory.path(),
-        &[
-            "commit",
-            "--quiet",
-            "-m",
-            "update source row after historical commit",
-        ],
-    );
+    .await;
+    drop(state);
     assert_ne!(
         repository.head().unwrap().unwrap(),
         historical_commit
+    );
+    assert_ne!(
+        format3::committed_store_rows(&repository, relation_id)[0].value(),
+        historical_rows[0].value(),
+        "HEAD carries the retitled row"
     );
     let historical_commit_selector = "HEAD~1";
     let (selected_commit, historical_format) = repository
@@ -537,11 +552,9 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
@@ -558,7 +571,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -691,11 +704,9 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
         return None;
     }
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -717,7 +728,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -809,7 +820,7 @@ impl MountedMusicRow {
             &[media_commit::SourceCaptureRow {
                 key: "london",
                 blob_fields: &[],
-                source_row: Some(source_row),
+                source_row,
                 ordinal: 0x9a,
                 insert_only: false,
             }],
@@ -956,11 +967,9 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
@@ -977,7 +986,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -1061,12 +1070,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
         "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1089,7 +1093,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x91,
         insert_only: true,
     }];
@@ -1203,12 +1207,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1231,7 +1230,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x91,
         insert_only: true,
     }];
@@ -1357,12 +1356,8 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     );
     let good_row =
         format!("{{\n    title: \"good\",\n    content: {capture},\n    duplicate: null,\n}}\n",);
-    let source_rows = [
-        ("Music/bad.orna", bad_row.as_str()),
-        ("Music/good.orna", good_row.as_str()),
-    ];
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(source, "Music", &source_rows);
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1387,14 +1382,14 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
         media_commit::SourceCaptureRow {
             key: "bad",
             blob_fields: &duplicate_blob_fields,
-            source_row: None,
+            source_row: &bad_row,
             ordinal: 0x81,
             insert_only: true,
         },
         media_commit::SourceCaptureRow {
             key: "good",
             blob_fields: &single_blob_fields,
-            source_row: None,
+            source_row: &good_row,
             ordinal: 0x82,
             insert_only: true,
         },
@@ -1641,11 +1636,9 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1667,7 +1660,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -1741,11 +1734,9 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1767,7 +1758,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -1859,11 +1850,9 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1885,7 +1874,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x94,
             insert_only: true,
         }],
@@ -1967,11 +1956,9 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1993,7 +1980,7 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x95,
             insert_only: true,
         }],
@@ -2067,11 +2054,9 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -2093,7 +2078,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x96,
             insert_only: true,
         }],
@@ -2288,12 +2273,7 @@ async fn mount_captured_media(
     );
     let row_source = format!("{{\n    content: {capture},\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -2312,7 +2292,7 @@ async fn mount_captured_media(
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x93,
         insert_only: true,
     }];
@@ -2437,12 +2417,7 @@ async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
     );
     let committed_row = format!("{{\n    content: {content_capture},\n    cover: null,\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &committed_row,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -2462,7 +2437,7 @@ async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
     let content_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &content_fields,
-        source_row: None,
+        source_row: &committed_row,
         ordinal: 0x95,
         insert_only: true,
     }];
@@ -2498,7 +2473,7 @@ async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
     let replacement_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &replacement_fields,
-        source_row: Some(replacement_row),
+        source_row: replacement_row,
         ordinal: 0xB5,
         insert_only: false,
     }];
