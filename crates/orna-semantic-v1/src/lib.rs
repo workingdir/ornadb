@@ -2586,6 +2586,12 @@ fn analyze_recording_origins(
     // Every module of one analysis belongs to a single admission, so each
     // unlinked `sys` member is reported once.
     let unlinked_system_members = providers.admission_record();
+    // ORNA-SECRET-001 applies to an imported type whatever the importer can see, so the
+    // defining module decides whether each exported type holds a secret.
+    let secret_exports: BTreeMap<Namespace, BTreeSet<String>> = parsed
+        .iter()
+        .map(|(namespace, tree)| (namespace.clone(), secret_holding_exports(tree)))
+        .collect();
     for (namespace, tree) in &parsed {
         origins.enter_namespace(&result.diagnostics, namespace);
         let Some(header) = result.modules.get(namespace).cloned() else {
@@ -2604,6 +2610,7 @@ fn analyze_recording_origins(
         );
         scope.current_namespace = Some(namespace.clone());
         scope.unlinked_system_members = unlinked_system_members.clone();
+        scope.secret_types = imported_secret_types(&scope.names, &result.modules, &secret_exports);
         // Import visibility is enforced by `scope.names`; every unit a name
         // can reach is in the merged environment, including wildcard-imported
         // catalogue units whose module never becomes a `scope.modules` alias.
@@ -4150,6 +4157,9 @@ struct Scope {
     /// Private representation fields keyed by canonical nominal identity.
     /// They are visible only while checking that type's nested implementation.
     nominal_private_fields: BTreeMap<String, BTreeSet<String>>,
+    /// Imported types whose full definition holds a secret, private members included
+    /// (ORNA-SECRET-001), keyed by the name a type reference resolves to.
+    secret_types: BTreeSet<String>,
     /// The nominal owner whose nested implementation body is currently being
     /// checked. Ordinary module code has no private-field owner.
     private_field_owner: Option<String>,
@@ -4278,6 +4288,7 @@ fn resolve_imports_with_dependencies(
             .collect(),
         nominal_rows: tree.items.iter().filter_map(nominal_row_type).collect(),
         nominal_private_fields: BTreeMap::new(),
+        secret_types: BTreeSet::new(),
         private_field_owner: None,
         allow_local_private_nominal_construction: false,
         local_nominal_names: tree
@@ -7091,6 +7102,7 @@ fn validate_stored_field_type(
         &resolved,
         &scope.nominal_rows,
         &scope.type_aliases,
+        &scope.secret_types,
         &mut BTreeSet::new(),
     ) {
         diagnostics.push(diag(
@@ -25502,24 +25514,19 @@ fn is_money_rate(ty: &Type) -> bool {
 }
 
 fn contains_secret_value_type(ty: &Type) -> bool {
-    contains_secret_value_type_in(ty, &BTreeMap::new(), &BTreeMap::new(), &mut BTreeSet::new())
+    contains_secret_value_type_in(
+        ty,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )
 }
 
-/// Finds a nominal row by canonical identity, or by a short name that exactly
-/// one row carries; an ambiguous short name yields no row.
+/// Finds a nominal row by its canonical identity. Only an exact identity resolves:
+/// a bare name must not borrow the secret of an unrelated namespaced row.
 fn nominal_row_by_name<'a>(rows: &'a BTreeMap<String, Type>, name: &str) -> Option<&'a Type> {
-    rows.get(name).or_else(|| {
-        let short = name.rsplit('.').next().unwrap_or(name);
-        let mut matching = rows
-            .iter()
-            .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(short));
-        let first = matching.next().map(|(_, row)| row);
-        if matching.next().is_some() {
-            None
-        } else {
-            first
-        }
-    })
+    rows.get(name)
 }
 
 /// Reports whether a value of `ty` can hold a `Secret`. A nominal reference is
@@ -25532,10 +25539,11 @@ fn contains_secret_value_type_in(
     ty: &Type,
     nominal_rows: &BTreeMap<String, Type>,
     aliases: &BTreeMap<String, Type>,
+    imported: &BTreeSet<String>,
     visiting: &mut BTreeSet<String>,
 ) -> bool {
     let secret = |ty: &Type, visiting: &mut BTreeSet<String>| {
-        contains_secret_value_type_in(ty, nominal_rows, aliases, visiting)
+        contains_secret_value_type_in(ty, nominal_rows, aliases, imported, visiting)
     };
     match ty {
         Type::Applied { base, arguments } => {
@@ -25562,6 +25570,7 @@ fn contains_secret_value_type_in(
         }
         Type::Named(name) => {
             name == "Secret"
+                || imported.contains(name)
                 || (visiting.insert(name.clone())
                     && nominal_row_by_name(nominal_rows, name)
                         .or_else(|| aliases.get(name))
@@ -26584,6 +26593,66 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
         })
         .collect();
     Some((name.clone(), Type::Record(fields)))
+}
+
+/// Names of the types in `tree` (nominal rows and transparent aliases) whose full definition
+/// holds a secret, private members included. Computed on the defining module so the export
+/// carries no private field names or types to importers.
+fn secret_holding_exports(tree: &SyntaxTree) -> BTreeSet<String> {
+    let rows: BTreeMap<String, Type> = tree.items.iter().filter_map(nominal_row_type).collect();
+    let aliases: BTreeMap<String, Type> = tree
+        .items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Type {
+                name,
+                generics,
+                representation: TypeRepresentation::Alias { ty, refinements },
+            } if generics.is_empty() && refinements.is_empty() => Some((name.clone(), type_of(ty))),
+            _ => None,
+        })
+        .collect();
+    let mut secret = BTreeSet::new();
+    for name in rows.keys().chain(aliases.keys()) {
+        if contains_secret_value_type_in(
+            &Type::Named(name.clone()),
+            &rows,
+            &aliases,
+            &BTreeSet::new(),
+            &mut BTreeSet::new(),
+        ) {
+            secret.insert(name.clone());
+        }
+    }
+    secret
+}
+
+/// Resolves each imported type name to the module that exports it and reports the
+/// names whose exporting module holds a secret. The key is the name a type reference
+/// resolves to (the nominal identity, or the alias name).
+fn imported_secret_types(
+    names: &BTreeMap<String, Symbol>,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+    secret_exports: &BTreeMap<Namespace, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut secret = BTreeSet::new();
+    for (name, symbol) in names {
+        let Type::Named(target) = &symbol.ty else {
+            continue;
+        };
+        let holds_secret = modules.iter().any(|(namespace, header)| {
+            secret_exports
+                .get(namespace)
+                .is_some_and(|exported| exported.contains(name))
+                && header.exports.get(name).is_some_and(|export| {
+                    export.kind == symbol.kind && export.ty == symbol.ty
+                })
+        });
+        if holds_secret {
+            secret.insert(target.clone());
+        }
+    }
+    secret
 }
 
 /// Canonical identities of the nominal types in scope that implement the core
