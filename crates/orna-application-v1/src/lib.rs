@@ -4068,6 +4068,65 @@ mod tests {
         fs::remove_dir_all(root).expect("test project is removed");
     }
 
+    /// G-2: the served REPL's write schemas union the catalogue's tables with
+    /// the loaded project's. A project table that reuses a catalogue table
+    /// name fails closed with `InvalidTableMetadata` instead of one declaration
+    /// silently replacing the other.
+    #[test]
+    fn served_repl_table_schemas_reject_a_project_table_named_like_a_catalogue_table() {
+        use orna_repository_v1::Repository;
+        use orna_semantic_v1::StandardDependencyProfile;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-served-repl-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        let project_source = "pub table Note(id: Int) { text: Str, }\n";
+        fs::write(root.join("main.orna"), project_source).expect("project fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let catalogue_source = "pub table Note(id: Int) { text: Str, }\n";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-collision",
+            [("std/store.orna".into(), catalogue_source.into())],
+        )
+        .expect("standard profile");
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(
+                &profile,
+                [("std/store.orna".into(), catalogue_source.into())],
+            )
+            .expect("standard catalogue");
+        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            catalogue,
+            Limits::default(),
+        ))
+        .with_loaded_project(project);
+        let result = adapter.repl_table_schemas();
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+        assert_eq!(
+            result.map(|tables| tables.keys().cloned().collect::<Vec<_>>()),
+            Err(ApplicationError::InvalidTableMetadata),
+        );
+    }
+
     fn expected_run_event(
         sequence: u64,
         succeeded: bool,
