@@ -274,3 +274,92 @@ fn stored_field_unresolved_name_does_not_match_unrelated_secret_nominal() {
         analysis.diagnostics
     );
 }
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a nominal stored through a local wrapper
+// whose member is an imported nominal holding a secret is a stored secret.
+fn stored_field_rejects_local_wrapper_of_imported_secret_nominal() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use creds.{Credential};\n\npub type Wrap {\n    c: Credential,\n}\n\npub table Account(id: Uuid) {\n    w: Wrap,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a wrapper exported by one module whose member
+// is that module's imported secret-holding nominal stores the secret when imported by another.
+fn stored_field_rejects_exported_wrapper_of_imported_secret_nominal() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use b.{Wrap};\n\npub table Account(id: Uuid) {\n    w: Wrap,\n}\n",
+        ),
+        ModuleInput::new(
+            "b.orna",
+            "use creds.{Credential};\n\npub type Wrap {\n    c: Credential,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001 and 29-formats.md:115; a transparent alias of an imported alias of
+// `Secret` stores a secret across two module hops.
+fn stored_field_rejects_alias_chain_across_modules_to_secret() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use mid.{Alias2};\n\npub table Account(id: Uuid) {\n    t: Alias2,\n}\n",
+        ),
+        ModuleInput::new(
+            "mid.orna",
+            "use creds.{Token};\n\npub type Alias2 = Token;\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+    ]);
+    assert_rejects_secret(&analysis);
+}
+
+#[test]
+// Specified: 29-formats serialisable subset; a local wrapper of an imported nominal with no secret
+// remains a valid stored field.
+fn stored_field_accepts_local_wrapper_of_imported_nominal_without_secret() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "use addr.{Address};\n\npub type Wrap {\n    a: Address,\n}\n\npub table Account(id: Uuid) {\n    w: Wrap,\n}\n",
+        ),
+        ModuleInput::new(
+            "addr.orna",
+            "pub type Address {\n    street: Str,\n}\n",
+        ),
+    ]);
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+// Specified: ORNA-SECRET-001; a local nominal named like an alias of `Secret` exported by an
+// unimported module must not inherit that module's secret.
+fn stored_field_local_nominal_does_not_collide_with_unimported_secret_alias() {
+    let analysis = analyze(&[
+        ModuleInput::new(
+            "main.orna",
+            "pub type Token {\n    value: Str,\n}\n\npub table Account(id: Uuid) {\n    t: Token,\n}\n",
+        ),
+        ModuleInput::new("creds.orna", "pub type Token = Secret<Str>;\n"),
+    ]);
+    assert!(
+        analysis.is_ok(),
+        "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+}

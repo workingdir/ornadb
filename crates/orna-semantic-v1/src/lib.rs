@@ -2586,12 +2586,32 @@ fn analyze_recording_origins(
     // Every module of one analysis belongs to a single admission, so each
     // unlinked `sys` member is reported once.
     let unlinked_system_members = providers.admission_record();
-    // ORNA-SECRET-001 applies to an imported type whatever the importer can see, so the
-    // defining module decides whether each exported type holds a secret.
-    let secret_exports: BTreeMap<Namespace, BTreeSet<String>> = parsed
-        .iter()
-        .map(|(namespace, tree)| (namespace.clone(), secret_holding_exports(tree)))
-        .collect();
+    // ORNA-SECRET-001 applies to an imported type whatever the importer can see. Every
+    // module's nominal rows and transparent aliases are keyed by canonical identity first, so
+    // a secret reached through a wrapper or a re-export chain is found in any importer.
+    let mut secret_rows: BTreeMap<String, Type> = BTreeMap::new();
+    let mut secret_aliases: BTreeMap<String, Type> = BTreeMap::new();
+    let mut secret_spellings: BTreeMap<Namespace, BTreeMap<String, String>> = BTreeMap::new();
+    for (namespace, tree) in &parsed {
+        let Some(header) = result.modules.get(namespace) else {
+            continue;
+        };
+        let mut scratch = result.diagnostics.clone();
+        let scope = resolve_imports_with_dependencies(
+            namespace,
+            tree,
+            header,
+            &result.modules,
+            &catalogue.historical_modules,
+            &catalogue.attached_symbols,
+            &dependency_summaries,
+            &units,
+            &mut scratch,
+        );
+        let spellings = secret_identity_spellings(namespace, tree, &scope, &result.modules);
+        secret_definitions(namespace, tree, &spellings, &mut secret_rows, &mut secret_aliases);
+        secret_spellings.insert(namespace.clone(), spellings);
+    }
     for (namespace, tree) in &parsed {
         origins.enter_namespace(&result.diagnostics, namespace);
         let Some(header) = result.modules.get(namespace).cloned() else {
@@ -2610,7 +2630,8 @@ fn analyze_recording_origins(
         );
         scope.current_namespace = Some(namespace.clone());
         scope.unlinked_system_members = unlinked_system_members.clone();
-        scope.secret_types = imported_secret_types(&scope.names, &result.modules, &secret_exports);
+        let spellings = secret_spellings.get(namespace).cloned().unwrap_or_default();
+        scope.secret_types = imported_secret_types(tree, &spellings, &secret_rows, &secret_aliases);
         // Import visibility is enforced by `scope.names`; every unit a name
         // can reach is in the merged environment, including wildcard-imported
         // catalogue units whose module never becomes a `scope.modules` alias.
@@ -26595,61 +26616,137 @@ fn nominal_row_type(item: &Item) -> Option<(String, Type)> {
     Some((name.clone(), Type::Record(fields)))
 }
 
-/// Names of the types in `tree` (nominal rows and transparent aliases) whose full definition
-/// holds a secret, private members included. Computed on the defining module so the export
-/// carries no private field names or types to importers.
-fn secret_holding_exports(tree: &SyntaxTree) -> BTreeSet<String> {
-    let rows: BTreeMap<String, Type> = tree.items.iter().filter_map(nominal_row_type).collect();
-    let aliases: BTreeMap<String, Type> = tree
-        .items
-        .iter()
-        .filter_map(|item| match &item.declaration {
+/// Spellings the defining module uses for its nominal and alias types and for the names it
+/// imports, mapped to canonical identities. A locally declared name is never an import. An
+/// imported alias maps to its exporter only when exactly one other module exports it.
+fn secret_identity_spellings(
+    namespace: &Namespace,
+    tree: &SyntaxTree,
+    scope: &Scope,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> BTreeMap<String, String> {
+    let mut spellings = scope.nominal_identities.clone();
+    let mut declared = BTreeSet::new();
+    for item in &tree.items {
+        let Declaration::Type {
+            name,
+            generics,
+            representation,
+        } = &item.declaration
+        else {
+            continue;
+        };
+        declared.insert(name.as_str());
+        match representation {
+            TypeRepresentation::Alias { refinements, .. }
+                if generics.is_empty() && refinements.is_empty() =>
+            {
+                spellings.insert(name.clone(), nominal_identity(namespace, name));
+            }
+            _ => {}
+        }
+    }
+    for (name, symbol) in &scope.names {
+        if declared.contains(name.as_str())
+            || spellings.contains_key(name)
+            || symbol.kind != SymbolKind::Type
+            || symbol.table_schema.is_some()
+        {
+            continue;
+        }
+        let Type::Named(target) = &symbol.ty else {
+            continue;
+        };
+        if target != name {
+            continue;
+        }
+        let mut exporters = modules
+            .iter()
+            .filter(|(exporter, header)| {
+                *exporter != namespace
+                    && header.exports.get(name).is_some_and(|export| {
+                        export.kind == symbol.kind && export.ty == symbol.ty
+                    })
+            })
+            .map(|(exporter, _)| exporter);
+        if let (Some(exporter), None) = (exporters.next(), exporters.next()) {
+            spellings.insert(name.clone(), nominal_identity(exporter, name));
+        }
+    }
+    spellings
+}
+
+/// Adds the nominal rows and transparent aliases of `tree` to the secret graph, keyed by
+/// canonical identity. Member and target names are rewritten through `spellings`, so a
+/// reference to a type of another module is followed to that type's definition. Private
+/// members are included: they are committed with the record.
+fn secret_definitions(
+    namespace: &Namespace,
+    tree: &SyntaxTree,
+    spellings: &BTreeMap<String, String>,
+    rows: &mut BTreeMap<String, Type>,
+    aliases: &mut BTreeMap<String, Type>,
+) {
+    for item in &tree.items {
+        match &item.declaration {
+            Declaration::Type {
+                name,
+                representation: TypeRepresentation::Nominal { .. },
+                ..
+            } => {
+                if let Some((_, row)) = nominal_row_type(item) {
+                    rows.insert(
+                        nominal_identity(namespace, name),
+                        canonicalize_type_with_identities(&row, spellings),
+                    );
+                }
+            }
             Declaration::Type {
                 name,
                 generics,
                 representation: TypeRepresentation::Alias { ty, refinements },
-            } if generics.is_empty() && refinements.is_empty() => Some((name.clone(), type_of(ty))),
+            } if generics.is_empty() && refinements.is_empty() => {
+                aliases.insert(
+                    nominal_identity(namespace, name),
+                    canonicalize_type_with_identities(&type_of(ty), spellings),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Names through which a module reaches a type whose definition holds a secret
+/// (ORNA-SECRET-001): the canonical identity and the module's own spelling of it. Locally
+/// declared names are excluded: their secrecy is checked from the local definitions.
+fn imported_secret_types(
+    tree: &SyntaxTree,
+    spellings: &BTreeMap<String, String>,
+    rows: &BTreeMap<String, Type>,
+    aliases: &BTreeMap<String, Type>,
+) -> BTreeSet<String> {
+    let declared: BTreeSet<&str> = tree
+        .items
+        .iter()
+        .filter_map(|item| match &item.declaration {
+            Declaration::Type { name, .. } => Some(name.as_str()),
             _ => None,
         })
         .collect();
     let mut secret = BTreeSet::new();
-    for name in rows.keys().chain(aliases.keys()) {
+    for (spelling, identity) in spellings {
+        if declared.contains(spelling.as_str()) {
+            continue;
+        }
         if contains_secret_value_type_in(
-            &Type::Named(name.clone()),
-            &rows,
-            &aliases,
+            &Type::Named(identity.clone()),
+            rows,
+            aliases,
             &BTreeSet::new(),
             &mut BTreeSet::new(),
         ) {
-            secret.insert(name.clone());
-        }
-    }
-    secret
-}
-
-/// Resolves each imported type name to the module that exports it and reports the
-/// names whose exporting module holds a secret. The key is the name a type reference
-/// resolves to (the nominal identity, or the alias name).
-fn imported_secret_types(
-    names: &BTreeMap<String, Symbol>,
-    modules: &BTreeMap<Namespace, ModuleHeader>,
-    secret_exports: &BTreeMap<Namespace, BTreeSet<String>>,
-) -> BTreeSet<String> {
-    let mut secret = BTreeSet::new();
-    for (name, symbol) in names {
-        let Type::Named(target) = &symbol.ty else {
-            continue;
-        };
-        let holds_secret = modules.iter().any(|(namespace, header)| {
-            secret_exports
-                .get(namespace)
-                .is_some_and(|exported| exported.contains(name))
-                && header.exports.get(name).is_some_and(|export| {
-                    export.kind == symbol.kind && export.ty == symbol.ty
-                })
-        });
-        if holds_secret {
-            secret.insert(target.clone());
+            secret.insert(identity.clone());
+            secret.insert(spelling.clone());
         }
     }
     secret
