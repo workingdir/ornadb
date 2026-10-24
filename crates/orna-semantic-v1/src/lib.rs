@@ -7087,7 +7087,7 @@ fn validate_stored_field_type(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let resolved = resolved_type_of(type_expr, scope);
-    if contains_secret_value_type(&resolved) {
+    if contains_secret_value_type_in(&resolved, &scope.nominal_rows, &mut BTreeSet::new()) {
         diagnostics.push(diag(
             DIAG_TYPE,
             "secret values cannot be stored in table fields",
@@ -25497,28 +25497,57 @@ fn is_money_rate(ty: &Type) -> bool {
 }
 
 fn contains_secret_value_type(ty: &Type) -> bool {
+    contains_secret_value_type_in(ty, &BTreeMap::new(), &mut BTreeSet::new())
+}
+
+/// Reports whether a value of `ty` can hold a `Secret`. A nominal reference is
+/// followed through `nominal_rows` (its canonical record members), so a nominal
+/// with a secret member stores that secret. `visiting` holds every nominal
+/// already entered; a self-referential nominal therefore terminates, and any
+/// reachable secret is still found on the first walk that reaches it.
+fn contains_secret_value_type_in(
+    ty: &Type,
+    nominal_rows: &BTreeMap<String, Type>,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
     match ty {
         Type::Applied { base, arguments } => {
-            base == "Secret" || arguments.iter().any(contains_secret_value_type)
+            base == "Secret"
+                || arguments
+                    .iter()
+                    .any(|argument| contains_secret_value_type_in(argument, nominal_rows, visiting))
         }
         Type::List(value)
         | Type::Range(value)
         | Type::Relation(value)
         | Type::Stream(value)
-        | Type::Optional(value) => contains_secret_value_type(value),
-        Type::Record(fields) => fields.values().any(contains_secret_value_type),
-        Type::Tuple(values) => values.iter().any(contains_secret_value_type),
+        | Type::Optional(value) => contains_secret_value_type_in(value, nominal_rows, visiting),
+        Type::Record(fields) => fields
+            .values()
+            .any(|field| contains_secret_value_type_in(field, nominal_rows, visiting)),
+        Type::Tuple(values) => values
+            .iter()
+            .any(|value| contains_secret_value_type_in(value, nominal_rows, visiting)),
         Type::MoneyPerUnit { currency, unit } => {
-            contains_secret_value_type(currency) || contains_secret_value_type(unit)
+            contains_secret_value_type_in(currency, nominal_rows, visiting)
+                || contains_secret_value_type_in(unit, nominal_rows, visiting)
         }
-        Type::Quantity { numeric, .. } => contains_secret_value_type(numeric),
+        Type::Quantity { numeric, .. } => contains_secret_value_type_in(numeric, nominal_rows, visiting),
         Type::Function {
             parameters, result, ..
         } => {
-            parameters.iter().any(contains_secret_value_type)
-                || contains_secret_value_type(result)
+            parameters
+                .iter()
+                .any(|parameter| contains_secret_value_type_in(parameter, nominal_rows, visiting))
+                || contains_secret_value_type_in(result, nominal_rows, visiting)
         }
-        Type::Named(name) => name == "Secret",
+        Type::Named(name) => {
+            name == "Secret"
+                || (visiting.insert(name.clone())
+                    && nominal_rows.get(name).is_some_and(|row| {
+                        contains_secret_value_type_in(row, nominal_rows, visiting)
+                    }))
+        }
         Type::Int
         | Type::Decimal
         | Type::Float
