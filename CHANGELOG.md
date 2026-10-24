@@ -5,6 +5,64 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A format-3 snapshot that tracks a loose row file (an unreached
+  `<table>/<key>.orna`) no longer loads with the row silently skipped:
+  loading the committed snapshot or a commit candidate fails with
+  `ORNA-REPO-CONTEXT-004` naming the file (ORNA-REPO-004, ORNA-UPGRADE-003).
+  A module a `use` reaches under a table's directory is still a module.
+  `orna commit` now also refuses a row file that `HEAD` already tracks, not
+  only one the commit adds or changes. The CLI test fixtures no longer commit
+  loose rows into format-3 repositories; row sources go straight into the
+  store.
+- Format-3 schema nodes record the Orna 1.1.0 schema identity, SHA-256 of
+  `orna.schema.v3`, NUL and the closed storage descriptor, and every row map
+  binds it. Earlier development builds recorded the descriptor's plain
+  SHA-256, so the row maps of format-3 stores they wrote no longer open;
+  re-create such a store with `orna init`, `orna commit` and `orna publish`.
+  The repository API also gives each admitted row its `orna.row.v3`
+  identity, which binds content and Blob annotations but no descriptor, page
+  or overflow object ID.
+- `orna publish` rewrites only the row pages a change touches. Maintenance
+  reads the path to each changed key and the pages beside it, rewrites those
+  pages and the branches above them, and keeps every other page by object ID
+  without reading it; the result is the same root a complete rebuild gives.
+  Earlier builds read and decoded every row of the table on each publish. A
+  row written back with the value it already holds is no change, so such a
+  publish reports nothing to publish.
+- `orna publish` stores rows larger than a row page holds inline. A value
+  whose stored encoding is over 8 KiB, or that holds more than 32 Blob
+  references of its own, is written to the shared overflow graph (a kind-3
+  node over an OGB-2 byte index, with a kind-7 index of the objects it
+  references) and its row names it with tag 60113. Large fields are lowered
+  first, so a row with one long text field keeps its other fields inline.
+  The committed rekey log lowers its rows the same way, so a rekey between
+  long keys stores each long address on its own instead of the whole row.
+  `orna query`, `orna history`, mounts and the REPL read such rows back as
+  ordinary values; earlier builds refused to publish them.
+- Format-3 row maps and the relation map cut pages by the exact ORP-1 rule:
+  the encoded node bytes, including the domain and entry-count heads, and the
+  page's distinct native refs. The same rows now give the same root as the
+  Orna 1.1.0 reference model. Earlier builds estimated sizes and summed refs,
+  so they cut pages early for large rows and for rows sharing Blob
+  descriptors.
+- A format-3 project whose `main.orna` is larger than 64 KiB can query,
+  publish, show history and mount its rows. Opening a row map pins the
+  committed `main.orna` by its blob OID instead of reading the source under a
+  64 KiB cap that store format 3 sets only for `database.orna`.
+- `orna mv OLD NEW` works in a database made by `orna init` once its first
+  `orna commit` exists. Like `git mv`, it stages the rename and commits
+  nothing. The table's declaration is renamed in the worktree module and in
+  its staged copy, and the store's identity inventory is restaged in the same
+  index update, so the table and its fields keep their IDs. Other unstaged
+  edits to the module stay unstaged. `orna commit` right after `mv` keeps the
+  table's relation and its published rows (ORNA-OBJECT-003, ORNA-CLI-001).
+  `orna mv` no longer reads or writes `.orna/object-identities.cbor` and no
+  longer moves loose-row directories, which format 3 does not have. Before the
+  first commit it refuses with E2101 because no identity is staged yet. If the
+  index update is refused, the source edit is rolled back. The Rust API adds
+  `Repository::stage_object_identities`,
+  `RelationAdmissionError::SourceNotStaged` and
+  `ObjectIdentityManifest::with_renames`.
 - Deleted the old-stack island crates `orna-client`, `orna-artifact`, `orna-protocol`, `orna-standard` and `orna-runtime-tty` (deletion programme step 7). None had a production caller: their only remaining dependents were the `orna-application-v1` dev-dependency (now removed) and each other. The `orna-standard` snapshot oracle `v1_profile.rs` is ported to `crates/orna-evaluator-v1/tests/standard_profile_v1.rs` (imports rewired to `orna-standard-sources`, fixtures moved alongside); `orna-standard-sources` remains the canonical source. The `just` recipes for the removed demos, Qt runtime and Studio shell (`runtime-tty-demo`, `client-*-demo`, `demo-suite`, `runtime-qt-*`, `studio-qt-*`, `runtime-suite`, `runtime-display-suite`, `runtime-abi-header-check`, `runtime-abi-parity`) were removed with them.
 - The `orna` CLI no longer links `orna-client` (and its HTTP, WebSocket and Qt-ABI dependencies) for the `:watch` types. `live_presentation` moved unchanged from `orna-client` into `orna-live-v1`, which the CLI already depends on (deletion programme step 4). The public API of `orna-client` no longer exports `live_presentation`; import it from `orna-live-v1` instead.
 - A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
@@ -22,11 +80,6 @@ been published.
   journals, and in compact manifests. The system worktree listing skips a
   Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
   as a user path.
-- Publishing row changes to a format-3 table applies them as one sorted merge
-  into the table's row map: each existing row moves at most twice, instead of
-  being shifted once per change. Publication sends changes in encoded key
-  order, which for `Text` keys is not key order, so the merge sorts them by
-  logical key first. The written row map is unchanged.
 - `scripts/orna_extract.py` is an independent extractor. It reads a format-3
   repository's Git objects at a commit through `git cat-file --batch`, without
   the engine's readers, and writes the modules, the schema, the rows and each
@@ -140,6 +193,26 @@ been published.
   The build checks that every published code is declared by an operation, is
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
+- A failed stream administration call (pause, resume or checkpoint reset)
+  records a stable failure class in its invocation audit row, with the
+  generation its writer fence observed. A retry under the same invocation ID
+  returns the recorded error instead of a storage-unavailable error. A stale
+  capture stores the capture that rejected the call and replays that same
+  error, even after later commits advance the CWD. A rejected stream-reference
+  resume now records its failure like a rejected pause.
+- When the CWD generation cannot be read, the row records no generation (NULL)
+  with a `failure:unobservable:<class>` outcome, and the first call still
+  returns its original error. A retry replays `<class>` as the same error when
+  the class is payload-free. The payload-carrying classes `stale_capture`,
+  `fault_injected` and `legacy_head_read_only`, and a bare legacy
+  `failure:unobservable` row, replay as `RecoveryInvalid`, because their
+  payload was never stored. The observed generation is nullable in the audit
+  schema, migrated in place for existing stores; unobservable rows are
+  excluded from the checkpoint-reset generation ordering.
+- A skip lease refused because the
+  failure is no longer open is `sys.failure.state_conflict`, not
+  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
+  no longer takes a lease purpose.
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and
