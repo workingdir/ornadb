@@ -7786,7 +7786,7 @@ impl Context<'_, '_> {
         scope: &mut Scope,
         depth: usize,
     ) -> Result<Value, EvaluationError> {
-        if !crate::sys_bindings::is_blob_annotation_operation(operation) {
+        if !crate::sys_bindings::is_blob_host_operation(operation) {
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         let table = orna_sys_v1::system_dispatch_table();
@@ -7843,6 +7843,13 @@ impl Context<'_, '_> {
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
             supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+        }
+        if crate::sys_bindings::is_blob_reflection_operation(operation) {
+            return crate::sys_bindings::dispatch_blob_reflection(
+                operation,
+                &supplied_values,
+                self.cancellation,
+            );
         }
         let annotated = crate::sys_bindings::dispatch_blob_annotation(operation, &supplied_values)?;
         Value::from_context_value(&annotated, self, 0)
@@ -8143,7 +8150,7 @@ impl Context<'_, '_> {
         // callable, and a resolved non-Blob function never falls through.
         #[cfg(feature = "system-host-bindings")]
         let declared = match resolved_function.as_deref() {
-            Some(name) if crate::sys_bindings::is_blob_annotation_operation(name) => {
+            Some(name) if crate::sys_bindings::is_blob_host_operation(name) => {
                 Some(name.to_owned())
             }
             Some(_) => None,
@@ -8151,7 +8158,7 @@ impl Context<'_, '_> {
                 .as_deref()
                 .filter(|name| {
                     !scope.0.contains_key("sys")
-                        && crate::sys_bindings::is_blob_annotation_operation(name)
+                        && crate::sys_bindings::is_blob_host_operation(name)
                 })
                 .map(str::to_owned),
         }
@@ -18692,9 +18699,9 @@ mod blob_equality_tests {
             .unwrap()
         );
 
-        // A descriptor-only ROV-3 value carries no bytes, so it has no shared
-        // admitted witness with OVB-2 content. ORNA-BLOB-005 permits explicit
-        // unavailability here instead of a fabricated equality.
+        // A descriptor-only ROV-3 value carries a descriptor but no admitted
+        // bytes in this evaluation, so it has no shared witness with OVB-2
+        // content. ORNA-BLOB-005 permits explicit unavailability here.
         assert!(blob_aware_eq(&rov3, &ovb2).is_err());
         assert!(blob_aware_eq(&ovb2, &rov3).is_err());
 
@@ -18724,6 +18731,52 @@ mod blob_equality_tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn blob_self_equality_and_nested_exact_content() {
+        let payload = b"payload";
+        let make = |bytes: &[u8]| {
+            annotated_ovb2(
+                &orna_value_v1::Blob::from_bytes_with_annotation(
+                    bytes.to_vec(),
+                    "application/octet-stream",
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let left = make(payload);
+        // Self-equality of an OVB-2 value holds.
+        assert!(blob_aware_eq(&left, &left).unwrap());
+
+        // Independently built, equal-content OVB-2 values nested in each
+        // compound shape compare equal by exact content (no shared Arc).
+        let enum_of = |blob: Value| Value::Enum {
+            type_id: Raw::Text("E".into()),
+            variant_id: Raw::Text("V".into()),
+            payload: Some(Box::new(blob)),
+        };
+        let record_of = |blob: Value| Value::NominalRecord {
+            type_id: Raw::Text("R".into()),
+            fields: vec![(Raw::Text("b".into()), blob)],
+        };
+        let stream_of = |blob: Value| Value::Stream {
+            values: vec![blob],
+            source_label: "s".to_owned(),
+            source_digest: [0; 32],
+        };
+        assert!(blob_aware_eq(&enum_of(left.clone()), &enum_of(make(payload))).unwrap());
+        assert!(blob_aware_eq(&record_of(left.clone()), &record_of(make(payload))).unwrap());
+        assert!(blob_aware_eq(&stream_of(left.clone()), &stream_of(make(payload))).unwrap());
+
+        // Equal length, different bytes: not equal in any nested shape.
+        let other = make(b"paylaod");
+        assert_eq!(payload.len(), b"paylaod".len());
+        assert!(!blob_aware_eq(&left, &other).unwrap());
+        assert!(!blob_aware_eq(&enum_of(left.clone()), &enum_of(other.clone())).unwrap());
+        assert!(!blob_aware_eq(&record_of(left.clone()), &record_of(other.clone())).unwrap());
+        assert!(!blob_aware_eq(&stream_of(left), &stream_of(other)).unwrap());
     }
 
     #[test]
