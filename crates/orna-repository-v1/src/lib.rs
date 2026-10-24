@@ -56,6 +56,8 @@ pub use compact::{
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{CompactPublicationPlan, CompactSegment};
+#[cfg(feature = "legacy-fixture-writer")]
+pub use compact::write_legacy_format1_fixture;
 pub use init::format_context::{
     FINAL_REPOSITORY_FORMAT, REPOSITORY_LAYOUT_VERSION, CaptureCapabilityError,
     CommittedTableBinding, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
