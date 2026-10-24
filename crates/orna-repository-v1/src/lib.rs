@@ -10771,6 +10771,31 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
+    #[test]
+    fn index_candidate_refuses_to_overwrite_an_existing_path() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = root.path().join("index-candidate-prepared");
+        fs::write(&candidate, b"attacker-owned").unwrap();
+
+        assert!(matches!(
+            super::write_new_index_candidate(&candidate, b"index-bytes"),
+            Err(RepositoryError::LocalStateUnavailable)
+        ));
+        assert_eq!(fs::read(&candidate).unwrap(), b"attacker-owned");
+    }
+
+    #[test]
+    fn commit_optional_treats_option_shaped_expressions_as_revisions() {
+        let root = repository_with_ignored_big_directory();
+        let repository = Repository::discover(root.path()).unwrap();
+        // Without `--end-of-options`, rev-parse would print this option's value
+        // and succeed; as a revision name it is simply absent.
+        assert!(matches!(
+            repository.commit_optional("--git-dir=/nonexistent"),
+            Ok(None)
+        ));
+    }
+
     fn repository_with_ignored_big_directory() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-q"]);

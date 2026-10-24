@@ -2494,4 +2494,15 @@ mod tests {
             "only the local private refs remain; none of the remote's is fetched"
         );
     }
+
+    #[test]
+    fn clone_does_not_parse_a_remote_beginning_with_a_dash_as_an_option() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("upload-pack-ran");
+        let remote = format!("--upload-pack=touch {}", marker.display());
+        let destination = temporary.path().join("clone");
+
+        assert!(Repository::clone_from(&remote, &destination).is_err());
+        assert!(!marker.exists());
+    }
 }
