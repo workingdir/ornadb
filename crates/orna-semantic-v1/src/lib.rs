@@ -902,7 +902,7 @@ impl Catalogue {
                         "parallel",
                         function(
                             vec![Type::List(Box::new(Type::Error))],
-                            Type::Stream(Box::new(Type::Error)),
+                            Type::List(Box::new(Type::Error)),
                         ),
                     ),
                     (
@@ -917,6 +917,13 @@ impl Catalogue {
                                 ("duration", Type::Named("std.DURATION".into())),
                             ],
                             Type::Error,
+                        ),
+                    ),
+                    (
+                        "sleep",
+                        named_function(
+                            vec![("duration", Type::Named("std.DURATION".into()))],
+                            Type::Null,
                         ),
                     ),
                 ],
