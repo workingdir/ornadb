@@ -874,9 +874,9 @@ async fn blob_descriptor_edits_are_refused_instead_of_dropped() {
     session.finish();
 }
 
-/// ORNA-VFS-024 / EDIT-1 (41-vfs.md:42-44, 103-105): a Blob projection has no
-/// private candidate, so a write-intent open, including `O_TRUNC`, is refused
-/// with EPERM. The stored Blob is not truncated by the refused open.
+/// A Blob projection has no private candidate, so a write-intent open, including
+/// `O_TRUNC`, is refused with EPERM (profiles/vfs-1.md:104-106, :139;
+/// 41-vfs.md:103-105). The stored Blob is not truncated by the refused open.
 #[tokio::test]
 async fn blob_write_open_is_refused_with_eperm_and_not_truncated() {
     if !require_fuse_or_skip() {
