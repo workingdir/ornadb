@@ -368,6 +368,27 @@ impl LoadedProject {
             .map(|profile| Catalogue::from_standard_sources(profile, sources))
             .transpose()
     }
+
+    /// The semantic catalogue `orna check` and the CLI's semantic catalogue
+    /// callers resolve: the authoritative core, extended by the pinned
+    /// standard profile and its verified sources when this project captured
+    /// one. Run, VFS and stream fixture admission resolve their own catalogues
+    /// and are not covered here.
+    pub fn production_catalogue(&self) -> Result<Catalogue, StandardCatalogueError> {
+        let catalogue = Catalogue::authoritative_core();
+        let Some(profile) = self.standard_profile.as_ref() else {
+            return Ok(catalogue);
+        };
+        catalogue.with_standard_sources(profile, self.standard_sources.iter().cloned())
+    }
+
+    /// Whether reachable source imports a standard module while this project
+    /// captured no standard dependency. Such a project has no production
+    /// catalogue: every standard import is unavailable.
+    pub fn has_uncaptured_standard_imports(&self) -> bool {
+        !self.standard_modules.is_empty() && self.standard_profile.is_none()
+    }
+
     /// Builds a source-only schema from this project's committed identity
     /// manifest. A table that stores a table reference records its database,
     /// so it fails here; use [`Self::source_table_schema_in_database`].
