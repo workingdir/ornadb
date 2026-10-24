@@ -3656,6 +3656,47 @@ mod tests {
         ));
     }
 
+    /// ORNA-EVAL-006 and 30-protocol ("An eval source is exactly one REPL
+    /// input"), A14-04: without a host-selected module, console input that
+    /// declares a function named `serve` is an ordinary REPL declaration. It
+    /// yields Unit, persists for the session and runs only when called.
+    #[test]
+    fn default_adapter_keeps_a_console_serve_function_as_a_repl_declaration() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let declared = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [8; 16],
+            &eval_message("fn serve(): Int = 1;", [9; 32]),
+        )
+        .expect("the session REPL admits the declaration");
+        assert!(matches!(
+            &declared.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::unit()
+        ));
+        let called = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [10; 16],
+            &eval_message("serve()", [11; 32]),
+        )
+        .expect("the declared function persists for the session");
+        assert!(matches!(
+            &called.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::new(OvbRaw::Int(1.into())).unwrap()
+        ));
+    }
+
     #[test]
     fn live_watch_serves_a_pinned_typed_snapshot_and_resyncs_by_full_replacement() {
         let authority =
