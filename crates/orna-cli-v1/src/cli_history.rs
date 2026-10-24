@@ -23,7 +23,7 @@ use orna_repository_v1::{
 use orna_runtime_v1::TableObjectId;
 use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use orna_repository_v1::relation_admission::CommittedRekey;
 
 /// Most revisions one history listing reports when `--limit` is not given.
@@ -1058,7 +1058,9 @@ fn rekey_window(
 /// then `b -> c` pairs `before[a]` with `after[c]`, and a swap through a
 /// temporary key pairs both rows crosswise. A row whose start or end key is
 /// absent from its side stays in the comparison as the plain removal or
-/// addition it is. The log records rekeys only, so a key a later commit
+/// addition it is. A start key reused by a later insert proves no identity,
+/// so every chain tracing back to it stays a removal plus an addition
+/// (ORNA-SYS-051). The log records rekeys only, so a key a later commit
 /// deleted and inserted again still reads as the end of its chain.
 fn pair_rekeys(
     mut before: BTreeMap<Vec<u8>, HistoryRow>,
@@ -1071,14 +1073,29 @@ fn pair_rekeys(
 ) {
     // The key each moved row started the window at, by the key it ends on.
     let mut origins = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    // Keys a rekey moved a row away from. A later move from one of them that
+    // continues no chain moves a row inserted there afterwards, so that start
+    // key is reused; this also covers two ends claiming one start key.
+    let mut vacated = BTreeSet::<Vec<u8>>::new();
+    let mut reused = BTreeSet::<Vec<u8>>::new();
     for (old, new) in moves {
-        let origin = origins.remove(old).unwrap_or_else(|| old.clone());
+        let origin = match origins.remove(old) {
+            Some(origin) => origin,
+            None => {
+                if vacated.contains(old) {
+                    reused.insert(old.clone());
+                }
+                old.clone()
+            }
+        };
+        vacated.insert(old.clone());
         origins.insert(new.clone(), origin);
     }
     let mut pairs = Vec::new();
     for (end, origin) in origins {
-        // A row moved away and back again has no net rekey to report.
-        if end == origin {
+        // A row moved away and back again has no net rekey to report, and a
+        // reused start key cannot say which row an end continues.
+        if end == origin || reused.contains(&origin) {
             continue;
         }
         let (Some(old), Some(new)) = (before.get(&origin), after.get(&end)) else {
@@ -1427,5 +1444,25 @@ mod tests {
         let (before, after, paired) = pair_rekeys(rows(&["a"]), rows(&[]), &moves(&[("a", "b")]));
         assert!(paired.is_empty());
         assert_eq!((before.len(), after.len()), (1, 0));
+
+        // `m -> z`, a new row inserted at `m`, then `m -> c` with `c < z`:
+        // the reused start key proves neither end's identity, so both stay
+        // additions and the original row a removal.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["m"]),
+            rows(&["c", "z"]),
+            &moves(&[("m", "z"), ("m", "c")]),
+        );
+        assert!(paired.is_empty());
+        assert_eq!((before.len(), after.len()), (1, 2));
+
+        // A row that returns to its start key and moves on is still tracked.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["m"]),
+            rows(&["c"]),
+            &moves(&[("m", "z"), ("z", "m"), ("m", "c")]),
+        );
+        assert!(before.is_empty() && after.is_empty());
+        assert_eq!(rekeyed(&paired), ["m->c"]);
     }
 }
