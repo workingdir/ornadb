@@ -5,6 +5,14 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Runtime admission reads the format recorded at the committed `HEAD` before
+  any worktree metadata or runtime state. A `HEAD` that records a format this
+  build does not know, whether `database.orna` names another `repository_format`
+  integer with any other fields or `format.orna` names one, is refused with
+  `ORNA-REPO-CONTEXT-003` (ORNA-UPGRADE-001, ORNA-META-002). The refusal is a
+  new `RuntimeError::UnknownHeadFormat`, and its persisted admin failure class
+  is `unknown_head_format`. Other `HEAD` metadata failures keep the existing
+  path.
 - A format-3 snapshot that tracks a loose row file (an unreached
   `<table>/<key>.orna`) no longer loads with the row silently skipped:
   loading the committed snapshot or a commit candidate fails with
