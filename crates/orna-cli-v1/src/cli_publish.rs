@@ -474,6 +474,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         };
         coordinator
             .publish_with_stage_hook(&repository, |stage| match stage {
+                orna_repository_v1::PublicationJournalStage::Prepared => {
+                    publication_crash_barrier("prepared")
+                }
                 orna_repository_v1::PublicationJournalStage::RefAdvanced => {
                     publication_crash_barrier("ref-cas")
                 }

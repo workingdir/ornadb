@@ -21,7 +21,7 @@ pub fn exercise() { music.update(\"london\", { title: \"Edited by run\" }); }\n\
 pub fn main() {}\n";
 
 fn orna(directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["--db", directory.to_str().expect("UTF-8 path")])
         .args(arguments)
@@ -30,7 +30,7 @@ fn orna(directory: &Path, arguments: &[&str]) -> Output {
 }
 
 fn run_repl(directory: &Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
