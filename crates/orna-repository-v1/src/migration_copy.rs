@@ -1436,6 +1436,7 @@ fn dependency_entries(
     repository: &Repository,
     commit: &GitCommitRef,
 ) -> Result<usize, RepositoryError> {
+    repository.objects().check_expansion(commit.as_str(), "")?;
     let mut command = repository.observer_command();
     command.args(["ls-tree", "-r", "-z", commit.as_str()]);
     let output = repository.run(command)?;

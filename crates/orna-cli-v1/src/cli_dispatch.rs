@@ -15,7 +15,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Version => {
-            println!("orna-cli-v1 0.1.0");
+            println!("orna 0.1.0");
             Ok(())
         }
         Command::Init(ref target) => {

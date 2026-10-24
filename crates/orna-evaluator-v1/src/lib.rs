@@ -82,18 +82,26 @@ pub use timezone::{
 };
 
 /// The verified standard-source bundle used by the bounded local and remote
-/// REPL boundaries. `orna-standard` owns the canonical module source; this
-/// crate verifies its pinned profile before either boundary admits an import.
+/// REPL boundaries. `orna-standard-sources` owns the canonical module source;
+/// this crate verifies its pinned profile before either boundary admits an import.
 /// Returns the reference standard sources supplied to the bounded REPL.
 #[must_use]
 pub fn reference_standard_sources() -> [(String, String); 77] {
-    orna_standard::reference_standard_sources_v1()
+    orna_standard_sources::reference_standard_sources_v1()
 }
 
 /// Returns the immutable profile that verifies [`reference_standard_sources`].
 #[must_use]
 pub fn reference_standard_profile() -> StandardDependencyProfile {
-    orna_standard::reference_standard_profile_v1()
+    StandardDependencyProfile::from_sources(
+        "orna.std/v1-reference-library",
+        orna_standard_sources::reference_standard_sources_v1(),
+    )
+    .expect("the bundled Orna 1.0.0 standard module path is valid")
+    .with_module_prelude_exports(
+        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_PATH_V1,
+        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+    )
 }
 
 const DEFAULT_SOURCE_BYTES: usize = 65_536;
@@ -15656,7 +15664,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
         );
         let mut registered = 0;
         let mut stub_candidates = 0;
-        for (path, source) in orna_standard::reference_standard_sources_v1() {
+        for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
             let parsed = orna_syntax_v1::parse_module(&source);
             assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
             let namespace = path

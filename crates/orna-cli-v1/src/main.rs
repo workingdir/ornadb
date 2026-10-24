@@ -218,6 +218,13 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
+        return Diagnostic::target(
+            "E2100",
+            "committed source tree exceeds the fixed walk limit",
+            "reduce the committed tree's entry count, nesting depth or path length, then run check again",
+        );
+    }
     let invalid_unit = match &error {
         orna_project_v1::ProjectLoadError::InvalidModule {
             logical_path,
@@ -270,6 +277,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
+        },
+        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
+            code: "ORNA-S011-AMBIGUOUS",
+            title: "standard import name is ambiguous",
+            explanation:
+                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            help: "import the functions under distinct names or use their qualified paths",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
@@ -1803,6 +1817,19 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
+/// The bounded pure path receives reachable standard modules through
+/// `load_standard_sources`, which verifies them against the captured profile.
+/// The project unit therefore carries neither those source units nor a
+/// standard dependency that the bounded evaluator would reject.
+fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let mut execution = execution_project(project);
+    execution
+        .modules
+        .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
+    execution.expectations.environment.stdlib = None;
+    execution
+}
+
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
@@ -2132,6 +2159,11 @@ fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    // Single-module projects that import pinned standard modules keep the
+    // authority route only when they need publication metadata; the authority
+    // admits only the user module and cannot load standard bodies. Pure ones take
+    // the bounded path below, which loads those bodies through the verified profile.
+    let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
@@ -2144,7 +2176,7 @@ fn run_pure_invocation(
         if identity.namespace() == namespace {
             let authority =
                 ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
-            let admitted = authority
+            let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
                     Diagnostic::target_with_detail(
@@ -2153,7 +2185,16 @@ fn run_pure_invocation(
                         "fix the first reported source contract error, then run check again",
                         error.to_string(),
                     )
-                })?;
+                });
+            let admitted = match admission {
+                Ok(admitted) => Some(admitted),
+                // The bounded path reports the analysis error for std-importing projects.
+                Err(_) if std_imports => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(admitted) = admitted
+                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+            {
             if admitted.requires_publication_metadata() {
                 let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
                     endpoint,
@@ -2199,6 +2240,7 @@ fn run_pure_invocation(
             }
             write_success_line("invocation completed", color_enabled)?;
             return Ok(());
+            }
         }
     }
     let catalogue = semantic_catalogue(&project)?;
@@ -2212,10 +2254,47 @@ fn run_pure_invocation(
     }
 
     let mut evaluator = BoundedEvaluator::default();
-    match evaluator.evaluate_project(&execution_project(&project)) {
+    if let Some(profile) = project.standard_profile() {
+        // Admission supplies the runtime-reachable closure (requested roots plus
+        // `main`) and the profile must accept exactly that key set, so every
+        // supplied module digest is verified before any body is evaluated.
+        let sources = project.standard_sources().to_vec();
+        match evaluator.load_standard_sources(profile, sources) {
+            StageOutcome::Passed => {}
+            StageOutcome::Cancelled(diagnostic) => {
+                return Err(cancellation_diagnostic(&diagnostic));
+            }
+            StageOutcome::Failed(diagnostic) => {
+                return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                    Diagnostic::target_with_detail(
+                        "ORNA-S010-IMPORT",
+                        "imported module is unavailable",
+                        "use a captured standard dependency or remove the import",
+                        format!("standard dependency load rejected with {}", diagnostic.code()),
+                    )
+                }));
+            }
+            StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                ));
+            }
+        }
+    }
+    match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+        StageOutcome::Failed(diagnostic) => {
+            return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "one-shot invocation requires an executable function-only project",
+                    "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
+                )
+            }));
+        }
+        StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
                 "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",

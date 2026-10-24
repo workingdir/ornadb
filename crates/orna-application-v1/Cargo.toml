@@ -31,4 +31,3 @@ orna-security-v1 = { path = "../orna-security-v1" }
 
 [dev-dependencies]
 futures = "0.3.31"
-orna-client = { path = "../orna-client" }

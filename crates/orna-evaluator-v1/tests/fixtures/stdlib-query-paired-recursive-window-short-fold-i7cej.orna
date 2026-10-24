@@ -1,25 +1,25 @@
 (
-    collection_ops.distinct(
+    distinct(
         collection_ops.flatten(
-            collection_ops.map(
+            map(
                 collection_ops.window(
                     query_ops.recursive_cte([10], row => [row]),
                     2,
                     1
                 ),
-                frame => collection_ops.distinct(frame)
+                frame => distinct(frame)
             )
         )
     ),
-    collection_ops.distinct(
+    distinct(
         collection_ops.flatten(
-            collection_ops.map(
+            map(
                 collection_ops.window(
                     query_ops.recursive_cte([20, 10], row => [row]),
                     2,
                     1
                 ),
-                frame => collection_ops.distinct(frame)
+                frame => distinct(frame)
             )
         )
     )
