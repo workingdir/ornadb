@@ -2312,6 +2312,7 @@ mod git_metadata_component_tests {
             "GIT~1",
             "git~1.",
             ".git:",
+            ".git:x",
             ".git::$INDEX_ALLOCATION",
             ".git\\config",
             "a\\.git",
