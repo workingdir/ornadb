@@ -1361,7 +1361,11 @@ impl Blob {
     /// Classify a full streamed comparison. A digest failure on either side is
     /// corruption and wins over byte differences; only two verified digests with
     /// differing bytes prove a collision (ORNA-BLOB-005).
-    fn exact_content_outcome(differs: bool, left_verified: bool, right_verified: bool) -> Result<bool> {
+    fn exact_content_outcome(
+        differs: bool,
+        left_verified: bool,
+        right_verified: bool,
+    ) -> Result<bool> {
         if !left_verified || !right_verified {
             return Err(Error::ContentDigestMismatch);
         }
