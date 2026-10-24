@@ -1,14 +1,16 @@
 //! A trusted REPL `Table.rekey` followed by `orna publish` must publish exactly
 //! one logical row rekey, visible to `orna history --diff` as a single
-//! `rekeyed` change rather than a removal plus an addition. A rekey of a table
-//! that carries a Blob field is rejected with a stable diagnostic and writes
-//! nothing.
+//! `rekeyed` change rather than a removal plus an addition. A Blob-bearing row
+//! moves with its committed Blob reference unchanged, and a rekey of long keys
+//! publishes through an overflow log row.
 
 use std::{
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
 };
+
+use orna_repository_v1::{Repository, TypedKey, relation_admission::CommittedRekey};
 
 #[path = "support/format3.rs"]
 mod format3;
@@ -62,6 +64,31 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         .expect("run orna")
 }
 
+/// Runs one trusted REPL submission and requires it to evaluate cleanly.
+fn submit(directory: &Path, input: &str) {
+    let output = run_repl(directory, input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(!stdout.contains("error["), "{stdout}");
+}
+
+/// Publishes the pending runtime changes and returns the new HEAD.
+fn publish(directory: &Path) -> String {
+    let before = head(directory);
+    let published = run(directory, &["publish"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "publish failed: {}{}",
+        String::from_utf8_lossy(&published.stdout),
+        String::from_utf8_lossy(&published.stderr)
+    );
+    let after = head(directory);
+    assert_ne!(before, after, "the publication advanced HEAD");
+    after
+}
+
 fn head(directory: &Path) -> String {
     String::from_utf8(git_output(directory, &["rev-parse", "HEAD"], None))
         .expect("HEAD text")
@@ -76,221 +103,177 @@ fn relation_hex(relation_id: [u8; 16]) -> String {
         .collect()
 }
 
+/// The `orna history --diff` JSON report between two snapshots.
+fn diff(directory: &Path, relation_id: [u8; 16], from: &str, to: &str) -> serde_json::Value {
+    let relation = relation_hex(relation_id);
+    let diff = run(
+        directory,
+        &["history", &relation, "--diff", from, to, "--format", "json"],
+    );
+    assert_eq!(
+        diff.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    serde_json::from_slice(&diff.stdout).unwrap()
+}
+
+/// Requires a diff report to hold exactly one rekey, from `from_key` to `key`.
+fn assert_one_rekey(report: &serde_json::Value, from_key: &str, key: &str) {
+    assert_eq!(report["rekeyed"], serde_json::json!(1), "{report}");
+    assert_eq!(report["added"], serde_json::json!(0), "{report}");
+    assert_eq!(report["removed"], serde_json::json!(0), "{report}");
+    assert_eq!(
+        report["changes"][0]["change"],
+        serde_json::json!("rekeyed"),
+        "{report}"
+    );
+    assert_eq!(
+        report["changes"][0]["from_key"],
+        serde_json::json!(from_key),
+        "{report}"
+    );
+    assert_eq!(
+        report["changes"][0]["key"],
+        serde_json::json!(key),
+        "{report}"
+    );
+}
+
+/// The committed rekey log of the published HEAD.
+fn committed_rekeys(repository: &Repository) -> Vec<CommittedRekey> {
+    let published = repository.head().expect("HEAD").expect("published HEAD");
+    repository
+        .read_committed_rekeys(&published)
+        .expect("committed rekey log")
+}
+
+/// Requires one log entry to record a move of `relation_id`'s row.
+fn assert_logged(
+    rekey: &CommittedRekey,
+    ordinal: u64,
+    relation_id: [u8; 16],
+    old: &str,
+    new: &str,
+) {
+    assert_eq!(rekey.ordinal(), ordinal);
+    assert_eq!(rekey.relation_id(), &relation_id);
+    assert_eq!(rekey.old_key(), text_key(old).as_slice());
+    assert_eq!(rekey.new_key(), text_key(new).as_slice());
+}
+
 /// The canonical ORP key bytes of a text primary key.
 fn text_key(key: &str) -> Vec<u8> {
-    orna_repository_v1::TypedKey::Text(key.to_owned())
+    TypedKey::Text(key.to_owned())
         .canonical_bytes()
         .expect("canonical text key")
+}
+
+/// The committed stored tuple of the row at a text key, if it exists.
+fn stored_row(repository: &Repository, relation_id: [u8; 16], key: &str) -> Option<Vec<u8>> {
+    committed_store_rows(repository, relation_id)
+        .into_iter()
+        .find(|row| row.key() == &TypedKey::Text(key.to_owned()))
+        .map(|row| {
+            row.value()
+                .encoded_fields()
+                .expect("an inline committed row")
+                .to_vec()
+        })
 }
 
 #[test]
 fn repl_rekey_publishes_one_logical_rekey() {
     let (directory, repository, relation_id) = format3_repository(RELOCATE_SOURCE);
     let root = directory.path();
+    submit(root, "main.add(\"london\", \"Live in London\").id");
+    let before = publish(root);
 
-    let added = run_repl(root, "main.add(\"london\", \"Live in London\").id");
-    assert_eq!(
-        added.status.code(),
-        Some(0),
-        "{:?}",
-        String::from_utf8_lossy(&added.stdout)
-    );
-    assert!(added.stderr.is_empty(), "{:?}", added.stderr);
-    let published_add = run(root, &["publish"]);
-    assert_eq!(
-        published_add.status.code(),
-        Some(0),
-        "publish after add failed"
-    );
-    let before = head(root);
-
-    let relocated = run_repl(root, "main.relocate(\"london\", \"paris\")");
-    let relocated_stdout = String::from_utf8_lossy(&relocated.stdout);
-    assert_eq!(relocated.status.code(), Some(0), "{relocated_stdout}");
-    assert!(relocated.stderr.is_empty(), "{:?}", relocated.stderr);
-    assert!(
-        !relocated_stdout.contains("ORNA-REPL-EFFECT"),
-        "{relocated_stdout}"
-    );
-
-    let published_rekey = run(root, &["publish"]);
-    assert_eq!(
-        published_rekey.status.code(),
-        Some(0),
-        "publish after rekey failed: {}{}",
-        String::from_utf8_lossy(&published_rekey.stdout),
-        String::from_utf8_lossy(&published_rekey.stderr)
-    );
-    let after = head(root);
-    assert_ne!(before, after, "publishing the rekey advanced HEAD");
-
+    submit(root, "main.relocate(\"london\", \"paris\")");
+    let after = publish(root);
     // The publication committed exactly one durable logical rekey with the
     // exact canonical old and new addresses.
-    let published = repository.head().expect("HEAD").expect("published HEAD");
-    let log = repository
-        .read_committed_rekeys(&published)
-        .expect("committed rekey log");
+    let log = committed_rekeys(&repository);
     assert_eq!(log.len(), 1, "one durable logical rekey: {log:?}");
-    assert_eq!(log[0].ordinal(), 0);
-    assert_eq!(log[0].relation_id(), &relation_id);
-    assert_eq!(log[0].old_key(), text_key("london").as_slice());
-    assert_eq!(log[0].new_key(), text_key("paris").as_slice());
-
-    let relation = relation_hex(relation_id);
-    let diff = run(
-        root,
-        &[
-            "history", &relation, "--diff", &before, &after, "--format", "json",
-        ],
-    );
-    assert_eq!(
-        diff.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&diff.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&diff.stdout).unwrap();
-    assert_eq!(
-        report["rekeyed"],
-        serde_json::json!(1),
-        "one logical rekey: {report}"
-    );
-    assert_eq!(report["added"], serde_json::json!(0), "{report}");
-    assert_eq!(report["removed"], serde_json::json!(0), "{report}");
+    assert_logged(&log[0], 0, relation_id, "london", "paris");
+    assert_one_rekey(&diff(root, relation_id, &before, &after), "london", "paris");
 
     // A later rekey appends to the committed log instead of replacing it, and
     // the diff of that publication reports only the new rekey.
-    let relocated_again = run_repl(root, "main.relocate(\"paris\", \"rome\")");
-    let relocated_again_stdout = String::from_utf8_lossy(&relocated_again.stdout);
-    assert_eq!(
-        relocated_again.status.code(),
-        Some(0),
-        "{relocated_again_stdout}"
-    );
-    assert!(
-        relocated_again.stderr.is_empty(),
-        "{:?}",
-        relocated_again.stderr
-    );
-    assert!(
-        !relocated_again_stdout.contains("error["),
-        "{relocated_again_stdout}"
-    );
-    let published_again = run(root, &["publish"]);
-    assert_eq!(
-        published_again.status.code(),
-        Some(0),
-        "publish after the second rekey failed: {}{}",
-        String::from_utf8_lossy(&published_again.stdout),
-        String::from_utf8_lossy(&published_again.stderr)
-    );
-    let latest = head(root);
-    let published = repository.head().expect("HEAD").expect("published HEAD");
-    let log = repository
-        .read_committed_rekeys(&published)
-        .expect("committed rekey log");
+    submit(root, "main.relocate(\"paris\", \"rome\")");
+    let latest = publish(root);
+    let log = committed_rekeys(&repository);
     assert_eq!(log.len(), 2, "the log keeps every logical rekey: {log:?}");
-    assert_eq!(log[0].old_key(), text_key("london").as_slice());
-    assert_eq!(log[1].ordinal(), 1);
-    assert_eq!(log[1].relation_id(), &relation_id);
-    assert_eq!(log[1].old_key(), text_key("paris").as_slice());
-    assert_eq!(log[1].new_key(), text_key("rome").as_slice());
-    let diff = run(
-        root,
-        &[
-            "history", &relation, "--diff", &after, &latest, "--format", "json",
-        ],
-    );
-    assert_eq!(
-        diff.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&diff.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&diff.stdout).unwrap();
-    assert_eq!(report["rekeyed"], serde_json::json!(1), "{report}");
-    assert_eq!(report["added"], serde_json::json!(0), "{report}");
-    assert_eq!(report["removed"], serde_json::json!(0), "{report}");
+    assert_logged(&log[0], 0, relation_id, "london", "paris");
+    assert_logged(&log[1], 1, relation_id, "paris", "rome");
+    assert_one_rekey(&diff(root, relation_id, &after, &latest), "paris", "rome");
+
+    // Across both publications the chain reads as one rekey, and the reverse
+    // diff undoes it instead of failing.
+    assert_one_rekey(&diff(root, relation_id, &before, &latest), "london", "rome");
+    assert_one_rekey(&diff(root, relation_id, &latest, &before), "rome", "london");
 }
 
 #[test]
-fn repl_rekey_of_a_blob_bearing_table_is_rejected_without_writing() {
+fn repl_rekey_of_a_blob_bearing_row_moves_its_committed_blob_unchanged() {
     let (directory, repository, relation_id) = format3_repository(RELOCATE_BLOB_SOURCE);
     let root = directory.path();
     std::fs::write(root.join("recording.mp3"), b"synthetic rekey payload").unwrap();
-    let before = head(root);
-
-    // The captured row stays pending rather than being published first: a
-    // REPL activation cannot load committed Blob rows into evaluator rows,
-    // and the rejection depends only on the table schema, before any row
-    // lookup.
     let add = format!(
         "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add(\"london\", \"Live in London\", audio).id",
         root = root.to_string_lossy().as_ref(),
     );
-    let added = run_repl(root, &add);
-    assert_eq!(
-        added.status.code(),
-        Some(0),
-        "{:?}",
-        String::from_utf8_lossy(&added.stdout)
-    );
-    assert!(added.stderr.is_empty(), "{:?}", added.stderr);
+    submit(root, &add);
+    let before = publish(root);
+    let committed = stored_row(&repository, relation_id, "london").expect("published row");
 
-    let relocated = run_repl(root, "main.relocate(\"london\", \"paris\")");
-    let relocated_stdout = String::from_utf8_lossy(&relocated.stdout);
-    assert_eq!(relocated.status.code(), Some(0), "{relocated_stdout}");
-    assert!(relocated.stderr.is_empty(), "{:?}", relocated.stderr);
-    assert!(
-        relocated_stdout.contains("error[ORNA-EVAL-TABLE-REKEY-BLOB]"),
-        "Blob-bearing rekey must fail with its stable code: {relocated_stdout}"
-    );
-    assert!(
-        !relocated_stdout.contains("ORNA-REPL-EFFECT"),
-        "{relocated_stdout}"
-    );
-
-    // The rejected rekey staged nothing: publishing commits the captured
-    // insert alone, under its original key, and no logical rekey.
-    let published_add = run(root, &["publish"]);
+    submit(root, "main.relocate(\"london\", \"paris\").id");
+    let after = publish(root);
+    // The row moved whole: its stored tuple, Blob reference (length, SHA-256,
+    // annotation and descriptor) included, is byte-identical at the new key.
+    assert_eq!(stored_row(&repository, relation_id, "london"), None);
     assert_eq!(
-        published_add.status.code(),
-        Some(0),
-        "publish after the rejected rekey failed: {}{}",
-        String::from_utf8_lossy(&published_add.stdout),
-        String::from_utf8_lossy(&published_add.stderr)
+        stored_row(&repository, relation_id, "paris"),
+        Some(committed),
+        "the rekeyed row keeps its committed Blob reference"
     );
-    let after = head(root);
-    assert_ne!(before, after, "the pending insert was published");
-    let published = repository.head().expect("HEAD").expect("published HEAD");
-    let log = repository
-        .read_committed_rekeys(&published)
-        .expect("committed rekey log");
-    assert!(
-        log.is_empty(),
-        "a rejected rekey publishes no logical rekey: {log:?}"
-    );
-
-    let relation = relation_hex(relation_id);
-    let diff = run(
-        root,
-        &[
-            "history", &relation, "--diff", &before, &after, "--format", "json",
-        ],
-    );
+    let log = committed_rekeys(&repository);
+    assert_eq!(log.len(), 1, "one durable logical rekey: {log:?}");
+    assert_logged(&log[0], 0, relation_id, "london", "paris");
+    let report = diff(root, relation_id, &before, &after);
+    assert_one_rekey(&report, "london", "paris");
     assert_eq!(
-        diff.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&diff.stderr)
-    );
-    let report: serde_json::Value = serde_json::from_slice(&diff.stdout).unwrap();
-    assert_eq!(report["added"], serde_json::json!(1), "{report}");
-    assert_eq!(report["rekeyed"], serde_json::json!(0), "{report}");
-    assert_eq!(report["removed"], serde_json::json!(0), "{report}");
-    assert_eq!(
-        report["changes"][0]["key"],
-        serde_json::json!("london"),
+        report["changes"][0]["content_changed"],
+        serde_json::json!(false),
         "{report}"
     );
+}
+
+#[test]
+fn repl_rekeys_of_long_keys_publish_through_overflow_log_rows() {
+    let (directory, repository, relation_id) = format3_repository(RELOCATE_SOURCE);
+    let root = directory.path();
+    // Each address spells about 5 KiB, so a log row holding the hex spelling
+    // of two of them exceeds the 8 KiB inline limit and is stored as overflow.
+    let first = "o".repeat(5_000);
+    let second = "n".repeat(5_000);
+    submit(root, &format!("main.add({first:?}, \"Long\").id"));
+    let before = publish(root);
+
+    submit(root, &format!("main.relocate({first:?}, {second:?}).id"));
+    let after = publish(root);
+    let log = committed_rekeys(&repository);
+    assert_eq!(log.len(), 1, "one durable logical rekey: {log:?}");
+    assert_logged(&log[0], 0, relation_id, &first, &second);
+    assert_one_rekey(&diff(root, relation_id, &before, &after), &first, &second);
+
+    // Appending reads the overflow row back and keeps it.
+    submit(root, &format!("main.relocate({second:?}, \"short\").id"));
+    let latest = publish(root);
+    let log = committed_rekeys(&repository);
+    assert_eq!(log.len(), 2, "the log keeps every logical rekey: {log:?}");
+    assert_logged(&log[0], 0, relation_id, &first, &second);
+    assert_logged(&log[1], 1, relation_id, &second, "short");
+    assert_one_rekey(&diff(root, relation_id, &before, &latest), &first, "short");
 }
