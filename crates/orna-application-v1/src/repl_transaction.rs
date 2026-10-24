@@ -1,7 +1,8 @@
 use super::*;
 use orna_project_v1::{
-    admit_format3_row, committed_tables, evaluator_rows, has_text_primary_key,
-    runtime_key_from_evaluator, storage_row_from_record, stored_field_names, ProjectLoader,
+    admit_format3_row, blob_placeholder, committed_tables, evaluator_rows, has_text_primary_key,
+    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record, CommittedTable,
+    ProjectLoader,
 };
 use orna_repository_v1::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
@@ -38,9 +39,8 @@ impl ApplicationAuthority {
             ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
         })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
-        let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
+        let (captured_rows, committed) = committed_table_rows(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
-        let ids_for_storage = table_ids.clone();
         let mutations = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
             captured_rows,
@@ -60,34 +60,45 @@ impl ApplicationAuthority {
         let activation = effects
             .mutations
             .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
-        let activation = normalize_repl_mutations(scope, &tables_for_storage, &ids_for_storage, activation)?;
+        let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)?;
         Ok((value, successor, activation))
     }
 }
 
+/// Projects the activation's evaluator-form mutations onto stored tuples in
+/// the runtime keyspace. A written row's Blob references are restored from
+/// the stored tuple it was read from: the row an earlier mutation of this
+/// activation left at its key, or else its committed row.
 fn normalize_repl_mutations(
-    scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
-    table_ids: &BTreeMap<String, TableObjectId>,
+    committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
     let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
         activation.into_parts();
-    let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
-    let mut field_names_by_table = BTreeMap::<String, Vec<String>>::new();
+    // The stored tuple this activation has left at each key so far; `None`
+    // marks a removed row, which then shadows the committed one.
+    let mut written = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
     let mut normalized = Vec::with_capacity(mutations.len());
     for mutation in mutations {
         let table = mutation.table().to_owned();
         let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let committed_table = committed
+            .get(&table)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         // A row admitted through `admit_format3_row` (the Blob insert path)
-        // already carries its canonical store key and stored-field tuple, and
-        // its source-row provenance says so. Every other mutation, a plain
-        // insert included, still holds the evaluator's row map and is
-        // projected to the stored-field tuple here.
+        // already carries its runtime key and stored-field tuple, and its
+        // source-row provenance says so. Every other mutation, a plain insert
+        // included, still holds the evaluator's row map and is projected to
+        // the stored-field tuple here.
         if source_row_schemas
             .iter()
             .any(|source_row| source_row.mutation_id == mutation.id())
         {
+            written.insert(
+                (table, mutation.key().to_vec()),
+                mutation.value().map(<[u8]>::to_vec),
+            );
             normalized.push(mutation);
             continue;
         }
@@ -101,21 +112,32 @@ fn normalize_repl_mutations(
         let mutation = mutation
             .with_reencoded_keys(key, rekey_to)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let source_key = (table.clone(), mutation.key().to_vec());
+        let source = match written.get(&source_key) {
+            Some(row) => row.clone(),
+            None => committed_table
+                .stored_row(mutation.key())
+                .map(<[u8]>::to_vec),
+        };
         let Some(row_value) = mutation.value().map(<[u8]>::to_vec) else {
+            written.insert(source_key, None);
             normalized.push(mutation);
             continue;
         };
-        let object_id = table_ids.get(&table).copied().ok_or(ApplicationError::InvalidTableMetadata)?;
-        if !field_names_by_table.contains_key(&table) {
-            let schema = ProjectLoader::default()
-                .resolve_committed_source_table_schema(scope.repository, commit, object_id)
-                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            let (_, field_names) = stored_field_names(schema.binding().descriptor().raw())
-                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            field_names_by_table.insert(table.clone(), field_names);
-        }
-        let encoded = storage_row_from_record(&row_value, &field_names_by_table[&table])
+        let storage_order = &committed_table.storage_order;
+        let encoded = storage_row_from_record(&row_value, storage_order)
+            .and_then(|stored| {
+                restore_stored_blobs(&stored, storage_order, table_schema, source.as_deref())
+            })
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        // A rekey moves the stored tuple: its old key is freed for later
+        // mutations and its new key carries the restored references.
+        if let Some(new_key) = mutation.rekey_to() {
+            written.insert((table, new_key.to_vec()), Some(encoded.clone()));
+            written.insert(source_key, None);
+        } else {
+            written.insert(source_key, Some(encoded.clone()));
+        }
         normalized.push(mutation.with_reencoded_value(encoded).map_err(|_| ApplicationError::InvalidTableMetadata)?);
     }
     Ok(StagedActivation {
@@ -127,24 +149,27 @@ fn normalize_repl_mutations(
     })
 }
 
+/// Every admitted table at the REPL's source commit: the evaluator rows the
+/// effect handler consumes, and the committed stored tuples whose Blob
+/// references `normalize_repl_mutations` restores.
 fn committed_table_rows(
     scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
-) -> Result<RuntimeTableRows, ApplicationError> {
-    let mut result = BTreeMap::new();
+) -> Result<(RuntimeTableRows, BTreeMap<String, CommittedTable>), ApplicationError> {
+    let mut rows = BTreeMap::new();
     if tables.is_empty() {
-        return Ok(result);
+        return Ok((rows, BTreeMap::new()));
     }
     let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
     let committed = committed_tables(scope.repository, scope.format_context, commit, tables, table_ids)
         .map_err(|_| ApplicationError::InvalidTableMetadata)?;
     for (table_name, table_schema) in tables {
         let table = committed.get(table_name).ok_or(ApplicationError::InvalidTableMetadata)?;
-        let rows = evaluator_rows(table, table_schema).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        result.insert(table_name.clone(), rows);
+        let table_rows = evaluator_rows(table, table_schema).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        rows.insert(table_name.clone(), table_rows);
     }
-    Ok(result)
+    Ok((rows, committed))
 }
 
 fn admitted_project_tables(
@@ -599,7 +624,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
             else {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
             };
-            *sanitized = blob_placeholder(ty, original)?;
+            *sanitized = blob_placeholder(ty);
         }
         if blob_bindings.is_empty() {
             return Ok(None);
@@ -823,20 +848,6 @@ fn blob_value<'a>(ty: &Type, value: &'a OvbRaw) -> Option<Option<&'a OvbRaw>> {
         });
     }
     is_blob(ty).then_some(Some(value))
-}
-
-fn blob_placeholder(ty: &Type, _original: &OvbRaw) -> Result<OvbRaw, EvaluationError> {
-    let placeholder = OvbRaw::Bytes(Vec::new());
-    if matches!(ty, Type::Optional(_)) {
-        return Ok(OvbRaw::Tag(
-            60_013,
-            Box::new(OvbRaw::Array(vec![
-                OvbRaw::Int(BigInt::from(1)),
-                placeholder,
-            ])),
-        ));
-    }
-    Ok(placeholder)
 }
 
 fn restore_contextual_blob_values(
