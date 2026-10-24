@@ -1706,7 +1706,7 @@ fn load_project_without_standard_rejection(
 fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    if project.standard_modules().is_empty() || project.standard_profile().is_some() {
+    if !project.has_uncaptured_standard_imports() {
         return Ok(());
     }
     Err(Diagnostic::target(
