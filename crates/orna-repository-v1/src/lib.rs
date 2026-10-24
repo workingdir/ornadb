@@ -2201,12 +2201,12 @@ pub struct ManagedPath(PathBuf);
 impl ManagedPath {
     /// Creates a normalized, repository-relative path for a write, a stage, or
     /// a committed-tree entry.
-    ///
     /// Absolute paths, `.git` administration components at any depth, tracked
-    /// `.orna/cache.db`, parent traversal, and empty paths are rejected before
-    /// they reach Git. No length limit applies here: Git stores committed names
-    /// of any length, so an overlong committed entry must still list. The
-    /// filesystem reports an overlong name when Orna creates it.
+    /// `.orna/cache.db`, parent traversal, backslashes, NUL, and empty
+    /// components are rejected before they reach Git. No length limit applies
+    /// here: Git stores committed names of any length, so an overlong committed
+    /// entry must still list. The filesystem reports an overlong name when Orna
+    /// creates it.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, RepositoryError> {
         Self::normalize(path.as_ref(), true).map(Self)
     }
@@ -2219,15 +2219,26 @@ impl ManagedPath {
         Self::normalize(Path::new(path), false).map(Self)
     }
 
-    fn normalize(path: &Path, refuse_git_metadata: bool) -> Result<PathBuf, RepositoryError> {
+    fn normalize(path: &Path, strict: bool) -> Result<PathBuf, RepositoryError> {
         if path.as_os_str().is_empty() || path.is_absolute() {
             return Err(RepositoryError::UnsafeManagedPath);
+        }
+        if strict {
+            // Git treats `\` as ordinary, but Windows checkouts and sync tools do
+            // not, so `..\x` would traverse there. NUL cannot name a file at all.
+            // Empty components (`a//b`, `a/`) are refused as Git's verify_path does.
+            let bytes = path.as_os_str().as_encoded_bytes();
+            if bytes.iter().any(|byte| matches!(*byte, b'\\' | 0))
+                || bytes.split(|byte| *byte == b'/').any(<[u8]>::is_empty)
+            {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
         }
         let mut normalized = PathBuf::new();
         for component in path.components() {
             match component {
                 Component::Normal(value) => {
-                    if refuse_git_metadata
+                    if strict
                         && orna_foundation_v1::is_git_metadata_component(value.as_encoded_bytes())
                     {
                         return Err(RepositoryError::UnsafeManagedPath);
@@ -10480,6 +10491,78 @@ mod tests {
         let recovered = PublicationJournal::decode(&journal.encode().unwrap(), 40).unwrap();
         assert_eq!(recovered.runtime_intent_id(), Some([1; 16]));
         assert_eq!(recovered.logical_rekeys(), &[event]);
+    }
+
+    /// Replaces one length-prefixed string in an encoded journal with another,
+    /// keeping the surrounding wire format valid.
+    pub(crate) fn splice_length_prefixed(
+        bytes: &[u8],
+        old: &str,
+        new: &str,
+        length_prefix: fn(u32) -> [u8; 4],
+    ) -> Vec<u8> {
+        let mut needle = length_prefix(old.len() as u32).to_vec();
+        needle.extend_from_slice(old.as_bytes());
+        let mut replacement = length_prefix(new.len() as u32).to_vec();
+        replacement.extend_from_slice(new.as_bytes());
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .expect("old path must be encoded in the journal");
+        let mut out = bytes[..at].to_vec();
+        out.extend_from_slice(&replacement);
+        out.extend_from_slice(&bytes[at + needle.len()..]);
+        out
+    }
+
+    #[test]
+    fn publication_journal_decode_refuses_hostile_managed_paths() {
+        let journal = PublicationJournal::new_with_runtime_intent(
+            GitCommitRef("a".repeat(40)),
+            GitCommitRef("b".repeat(40)),
+            super::IndexTreeRef::from_verified_tree("c".repeat(40), 40).unwrap(),
+            [1; 16],
+            vec![PublicationJournalEntry::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                None,
+                Some(b"committed".to_vec()),
+            )],
+        )
+        .unwrap();
+        let encoded = journal.encode().unwrap();
+        assert!(PublicationJournal::decode(&encoded, 40).is_ok());
+        for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
+            let spliced = splice_length_prefixed(
+                &encoded,
+                ".orna/database.orna",
+                hostile,
+                u32::to_le_bytes,
+            );
+            assert!(
+                PublicationJournal::decode(&spliced, 40).is_err(),
+                "journal path {hostile:?} must not decode"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_journal_v1_legacy_bytes_decode_and_hostile_discard_paths_refuse() {
+        let mut bytes = super::CHECKOUT_JOURNAL_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&7_u64.to_be_bytes());
+        bytes.push(2);
+        super::put_string(&mut bytes, &"a".repeat(40)).unwrap();
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        super::put_string(&mut bytes, "generated/row.orna").unwrap();
+        assert!(super::CheckoutRecoveryJournal::decode(&bytes, 40).is_ok());
+        let hostile = splice_length_prefixed(
+            &bytes,
+            "generated/row.orna",
+            "../escape",
+            u32::to_le_bytes,
+        );
+        assert!(super::CheckoutRecoveryJournal::decode(&hostile, 40).is_err());
     }
 
     #[test]
