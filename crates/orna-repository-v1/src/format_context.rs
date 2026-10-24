@@ -1147,11 +1147,29 @@ impl Repository {
     ///
     /// An unborn `HEAD`, a format-3 `HEAD` and unreadable metadata are not
     /// decided here; the metadata checks that follow report them. A prepared
-    /// migration copy ([`Self::holds_prepared_migration`]) stays admitted so
-    /// `orna migrate copy` can carry consumer checkpoints into it.
+    /// migration copy is not admitted here: its `HEAD` is still the legacy
+    /// format, so ordinary durable writes stay refused (ORNA-UPGRADE-001,
+    /// ORNA-UPGRADE-003). Only [`Self::require_migration_carry_head_format`]
+    /// admits a prepared copy, for the migration's own checkpoint carry.
     pub fn require_writable_head_format(&self) -> Result<(), LegacyWriteRefused> {
         let Ok(context) = self.open_format_context() else {
             return Ok(());
+        };
+        if !context.is_read_only() {
+            return Ok(());
+        }
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
+    }
+
+    /// Admits the migration's checkpoint carry only into a prepared copy
+    /// ([`Self::holds_prepared_migration`]) whose recorded `HEAD` format is
+    /// legacy (ORNA-UPGRADE-001). A writable `HEAD` is admitted as usual, and
+    /// an unreadable context is decided by [`Self::require_writable_head_format`].
+    pub fn require_migration_carry_head_format(&self) -> Result<(), LegacyWriteRefused> {
+        let Ok(context) = self.open_format_context() else {
+            return self.require_writable_head_format();
         };
         if !context.is_read_only() || self.holds_prepared_migration() {
             return Ok(());

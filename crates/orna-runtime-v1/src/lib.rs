@@ -66,7 +66,9 @@ mod query;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
 mod repository_identity;
-pub use repository_identity::{repository_runtime_identity, runtime_identity_for_database_id};
+pub use repository_identity::{
+    migration_copy_runtime_identity, repository_runtime_identity, runtime_identity_for_database_id,
+};
 mod stream_carry;
 pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use catalogue::{
@@ -2461,6 +2463,7 @@ pub enum RuntimeError {
     InvocationTailInvalid,
     InvocationTailLimit,
     StreamIdentityMismatch,
+    MigrationCarryTargetDiffers,
     StreamSourceNotReplayable,
     StreamCheckpointStale,
     CheckpointNotReplayable,
@@ -2554,6 +2557,7 @@ impl fmt::Display for RuntimeError {
             Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
             Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
+            Self::MigrationCarryTargetDiffers => "migration carry target holds stream rows that differ from the carry",
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
@@ -4540,6 +4544,7 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::InvocationTailInvalid => "invocation_tail_invalid",
         RuntimeError::InvocationTailLimit => "invocation_tail_limit",
         RuntimeError::StreamIdentityMismatch => "stream_identity_mismatch",
+        RuntimeError::MigrationCarryTargetDiffers => "migration_carry_target_differs",
         RuntimeError::StreamSourceNotReplayable => "stream_source_not_replayable",
         RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
         RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
