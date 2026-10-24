@@ -523,6 +523,31 @@ impl ObjectIdentityManifest {
         Ok(Self { records })
     }
 
+    /// Applies only explicit semantic renames to this inventory, as
+    /// `orna mv` does before the renamed source is staged. Every other
+    /// record keeps its name, ID and retirement, so unstaged source edits
+    /// neither retire nor allocate identities; the next `orna commit`
+    /// reconciles the staged source as usual. Each rename must name an
+    /// active identity and a declaration `modules` contain, and a target
+    /// may not collide with another active identity.
+    pub fn with_renames(
+        &self,
+        modules: &[ModuleInput],
+        renames: &[ObjectIdentityRename],
+    ) -> Result<Self, ObjectIdentityError> {
+        let active = source_identity_keys(modules)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut records = self.records.clone();
+        apply_explicit_renames(&mut records, &active, renames)?;
+        records.sort_by(|left, right| {
+            (left.kind, left.qualified_name.as_str())
+                .cmp(&(right.kind, right.qualified_name.as_str()))
+        });
+        validate_records(&records)?;
+        Ok(Self { records })
+    }
+
     /// Reads and validates the committed identity inventory of one exact
     /// commit.
     ///
@@ -2443,6 +2468,76 @@ mod tests {
         assert_eq!(
             ObjectIdentityManifest::read_worktree(&repository).unwrap(),
             Some(next)
+        );
+    }
+
+    /// `orna mv` moves only the renamed table and its fields: a table the
+    /// worktree dropped but the staged source still declares stays active
+    /// under its ID, and a new worktree declaration gets no ID yet.
+    #[test]
+    fn rename_only_updates_move_named_identities_and_leave_the_rest() {
+        let staged = ModuleInput::new(
+            "main.orna",
+            "pub table Media(id: Str) { payload: Blob, }\npub table Clip(id: Str) { take: Int, }",
+        );
+        let previous = ObjectIdentityManifest::reconcile(std::slice::from_ref(&staged), None)
+            .expect("initial identities");
+        let worktree = ModuleInput::new(
+            "main.orna",
+            "pub table Archive(id: Str) { payload: Blob, }\npub table Note(id: Str) { body: Str, }",
+        );
+        let rename = ObjectIdentityRename::new(ObjectKind::Table, "Media", "Archive");
+
+        let renamed = previous
+            .with_renames(
+                std::slice::from_ref(&worktree),
+                std::slice::from_ref(&rename),
+            )
+            .expect("explicit rename");
+
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Archive"),
+            previous.id(ObjectKind::Table, "Media")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.payload"),
+            previous.id(ObjectKind::Field, "Media.payload")
+        );
+        assert_eq!(
+            renamed.id(ObjectKind::Field, "Archive.id"),
+            previous.id(ObjectKind::Field, "Media.id")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Media"), None);
+        assert_eq!(
+            renamed.id(ObjectKind::Table, "Clip"),
+            previous.id(ObjectKind::Table, "Clip")
+        );
+        assert_eq!(renamed.id(ObjectKind::Table, "Note"), None);
+        assert_eq!(renamed.records().len(), previous.records().len());
+        assert!(renamed.records().iter().all(|record| !record.is_retired()));
+
+        let colliding = ModuleInput::new("main.orna", "pub table Clip(id: Str) { payload: Blob, }");
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&colliding),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Clip"
+                )],
+            ),
+            Err(ObjectIdentityError::IdentityCollision),
+        );
+        assert_eq!(
+            previous.with_renames(
+                std::slice::from_ref(&staged),
+                &[ObjectIdentityRename::new(
+                    ObjectKind::Table,
+                    "Media",
+                    "Archive"
+                )],
+            ),
+            Err(ObjectIdentityError::InvalidSource),
         );
     }
 
