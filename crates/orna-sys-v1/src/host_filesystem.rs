@@ -1001,8 +1001,9 @@ mod beneath {
             return Err(FilesystemProviderError::OutputLimit);
         }
         let (parent, name) = parent_and_name(root, destination)?;
-        // Like `std::fs::copy`, the copy takes the source's permission bits.
-        let permissions = Mode::from_raw_mode(status.st_mode);
+        // The copy takes the source's permission bits without setuid, setgid or
+        // sticky, so a copied executable never carries privilege bits.
+        let permissions = Mode::from_raw_mode(status.st_mode & 0o777);
         let existing = if overwrite {
             Existing::Open
         } else {
@@ -2234,6 +2235,29 @@ mod confinement_tests {
                 .write_text(&fixture.root_name(), "reports/summary.txt", "x", false),
             Err(Denied)
         );
+    }
+
+    #[test]
+    fn copies_keep_permission_bits_but_drop_setuid_setgid_and_sticky() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        let root = fixture.root_name();
+        let source = fixture.root().join("tool.bin");
+        fs::write(&source, "binary").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o7755)).unwrap();
+
+        assert_eq!(
+            fixture
+                .provider
+                .copy_file(&root, "tool.bin", "copy.bin", false),
+            Ok(())
+        );
+
+        let mode = fs::metadata(fixture.root().join("copy.bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755);
     }
 
     #[test]
