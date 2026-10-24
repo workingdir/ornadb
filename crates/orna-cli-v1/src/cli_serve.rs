@@ -1913,7 +1913,7 @@ fn run_git_http_backend(
         .parent()
         .ok_or_else(|| io::Error::other("repository parent is unavailable"))?;
     let mut command = Command::new("git");
-    scrub_host_git_environment(&mut command);
+    clear_cgi_environment(&mut command);
     command
         .arg("http-backend")
         .current_dir(root)
@@ -1969,40 +1969,17 @@ fn run_git_http_backend(
     parse_cgi_response(&cgi_output)
 }
 
-fn scrub_host_git_environment(command: &mut Command) {
-    for variable in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_IMPLICIT_WORK_TREE",
-        "GIT_PREFIX",
-        "GIT_NAMESPACE",
-        "GIT_REPLACE_REF_BASE",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_GRAFT_FILE",
-        "GIT_SHALLOW_FILE",
-        "GIT_PROTOCOL",
-    ] {
-        command.env_remove(variable);
-    }
-    for (variable, _) in std::env::vars_os() {
-        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
-            || variable
-                .as_encoded_bytes()
-                .starts_with(b"GIT_CONFIG_VALUE_")
-        {
-            command.env_remove(variable);
+/// The CGI child inherits only this allow-list: PATH to run git, HOME and
+/// TMPDIR for git's own state, and locale. Server tokens, proxy settings and
+/// ambient GIT_* routing or config variables never reach it. Git locates its
+/// exec path itself (compiled-in or RUNTIME_PREFIX), so GIT_EXEC_PATH is not
+/// forwarded; XDG_CONFIG_HOME is not forwarded, so only ~/.gitconfig applies.
+/// Requires git >= 2.30 (`commit_optional` relies on `rev-parse --end-of-options`).
+fn clear_cgi_environment(command: &mut Command) {
+    command.env_clear();
+    for name in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
         }
     }
 }
@@ -4705,5 +4682,33 @@ mod tests {
 
     fn assert_expression_result(response: &Envelope) {
         assert_success_value(response, &int_value(42));
+    }
+
+    #[test]
+    fn cgi_environment_drops_git_proxy_and_token_variables() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("GIT_DIR", "/should/not/leak");
+        command.env("GIT_CONFIG_GLOBAL", "/should/not/leak");
+        command.env("HTTPS_PROXY", "http://should-not-leak.invalid");
+        command.env("ORNA_SERVER_TOKEN", "should-not-leak");
+        command.env("XDG_CONFIG_HOME", "/should/not/leak");
+        clear_cgi_environment(&mut command);
+        let output = command.output().expect("env runs");
+        assert!(output.status.success());
+        let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect();
+        for name in &names {
+            assert!(
+                ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"].contains(&name.as_str()),
+                "CGI child inherited unexpected variable {name}"
+            );
+        }
+        for name in ["PATH", "HOME", "TMPDIR"] {
+            if std::env::var_os(name).is_some() {
+                assert!(names.iter().any(|kept| kept == name), "{name} was dropped");
+            }
+        }
     }
 }

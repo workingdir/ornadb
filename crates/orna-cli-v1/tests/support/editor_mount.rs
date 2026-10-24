@@ -198,7 +198,7 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
@@ -230,7 +230,11 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Waits until the Linux mount table lists the process's mountpoint.
 pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mounted.mountpoint) {
+    // Ready means the mount table lists the mountpoint and the mounted root answers.
+    // A bare mountinfo match can precede the first FUSE request being served.
+    while !(mountinfo_contains(&mounted.mountpoint)
+        && root_answers_before(&mounted.mountpoint, deadline))
+    {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             mounted.exited(status);
         }
@@ -238,6 +242,19 @@ pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
         thread::sleep(Duration::from_millis(20));
     }
     mounted
+}
+
+/// Lists the mounted root on a helper thread, so a hung FUSE daemon cannot block the
+/// caller past `deadline`. A probe that never returns stays blocked in the kernel; the
+/// caller then fails at the deadline.
+fn root_answers_before(path: &Path, deadline: Instant) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = path.to_path_buf();
+    thread::spawn(move || {
+        let _ = tx.send(path.read_dir().is_ok());
+    });
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(false)
 }
 
 pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
