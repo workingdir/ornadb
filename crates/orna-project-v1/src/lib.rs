@@ -52,6 +52,13 @@ pub use attachments::{
 ///
 /// These are implementation resource limits: a loader may configure them, and
 /// each one is reported by its own error when exceeded (ORNA-CLOSURE-004).
+///
+/// The committed source tree walk also runs under fixed bounds that are not
+/// configurable here. A breach is reported as
+/// [`ProjectLoadError::SourceTreeLimit`] before git expands the tree: at most
+/// 2^20 visited entries (every interior tree and every listed entry, counting
+/// each occurrence of a shared subtree), at most 2^27 listed path bytes, and
+/// nesting depth at most 256.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProjectLimits {
     /// Maximum reachable modules loaded and parsed.
@@ -1673,6 +1680,7 @@ pub enum ProjectLoadError {
     SourceUnavailable,
     SourceTooLarge,
     RepositoryLimit,
+    SourceTreeLimit,
     ModuleLimit,
     InvalidModule {
         logical_path: String,
@@ -1708,6 +1716,7 @@ impl fmt::Display for ProjectLoadError {
             Self::SourceUnavailable => "reachable source module is unavailable",
             Self::SourceTooLarge => "project source exceeds the configured limit",
             Self::RepositoryLimit => "project exceeds the configured source-module limit",
+            Self::SourceTreeLimit => "committed source tree exceeds the fixed walk limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
             Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
             Self::InvalidRowUnit { .. } => "reachable row unit is not a valid row unit",
@@ -1844,7 +1853,7 @@ fn validate_committed_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_committed_source_tree(commit)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
 }
 
@@ -1855,8 +1864,18 @@ fn validate_private_candidate_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_private_candidate_source_tree(candidate)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
+}
+
+/// A source tree over the fixed walk limit is reported as
+/// [`ProjectLoadError::SourceTreeLimit`], and every other repository failure
+/// stays a repository error.
+fn source_tree_load_error(error: RepositoryError) -> ProjectLoadError {
+    match error {
+        RepositoryError::SourceTreeLimit => ProjectLoadError::SourceTreeLimit,
+        error => ProjectLoadError::Repository(error),
+    }
 }
 
 fn validate_snapshot_tree(
