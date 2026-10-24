@@ -582,6 +582,10 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
     snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
     FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
 );
+-- No runtime path binds a new revision pair or reads a binding back; catalogue
+-- carry-forward only copies an existing predecessor row to its successor
+-- snapshot. The table stays so existing and new state.db files share one
+-- schema; dropping it requires a state-schema migration.
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision_binding (
     snapshot BLOB PRIMARY KEY REFERENCES runtime_catalogue_admission(snapshot),
     source_revision_id BLOB NOT NULL CHECK (length(source_revision_id) = 16),
@@ -6950,7 +6954,6 @@ impl RuntimeState {
                 faults,
                 None,
                 None,
-                None,
             )
             .await
         {
@@ -7004,7 +7007,7 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, None, None)
+        self.commit_validated_request_activation(request, None)
             .await
     }
 
@@ -7019,21 +7022,7 @@ impl RuntimeState {
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: &catalogue::CatalogueAdmission,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), None)
-            .await
-    }
-
-    /// Publishes a complete compiler-resolved source catalogue with the exact
-    /// source/catalogue revision pair that produced it. The pair is retained
-    /// only as compiler/core identity evidence; this boundary neither derives
-    /// a revision identity nor constructs a snapshot-pinned reference.
-    pub async fn commit_validated_catalogue_table_request_activation_with_revision_pair(
-        &self,
-        request: ValidatedTableRequestActivationCommit<'_>,
-        admission: &catalogue::CatalogueAdmission,
-        revision_pair: orna_core::revision::RevisionPair,
-    ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), Some(revision_pair))
+        self.commit_validated_request_activation(request, Some(admission))
             .await
     }
 
@@ -7041,7 +7030,6 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
         let ValidatedTableRequestActivationCommit {
             writer,
@@ -7066,7 +7054,6 @@ impl RuntimeState {
                 faults,
                 Some(validator),
                 admission,
-                revision_pair,
             )
             .await
         {
@@ -7114,7 +7101,6 @@ impl RuntimeState {
         faults: &dyn FaultInjector,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
@@ -7220,7 +7206,6 @@ impl RuntimeState {
                 &current_capture,
                 &next,
                 admission,
-                revision_pair,
             )
             .await
             {
