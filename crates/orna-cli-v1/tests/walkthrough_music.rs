@@ -409,8 +409,14 @@ fn git_text(root: &Path, arguments: &[&str]) -> String {
 fn assert_loose_row_refused(output: &Output, path: &str) {
     let message = stderr(output);
     assert_eq!(output.status.code(), Some(1), "{message}");
-    assert!(message.contains("error[ORNA-REPO-CONTEXT-004]"), "{message}");
-    assert!(message.contains(path), "the refusal names the row file: {message}");
+    assert!(
+        message.contains("error[ORNA-REPO-CONTEXT-004]"),
+        "{message}"
+    );
+    assert!(
+        message.contains(path),
+        "the refusal names the row file: {message}"
+    );
 }
 
 /// Rows have no Git paths in format 3: they live only in `.orna/store`
@@ -425,9 +431,14 @@ fn add_row_refuses_loose_row_in_format3_repository() {
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("music");
     let init = run(directory.path(), &["init", root.to_str().unwrap()]);
-    assert_eq!(init.status.code(), Some(0), "orna init failed: {}", stderr(&init));
-    git(&root, &["config", "user.email", "kieran@drewett.dev"]);
-    git(&root, &["config", "user.name", "kierandrewett"]);
+    assert_eq!(
+        init.status.code(),
+        Some(0),
+        "orna init failed: {}",
+        stderr(&init)
+    );
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
     git(&root, &["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
     std::fs::create_dir_all(root.join("music")).unwrap();
@@ -436,27 +447,48 @@ fn add_row_refuses_loose_row_in_format3_repository() {
     // The branch is unborn, so the format is the one `orna init` recorded.
     let refused = run(&root, &["add", "--row", "music", "\"london\""]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(git_text(&root, &["ls-files", "--stage"]), "", "nothing was staged");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        "",
+        "nothing was staged"
+    );
 
     git(&root, &["add", "main.orna", ".orna/database.orna"]);
     let committed = run(&root, &["commit", "-m", "Declare music"]);
-    assert_eq!(committed.status.code(), Some(0), "first commit failed: {}", stderr(&committed));
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "first commit failed: {}",
+        stderr(&committed)
+    );
     let head = git_text(&root, &["rev-parse", "HEAD"]);
     let refs = git_text(&root, &["for-each-ref"]);
     let staged = git_text(&root, &["ls-files", "--stage"]);
 
     let refused = run(&root, &["add", "--row", "music", "\"london\""]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(git_text(&root, &["ls-files", "--stage"]), staged, "nothing was staged");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        staged,
+        "nothing was staged"
+    );
 
     // Plain Git can still stage the file; the commit refuses it.
     git(&root, &["add", "music/london.orna"]);
     let staged = git_text(&root, &["ls-files", "--stage"]);
     let refused = run(&root, &["commit", "-m", "Commit a loose row"]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(git_text(&root, &["rev-parse", "HEAD"]), head, "no commit was made");
+    assert_eq!(
+        git_text(&root, &["rev-parse", "HEAD"]),
+        head,
+        "no commit was made"
+    );
     assert_eq!(git_text(&root, &["for-each-ref"]), refs, "no ref moved");
-    assert_eq!(git_text(&root, &["ls-files", "--stage"]), staged, "the index is unchanged");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        staged,
+        "the index is unchanged"
+    );
 }
 
 /// A format-3 fixture that still commits a legacy loose row file, which
@@ -477,20 +509,32 @@ fn commit_refuses_changed_loose_row_in_format3_repository() {
     std::fs::write(
         root.join("music/london.orna"),
         "{ title: \"Live in London — remastered\", artist: \"Kieran\", }\n",
-    ).unwrap();
+    )
+    .unwrap();
     let head = repository.head().unwrap().unwrap();
     let staged = git_text(root, &["ls-files", "--stage"]);
 
     let refused = run(root, &["add", "--row", "music", "\"london\""]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(git_text(root, &["ls-files", "--stage"]), staged, "nothing was staged");
+    assert_eq!(
+        git_text(root, &["ls-files", "--stage"]),
+        staged,
+        "nothing was staged"
+    );
 
     git(root, &["add", "music/london.orna"]);
     let refused = run(root, &["commit", "-m", "Retitle the recording"]);
     assert_loose_row_refused(&refused, "music/london.orna");
-    assert_eq!(repository.head().unwrap(), Some(head.clone()), "no commit was made");
     assert_eq!(
-        git_text(root, &["show", &format!("{}:music/london.orna", head.as_str())]),
+        repository.head().unwrap(),
+        Some(head.clone()),
+        "no commit was made"
+    );
+    assert_eq!(
+        git_text(
+            root,
+            &["show", &format!("{}:music/london.orna", head.as_str())]
+        ),
         LONDON_ROW
     );
 }
