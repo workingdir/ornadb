@@ -5636,20 +5636,8 @@ mod tests {
                 (key, source)
             })
             .collect::<Vec<_>>();
-        let paths = fixture_rows
-            .iter()
-            .map(|(key, source)| (format!("Music/{key}.orna"), source.clone()))
-            .collect::<Vec<_>>();
-        let path_sources = paths
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
         let (_repository_directory, repository, relation_id, format_context) =
-            crate::format3::format3_repository_for_table_with_source_rows(
-                SOURCE,
-                "Music",
-                &path_sources,
-            );
+            crate::format3::format3_repository_with_context(SOURCE, "Music");
         let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
         let state = orna_runtime_v1::RuntimeState::open(&repository, identity, digest)
             .await
@@ -5664,7 +5652,7 @@ mod tests {
             .map(|(index, (key, source))| crate::media_commit::SourceCaptureRow {
                 key,
                 blob_fields: &[],
-                source_row: Some(source),
+                source_row: source,
                 ordinal: u8::try_from(index).unwrap(),
                 insert_only: true,
             })
