@@ -509,6 +509,44 @@ fn managed_paths_do_not_cap_length_because_git_stores_any_length() {
     assert!(ManagedPath::new(format!("docs/{long_component}.md")).is_ok());
 }
 
+#[test]
+fn managed_paths_refuse_traversal_absolute_nul_backslash_and_empty_components() {
+    for hostile in [
+        "..",
+        "../x",
+        "a/../b",
+        "/etc/passwd",
+        "..\\x",
+        "a\\..\\b",
+        "a\\b",
+        "a\0b",
+        "a//b",
+        "a/",
+        "sub/./",
+    ] {
+        assert!(
+            matches!(
+                ManagedPath::new(hostile),
+                Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+            ),
+            "{hostile:?} must be refused"
+        );
+    }
+    assert!(ManagedPath::new("./a/b").is_ok());
+}
+
+#[test]
+fn untracked_git_named_directory_changes_the_status_digest() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "first\n").unwrap();
+    let before = repo.worktree_state().unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "second\n").unwrap();
+    let after = repo.worktree_state().unwrap();
+    assert_ne!(before, after);
+}
+
 /// Runs Git with raw bytes on stdin, for objects Git's own tree writers refuse.
 fn git_raw(directory: &Path, arguments: &[&str], input: &[u8]) -> String {
     use std::io::Write as _;

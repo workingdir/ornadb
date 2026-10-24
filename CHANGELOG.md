@@ -13,7 +13,12 @@ been published.
   any length. Untracked user paths such as `Sub/.GIT/notes` still appear in
   status and checkout plans, and a forced checkout leaves them in place.
   `orna export --check` and `--restore` refuse an archive whose dependency path
-  names Git metadata before anything is restored.
+  names Git metadata before anything is restored. Managed paths also refuse a
+  backslash, a NUL byte, an empty component (`a//b`, `a/`), and `..`, absolute
+  and other non-normal components, on write, in publication and checkout
+  journals, and in compact manifests. The system worktree listing skips a
+  Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
+  as a user path.
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
