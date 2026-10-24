@@ -1209,12 +1209,9 @@ impl NativeGraphContext {
         // through tag 60113 (store-format-3 section 5).
         let mut written = BTreeSet::new();
         {
-            let mut overflow = crate::overflow::OverflowWriter::new(
-                self,
-                scope,
-                &mut written,
-                scope.max_objects,
-            );
+            let mut store =
+                crate::overflow::CaptureStore::new(self, scope, &mut written, scope.max_objects);
+            let mut overflow = crate::overflow::OverflowWriter::new(&mut store);
             for mutation in mutations {
                 let RowIndexMutation::Insert { key, fields } = mutation else {
                     continue;

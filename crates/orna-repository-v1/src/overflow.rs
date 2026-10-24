@@ -44,22 +44,33 @@ pub(crate) fn fits_inline(stored: &CborValue, encoded_len: usize) -> Result<bool
         && direct_blob_reference_count(stored)? <= ROW_INLINE_REF_LIMIT)
 }
 
-/// Writes the overflow graph of one row's values through a capture writer.
-/// Every object written joins `written`, the closure the caller syncs before
-/// any ref names it.
-pub(crate) struct OverflowWriter<'a> {
+/// Where an overflow graph is written: the capture writer of a row graph
+/// ([`CaptureStore`]) or the node writer of a system relation. Both lower rows
+/// through [`OverflowWriter`], so a logical row is stored the same way
+/// whichever of them writes it.
+pub(crate) trait OverflowStore {
+    /// The width of the repository's native object IDs.
+    fn oid_width(&self) -> usize;
+
+    /// Writes one OGS-1 node envelope and returns its object ID.
+    fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError>;
+
+    /// Writes nonempty `bytes` as their canonical OGB-2 byte index
+    /// (store-format-3 §4) and returns the index root.
+    fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError>;
+}
+
+/// The capture writer of one row graph as an overflow store. Every object
+/// written joins `written`, the closure the caller syncs before any ref
+/// names it.
+pub(crate) struct CaptureStore<'a> {
     graph: &'a NativeGraphContext,
     scope: &'a RepositoryReadScope,
     written: &'a mut BTreeSet<NativeOid>,
     object_limit: u64,
-    oid_width: usize,
 }
 
-/// A value as stored (ROV-3, possibly holding overflow references) and its
-/// SOV-3 semantic form, which never does.
-type Lowered = (CborValue, CborValue);
-
-impl<'a> OverflowWriter<'a> {
+impl<'a> CaptureStore<'a> {
     pub(crate) fn new(
         graph: &'a NativeGraphContext,
         scope: &'a RepositoryReadScope,
@@ -71,8 +82,63 @@ impl<'a> OverflowWriter<'a> {
             scope,
             written,
             object_limit,
-            oid_width: graph.algorithm().width(),
         }
+    }
+}
+
+impl OverflowStore for CaptureStore<'_> {
+    fn oid_width(&self) -> usize {
+        self.graph.algorithm().width()
+    }
+
+    fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError> {
+        self.graph
+            .write_capture_node(node, self.written, self.object_limit)
+    }
+
+    /// The chunks are structured row bytes, not media, so they are not
+    /// charged as payload written.
+    fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+        let spans = GearChunker::new()
+            .spans(bytes)
+            .map_err(|_| GraphError::InvalidByteIndex)?;
+        let mut chunks = Vec::with_capacity(spans.len());
+        for span in spans {
+            let start = usize::try_from(span.offset()).map_err(|_| GraphError::InvalidByteIndex)?;
+            let end = start
+                .checked_add(
+                    usize::try_from(span.length()).map_err(|_| GraphError::InvalidByteIndex)?,
+                )
+                .ok_or(GraphError::InvalidByteIndex)?;
+            let chunk = bytes.get(start..end).ok_or(GraphError::InvalidByteIndex)?;
+            let target =
+                self.graph
+                    .write_capture_object("blob", chunk, self.written, self.object_limit)?;
+            chunks.push((span.length(), target, span.sha256()));
+        }
+        let mut index =
+            CaptureIndexBuilder::new(self.graph, self.written, self.object_limit, self.scope);
+        for (length, target, sha256) in chunks {
+            index.push_chunk(length, target, sha256)?;
+        }
+        index.finish()?.ok_or(GraphError::InvalidByteIndex)
+    }
+}
+
+/// Lowers row values into the shared overflow graph of one store.
+pub(crate) struct OverflowWriter<'a, S: OverflowStore> {
+    store: &'a mut S,
+    oid_width: usize,
+}
+
+/// A value as stored (ROV-3, possibly holding overflow references) and its
+/// SOV-3 semantic form, which never does.
+type Lowered = (CborValue, CborValue);
+
+impl<'a, S: OverflowStore> OverflowWriter<'a, S> {
+    pub(crate) fn new(store: &'a mut S) -> Self {
+        let oid_width = store.oid_width();
+        Self { store, oid_width }
     }
 
     /// Lowers one canonical ROV-3 stored-field tuple and returns the value
@@ -283,17 +349,13 @@ impl<'a> OverflowWriter<'a> {
         let mut dependencies = BTreeMap::new();
         collect_row_dependencies(stored, &mut dependencies)?;
         let dependency_root = self.write_dependency_index(dependencies.into_keys().collect())?;
-        let byte_root = self.write_byte_index(&encoded)?;
-        let root = self.graph.write_capture_node(
-            &NodeData::ValueOverflow {
-                encoded_length,
-                semantic_digest,
-                byte_root: byte_root.clone(),
-                dependency_root: dependency_root.clone(),
-            },
-            self.written,
-            self.object_limit,
-        )?;
+        let byte_root = self.store.write_byte_index(&encoded)?;
+        let root = self.store.write_node(&NodeData::ValueOverflow {
+            encoded_length,
+            semantic_digest,
+            byte_root: byte_root.clone(),
+            dependency_root: dependency_root.clone(),
+        })?;
         ValueOverflowRef::from_native_node(
             root,
             encoded_length,
@@ -302,35 +364,6 @@ impl<'a> OverflowWriter<'a> {
             dependency_root,
         )
         .map_err(|_| GraphError::NonCanonicalData)
-    }
-
-    /// Stores `bytes` as OGB-2 chunks under the canonical byte index
-    /// (store-format-3 §4). The chunks are structured row bytes, not media,
-    /// so they are not charged as payload written.
-    fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError> {
-        let spans = GearChunker::new()
-            .spans(bytes)
-            .map_err(|_| GraphError::InvalidByteIndex)?;
-        let mut chunks = Vec::with_capacity(spans.len());
-        for span in spans {
-            let start = usize::try_from(span.offset()).map_err(|_| GraphError::InvalidByteIndex)?;
-            let end = start
-                .checked_add(
-                    usize::try_from(span.length()).map_err(|_| GraphError::InvalidByteIndex)?,
-                )
-                .ok_or(GraphError::InvalidByteIndex)?;
-            let chunk = bytes.get(start..end).ok_or(GraphError::InvalidByteIndex)?;
-            let target =
-                self.graph
-                    .write_capture_object("blob", chunk, self.written, self.object_limit)?;
-            chunks.push((span.length(), target, span.sha256()));
-        }
-        let mut index =
-            CaptureIndexBuilder::new(self.graph, self.written, self.object_limit, self.scope);
-        for (length, target, sha256) in chunks {
-            index.push_chunk(length, target, sha256)?;
-        }
-        index.finish()?.ok_or(GraphError::InvalidByteIndex)
     }
 
     /// Writes the canonical kind-7 inventory of `dependencies`: sorted by
@@ -361,22 +394,16 @@ impl<'a> OverflowWriter<'a> {
             let children = level.len();
             let mut next = Vec::new();
             {
-                let graph = self.graph;
-                let written = &mut *self.written;
-                let object_limit = self.object_limit;
+                let store = &mut *self.store;
                 let mut emit = |page: Vec<DependencyEntry>| -> Result<(), GraphError> {
                     let last = page
                         .last()
                         .map(|entry| entry.last.clone())
                         .ok_or(GraphError::InvalidCount(0))?;
-                    let oid = graph.write_capture_node(
-                        &NodeData::DependencyIndex {
-                            height,
-                            children: page.into_iter().map(|entry| entry.child).collect(),
-                        },
-                        written,
-                        object_limit,
-                    )?;
+                    let oid = store.write_node(&NodeData::DependencyIndex {
+                        height,
+                        children: page.into_iter().map(|entry| entry.child).collect(),
+                    })?;
                     next.push(DependencyEntry { child: oid, last });
                     Ok(())
                 };

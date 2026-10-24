@@ -26,6 +26,8 @@ been published.
   node over an OGB-2 byte index, with a kind-7 index of the objects it
   references) and its row names it with tag 60113. Large fields are lowered
   first, so a row with one long text field keeps its other fields inline.
+  The committed rekey log lowers its rows the same way, so a rekey between
+  long keys stores each long address on its own instead of the whole row.
   `orna query`, `orna history`, mounts and the REPL read such rows back as
   ordinary values; earlier builds refused to publish them.
 - Format-3 row maps and the relation map cut pages by the exact ORP-1 rule:

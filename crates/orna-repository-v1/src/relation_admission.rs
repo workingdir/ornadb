@@ -42,10 +42,8 @@ use crate::{
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
         StoreRelationEntry, hex_decode, hex_encode, sync_object_files,
     },
-    row_store::{
-        KeyRange, MAX_ROW_RANGE_LIMIT, ROW_INLINE_LIMIT, RowDependency, RowEntry, RowValue,
-        TypedKey, ValueOverflowRef,
-    },
+    overflow::{OverflowStore, OverflowWriter},
+    row_store::{KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowValue, TypedKey},
 };
 
 /// Stable relation UUID of the sealed object-identity inventory: the
@@ -498,8 +496,9 @@ fn read_rekey_rows(
         let page = graph.range_rows(&range, &scope)?;
         let full = page.len() == MAX_ROW_RANGE_LIMIT;
         for row in &page {
-            // An address too large to inline arrives as an overflow value, so
-            // the tuple is read back through the graph rather than the page.
+            // A long address is stored through the overflow graph, as its own
+            // field value or with the whole row, so the tuple is read back and
+            // expanded through the graph rather than taken from the page.
             let fields = graph.stored_row_fields(row, &scope)?;
             let key = row
                 .key()
@@ -526,7 +525,10 @@ fn read_rekey_rows(
     Ok(log)
 }
 
-/// Writes the rekey log's schema node and its complete row map.
+/// Writes the rekey log's schema node and its complete row map. Each row is
+/// lowered like any other row (store-format-3 §5): an address too long to
+/// stay inline is lowered to its own kind-3 node first, and the row entry
+/// itself only when it still exceeds the inline limits.
 fn write_rekey_relation(
     writer: &mut NodeWriter<'_>,
     log: &[CommittedRekey],
@@ -534,6 +536,7 @@ fn write_rekey_relation(
     let descriptor = object_rekey_descriptor()?;
     let (schema_oid, schema_digest) = write_schema_node(writer, &descriptor)?;
     let mut rows = Vec::with_capacity(log.len());
+    let mut overflow = OverflowWriter::new(&mut *writer);
     for rekey in log {
         let key = rekey.row_key();
         let key_bytes = key
@@ -543,8 +546,7 @@ fn write_rekey_relation(
         descriptor
             .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key_bytes, &fields)
             .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
-        let value = rekey_row_value(writer, fields)?;
-        rows.push(RowEntry::new(key, value));
+        rows.push(RowEntry::new(key, overflow.lower_row(&fields)?));
     }
     rows.sort_by(|left, right| left.key().cmp(right.key()));
     let primary_root = NativeGraphContext::build_canonical_ordered_map(
@@ -559,34 +561,6 @@ fn write_rekey_relation(
         secondary_root: None,
         row_count: rows.len() as u64,
     })
-}
-
-/// The stored value of one rekey log row. A tuple of at most 8 KiB is inline;
-/// a larger one uses the tag-60113 overflow form (store-format-3 §3, §5): a
-/// kind-3 node holding its length, its SOV-3 digest and the byte index of the
-/// complete ROV-3 tuple. A rekey row holds only `Str` and `Uuid` values, so the
-/// tuple is its own SOV-3 encoding and exposes no dependency index.
-fn rekey_row_value(
-    writer: &mut NodeWriter<'_>,
-    fields: Vec<u8>,
-) -> Result<RowValue, RelationAdmissionError> {
-    if fields.len() <= ROW_INLINE_LIMIT {
-        return RowValue::decode_canonical_fields(fields)
-            .map_err(|_| RelationAdmissionError::InvalidRekeyLog);
-    }
-    let encoded_length = fields.len() as u64;
-    let semantic_digest: [u8; 32] = Sha256::digest(&fields).into();
-    let byte_root = write_byte_index(writer, &fields)?.ok_or(GraphError::InvalidByteIndex)?;
-    let root = writer.node(&NodeData::ValueOverflow {
-        encoded_length,
-        semantic_digest,
-        byte_root: byte_root.clone(),
-        dependency_root: None,
-    })?;
-    let reference =
-        ValueOverflowRef::from_native_node(root, encoded_length, semantic_digest, byte_root, None)
-            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
-    Ok(RowValue::overflow(reference))
 }
 
 impl Repository {
@@ -1756,6 +1730,20 @@ impl<'a> NodeWriter<'a> {
     }
 }
 
+impl OverflowStore for NodeWriter<'_> {
+    fn oid_width(&self) -> usize {
+        self.algorithm.width()
+    }
+
+    fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError> {
+        self.node(node)
+    }
+
+    fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+        write_byte_index(self, bytes)?.ok_or(GraphError::InvalidByteIndex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1868,6 +1856,76 @@ mod tests {
                 Err(RelationAdmissionError::InvalidRekeyLog)
             ));
         }
+    }
+
+    /// store-format-3 §5: a rekey log row is lowered bottom-up like every
+    /// other row. An address whose hex spelling passes 8 KiB is lowered to
+    /// its own kind-3 node and its row stays inline, naming that node with
+    /// tag 60113; a row whose addresses fit inline but whose tuple does not
+    /// is lowered whole. The log's primary map stores exactly those values.
+    #[test]
+    fn rekey_log_rows_lower_long_addresses_first() {
+        use crate::native_graph::{CborValue, decode_canonical_content};
+
+        let (_directory, repository) = initialized_repository();
+        let mut writer = NodeWriter::new(&repository).unwrap();
+        let text_key = |letter: &str, length: usize| {
+            TypedKey::Text(letter.repeat(length))
+                .canonical_bytes()
+                .unwrap()
+        };
+        let log = [
+            // 5,000 letters spell about 10 KiB of hex.
+            CommittedRekey {
+                ordinal: 0,
+                relation_id: [0x11; 16],
+                old_key: text_key("o", 5_000),
+                new_key: text_key("n", 5),
+            },
+            // 3,000 letters spell about 6 KiB: each address fits, the row not.
+            CommittedRekey {
+                ordinal: 1,
+                relation_id: [0x11; 16],
+                old_key: text_key("p", 3_000),
+                new_key: text_key("q", 3_000),
+            },
+        ];
+        let entry = write_rekey_relation(&mut writer, &log).unwrap();
+
+        let rows = log
+            .iter()
+            .map(|rekey| {
+                let fields = rekey.row_fields().unwrap();
+                let value = OverflowWriter::new(&mut writer).lower_row(&fields).unwrap();
+                RowEntry::new(rekey.row_key(), value)
+            })
+            .collect::<Vec<_>>();
+        let RowValue::Inline { encoded, .. } = rows[0].value() else {
+            panic!("a row with one long address stays inline");
+        };
+        let CborValue::Array(fields) = decode_canonical_content(encoded).unwrap() else {
+            panic!("a row is a field tuple");
+        };
+        assert!(
+            matches!(fields[0], CborValue::Tag(60_113, _)),
+            "the long old address is lowered alone"
+        );
+        assert!(matches!(fields[1], CborValue::Text(_)));
+        assert!(
+            matches!(rows[1].value(), RowValue::Overflow(_)),
+            "a tuple still over 8 KiB is lowered whole"
+        );
+
+        let (_, schema_digest) =
+            write_schema_node(&mut writer, &object_rekey_descriptor().unwrap()).unwrap();
+        let primary_root = NativeGraphContext::build_canonical_ordered_map(
+            &rows_domain(&OBJECT_REKEY_RELATION_ID, &schema_digest),
+            &rows,
+            &mut |node| writer.node(node),
+        )
+        .unwrap();
+        assert_eq!(entry.primary_root, primary_root);
+        assert_eq!(entry.row_count, 2);
     }
 
     #[test]
