@@ -2183,6 +2183,16 @@ mod tests {
             root,
             &["rm", "--cached", "--quiet", &format!(".orna/store/{node_path}/data")],
         );
+        let dbg_listing = git(root, &["ls-tree", "-r", "-t", "HEAD:.orna/store"]);
+        eprintln!("DIAG node_path={node_path} second_root={second_root}");
+        eprintln!("DIAG listing:\n{}", dbg_listing.lines().filter(|l| l.contains(&second_root) || l.contains(node_path.as_str())).collect::<Vec<_>>().join("\n"));
+        eprintln!("DIAG index:\n{}", git(root, &["ls-files", "-s", "--", ".orna/store"]).lines().filter(|l| l.contains(&second_root) || l.contains(node_path.as_str())).collect::<Vec<_>>().join("\n"));
+        let dbg_pre = repository.capture_staged_candidate().unwrap();
+        eprintln!("DIAG store_root={:?}", dbg_pre.store_root);
+        if let Some(dbg_root) = dbg_pre.store_root.as_ref() {
+            let dbg_read = NativeGraphContext::read_store_relations(&repository, dbg_root.algorithm(), *dbg_pre.database_id.as_bytes(), dbg_root).map(|e| e.len());
+            eprintln!("DIAG read_store_relations={dbg_read:?}");
+        }
 
         let staged = repository.capture_staged_candidate().unwrap();
         let edited = [
