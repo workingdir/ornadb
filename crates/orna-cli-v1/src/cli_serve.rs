@@ -553,8 +553,9 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    // The listener is plaintext HTTP on loopback. A `Secure` cookie would be
-    // dropped by the browser over http, so TLS is declared off here.
+    // The listener is plaintext HTTP on loopback, the explicitly trusted
+    // transport 30-protocol:5 permits. `Secure` is reserved for TLS
+    // (30-protocol:15), so the session cookie omits it here.
     let transport_limits = TransportLimits {
         tls: false,
         ..TransportLimits::default()
@@ -603,6 +604,7 @@ fn new_serve_state(
 
 fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
     start_session_sweep(state)?;
+    let refusals = Arc::new(AtomicUsize::new(0));
     for accepted in listener.incoming() {
         let stream = match accepted {
             Ok(stream) => stream,
@@ -615,7 +617,7 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
             Err(error) => return Err(error),
         };
         let Some(slot) = ConnectionSlot::claim(state, &stream) else {
-            refuse_connection(stream);
+            refuse_off_loop(stream, &refusals);
             continue;
         };
         // A failed spawn drops the closure, which releases the slot and
@@ -628,6 +630,32 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
             });
     }
     Ok(())
+}
+
+/// Refusals answered at once. Each waits up to [`REFUSAL_HEAD_TIMEOUT`] for
+/// its request head on a thread of its own; beyond this many, the connection
+/// is closed without an answer so refusal threads stay bounded.
+const MAX_REFUSALS_IN_FLIGHT: usize = 16;
+
+/// Hands a connection beyond the cap to [`refuse_connection`] on its own
+/// thread, so the accept loop never waits on a silent peer.
+fn refuse_off_loop(stream: TcpStream, in_flight: &Arc<AtomicUsize>) {
+    let claimed = in_flight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        (active < MAX_REFUSALS_IN_FLIGHT).then_some(active + 1)
+    });
+    if claimed.is_err() {
+        return;
+    }
+    let worker = Arc::clone(in_flight);
+    let spawned = std::thread::Builder::new()
+        .name("orna-serve-refusal".into())
+        .spawn(move || {
+            refuse_connection(stream);
+            worker.fetch_sub(1, Ordering::AcqRel);
+        });
+    if spawned.is_err() {
+        in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// How long the accept loop pauses after a transient accept failure before
@@ -693,8 +721,9 @@ impl Drop for ConnectionSlot {
 /// Answers a connection beyond [`ServeOptions::max_connections`] from the
 /// accept loop itself, with a 503 in the shape its route expects (30-protocol,
 /// Creation/resume errors: `{ "code", "message" }` on `/orna/`). The request
-/// head is read first, bounded by [`REFUSAL_HEAD_TIMEOUT`], so a silent peer
-/// cannot hold up the accept loop for longer than that.
+/// head is read first, bounded by [`REFUSAL_HEAD_TIMEOUT`], on the refusal's
+/// own thread (see [`refuse_off_loop`]), so a silent peer cannot hold up the
+/// accept loop.
 fn refuse_connection(stream: TcpStream) {
     let mut reader = BufReader::new(stream);
     let mut orna_route = false;
@@ -3659,6 +3688,44 @@ mod tests {
         assert_eq!(
             refused.body,
             r#"{"code":"live.unavailable","message":"request rejected"}"#
+        );
+    }
+
+    /// A silent peer refused over the cap must not delay the next refusal:
+    /// the accept loop answers the second peer without waiting out the first
+    /// peer's head timeout.
+    #[test]
+    fn silent_refused_peer_does_not_delay_the_next_refusal() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=silent"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+        // Sends nothing, so its refusal runs until REFUSAL_HEAD_TIMEOUT.
+        let _silent = std::net::TcpStream::connect(address).expect("silent peer");
+
+        let started = Instant::now();
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert!(
+            started.elapsed() < REFUSAL_HEAD_TIMEOUT,
+            "a silent peer delayed the next refusal"
         );
     }
 
