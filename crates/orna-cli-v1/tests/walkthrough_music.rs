@@ -538,3 +538,35 @@ fn commit_refuses_changed_loose_row_in_format3_repository() {
         LONDON_ROW
     );
 }
+
+/// Format-1/2 repositories are loose-row based, so `orna add --row` on an
+/// unborn branch whose `.orna/` holds a legacy `format.orna` beside
+/// `database.orna` still stages the row. Only format 3 refuses loose rows
+/// (ORNA-META-001). This pins that behaviour so a change is deliberate.
+#[test]
+fn add_row_stages_loose_row_on_unborn_branch_with_legacy_marker() {
+    const LEGACY_FORMAT: &str =
+        include_str!("../../orna-repository-v1/tests/fixtures/format-context/format-1-ornadb-1.0.orna");
+    const SIDECAR_DATABASE: &str =
+        include_str!("../../orna-repository-v1/tests/fixtures/format-context/database-sidecar.orna");
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("music");
+    let init = run(directory.path(), &["init", root.to_str().unwrap()]);
+    assert_eq!(init.status.code(), Some(0), "orna init failed: {}", stderr(&init));
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::remove_dir_all(root.join(".orna/store")).ok();
+    std::fs::write(root.join(".orna/format.orna"), LEGACY_FORMAT).unwrap();
+    std::fs::write(root.join(".orna/database.orna"), SIDECAR_DATABASE).unwrap();
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::write(root.join("music/london.orna"), LONDON_ROW).unwrap();
+
+    let staged = run(&root, &["add", "--row", "music", "\"london\""]);
+    assert_eq!(staged.status.code(), Some(0), "{}", stderr(&staged));
+    assert!(
+        git_text(&root, &["ls-files", "--stage"]).contains("music/london.orna"),
+        "the legacy row file is staged"
+    );
+}
