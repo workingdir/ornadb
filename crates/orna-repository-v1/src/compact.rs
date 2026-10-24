@@ -4527,6 +4527,13 @@ impl fmt::Display for CompactSegmentRole {
     }
 }
 
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+mod legacy_fixture_writer;
+#[cfg(feature = "legacy-fixture-writer")]
+mod legacy_fixture_builder;
+#[cfg(feature = "legacy-fixture-writer")]
+pub use legacy_fixture_builder::write_legacy_format1_fixture;
+
 #[cfg(test)]
 mod legacy_reader_tests;
 
