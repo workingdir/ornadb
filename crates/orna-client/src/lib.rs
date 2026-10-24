@@ -145,7 +145,6 @@ pub mod endpoint;
 pub mod inspect_lifecycle;
 pub mod inspect_session;
 pub mod live_bootstrap;
-pub mod live_presentation;
 pub mod live_session;
 pub mod live_transport;
 pub mod page_state;
@@ -187,10 +186,6 @@ pub use inspect_session::{
 pub use live_bootstrap::{
     BootstrappedLiveAttachment, LiveBootstrapError, LiveReconnectCause, LiveReconnectError,
     LiveReconnectFailure, PrefetchedBinaryTransport,
-};
-pub use live_presentation::{
-    LivePresentationError, LivePresentationUpdate, PublishedPresentation, ResyncRequest,
-    WatchPresentation,
 };
 pub use live_session::{
     AuthenticatedLiveTransport, LiveByteDriver, LiveDiagnostic, LiveSessionDriver,
