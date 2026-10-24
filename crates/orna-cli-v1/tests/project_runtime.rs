@@ -836,6 +836,11 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         .await
         .expect("seed durable pending mutation");
 
+    // The seeding writer has exited before the CLI starts. A live in-process
+    // runtime still holds the worktree owner lock, and ORNA-TURSO-004/005
+    // require a concurrent `orna run` to fail rather than share that writer.
+    drop(state);
+
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
@@ -1238,6 +1243,10 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             && integer(row, "quantity") == 4
     }));
 
+    // The previous writer has exited; release its owner lock so this run is a
+    // fresh process taking over a departed lease (ORNA-TASK-003).
+    drop(state);
+
     let duplicate = invoke(directory.path(), "run", "seed");
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("error[E2200]"));
@@ -1264,6 +1273,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             .len(),
         2
     );
+
+    // Release the duplicate-check writer so the next run is a fresh process.
+    drop(duplicate_state);
 
     let exercise = invoke(directory.path(), "run", "exercise");
     assert!(
