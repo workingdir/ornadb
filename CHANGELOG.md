@@ -348,6 +348,8 @@ been published.
 
 - `orna migrate copy` reports a source whose format context cannot be admitted as `E2100` titled `migration source could not be admitted: <cause>`, with the cause's `ORNA-REPO-CONTEXT-*` code, and creates no destination.
 
+- `orna run` and the streaming project invocation keep the underlying failure on `E2200`. A runtime error carries its `sys.*` public code when it has one, otherwise its non-disclosing display text; a legacy read-only head refusal carries its `ORNA-REPO-CONTEXT-*` code and names its remedy in the help line. A streaming failure carries the runtime stream-failure label and no evaluator nested causes. Nested cause codes apply to `orna run` only: an evaluator rejection lists each nested cause code the evaluator itself emits, and redacts any other code, including a user-authored `ORNA-*` code. These details render with `--debug` only, per ORNA-UX-004. Evaluator spans and the shared source diagnostic remain open under ornadb-5il1.152 and ornadb-5il1.101.
+
 - Format-3 store-only publication validates canonical row keys without legacy
   loose-row path resolution, including no-op preparation.
 
