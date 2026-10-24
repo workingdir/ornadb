@@ -588,6 +588,16 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertIsNone(baseline_status(entry, "workspace-rest", ignored_only, []))
         self.assertEqual(baseline_status(entry, "workspace-rest", with_pass, []), "passed")
 
+    def test_a_known_failure_whose_test_left_its_finished_target_is_missing(self) -> None:
+        # M4: an entry for a renamed or deleted test can never be observed again.
+        entry = KnownFailure("orna-demo-v1", "lib", "codec::tests::gone", "ornadb-5il1.1", "known")
+        renamed = [target("orna-demo-v1", "lib", {"codec::tests::renamed": "passed"})]
+        ignored = [target("orna-demo-v1", "lib", {"codec::tests::gone": "ignored"})]
+        unfinished = [target("orna-demo-v1", "lib", {}, completed=False)]
+        self.assertEqual(baseline_status(entry, "workspace-rest", renamed, []), "missing")
+        self.assertIsNone(baseline_status(entry, "workspace-rest", ignored, []))
+        self.assertIsNone(baseline_status(entry, "workspace-rest", unfinished, []))
+
     def test_a_missing_expected_record_is_not_executed_for_a_selector_without_a_record_key(self) -> None:
         # M2: an unfinished record must never let an item read as passed.
         records = {"workspace-rest": record("workspace-rest", "passed", [target("orna-demo-v1", "lib", {"round_trips": "passed"})])}
@@ -688,8 +698,8 @@ class ReviewFindingTests(unittest.TestCase):
             item = next(i for i in manifest.items if i["id"] == item_id)
             self.assertTrue(all(sel["record"] == "workspace-cli" for sel in item["select"]), item_id)
 
-    def test_summarize_rejects_a_foreign_commit_and_a_known_failure_that_passed(self) -> None:
-        # M9: with --expect-commit, records from another commit and a passing known failure are problems.
+    def summarize_known_failure(self, status: str, entry_options: str, expect_commit: str) -> tuple[int, dict]:
+        """Summarize one record of commit a*40 that gives a baselined test this status; return the exit code and summary."""
         with TemporaryDirectory() as directory:
             root = Path(directory)
             records = root / "records"
@@ -708,7 +718,7 @@ class ReviewFindingTests(unittest.TestCase):
                         "target": "lib",
                         "test": "codec::tests::rejects_bad_tag",
                         "record": "workspace-rest",
-                        "status": "passed",
+                        "status": status,
                     }
                 ],
             )
@@ -741,20 +751,60 @@ class ReviewFindingTests(unittest.TestCase):
                     bead = "ornadb-5il1.1"
                     reason = "pinned"
                     """
-                ),
+                )
+                + entry_options,
                 encoding="utf-8",
             )
             out = root / "summary.json"
             argv = [
                 "summarize", "--records", str(records), "--out", str(out), "--items", str(items),
-                "--baseline", str(baseline), "--expect-commit", "b" * 40,
+                "--baseline", str(baseline), "--expect-commit", expect_commit,
             ]
 
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                self.assertEqual(main(argv), 1)
-            problems = json.loads(out.read_text(encoding="utf-8"))["problems"]
-            self.assertTrue(any("records must test " + "b" * 40 in problem for problem in problems), problems)
-            self.assertTrue(any("remove its baseline entry" in problem for problem in problems), problems)
+                code = main(argv)
+            return code, json.loads(out.read_text(encoding="utf-8"))
+
+    def test_summarize_rejects_a_foreign_commit_and_a_known_failure_that_passed(self) -> None:
+        # M9: with --expect-commit, records from another commit and a passing known failure are problems.
+        code, summary = self.summarize_known_failure("passed", "", "b" * 40)
+
+        self.assertEqual(code, 1)
+        problems = summary["problems"]
+        self.assertTrue(any("records must test " + "b" * 40 in problem for problem in problems), problems)
+        self.assertTrue(any("remove its baseline entry" in problem for problem in problems), problems)
+
+    def test_summarize_keeps_an_intermittent_known_failure_that_passed(self) -> None:
+        # M4: a test that fails only on some runs is not stale when one run passes it.
+        code, summary = self.summarize_known_failure("passed", "intermittent = true\n", "a" * 40)
+
+        self.assertEqual(summary["problems"], [])
+        self.assertEqual(code, 0)
+        self.assertEqual([(entry["status"], entry["intermittent"]) for entry in summary["baseline"]], [("passed", True)])
+
+    def test_summarize_rejects_a_known_failure_whose_test_no_longer_exists(self) -> None:
+        # M4: the entry's target finished without the test, so the entry hides nothing and must go.
+        code, summary = self.summarize_known_failure("missing", "intermittent = true\n", "a" * 40)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            summary["problems"],
+            [
+                "known failure codec::tests::rejects_bad_tag is not a test of orna-demo-v1 lib on "
+                + "a" * 40
+                + ": remove or rename its baseline entry"
+            ],
+        )
+
+    def test_baseline_intermittent_must_be_a_boolean(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.toml"
+            entry = 'package = "orna-demo-v1"\ntarget = "lib"\ntest = "t"\nbead = "ornadb-x"\nreason = "r"\n'
+            path.write_text("[[failure]]\n" + entry + 'intermittent = "yes"\n', encoding="utf-8")
+            with self.assertRaisesRegex(EvidenceError, "intermittent must be true or false"):
+                load_baseline(path)
+            path.write_text("[[failure]]\n" + entry + "intermittent = true\n", encoding="utf-8")
+            self.assertTrue(load_baseline(path)[0].intermittent)
 
 
 # Answers `cargo metadata` from $FAKE_CARGO_METADATA, logs every call to $FAKE_CARGO_CALLS and, like
