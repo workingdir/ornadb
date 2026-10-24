@@ -261,7 +261,10 @@ fn format3_modules_beside_a_table_are_not_loose_rows() {
         ("sensors/input.orna", "pub fn reading(): Int = 1;\n"),
         ("sensors/main.orna", "pub fn unused(): Int = 2;\n"),
         ("sensors/notes.txt", "not a row\n"),
-        ("Musicals/london.orna", "{\n    title: \"Not a Music row\",\n}\n"),
+        (
+            "Musicals/london.orna",
+            "{\n    title: \"Not a Music row\",\n}\n",
+        ),
         (".orna/database.orna", FORMAT3_DATABASE),
         (".orna/store/data", "format-3 row graph"),
     ]);
