@@ -2030,15 +2030,7 @@ fn run_project_invocation_with_arguments(
                     arguments,
                 ),
         )
-        .map_err(|error| {
-            let mut diagnostic = Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            );
-            diagnostic.detail = Some(runtime_failure_detail(&error));
-            diagnostic
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
@@ -2117,26 +2109,10 @@ fn run_project_stream_invocation_with_project(
                     root_entry,
                 ),
         )
-        .map_err(|error| {
-            let mut invocation = Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            );
-            invocation.detail = Some(runtime_failure_detail(&error));
-            invocation
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => {
-            let mut delivery = Diagnostic::target(
-                "E2200",
-                "durable project stream delivery failed",
-                "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
-            );
-            delivery.detail = Some(failure_detail(&diagnostic));
-            Err(delivery)
-        }
+        StageOutcome::Failed(diagnostic) => Err(stream_delivery_failed(&diagnostic)),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
@@ -2183,6 +2159,31 @@ fn failure_detail(diagnostic: &orna_foundation_v1::Diagnostic) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("failure code: {} (causes: {codes})", diagnostic.code())
+}
+
+/// Maps a failed durable project invocation to `E2200`. The runtime's public
+/// code, or its non-disclosing display text, is carried in the detail, which
+/// renders only with `--debug` (ORNA-UX-004).
+fn durable_invocation_failed(error: &orna_runtime_v1::RuntimeError) -> Diagnostic {
+    let mut diagnostic = Diagnostic::target(
+        "E2200",
+        "durable project invocation failed",
+        "retry the project transaction after checking its durable state",
+    );
+    diagnostic.detail = Some(runtime_failure_detail(error));
+    diagnostic
+}
+
+/// Maps a stream delivery the runtime rolled back to `E2200`, carrying the
+/// evaluator failure code and its nested cause codes in the `--debug` detail.
+fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
+    let mut delivery = Diagnostic::target(
+        "E2200",
+        "durable project stream delivery failed",
+        "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
+    );
+    delivery.detail = Some(failure_detail(diagnostic));
+    delivery
 }
 fn run_pure_invocation(
     endpoint: &Endpoint,
@@ -4227,6 +4228,66 @@ mod tests {
         assert_eq!(
             String::from_utf8(colored).expect("diagnostic is UTF-8"),
             "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
+        );
+    }
+
+    #[test]
+    fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::AdminBusy);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: sys.admin.busy")
+        );
+
+        let mut plain = Vec::new();
+        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain write");
+        let plain = String::from_utf8(plain).expect("diagnostic is UTF-8");
+        assert!(!plain.contains("sys.admin.busy"), "plain output: {plain}");
+        assert!(!plain.contains("runtime failure"), "plain output: {plain}");
+
+        let mut debug = Vec::new();
+        write_diagnostic(&mut debug, &diagnostic, false, true).expect("debug write");
+        let debug = String::from_utf8(debug).expect("diagnostic is UTF-8");
+        assert!(
+            debug.contains("runtime failure: sys.admin.busy"),
+            "debug output: {debug}"
+        );
+    }
+
+    #[test]
+    fn durable_invocation_failure_without_public_code_carries_display_text() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::LeaseHeld);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: runtime writer is held")
+        );
+    }
+
+    #[test]
+    fn stream_delivery_failure_lists_evaluator_and_nested_cause_codes() {
+        let severity = orna_foundation_v1::DiagnosticSeverity::Error;
+        let message = || orna_foundation_v1::SafeText::new("redacted").expect("safe text");
+        let cause = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("cause diagnostic");
+        let failure = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("failure diagnostic")
+        .with_cause(cause);
+
+        let delivery = stream_delivery_failed(&failure);
+        assert_eq!(delivery.code, "E2200");
+        assert_eq!(
+            delivery.detail.as_deref(),
+            Some("failure code: ORNA-EVAL-SURFACE (causes: ORNA-EVAL-DIVIDE-BY-ZERO)")
         );
     }
 
