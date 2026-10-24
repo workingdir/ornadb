@@ -546,9 +546,9 @@ fn commit_refuses_changed_loose_row_in_format3_repository() {
 #[test]
 fn add_row_stages_loose_row_on_unborn_branch_with_legacy_marker() {
     const LEGACY_FORMAT: &str =
-        include_str!("../../orna-repository-v1/tests/fixtures/format-context/format-1-ornadb-1.0.orna");
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
     const SIDECAR_DATABASE: &str =
-        include_str!("../../orna-repository-v1/tests/fixtures/format-context/database-sidecar.orna");
+        include_str!("fixtures/format-context/database-sidecar.orna");
     let directory = TempDir::new().unwrap();
     let root = directory.path().join("music");
     let init = run(directory.path(), &["init", root.to_str().unwrap()]);
