@@ -408,20 +408,61 @@ fn edit_via_owner(
         rustix::fs::XattrFlags::empty(),
     ) {
         Ok(()) => Ok(()),
-        Err(error) if error == rustix::io::Errno::STALE => Err(edit_refusal(
-            crate::fuse_mount::EditError::Stale(format!(
-                "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
-                draft.display()
-            )),
-        )),
-        Err(error) => Err(mount_error(
+        Err(error) => settle_owner_reply(Err(error), &draft),
+    }
+}
+
+/// Settles the owner's reply to `user.orna.edit-commit`.
+///
+/// The owner answers a refused request with a definite errno (`EBUSY`,
+/// `ESTALE`, `EIO`, `EINVAL`, `ENODATA`) and retains the draft. Any other
+/// errno means the reply never arrived, so the owner may have committed before
+/// it ended. The retained draft is the request identity: the owner removes it
+/// only after an accepted commit (ORNA-ADMIN-003). A missing draft therefore
+/// means the edit was accepted; a present draft leaves the outcome unknown.
+#[cfg(target_os = "linux")]
+fn settle_owner_reply(
+    reply: Result<(), rustix::io::Errno>,
+    draft: &Path,
+) -> Result<(), Diagnostic> {
+    let error = match reply {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if error == rustix::io::Errno::STALE {
+        return Err(edit_refusal(crate::fuse_mount::EditError::Stale(format!(
+            "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
+            draft.display()
+        ))));
+    }
+    let definite_refusal = [
+        rustix::io::Errno::BUSY,
+        rustix::io::Errno::IO,
+        rustix::io::Errno::INVAL,
+        rustix::io::Errno::NODATA,
+    ]
+    .contains(&error);
+    if definite_refusal {
+        return Err(mount_error(
             "Edit was not accepted",
             format!(
                 "mounted workspace refused the edit ({error}); draft retained at {}",
                 draft.display()
             ),
-        )),
+        ));
     }
+    if !draft.exists() {
+        return Ok(());
+    }
+    Err(Diagnostic::target_with_detail(
+        "E2010",
+        "Edit outcome is unknown",
+        "run `orna status` to inspect the durable row before retrying the retained draft",
+        format!(
+            "the mount connection ended before the owner replied ({error}); the draft at {} is still present, so the edit may or may not have been accepted",
+            draft.display()
+        ),
+    ))
 }
 
 /// One Orna FUSE mount from `/proc/self/mountinfo`.
@@ -1235,6 +1276,77 @@ mod tests {
     fn escape_json_leaves_ordinary_paths_unchanged() {
         assert_eq!(escape_json("/mnt/library"), "/mnt/library");
         assert_eq!(escape_json("tab\there"), "tab\\there");
+    }
+
+    #[cfg(target_os = "linux")]
+    mod owner_reply {
+        use super::super::settle_owner_reply;
+        use rustix::io::Errno;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+
+        fn retained_draft(directory: &Path) -> PathBuf {
+            let draft = directory.join("orna-edit-1.draft");
+            fs::write(&draft, b"candidate\n").unwrap();
+            draft
+        }
+
+        #[test]
+        fn accepted_reply_is_success() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            assert!(settle_owner_reply(Ok(()), &draft).is_ok());
+        }
+
+        #[test]
+        fn lost_reply_with_draft_retained_is_an_unknown_outcome() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            let diagnostic = settle_owner_reply(Err(Errno::NOTCONN), &draft)
+                .expect_err("a retained draft leaves the outcome unknown");
+            assert_eq!(diagnostic.code, "E2010");
+            assert_eq!(&*diagnostic.title, "Edit outcome is unknown");
+            assert!(diagnostic.help.contains("orna status"), "{}", diagnostic.help);
+            let detail = diagnostic.detail.unwrap_or_default();
+            assert!(detail.contains(&draft.display().to_string()), "{detail}");
+        }
+
+        #[test]
+        fn lost_reply_after_an_accepted_commit_is_success() {
+            // The owner removes the draft when a commit is accepted, before it
+            // replies (admit_edit_result). A lost reply then finds no draft.
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            fs::remove_file(&draft).unwrap();
+            assert!(settle_owner_reply(Err(Errno::NOTCONN), &draft).is_ok());
+        }
+
+        #[test]
+        fn definite_refusals_are_never_reclassified_as_unknown() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            for present in [true, false] {
+                if !present {
+                    fs::remove_file(&draft).unwrap();
+                }
+                for errno in [Errno::BUSY, Errno::IO, Errno::INVAL, Errno::NODATA] {
+                    let diagnostic = settle_owner_reply(Err(errno), &draft)
+                        .expect_err("a definite refusal is an error");
+                    assert_eq!(diagnostic.code, "E2000", "{errno}");
+                    assert_eq!(&*diagnostic.title, "Edit was not accepted", "{errno}");
+                }
+            }
+        }
+
+        #[test]
+        fn stale_reply_is_a_stale_refusal() {
+            let directory = tempfile::tempdir().unwrap();
+            let draft = retained_draft(directory.path());
+            let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
+                .expect_err("a stale baseline is refused");
+            assert_eq!(diagnostic.code, "E2000");
+            assert_eq!(&*diagnostic.title, "Edit is stale against the mounted baseline");
+        }
     }
 }
 

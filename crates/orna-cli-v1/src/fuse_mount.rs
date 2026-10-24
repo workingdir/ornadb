@@ -1447,6 +1447,9 @@ pub(super) fn spawn_read_only(
     fuser::spawn_mount(filesystem, mountpoint, &config)
         .map_err(|error| format!("FUSE mount could not be created: {error}"))
 }
+/// The editor mount omits `AllowOther`, so the kernel admits only the mounting
+/// uid. The owner's control handler therefore does not check the caller uid
+/// (`_request` is unused): same-user access is the access boundary.
 pub(super) fn spawn_editor(
     repository: &Repository,
     commit: &GitCommitRef,
@@ -1757,13 +1760,7 @@ impl WorkspaceFilesystem {
         if !in_store {
             return Err("edit draft is outside the editor draft store".into());
         }
-        let metadata = fs::symlink_metadata(draft)
-            .map_err(|error| format!("edit draft could not be inspected: {error}"))?;
-        if !metadata.file_type().is_file() {
-            return Err("edit draft is not a regular file".into());
-        }
-        let candidate = fs::read(draft)
-            .map_err(|error| format!("edited candidate could not be read: {error}"))?;
+        let candidate = read_regular_draft(draft)?;
         // ORNA-VFS-015: `edit --row` is this mount's own grouped row save, so the
         // mount records the row it accepted and its next save compares against it
         // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
@@ -1772,6 +1769,32 @@ impl WorkspaceFilesystem {
         self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
             .commit(&candidate, draft, grouped_row)
     }
+}
+
+/// Reads an editor draft through one descriptor opened without following a
+/// symbolic link, so the regular-file check and the read name the same inode.
+/// `O_NONBLOCK` keeps a FIFO from stalling the open before the check rejects it.
+fn read_regular_draft(draft: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let descriptor = rustix::fs::open(
+        draft,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| format!("edit draft could not be opened: {error}"))?;
+    let stat = rustix::fs::fstat(&descriptor)
+        .map_err(|error| format!("edit draft could not be inspected: {error}"))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err("edit draft is not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(descriptor)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("edited candidate could not be read: {error}"))?;
+    Ok(bytes)
 }
 
 pub(super) fn edit_path(
@@ -1797,7 +1820,7 @@ pub(super) fn edit_path(
             draft_path.display()
         ))
     })?;
-    prepared.commit(&candidate, &draft_path, true)
+    prepared.commit(&candidate, &draft_path, grouped_row)
 }
 #[derive(Debug)]
 pub(super) enum UnmountPreparationError {
@@ -5976,5 +5999,18 @@ mod hardening_tests {
         }
         let error = create_editor_draft(runtime.path()).unwrap_err();
         assert!(error.contains("editor draft store is full"), "{error}");
+    }
+
+    #[test]
+    fn owner_draft_read_refuses_a_symlink_and_reads_a_regular_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("elsewhere");
+        std::fs::write(&target, b"outside the draft store").unwrap();
+        let draft = directory.path().join("orna-edit-1.draft");
+        std::os::unix::fs::symlink(&target, &draft).unwrap();
+        assert!(super::read_regular_draft(&draft).is_err());
+        std::fs::remove_file(&draft).unwrap();
+        std::fs::write(&draft, b"candidate").unwrap();
+        assert_eq!(super::read_regular_draft(&draft).unwrap(), b"candidate");
     }
 }
