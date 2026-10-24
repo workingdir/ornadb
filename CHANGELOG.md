@@ -5,11 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- Managed paths refuse any `.git` component at any depth, in any letter case,
-  including Windows-equivalent spellings (trailing dot or space, `git~1`, a
-  `:` stream suffix and HFS ignorable characters), on write and on load of a
-  committed tree. Length is no longer capped, because Git stores names of any
-  length; the checkout plan still lists user paths such as `Sub/.GIT/notes`.
+- Managed paths refuse a `.git` component at any depth and in any letter case,
+  including the Windows and macOS spellings Git refuses (trailing dot or space,
+  `git~1`, a `:` stream suffix and HFS ignorable characters), on write and when
+  a committed tree is loaded or listed. Before, only an exact `.git` first
+  component was refused. Path length is not capped, because Git stores names of
+  any length. Untracked user paths such as `Sub/.GIT/notes` still appear in
+  status and checkout plans, and a forced checkout leaves them in place.
+  `orna export --check` and `--restore` refuse an archive whose dependency path
+  names Git metadata before anything is restored.
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
