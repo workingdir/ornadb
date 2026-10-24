@@ -34,11 +34,17 @@ use unicode_normalization::UnicodeNormalization;
 mod attachments;
 mod unicode16;
 mod object_identity;
+mod table_storage;
 
 pub use object_identity::{
     ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectIdentityRename,
     ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
     OBJECT_IDENTITY_MANIFEST_PATH,
+};
+pub use table_storage::{
+    CommittedTable, TableStorageError, admitted_table_schemas, blob_placeholder, committed_tables,
+    evaluator_rows, has_text_primary_key, holds_blob, restore_stored_blobs,
+    runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
 };
 
 pub use attachments::{
@@ -52,6 +58,13 @@ pub use attachments::{
 ///
 /// These are implementation resource limits: a loader may configure them, and
 /// each one is reported by its own error when exceeded (ORNA-CLOSURE-004).
+///
+/// The committed source tree walk also runs under fixed bounds that are not
+/// configurable here. A breach is reported as
+/// [`ProjectLoadError::SourceTreeLimit`] before git expands the tree: at most
+/// 2^20 visited entries (every interior tree and every listed entry, counting
+/// each occurrence of a shared subtree), at most 2^27 listed path bytes, and
+/// nesting depth at most 256.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProjectLimits {
     /// Maximum reachable modules loaded and parsed.
@@ -502,13 +515,13 @@ pub fn admit_format3_row(
         .iter()
         .map(|field| field.name.as_str())
         .collect::<BTreeSet<_>>();
-    let stored_field_names = fields
+    let stored_names = fields
         .iter()
         .filter(|field| field.role == 1)
         .map(|field| field.name.as_str())
         .collect::<BTreeSet<_>>();
     if row_fields.keys().any(|name| {
-        !key_field_names.contains(*name) && !stored_field_names.contains(*name)
+        !key_field_names.contains(*name) && !stored_names.contains(*name)
     }) {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -1178,6 +1191,13 @@ impl ProjectLoader {
             |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
             |tables, total_bytes| {
                 if has_format3_database {
+                    refuse_written_format3_loose_rows(
+                        repository,
+                        candidate,
+                        &snapshot.row_paths,
+                        tables,
+                        self.limits,
+                    )?;
                     Ok(Vec::new())
                 } else {
                     discover_private_candidate_rows(
@@ -1666,6 +1686,7 @@ pub enum ProjectLoadError {
     SourceUnavailable,
     SourceTooLarge,
     RepositoryLimit,
+    SourceTreeLimit,
     ModuleLimit,
     InvalidModule {
         logical_path: String,
@@ -1692,13 +1713,16 @@ impl fmt::Display for ProjectLoadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Repository(_) => "could not discover the Git worktree",
-            Self::FormatContext(_) => "repository format metadata is invalid",
+            // The admission error says which metadata or path failed, such as
+            // the entry or row file that mixes formats.
+            Self::FormatContext(error) => return write!(formatter, "{error}"),
             Self::RootUnavailable => "could not resolve the Git worktree",
             Self::UnsafePath => "project contains an unsafe module path",
             Self::Symlink => "project module path contains a symbolic link",
             Self::SourceUnavailable => "reachable source module is unavailable",
             Self::SourceTooLarge => "project source exceeds the configured limit",
             Self::RepositoryLimit => "project exceeds the configured source-module limit",
+            Self::SourceTreeLimit => "committed source tree exceeds the fixed walk limit",
             Self::ModuleLimit => "project exceeds the configured module limit",
             Self::InvalidModule { .. } => "reachable source module is not a valid module unit",
             Self::InvalidRowUnit { .. } => "reachable row unit is not a valid row unit",
@@ -1835,7 +1859,7 @@ fn validate_committed_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_committed_source_tree(commit)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
 }
 
@@ -1846,8 +1870,18 @@ fn validate_private_candidate_tree(
 ) -> Result<ValidatedSnapshotTree, ProjectLoadError> {
     let entries = repository
         .list_private_candidate_source_tree(candidate)
-        .map_err(ProjectLoadError::Repository)?;
+        .map_err(source_tree_load_error)?;
     validate_snapshot_tree(entries, limits)
+}
+
+/// A source tree over the fixed walk limit is reported as
+/// [`ProjectLoadError::SourceTreeLimit`], and every other repository failure
+/// stays a repository error.
+fn source_tree_load_error(error: RepositoryError) -> ProjectLoadError {
+    match error {
+        RepositoryError::SourceTreeLimit => ProjectLoadError::SourceTreeLimit,
+        error => ProjectLoadError::Repository(error),
+    }
 }
 
 fn validate_snapshot_tree(
@@ -2192,6 +2226,67 @@ fn discover_private_candidate_rows(
             })
         })
         .collect()
+}
+
+/// Refuses a format-3 commit candidate that writes a loose row file.
+///
+/// Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004), so a `.orna`
+/// file at a table's row path, `<table>/<key>.orna`, is the legacy loose-row
+/// layout. A candidate that adds or changes one would make the writer produce
+/// a mixed snapshot (ORNA-META-001, ORNA-UPGRADE-003; Gate A, "unknown/mixed
+/// formats fail early"), so it is refused by path before anything is staged.
+/// The candidate is captured on `HEAD`: a row file `HEAD` already commits with
+/// the same bytes is not written by it, and format-3 readers leave it unread.
+fn refuse_written_format3_loose_rows(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    row_paths: &BTreeSet<String>,
+    table_paths: &BTreeSet<String>,
+    limits: ProjectLimits,
+) -> Result<(), ProjectLoadError> {
+    let mut row_files = row_paths
+        .iter()
+        .filter(|logical_path| table_owner_and_key(logical_path, table_paths).is_some())
+        .peekable();
+    if row_files.peek().is_none() {
+        return Ok(());
+    }
+    let head = repository.head().map_err(ProjectLoadError::Repository)?;
+    let committed: BTreeSet<String> = match &head {
+        Some(head) => repository
+            .list_committed_source_tree(head)
+            .map_err(ProjectLoadError::Repository)?
+            .into_iter()
+            .filter(|entry| matches!(entry.kind(), CommittedTreeEntryKind::File { .. }))
+            .filter_map(|entry| entry.path().as_path().to_str().map(str::to_owned))
+            .collect(),
+        None => BTreeSet::new(),
+    };
+    for logical_path in row_files {
+        let unchanged = match &head {
+            Some(head) if committed.contains(logical_path) => {
+                repository
+                    .read_committed_file(head, logical_path, limits.max_source_bytes)
+                    .map_err(ProjectLoadError::Repository)?
+                    == repository
+                        .read_private_candidate_file(
+                            candidate,
+                            logical_path,
+                            limits.max_source_bytes,
+                        )
+                        .map_err(ProjectLoadError::Repository)?
+            }
+            _ => false,
+        };
+        if !unchanged {
+            return Err(ProjectLoadError::FormatContext(
+                FormatContextError::MixedFormats {
+                    path: logical_path.clone(),
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn table_owner_and_key(

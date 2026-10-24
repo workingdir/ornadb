@@ -1,11 +1,11 @@
 (
-    collection_ops.distinct(
+    distinct(
         collection_ops.flatten(
-            collection_ops.map(
+            map(
                 collection_ops.window(
                     query_ops.recursive_cte(
-                        collection_ops.filter(
-                            collection_ops.flat_map(
+                        filter(
+                            flat_map(
                                 [10, 0, 20],
                                 parent => [parent * 10 + 1, parent * 10 + 1]
                             ),
@@ -16,17 +16,17 @@
                     2,
                     1
                 ),
-                frame => collection_ops.distinct(frame)
+                frame => distinct(frame)
             )
         )
     ),
-    collection_ops.distinct(
+    distinct(
         collection_ops.flatten(
-            collection_ops.map(
+            map(
                 collection_ops.window(
                     query_ops.recursive_cte(
-                        collection_ops.filter(
-                            collection_ops.flat_map(
+                        filter(
+                            flat_map(
                                 [30, 0, 20],
                                 parent => [parent * 10 + 1, parent * 10 + 1]
                             ),
@@ -37,7 +37,7 @@
                     2,
                     1
                 ),
-                frame => collection_ops.distinct(frame)
+                frame => distinct(frame)
             )
         )
     )
