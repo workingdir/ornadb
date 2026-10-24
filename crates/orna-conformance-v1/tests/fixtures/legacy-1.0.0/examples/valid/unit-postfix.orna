@@ -1,0 +1,2 @@
+pub fn converted(speed: Float<mph>) = speed.mph;
+pub fn duration() = 90.min;

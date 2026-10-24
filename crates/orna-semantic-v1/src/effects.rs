@@ -71,7 +71,6 @@ pub fn host_effect(path: &[&str]) -> Option<EffectKind> {
         ["std", "concurrent", "sleep"] => Clock,
         ["std", "random", ..] => Randomness,
         ["std", "secret", "open"] => SecretAccess,
-        ["std", "ui", ..] => Ui,
         ["sys", "io", ..] => Filesystem,
         ["sys", "net", ..] => Network,
         ["sys", "process", ..] => Process,
@@ -129,7 +128,7 @@ mod tests {
     /// one kind, and together the host classes cover every non-table kind.
     #[test]
     fn host_classification_covers_every_host_kind() {
-        let cases: [(&[&str], EffectKind); 26] = [
+        let cases: [(&[&str], EffectKind); 25] = [
             (&["std", "net", "http", "get"], EffectKind::Network),
             (&["std", "io", "fs", "read"], EffectKind::Filesystem),
             (&["std", "io", "process", "run"], EffectKind::Process),
@@ -137,7 +136,6 @@ mod tests {
             (&["std", "concurrent", "sleep"], EffectKind::Clock),
             (&["std", "random", "dice"], EffectKind::Randomness),
             (&["std", "secret", "open"], EffectKind::SecretAccess),
-            (&["std", "ui", "text"], EffectKind::Ui),
             (&["sys", "io", "read"], EffectKind::Filesystem),
             (&["sys", "net", "get"], EffectKind::Network),
             (&["sys", "process", "run"], EffectKind::Process),
@@ -170,11 +168,12 @@ mod tests {
         assert_eq!(covered, host_kinds);
     }
 
-    /// Pure `sys` and `std` operations, including read-class admin plans and
-    /// the in-memory blob writer, touch no host resource.
+    /// Pure `sys` and `std` operations, including read-class admin plans, the
+    /// in-memory blob writer and the `std.ui` presentation constructors
+    /// (09-standard-library.md:156-158), touch no host resource.
     #[test]
     fn pure_operations_have_no_host_effect() {
-        let paths: [&[&str]; 8] = [
+        let paths: [&[&str]; 9] = [
             &["sys", "admin", "plan_checkout"],
             &["sys", "admin", "review_commit"],
             &["sys", "blob", "begin"],
@@ -182,6 +181,7 @@ mod tests {
             &["sys", "blob", "read"],
             &["sys", "git", "commits"],
             &["std", "secret", "ref"],
+            &["std", "ui", "text"],
             &["user", "fetch"],
         ];
         for path in paths {

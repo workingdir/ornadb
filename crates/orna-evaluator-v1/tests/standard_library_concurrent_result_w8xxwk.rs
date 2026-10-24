@@ -32,7 +32,7 @@ fn result_enum(variant: u8, field: &str, value: Raw) -> Raw {
 }
 
 fn pinned_runtime() -> (Functions, NominalDefinitions) {
-    let selected = orna_standard::reference_standard_sources_v1()
+    let selected = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
             matches!(

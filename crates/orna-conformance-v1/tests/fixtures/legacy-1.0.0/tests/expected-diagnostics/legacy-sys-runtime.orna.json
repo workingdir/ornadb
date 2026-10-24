@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-sys-runtime.orna",
+  "failing_phase": "resolve",
+  "primary_diagnostic": "ORNA100-E-SYS-RUNTIME",
+  "message_contains": "`sys.runtime` was renamed to `sys.rt`",
+  "status": "expected-not-executed"
+}

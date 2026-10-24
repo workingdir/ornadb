@@ -44,9 +44,13 @@ on:
 permissions:
   contents: read
 
+# A push to main is keyed on its commit and never cancelled, so every merge keeps its
+# own fixture and editor artefact run (seven main runs on 2026-10-23 were cancelled by
+# a later push, four of them while running). Pull requests and manual runs still
+# cancel older runs of the same group.
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' && format('source-audits|focused|{0}|{1}|{2}|{3}|{4}', inputs.revision_sha, inputs.cargo_package, inputs.target_kind, inputs.integration_target, inputs.test_filter) || format('source-audits-{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' && format('source-audits|focused|{0}|{1}|{2}|{3}|{4}', inputs.revision_sha, inputs.cargo_package, inputs.target_kind, inputs.integration_target, inputs.test_filter) || format('source-audits-{0}-{1}', github.workflow, github.event_name == 'push' && github.sha || github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   fixture-and-editor-artifacts:
@@ -74,6 +78,9 @@ jobs:
       - name: Prove standard library pin checker behavior
         run: python3 -m unittest scripts.test_standard_library_pin
 
+      - name: Prove independent extractor behavior
+        run: python3 -m unittest scripts.test_orna_extract
+
       - name: Check standard library pin and Rust mirror
         run: python3 scripts/check_standard_library_pin.py --check
 
@@ -82,6 +89,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Prove citation scope equals the shipped-binary closure
+        run: cargo test --locked -p orna-traceability-v1 --test scan_scope_closure
       # This ratchets citations in test code, not conformance. To lower max_uncited, update the baseline only after reviewing the cited-ID output and preserving cited_ids.
 # When eligibility rules change, revalidate every dropped ID and set max_uncited to the corrected scan's exact uncited count.
       - name: Ratchet requirement citations (not conformance proof)
@@ -170,6 +180,23 @@ jobs:
 
       - name: Check Tree-sitter grammar syntax
         run: node --check editors/tree-sitter-orna/grammar.js
+
+      # The highlighter test runs each generated grammar in its real host and
+      # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
+      # missing.
+      - name: Install editor hosts for the highlighter test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox vim
+          npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
+            tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1
+          echo "ORNA_EDITOR_TOOLS=$RUNNER_TEMP/editor-tools" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/editor-tools/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Run every generated highlighter over the shared sample
+        env:
+          ORNA_REQUIRE_EDITORS: "1"
+        run: cargo test --locked -p orna-syntax-v1 --test editor_highlighters
 
   focused-consumer:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' }}

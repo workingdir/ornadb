@@ -1,0 +1,2 @@
+pub fn impact(object: sys.Object) =
+    sys.dependents(object.reference);

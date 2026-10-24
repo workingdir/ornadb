@@ -2,9 +2,9 @@
 """Build and verify the smallest installed Orna Linux artifact.
 
 The artifact is a deterministic root-relative tar archive containing exactly
-one executable and the two provenance manifests required by the installed
-command boundary.  It deliberately has no package-manager lifecycle hooks,
-network access, or runtime helper executable.
+one executable and the distribution manifest that binds it to its build
+inputs.  It deliberately has no package-manager lifecycle hooks, network
+access, runtime helper executable, or external database engine.
 """
 
 from __future__ import annotations
@@ -27,11 +27,9 @@ from typing import Iterable, NoReturn
 
 ARCHIVE_EXECUTABLE = "usr/bin/orna"
 ARCHIVE_DISTRIBUTION_MANIFEST = "usr/share/orna/distribution-manifest.toml"
-ARCHIVE_ENGINE_MANIFEST = "usr/share/orna/embedded-engine-manifest.json"
 ARCHIVE_MEMBERS = (
     ARCHIVE_EXECUTABLE,
     ARCHIVE_DISTRIBUTION_MANIFEST,
-    ARCHIVE_ENGINE_MANIFEST,
 )
 RUST_PATH_REMAP = "<repository>=/usr/src/orna"
 RUST_LINK_FLAGS = "-C link-arg=-Wl,--build-id=none"
@@ -219,22 +217,6 @@ def cargo_product_version(repository: Path) -> str:
     return version
 
 
-def builder_image_digest(engine: bytes) -> str:
-    try:
-        document = json.loads(engine)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        fail(f"embedded engine manifest is not valid JSON: {error}")
-    if not isinstance(document, dict) or document.get("format") != 1:
-        fail("embedded engine manifest format is not 1")
-    builder = document.get("builder")
-    if not isinstance(builder, dict):
-        fail("embedded engine manifest builder evidence is absent")
-    image_digest = builder.get("image_digest")
-    if not valid_digest(image_digest, prefix="sha256:"):
-        fail("embedded engine builder image digest is invalid")
-    return image_digest
-
-
 def parse_quoted(line: str, key: str) -> str | None:
     if not line.startswith(key):
         return None
@@ -246,10 +228,7 @@ def parse_quoted(line: str, key: str) -> str | None:
         return None
     return value
 
-
-def parse_distribution_manifest(
-    content: bytes, *, engine_sha256: str, executable_sha256: str
-) -> None:
+def parse_distribution_manifest(content: bytes, *, executable_sha256: str) -> None:
     if len(content) > MANIFEST_LIMIT:
         fail("distribution manifest is too large")
     try:
@@ -259,28 +238,21 @@ def parse_distribution_manifest(
     if not text.endswith("\n"):
         fail("distribution manifest has no final newline")
     lines = text[:-1].split("\n")
-    if len(lines) != 11 or lines[0] != "format = 1":
+    if len(lines) != 7 or lines[0] != "format = 1":
         fail("distribution manifest shape is not format 1")
     rustc = parse_quoted(lines[1], "rustc = ")
     cargo = parse_quoted(lines[2], "cargo = ")
-    builder = parse_quoted(lines[3], "builder_image = ")
-    lock = parse_quoted(lines[4], "cargo_lock_sha256 = ")
-    embedded = parse_quoted(lines[7], "embedded_engine_manifest_sha256 = ")
-    executable = parse_quoted(lines[10], "executable_sha256 = ")
+    lock = parse_quoted(lines[3], "cargo_lock_sha256 = ")
+    executable = parse_quoted(lines[6], "executable_sha256 = ")
     if (
         rustc is None
         or not rustc.startswith("rustc ")
         or cargo is None
         or not cargo.startswith("cargo ")
-        or builder is None
-        or not valid_digest(builder, prefix="sha256:")
         or lock is None
         or not valid_digest(lock)
-        or lines[5] != f'rust_path_remap = "{RUST_PATH_REMAP}"'
-        or lines[6] != f'rust_link_flags = "{RUST_LINK_FLAGS}"'
-        or embedded != engine_sha256
-        or lines[8] != "accepted_predecessor_engines = []"
-        or lines[9] != "supported_forward_edges = []"
+        or lines[4] != f'rust_path_remap = "{RUST_PATH_REMAP}"'
+        or lines[5] != f'rust_link_flags = "{RUST_LINK_FLAGS}"'
         or executable != executable_sha256
     ):
         fail("distribution manifest evidence does not bind package inputs")
@@ -290,54 +262,19 @@ def canonical_manifest(
     *,
     rustc: str,
     cargo: str,
-    builder_image: str,
     cargo_lock_sha256: str,
-    engine_sha256: str,
     executable_sha256: str,
 ) -> bytes:
     lines = [
         "format = 1",
         f"rustc = {quote_toml_string(rustc)}",
         f"cargo = {quote_toml_string(cargo)}",
-        f"builder_image = {quote_toml_string(builder_image)}",
         f"cargo_lock_sha256 = {quote_toml_string(cargo_lock_sha256)}",
         f"rust_path_remap = {quote_toml_string(RUST_PATH_REMAP)}",
         f"rust_link_flags = {quote_toml_string(RUST_LINK_FLAGS)}",
-        f"embedded_engine_manifest_sha256 = {quote_toml_string(engine_sha256)}",
-        "accepted_predecessor_engines = []",
-        "supported_forward_edges = []",
         f"executable_sha256 = {quote_toml_string(executable_sha256)}",
     ]
     return ("\n".join(lines) + "\n").encode("utf-8")
-
-
-def source_engine_path(
-    repository: Path, explicit: str | None, *, search_root: Path | None = None
-) -> Path:
-    candidates: list[Path] = []
-    if explicit:
-        candidates.append(input_path(explicit, "embedded engine manifest"))
-    elif os.environ.get("ORNA_EMBEDDED_ENGINE_OUTPUT"):
-        candidates.append(
-            input_path(
-                str(
-                    Path(os.environ["ORNA_EMBEDDED_ENGINE_OUTPUT"])
-                    / "embedded-engine-manifest.json"
-                ),
-                "embedded engine manifest",
-            )
-        )
-    else:
-        target = search_root or (repository / "target")
-        if target.is_dir():
-            candidates = sorted(
-                path
-                for path in target.rglob("embedded-engine-manifest.json")
-                if path.is_file() and not path.is_symlink()
-            )
-    if len(candidates) != 1:
-        fail("package requires exactly one embedded-engine-manifest.json input")
-    return input_path(str(candidates[0]), "embedded engine manifest")
 
 
 def prepare_build_target(repository: Path) -> Path:
@@ -392,13 +329,13 @@ def build_executable(repository: Path, source_date_epoch: int) -> Path:
         "--package",
         "orna-cli-v1",
         "--bin",
-        "orna-cli-v1",
+        "orna",
     ]
     try:
         subprocess.run(command, cwd=repository, env=environment, check=True)
     except (OSError, subprocess.CalledProcessError) as error:
         fail(f"the reproducible Orna build failed: {error}")
-    executable = target / "release" / "orna-cli-v1"
+    executable = target / "release" / "orna"
     if not executable.is_file() or executable.is_symlink():
         fail(f"the reproducible build did not produce {executable}")
     return executable
@@ -494,7 +431,6 @@ def verify_archive(
     for name, expected_mode in (
         (ARCHIVE_EXECUTABLE, 0o755),
         (ARCHIVE_DISTRIBUTION_MANIFEST, 0o644),
-        (ARCHIVE_ENGINE_MANIFEST, 0o644),
     ):
         member, _ = by_name[name]
         if member.uid != 0 or member.gid != 0:
@@ -504,13 +440,10 @@ def verify_archive(
         if expected_epoch is not None and member.mtime != expected_epoch:
             fail(f"package archive member has the wrong timestamp: {name}")
     executable = by_name[ARCHIVE_EXECUTABLE][1]
-    engine = by_name[ARCHIVE_ENGINE_MANIFEST][1]
     manifest = by_name[ARCHIVE_DISTRIBUTION_MANIFEST][1]
     if not executable:
         fail("packaged executable is empty")
-    parse_distribution_manifest(
-        manifest, engine_sha256=digest(engine), executable_sha256=digest(executable)
-    )
+    parse_distribution_manifest(manifest, executable_sha256=digest(executable))
     if not valid_linux_x86_64_elf(executable):
         fail("packaged executable is not a Linux x86_64 ELF")
     return members
@@ -725,17 +658,13 @@ def verify_replaceable_payload(root: int) -> None:
         fail("package replacement found a partial installed payload")
     executable, executable_metadata = present[ARCHIVE_EXECUTABLE]  # type: ignore[misc]
     manifest, manifest_metadata = present[ARCHIVE_DISTRIBUTION_MANIFEST]  # type: ignore[misc]
-    engine, engine_metadata = present[ARCHIVE_ENGINE_MANIFEST]  # type: ignore[misc]
     if (
         stat.S_IMODE(executable_metadata.st_mode) != 0o755
         or stat.S_IMODE(manifest_metadata.st_mode) != 0o644
-        or stat.S_IMODE(engine_metadata.st_mode) != 0o644
         or not valid_linux_x86_64_elf(executable)
     ):
         fail("installed package payload has an invalid mode or executable")
-    parse_distribution_manifest(
-        manifest, engine_sha256=digest(engine), executable_sha256=digest(executable)
-    )
+    parse_distribution_manifest(manifest, executable_sha256=digest(executable))
 
 
 def parent_is_current(root: int, relative: PurePosixPath, expected: int) -> bool:
@@ -803,46 +732,32 @@ def make_archive(args: argparse.Namespace) -> Path:
         fail("SOURCE_DATE_EPOCH must be an unsigned decimal")
     if epoch < 0 or epoch > 2**33 - 1:
         fail("SOURCE_DATE_EPOCH is outside the tar archive range")
-    if bool(args.executable) != bool(args.engine_manifest):
-        fail("--executable and --engine-manifest must be supplied together")
-    built_target: Path | None = None
     if args.executable:
         executable_path = input_path(args.executable, "package executable")
     else:
         executable_path = build_executable(repository, epoch)
-        built_target = repository / "target" / "linux-package"
     executable, executable_stat = read_stable_file(executable_path)
     source_mode = stat.S_IMODE(executable_stat.st_mode)
     if source_mode & 0o111 == 0 or source_mode & 0o6000:
         fail("package executable must be a non-empty regular executable file")
     if not valid_linux_x86_64_elf(executable):
         fail("package executable is not a Linux x86_64 ELF")
-    engine_path = source_engine_path(
-        repository, args.engine_manifest, search_root=built_target
-    )
-    engine, _ = read_stable_file(engine_path, mode=0o644)
-    builder_image = builder_image_digest(engine)
     product_version = cargo_product_version(repository)
     if not product_version:
         fail("workspace product version is empty")
     manifest = canonical_manifest(
         rustc=tool_version("rustc"),
         cargo=tool_version("cargo"),
-        builder_image=builder_image,
         cargo_lock_sha256=cargo_lock_digest(repository),
-        engine_sha256=digest(engine),
         executable_sha256=digest(executable),
     )
-    parse_distribution_manifest(
-        manifest, engine_sha256=digest(engine), executable_sha256=digest(executable)
-    )
+    parse_distribution_manifest(manifest, executable_sha256=digest(executable))
     output = Path(args.output).resolve() if args.output else repository / "target" / f"orna-{product_version}-linux-amd64.tar"
     write_archive(
         output,
         [
             (ARCHIVE_EXECUTABLE, executable, 0o755),
             (ARCHIVE_DISTRIBUTION_MANIFEST, manifest, 0o644),
-            (ARCHIVE_ENGINE_MANIFEST, engine, 0o644),
         ],
         epoch,
     )
@@ -858,11 +773,7 @@ def parser() -> argparse.ArgumentParser:
     build.add_argument("--repository", default=Path(__file__).resolve().parents[2])
     build.add_argument(
         "--executable",
-        help="explicit executable input; pair it with an engine manifest from the same build",
-    )
-    build.add_argument(
-        "--engine-manifest",
-        help="explicit engine input; pair it with an executable from the same build",
+        help="explicit Linux x86_64 executable input instead of a reproducible build",
     )
     build.add_argument("--output")
     build.add_argument("--source-date-epoch")

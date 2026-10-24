@@ -1,0 +1,127 @@
+{
+  "id": "vectors/float-order-and-statistics",
+  "version": "1.0.0",
+  "requirements": [
+    "ORNA-FLOAT-001",
+    "ORNA-FLOAT-002",
+    "ORNA-FLOAT-006",
+    "ORNA-FLOAT-007",
+    "ORNA-COMPACT-017"
+  ],
+  "ascending_total_order": [
+    {
+      "label": "negative quiet NaN",
+      "bits": "fff8000000000000"
+    },
+    {
+      "label": "negative signaling NaN",
+      "bits": "fff0000000000001"
+    },
+    {
+      "label": "negative infinity",
+      "bits": "fff0000000000000"
+    },
+    {
+      "label": "negative one",
+      "bits": "bff0000000000000"
+    },
+    {
+      "label": "negative zero",
+      "bits": "8000000000000000"
+    },
+    {
+      "label": "positive zero",
+      "bits": "0000000000000000"
+    },
+    {
+      "label": "positive one",
+      "bits": "3ff0000000000000"
+    },
+    {
+      "label": "positive infinity",
+      "bits": "7ff0000000000000"
+    },
+    {
+      "label": "positive signaling NaN",
+      "bits": "7ff0000000000001"
+    },
+    {
+      "label": "positive quiet NaN",
+      "bits": "7ff8000000000000"
+    }
+  ],
+  "ordinary_equality": [
+    {
+      "left": "8000000000000000",
+      "right": "0000000000000000",
+      "equal": true
+    },
+    {
+      "left": "7ff8000000000000",
+      "right": "7ff8000000000000",
+      "equal": false
+    },
+    {
+      "left": "3ff0000000000000",
+      "right": "3ff0000000000000",
+      "equal": true
+    }
+  ],
+  "aggregate": [
+    {
+      "operation": "min",
+      "inputs": [
+        "8000000000000000",
+        "0000000000000000"
+      ],
+      "result": "8000000000000000"
+    },
+    {
+      "operation": "max",
+      "inputs": [
+        "8000000000000000",
+        "0000000000000000"
+      ],
+      "result": "0000000000000000"
+    },
+    {
+      "operation": "min",
+      "inputs": [
+        "3ff0000000000000",
+        "7ff8000000000000"
+      ],
+      "result": "7ff8000000000000"
+    },
+    {
+      "operation": "max",
+      "inputs": [
+        "3ff0000000000000",
+        "7ff8000000000000"
+      ],
+      "result": "7ff8000000000000"
+    }
+  ],
+  "parquet_statistics": [
+    {
+      "values": [
+        "bff0000000000000",
+        "8000000000000000",
+        "0000000000000000",
+        "3ff0000000000000",
+        "7ff8000000000000"
+      ],
+      "nan_count": 1,
+      "min_non_nan": "bff0000000000000",
+      "max_non_nan": "3ff0000000000000"
+    },
+    {
+      "values": [
+        "7ff8000000000000",
+        "7ff8000000000000"
+      ],
+      "nan_count": 2,
+      "min_total": "7ff8000000000000",
+      "max_total": "7ff8000000000000"
+    }
+  ]
+}

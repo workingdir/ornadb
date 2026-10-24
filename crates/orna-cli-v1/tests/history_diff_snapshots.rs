@@ -25,7 +25,7 @@ const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 fn run_history(directory: &Path, arguments: &[&str]) -> Output {
     let mut words = vec!["history"];
     words.extend_from_slice(arguments);
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(&words)
         .current_dir(directory)
         .output()
@@ -54,8 +54,8 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
         )
         .unwrap();
     }
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
+    let song_source = object_source_row(source.path(), "song");
     let before = String::from_utf8(git_output(directory.path(), &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -82,7 +82,7 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
     let initial_row = [SourceCaptureRow {
         key: "song",
         blob_fields: &initial_fields,
-        source_row: None,
+        source_row: &song_source,
         ordinal: 0x90,
         insert_only: true,
     }];
@@ -99,7 +99,6 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
     let after = commit_source_row_to_native_graph(
         directory.path(),
         &repository,
-        &before,
         relation_id,
         &format_context,
         "song",
@@ -207,14 +206,9 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
         .with_repository_capture_capability(capability);
 
     let updated_commit = repository.head().unwrap().unwrap();
-    let committed_source = repository
-        .read_committed_file(&updated_commit, "Object/song.orna", 1 << 20)
-        .unwrap();
     let updated_format_context =
         format3_context_for_snapshot(&repository, updated_commit.as_str());
-    let updated_source = std::str::from_utf8(&committed_source)
-        .unwrap()
-        .replace("    cover: null,\n", "");
+    let updated_source = song_source.replace("    cover: null,\n", "");
     assert!(
         !updated_source.contains("cover"),
         "cover is omitted from the updated source row: {updated_source}"
@@ -224,7 +218,7 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
     let updated_row = [SourceCaptureRow {
         key: "song",
         blob_fields: &updated_fields,
-        source_row: Some(&updated_source),
+        source_row: &updated_source,
         ordinal: 0xA0,
         insert_only: false,
     }];
@@ -241,7 +235,6 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
     let with_cover = commit_source_row_to_native_graph(
         directory.path(),
         &repository,
-        &after,
         relation_id,
         &format_context,
         "song",

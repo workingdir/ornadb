@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/affine-addition.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5002",
+  "message_contains": "cannot add two absolute affine temperatures",
+  "status": "expected-not-executed"
+}

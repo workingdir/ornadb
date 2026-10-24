@@ -1443,6 +1443,8 @@ pub const VFS_ENOENT: i32 = 2;
 pub const VFS_EPERM: i32 = 1;
 /// `EOPNOTSUPP`: a VFS-1 unsupported operation (VFS-014).
 pub const VFS_EOPNOTSUPP: i32 = 95;
+/// `EIO`: corrupt or unavailable backing data.
+pub const VFS_EIO: i32 = 5;
 
 /// Why a projected name, a resolved path, or a candidate document was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1464,6 +1466,10 @@ pub enum VfsPathError {
     Unsupported,
     /// The write baseline no longer matches the accepted row (VFS-011).
     StaleBaseline,
+    /// A stored Blob annotation the MIME-1 registry refuses. Stored annotations
+    /// are validated when captured, so this is corrupt backing metadata and no
+    /// host name is guessed for it (EIO).
+    CorruptAnnotation,
 }
 
 impl VfsPathError {
@@ -1476,11 +1482,13 @@ impl VfsPathError {
             Self::UnknownRow => VFS_ENOENT,
             Self::Unsupported => VFS_EOPNOTSUPP,
             Self::StaleBaseline => VFS_EAGAIN,
+            Self::CorruptAnnotation => VFS_EIO,
         }
     }
 
     /// The stable Orna cause code kept alongside the host `errno`. Unknown
-    /// rows report `ENOENT` with no Orna failure code of their own.
+    /// rows report `ENOENT` and corrupt stored metadata reports `EIO`, neither
+    /// with an Orna failure code of its own.
     pub const fn failure_code(self) -> Option<&'static str> {
         match self {
             Self::OutsideProjection | Self::Unsupported => Some("sys.vfs.unsupported"),
@@ -1489,7 +1497,7 @@ impl VfsPathError {
             }
             Self::NameCollision => Some("sys.vfs.name_collision"),
             Self::StaleBaseline => Some("sys.vfs.stale_edit"),
-            Self::UnknownRow => None,
+            Self::UnknownRow | Self::CorruptAnnotation => None,
         }
     }
 }
@@ -1681,13 +1689,17 @@ pub fn resolve_field_alias(digest: &[u8; 32], candidates: &[&str]) -> Result<Str
 /// escaped field name plus the MIME-1 selected suffix. A field that would spell
 /// the reserved row document keeps its own distinct name (VFS-016).
 ///
-/// Stored annotations are canonical MIME-1. A pair the registry refuses
-/// declares no suffix, so it projects as the octet-stream/null fallback does,
-/// as `bin`, instead of spelling an unchecked hint into a host name.
-pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>) -> String {
+/// Stored annotations are canonical MIME-1, so a pair the registry refuses is
+/// corrupt backing metadata. It is reported as `CorruptAnnotation` (EIO)
+/// instead of being projected under a guessed `bin` name (W08-09).
+pub fn project_content_name(
+    field: &str,
+    media_type: &str,
+    suffix: Option<&str>,
+) -> Result<String, VfsPathError> {
     let annotation = MimeRegistry::mime1()
         .canonical_annotation(media_type, suffix)
-        .unwrap_or_default();
+        .map_err(|_| VfsPathError::CorruptAnnotation)?;
     let selected = annotation.selected_suffix();
     // The suffix is part of the projected component, so VFS-016's component
     // bound covers the whole `field + "." + suffix` spelling rather than the
@@ -1696,11 +1708,11 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     // is derived from the stored field name, so the full name is still
     // re-derivable and verified by the long-name index (VFS-016).
     if project_field_name(field).len() + 1 + selected.len() > VFS_MAX_COMPONENT_BYTES {
-        return format!(
+        return Ok(format!(
             "{}.{}",
             long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
             selected
-        );
+        ));
     }
     let mut name = project_field_name(field);
     name.push('.');
@@ -1708,7 +1720,7 @@ pub fn project_content_name(field: &str, media_type: &str, suffix: Option<&str>)
     if name == VFS_ROW_DOCUMENT {
         name.replace_range(..1, &format!("%{:02X}", b'd'));
     }
-    name
+    Ok(name)
 }
 
 /// Whether `suffix` is a hint MIME-1 admits for this media type: a compatible
@@ -2077,7 +2089,7 @@ impl<S> VfsRowProjection<S> {
                     required,
                     captured,
                 } => {
-                    let name = project_content_name(&field.name, media_type, suffix.as_deref());
+                    let name = project_content_name(&field.name, media_type, suffix.as_deref())?;
                     // Two stored values that claim one host name are refused
                     // rather than merged into one directory entry (VFS-016).
                     if names.contains(&name) {
@@ -3245,14 +3257,21 @@ mod tests {
         test_git(root, &["add", "--all"]);
         test_git(root, &["commit", "--quiet", "-m", "format3 Blob fixture"]);
 
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        // The chunk entry carries the chunk's SHA-256; the kind-6 node and the
+        // rows domain carry the format-3 schema identity.
+        let chunk_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest: [u8; 32] = Sha256::new()
+            .chain_update(b"orna.schema.v3\0")
+            .chain_update(&schema_bytes)
+            .finalize()
+            .into();
         let chunk_oid = test_git_object(root, "blob", &schema_bytes);
         let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
         append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         byte_index.extend_from_slice(&[0x81, 0x83]);
         append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         append_fixture_cbor_bytes(&mut byte_index, &fixture_oid_bytes(&chunk_oid));
-        append_fixture_cbor_bytes(&mut byte_index, &schema_digest);
+        append_fixture_cbor_bytes(&mut byte_index, &chunk_digest);
         let byte_index_oid = test_native_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
         let mut schema = vec![0x85, 0x01, 0x06];
@@ -3354,8 +3373,8 @@ mod tests {
         )
         .expect("row projection");
 
-        let content = project_content_name("content", "audio/mpeg", None);
-        let cover = project_content_name("cover", "image/jpeg", None);
+        let content = project_content_name("content", "audio/mpeg", None).unwrap();
+        let cover = project_content_name("cover", "image/jpeg", None).unwrap();
         assert_eq!(content, "content.mp3");
         assert_eq!(cover, "cover.jpg");
 
@@ -3465,32 +3484,49 @@ mod tests {
         assert!(!content_suffix_is_compatible("image/jpeg", "png"));
         assert_eq!(
             project_content_name("content", "application/x-unknown", None),
-            "content.bin"
+            Ok("content.bin".to_owned())
         );
         assert_eq!(
             project_content_name("content", "application/x-unknown", Some("xyz")),
-            "content.xyz"
+            Ok("content.xyz".to_owned())
         );
         // Projection reads the registry's selected suffix, so an alias spelling
-        // projects as its canonical essence, and a hint the registry refuses is
-        // never spelled into the host name.
+        // projects as its canonical essence. A stored hint the registry refuses
+        // is corrupt metadata: it is reported (EIO), never spelled into the host
+        // name and never renamed to the octet-stream `bin` fallback (W08-09).
         assert_eq!(
             project_content_name("content", "Audio/X-WAV", None),
-            "content.wav"
+            Ok("content.wav".to_owned())
         );
         assert_eq!(
             project_content_name("content", "audio/mpeg", Some("../mp3")),
-            "content.bin"
+            Err(VfsPathError::CorruptAnnotation)
+        );
+        assert_eq!(VfsPathError::CorruptAnnotation.errno(), VFS_EIO);
+        assert_eq!(VfsPathError::CorruptAnnotation.failure_code(), None);
+        assert_eq!(
+            VfsRowProjection::project(
+                SnapshotPin::capture(Arc::new(7_u64)),
+                &[VfsStoredField::content(
+                    "content",
+                    "audio/mpeg",
+                    Some("../mp3".to_owned()),
+                    4
+                )],
+            )
+            .err(),
+            Some(VfsPathError::CorruptAnnotation),
+            "a row whose stored annotation is refused is not projected"
         );
 
         // The suffix rename never changes the stored content identity: the same
         // descriptor size projects under the selected hint, and the row's bytes
         // are untouched.
-        let renamed = project_content_name("content", "audio/mpeg", Some("mp1"));
+        let renamed = project_content_name("content", "audio/mpeg", Some("mp1")).unwrap();
         assert_eq!(renamed, "content.mp1");
         assert_eq!(
             project_content_name("content", "audio/mpeg", None),
-            "content.mp3"
+            Ok("content.mp3".to_owned())
         );
     }
 
@@ -3519,7 +3555,7 @@ mod tests {
     #[test]
     fn content_file_projection_uses_field_namespace_and_exact_entry_identity() {
         let long_field = "content_".repeat(40);
-        let projected = project_content_name(&long_field, "audio/mpeg", None);
+        let projected = project_content_name(&long_field, "audio/mpeg", None).unwrap();
         assert!(projected.starts_with("~field-"));
         assert!(projected.ends_with(".mp3"));
 
@@ -3622,7 +3658,7 @@ mod tests {
         // room for its suffix takes the `~field-` digest alias instead of
         // overflowing the bound (VFS-016).
         let field = "f".repeat(200);
-        let name = project_content_name(&field, "audio/mpeg", None);
+        let name = project_content_name(&field, "audio/mpeg", None).unwrap();
         assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
         assert!(name.starts_with("~field-"));
         assert!(name.ends_with(".mp3"));
@@ -3641,7 +3677,7 @@ mod tests {
         // A base with room for the suffix still spells the escaped name
         // directly; only the over-bound spelling changes.
         let field = "f".repeat(196);
-        let name = project_content_name(&field, "audio/mpeg", None);
+        let name = project_content_name(&field, "audio/mpeg", None).unwrap();
         assert!(name.len() <= VFS_MAX_COMPONENT_BYTES);
         assert!(!name.starts_with("~field-"));
         assert!(name.ends_with(".mp3"));

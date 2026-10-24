@@ -136,7 +136,7 @@ std.encoding.orna.decode(text, as: Contact)
 
 ## Row-body encoding versus standalone encoding
 
-A loose row file omits its key because the key is in the path.
+A VFS row document omits its key because the key is selected by its row directory. Legacy loose-row interchange uses its recorded path codec. Neither projection is a second format-3 stored row copy.
 
 Standalone encoding of the logical row includes the key:
 
@@ -150,7 +150,15 @@ Standalone encoding of the logical row includes the key:
 
 **ORNA-CODEC-004** Generic value encoding of a table row MUST include all logical fields, including primary-key fields.
 
-**ORNA-CODEC-005** Loading a row unit MUST combine table schema, decoded path key and decoded row body.
+**ORNA-CODEC-005** Loading a row document MUST combine its admitted table schema, explicit/path key and decoded stored fields under the selected interchange/VFS context; arbitrary host paths cannot supply authority. Format-3 persistence encodes the key and stored fields directly through ORP-1.
 
 **ORNA-CODEC-006** Exact checked-out source text MAY differ from canonical re-encoding because comments and formatting may be preserved. Exact source is obtained through `sys.File`, not by encoding the semantic value.
 
+## Blob values {#blob-presentation}
+
+The default structural [Blob inspector](#blob-values) presents safe length/content metadata without materialising bytes. Rich media viewing or downloading is explicit and uses a snapshot-bound, authorised Blob reader. Declared media type and optional suffix are Blob annotations; byte identity is separate. A filename is a VFS projection, not a content identity. Inspecting arbitrary source, HTML or SVG must not execute it. No devtools-specific Asset table is required by a renderer.
+
+
+## Codec selection in format 3
+
+The legacy portable text/OVB-1 descriptions are compatibility encodings, not the new annotated-Blob row representation. Format-3 values use [OVB-2/ROV-3/SOV-3](#formats). New Blob-bearing human row documents use small references through VFS-1 or explicit complete snapshot export; they never expand media as Base64. Full portable byte export is explicit and bounded/streamed.
