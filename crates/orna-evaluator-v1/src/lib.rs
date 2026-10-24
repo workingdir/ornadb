@@ -804,16 +804,17 @@ impl EvaluationError {
     }
 
     fn from_canonical(value: CanonicalErrorValue) -> Self {
+        let mut diagnostic = Diagnostic::new(
+            SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),
+            DiagnosticSeverity::Error,
+            SafeText::redacted(),
+        )
+        .expect("safe diagnostic code");
+        for cause in value.causes() {
+            diagnostic = diagnostic.with_cause(canonical_cause_diagnostic(&cause));
+        }
         Self {
-            diagnostic: Box::new(
-                Diagnostic::new(
-                    SafeText::new("ORNA-EVAL-ERROR").expect("static safe code"),
-                    DiagnosticSeverity::Error,
-                    SafeText::redacted(),
-                )
-                .expect("safe diagnostic code")
-                .redacted(),
-            ),
+            diagnostic: Box::new(diagnostic.redacted()),
             canonical: Some(value),
             deliberate: true,
         }
@@ -840,6 +841,30 @@ impl fmt::Display for EvaluationError {
     }
 }
 impl std::error::Error for EvaluationError {}
+
+/// Projects a nested canonical cause to a code-only diagnostic. A user-authored
+/// Error code is trusted only when it has the catalogue shape; any other code,
+/// and every message and span, stays redacted at the evaluator boundary.
+fn canonical_cause_diagnostic(cause: &CanonicalErrorValue) -> Diagnostic {
+    let code = cause.code();
+    let catalogue_shaped = code.len() <= 64
+        && code.starts_with("ORNA-")
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-');
+    let safe_code = if catalogue_shaped {
+        SafeText::new(code).expect("catalogue-shaped code is safe text")
+    } else {
+        SafeText::redacted()
+    };
+    let mut diagnostic =
+        Diagnostic::new(safe_code, DiagnosticSeverity::Error, SafeText::redacted())
+            .expect("safe diagnostic code");
+    for nested in cause.causes() {
+        diagnostic = diagnostic.with_cause(canonical_cause_diagnostic(&nested));
+    }
+    diagnostic.redacted()
+}
 
 /// Executes an admitted effect after its arguments have been evaluated exactly
 /// once into canonical values. Returning `Ok(None)` leaves the call to the
@@ -15704,6 +15729,35 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn canonical_causes_keep_catalogue_codes_and_redact_other_codes() {
+        let inner = CanonicalErrorValue::new(
+            "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "private message",
+            [],
+            BTreeMap::new(),
+        )
+        .expect("canonical inner error");
+        let user =
+            CanonicalErrorValue::new("userSuppliedCode", "private message", [], BTreeMap::new())
+                .expect("canonical user error");
+        let outer = CanonicalErrorValue::new(
+            "ORNA-EVAL-SURFACE",
+            "private message",
+            [inner, user],
+            BTreeMap::new(),
+        )
+        .expect("canonical outer error");
+
+        let error = EvaluationError::from_canonical(outer);
+        let causes = error.diagnostic().causes();
+        assert_eq!(error.code(), "ORNA-EVAL-ERROR");
+        assert_eq!(causes.len(), 2);
+        assert_eq!(causes[0].code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
+        assert_eq!(causes[1].code(), "<redacted>");
+        assert!(causes.iter().all(|cause| cause.message() == "<redacted>"));
+    }
 
     /// `std.collection.map_from` at the historical pin a987024 (recursive).
     const HISTORICAL_MAP_FROM: &str = "fn map_from<T, U>(
