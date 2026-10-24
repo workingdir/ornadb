@@ -862,6 +862,69 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_lease() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/private-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let _lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+
+    // ORNA-TURSO-004 permits at most one owning writer, and ORNA-TURSO-005
+    // requires a second `orna run` to coordinate or fail while it is live.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        !refused.status.success(),
+        "concurrent run unexpectedly succeeded: {:?}",
+        refused.stdout
+    );
+    assert!(refused.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("error[E2200]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    drop(state);
+
+    let released = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        released.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    assert_eq!(released.stdout, b"invocation completed\n");
+    assert!(released.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn binary_invoke_routes_single_module_std_import_needing_publication_metadata_through_authority() {
     let (directory, _module_commit) = captured_standard_project_with(
         &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
