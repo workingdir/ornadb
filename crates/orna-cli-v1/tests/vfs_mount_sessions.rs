@@ -85,7 +85,7 @@ fn assert_success(output: &Output, context: &str) {
 }
 
 fn orna(repository: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
         .arg(repository)
         .args(args)
@@ -271,7 +271,7 @@ impl Session {
     }
 
     fn unmount(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .arg("--db")
             .arg(self.repository_directory.path())
             .arg("unmount")
@@ -290,7 +290,7 @@ impl Session {
         )
         .unwrap();
         fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        let output = Command::new(env!("CARGO_BIN_EXE_orna"))
             .arg("--db")
             .arg(self.repository_directory.path())
             .args(["edit", &format!("Music/{key}/data.orna")])
