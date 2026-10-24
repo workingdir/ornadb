@@ -44,9 +44,13 @@ on:
 permissions:
   contents: read
 
+# A push to main is keyed on its commit and never cancelled, so every merge keeps its
+# own fixture and editor artefact run (seven main runs on 2026-10-23 were cancelled by
+# a later push, four of them while running). Pull requests and manual runs still
+# cancel older runs of the same group.
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' && format('source-audits|focused|{0}|{1}|{2}|{3}|{4}', inputs.revision_sha, inputs.cargo_package, inputs.target_kind, inputs.integration_target, inputs.test_filter) || format('source-audits-{0}-{1}', github.workflow, github.ref) }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.revision_sha != '' && format('source-audits|focused|{0}|{1}|{2}|{3}|{4}', inputs.revision_sha, inputs.cargo_package, inputs.target_kind, inputs.integration_target, inputs.test_filter) || format('source-audits-{0}-{1}', github.workflow, github.event_name == 'push' && github.sha || github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   fixture-and-editor-artifacts:

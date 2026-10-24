@@ -15,11 +15,15 @@ env:
   RUST_TEST_THREADS: 2
 
 # Keep each ref's native CLI gate independent. A worker branch must not replace
-# main's pending test run. A newer push to the same pull request does cancel that
+# main's pending test run. A newer push to the same pull request cancels that
 # pull request's older run (otherwise every push queues behind the previous run and
-# the wait multiplies); main pushes are never cancelled.
+# the wait multiplies). A push to main is keyed on its commit and is never
+# cancelled: with one group per ref GitHub replaces a pending run when a newer one
+# queues, so merges landing close together lost their CLI run (nine main runs ended
+# "cancelled" with no jobs between a6d716278 and 8f49ea74e), and a red head could
+# not be traced to the merge that caused it.
 concurrency:
-  group: cli-tests-${{ github.workflow }}-${{ github.ref }}
+  group: cli-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
