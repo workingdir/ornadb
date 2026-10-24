@@ -101,11 +101,9 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
 
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -124,7 +122,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -235,12 +233,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "{{ title: \"before\", content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"), }}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -267,7 +260,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &blob_captures,
-            source_row: None,
+            source_row: &row_source,
             ordinal: 0x93,
             insert_only: true,
         }],

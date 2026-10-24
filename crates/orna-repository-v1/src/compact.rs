@@ -3048,6 +3048,8 @@ impl Repository {
         &self,
         commit: &GitCommitRef,
     ) -> Result<BTreeMap<Uuid, CompactManifest>, RepositoryError> {
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.command();
         command.args([
             "ls-tree",
@@ -3403,6 +3405,8 @@ impl Repository {
         ) {
             return Err(RepositoryError::InvalidCompactManifest);
         }
+        self.objects()
+            .check_expansion(commit.as_str(), ".orna/storage")?;
         let mut command = self.observer_command();
         command.env("GIT_NO_LAZY_FETCH", "1").args([
             "ls-tree",
@@ -6208,6 +6212,45 @@ mod tests {
             Some(&&OvbRaw::Text("GB".into()))
         );
         assert!(!projected_values.contains_key(&computed));
+    }
+
+    #[test]
+    fn compact_manifest_witness_decodes_and_refuses_hostile_entry_paths() {
+        let table = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let witness = CompactManifestWitness {
+            table,
+            selected_ref: "refs/heads/x".into(),
+            runtime_intent_id: [1; 16],
+            cleanup_watermark: [2; 32],
+            manifest_path: managed_child(&compact_root(table), "manifest.orna").unwrap(),
+            base_sha256: [4; 32],
+            manifest_sha256: [5; 32],
+            generation: 1,
+            entries: vec![CompactManifestObject {
+                path: managed_child(&compact_data_root(table), "a.orna").unwrap(),
+                object_id: "a".repeat(40),
+                sha256: [3; 32],
+            }],
+        };
+        let mut bytes = Vec::new();
+        witness.encode(&mut bytes).unwrap();
+        assert_eq!(
+            CompactManifestWitness::decode(&bytes, &mut 0, 40).unwrap(),
+            witness
+        );
+        let data_path = witness.entries[0].path.as_path().to_str().unwrap().to_owned();
+        for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
+            let spliced = crate::tests::splice_length_prefixed(
+                &bytes,
+                &data_path,
+                hostile,
+                u32::to_be_bytes,
+            );
+            assert!(
+                CompactManifestWitness::decode(&spliced, &mut 0, 40).is_err(),
+                "compact entry path {hostile:?} must not decode"
+            );
+        }
     }
 }
 
