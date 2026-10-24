@@ -11210,6 +11210,63 @@ mod tests {
     }
 
     #[test]
+    fn url_safe_sec_websocket_key_is_rejected_by_the_real_handshake() {
+        let (host, origin, _) = subscribed_host_with_credential(None);
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential: SessionCredential {
+                    security: OpaqueCredential::from_bytes([7; 32]),
+                    serving: ServingCredential::new([7; 32]),
+                },
+                origin,
+            },
+        );
+        let request = |key: &str| WireRequest {
+            method: "GET".into(),
+            path: format!("/orna/live/{}", uuid([1; 16])),
+            headers: vec![
+                ("Host".into(), "app.example".into()),
+                ("Origin".into(), "https://app.example".into()),
+                ("Connection".into(), "Upgrade".into()),
+                ("Upgrade".into(), "websocket".into()),
+                ("Sec-WebSocket-Version".into(), "13".into()),
+                ("Sec-WebSocket-Key".into(), key.into()),
+                ("Sec-WebSocket-Protocol".into(), SUBPROTOCOL.into()),
+                (
+                    "Cookie".into(),
+                    format!("orna_session={}", encode_token([7; 32])),
+                ),
+            ],
+            body: Vec::new(),
+        };
+        // The standard-alphabet key is the control: the same request is
+        // admitted, so the rejections below are caused by the key alone.
+        assert!(
+            transport
+                .begin_websocket_upgrade(&request("dGhlIHNhbXBsZSBub25jZQ=="), [5; 16], 0)
+                .is_ok()
+        );
+        for key in ["AAAAAAAAAAAAAAAAAAAA_w==", "AAAAAAAAAAAAAAAAAAAA-w=="] {
+            assert_eq!(
+                transport
+                    .begin_websocket_upgrade(&request(key), [6; 16], 0)
+                    .err(),
+                Some(wire_error(400, "live.malformed_request")),
+                "key {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn delivery_barrier_rejects_expired_delivery_and_late_commit() {
         let mut transport = LiveTransport::new(subscribed_host(None), TransportLimits::default())
             .expect("transport is configured");
@@ -11388,7 +11445,7 @@ mod websocket_key_alphabet {
     }
 
     #[test]
-    fn url_safe_key_is_rejected_at_the_handshake() {
+    fn url_safe_key_alphabet_is_rejected_by_the_decoder() {
         // 24 characters, URL alphabet '_' in the final group.
         assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA_w==").is_none());
         assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA-w==").is_none());
