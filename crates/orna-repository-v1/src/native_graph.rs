@@ -9803,17 +9803,43 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
 
         /// One of `keys`, a non-negative Int spelled `Int` or `UInt` at random.
         fn key_from(&mut self, keys: &[TypedKey]) -> TypedKey {
-            match &keys[self.below(keys.len())] {
-                TypedKey::Int(value) if *value >= 0 && self.below(2) == 0 => {
+            let key = keys[self.below(keys.len())].clone();
+            self.spelled(key)
+        }
+
+        /// A batch key: any of `universe` `strays` times in eight, otherwise
+        /// one taken out of `pool`, or none once `pool` is empty.
+        fn draw(
+            &mut self,
+            pool: &mut Vec<TypedKey>,
+            strays: usize,
+            universe: &[TypedKey],
+        ) -> Option<TypedKey> {
+            if self.below(8) < strays {
+                return Some(self.key_from(universe));
+            }
+            if pool.is_empty() {
+                return None;
+            }
+            let key = pool.swap_remove(self.below(pool.len()));
+            Some(self.spelled(key))
+        }
+
+        /// `key`, a non-negative Int spelled `Int` or `UInt` at random.
+        fn spelled(&mut self, key: TypedKey) -> TypedKey {
+            match key {
+                TypedKey::Int(value) if value >= 0 && self.below(2) == 0 => {
                     TypedKey::UInt(value.unsigned_abs())
                 }
-                key => key.clone(),
+                key => key,
             }
         }
     }
 
     /// Seeded random batches of deletes, rekeys, inserts and delete-plus-insert
-    /// updates over small key universes, so batches repeat keys, name absent
+    /// updates over small key universes. Batches take keys the rows can still
+    /// lose or gain, so they chain rekeys and reuse removed keys, and stray to
+    /// any key at rates chosen per case, so they also repeat keys, name absent
     /// ones and collide with each other. Text keys of up to four letters
     /// order differently as canonical bytes than logically, Int keys come
     /// spelled `Int` and `UInt`, and half the batches arrive in publication's
@@ -9862,36 +9888,53 @@ a75df592997e1cd0d727389b24df8783a6273458 299 17 4 4 663f2d42b6d1bd1ff27da3eee4b9
                 }
             }
             pinned.sort_by(|left, right| left.0.cmp(&right.0));
-            let present = pinned
+            // Deletes and rekey sources take keys still removable: pinned
+            // keys, then each rekey's target. Inserts and rekey targets take
+            // keys still addable: free keys, then each removed key. Removals
+            // stray never or one time in eight and additions up to five times
+            // in eight, so no outcome crowds out the others.
+            let mut removable = pinned
                 .iter()
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
-            // Mostly a present key for deletes and rekey sources and a free
-            // one for inserts and rekey targets, sometimes any key at all.
-            let pick = |rng: &mut SplitMix64, preferred: &[TypedKey]| {
-                if preferred.is_empty() || rng.below(3) == 0 {
-                    rng.key_from(&universe)
-                } else {
-                    rng.key_from(preferred)
-                }
-            };
+            let mut addable = free;
+            let (removal_strays, addition_strays) = (rng.below(2), rng.below(6));
             let mut batch = Vec::new();
             for _ in 0..rng.below(25) {
                 match rng.below(10) {
-                    0..=2 => batch.push(RowIndexMutation::Delete {
-                        key: pick(&mut rng, &present),
-                    }),
+                    0..=2 => {
+                        let Some(key) = rng.draw(&mut removable, removal_strays, &universe)
+                        else {
+                            continue;
+                        };
+                        addable.push(key.clone());
+                        batch.push(RowIndexMutation::Delete { key });
+                    }
                     3..=4 => {
-                        let from = pick(&mut rng, &present);
-                        let to = pick(&mut rng, &free);
+                        let from = rng.draw(&mut removable, removal_strays, &universe);
+                        let to = rng.draw(&mut addable, addition_strays, &universe);
+                        let (Some(from), Some(to)) = (from, to) else {
+                            continue;
+                        };
+                        addable.push(from.clone());
+                        removable.push(to.clone());
                         batch.push(RowIndexMutation::Rekey { from, to });
                     }
-                    5..=7 => batch.push(RowIndexMutation::Insert {
-                        key: pick(&mut rng, &free),
-                        value: value(),
-                    }),
+                    5..=7 => {
+                        let Some(key) = rng.draw(&mut addable, addition_strays, &universe)
+                        else {
+                            continue;
+                        };
+                        batch.push(RowIndexMutation::Insert {
+                            key,
+                            value: value(),
+                        });
+                    }
                     _ => {
-                        let key = pick(&mut rng, &present);
+                        let Some(key) = rng.draw(&mut removable, removal_strays, &universe)
+                        else {
+                            continue;
+                        };
                         batch.push(RowIndexMutation::Delete { key: key.clone() });
                         batch.push(RowIndexMutation::Insert {
                             key,
