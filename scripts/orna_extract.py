@@ -1970,8 +1970,8 @@ class Graph:
         node = self.node_of_kind(oid, 6, where)
         _, _, length, digest, byte_root = node.data
         encoded = self.full_bytes(byte_root.hex(), length, SCHEMA_BYTES_LIMIT, here)
-        if hashlib.sha256(encoded).digest() != digest:
-            fail(f"{here}: schema digest is not the SHA-256 of its descriptor bytes")
+        if hashlib.sha256(b"orna.schema.v3\x00" + encoded).digest() != digest:
+            fail(f"{here}: schema digest is not the orna.schema.v3 identity of its descriptor bytes")
         raw = decode_canonical(encoded, here)
         if _holds_profile_tag(raw):
             fail(f"{here}: descriptor holds a format-3 profile tag")
