@@ -1764,9 +1764,13 @@ impl WorkspaceFilesystem {
         }
         let candidate = fs::read(draft)
             .map_err(|error| format!("edited candidate could not be read: {error}"))?;
+        // ORNA-VFS-015: `edit --row` is this mount's own grouped row save, so the
+        // mount records the row it accepted and its next save compares against it
+        // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
+        // `edit PATH` owner-routed by another writer leaves the mounted baseline
+        // unchanged, so the mount's next save is stale against that writer's row.
         self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
-            // ORNA-VFS-015: an owner-routed edit is another writer's change; the mount keeps its captured baseline so its next save is stale.
-            .commit(&candidate, draft, false)
+            .commit(&candidate, draft, grouped_row)
     }
 }
 
