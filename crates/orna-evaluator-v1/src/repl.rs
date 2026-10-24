@@ -218,13 +218,17 @@ impl ReplSession {
                 candidate.evaluate_discarded(expression, None, Some(effects))?;
                 None
             }
-            ReplInput::Item(item) => match &item.declaration {
-                Declaration::Let { pattern, value, .. } => {
-                    candidate.let_binding(pattern, value, None, Some(effects))?;
-                    None
+            ReplInput::Item(item) => {
+                match &item.declaration {
+                    Declaration::Let { pattern, value, .. } => {
+                        candidate.let_binding(pattern, value, None, Some(effects))?;
+                    }
+                    // A function or import declaration evaluates nothing, so
+                    // it is declared exactly as the pure path declares it.
+                    declaration => candidate.declare_admitted(declaration, None)?,
                 }
-                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-            },
+                None
+            }
         };
         *self = candidate;
         Ok(result)
