@@ -23,9 +23,10 @@ fn best_of(source: &str) -> Duration {
         .expect("RUNS > 0")
 }
 
-fn assert_linear(label: &str, unit: &str) {
-    let small = best_of(&unit.repeat(SIZES[0]));
-    let large = best_of(&unit.repeat(SIZES[1]));
+fn assert_linear(label: &str, prefix: &str, unit: &str, suffix: &str) {
+    let source = |count: usize| format!("{prefix}{}{suffix}", unit.repeat(count));
+    let small = best_of(&source(SIZES[0]));
+    let large = best_of(&source(SIZES[1]));
     assert!(
         large < BACKSTOP,
         "{label}: 8k parse took {large:?}, backstop {BACKSTOP:?}"
@@ -40,10 +41,13 @@ fn assert_linear(label: &str, unit: &str) {
 
 #[test]
 fn var_declarations_without_terminators_parse_in_linear_time() {
-    assert_linear("var", "{ var x = 1 ");
+    assert_linear("var", "", "{ var x = 1 ", "");
 }
 
+/// The probes must sit in expression position. Item recovery skips top-level
+/// text such as `{ a < b`, so only an expression parse reaches the generic-call
+/// lookahead; inside an array literal every `<` scans to the closing `]`.
 #[test]
 fn angle_brackets_without_closers_parse_in_linear_time() {
-    assert_linear("angle", "{ a < b ");
+    assert_linear("angle", "fn f() { [", "a < b, ", "] }");
 }
