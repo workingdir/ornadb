@@ -1120,11 +1120,6 @@ impl NativeGraphContext {
         mutations: &[RowIndexMutation],
         scope: &RepositoryReadScope,
     ) -> Result<IndexMaintenance, GraphError> {
-        use crate::orp::maintenance::{
-            RowChange, RowChanges, lookup_ordered_entries, maintain_ordered_map,
-        };
-        use crate::row_store::TypedKey;
-
         scope.authorize(self)?;
         let version = self.row_snapshot.version();
         let expected_count = version.row_count().ok_or(GraphError::ContextMismatch)?;
@@ -1151,127 +1146,20 @@ impl NativeGraphContext {
         let root_node = read_node(&root)?;
         validate_ordered_root_node(&root_node, &domain, expected_count)?;
 
-        // The pinned value of every key a mutation names, from one descent
-        // over the touched pages.
-        let touched: Vec<TypedKey> = mutations
-            .iter()
-            .flat_map(|mutation| match mutation {
-                RowIndexMutation::Delete { key } | RowIndexMutation::Insert { key, .. } => {
-                    [Some(key), None]
-                }
-                RowIndexMutation::Rekey { from, to } => [Some(from), Some(to)],
-            })
-            .flatten()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let pinned = lookup_ordered_entries(&domain, &root_node, &touched, &mut read_node)?;
-        let mut rows: BTreeMap<TypedKey, Option<Cow<'_, [u8]>>> = touched
-            .into_iter()
-            .map(|key| {
-                let value = pinned
-                    .get(&key)
-                    .map(|value| Cow::Borrowed(value.as_slice()));
-                (key, value)
-            })
-            .collect();
-
-        for mutation in mutations {
-            let RowIndexMutation::Delete { key } = mutation else {
-                continue;
-            };
-            let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
-            if slot.take().is_none() {
-                return Err(GraphError::RowKeyAbsent);
-            }
-        }
-        let mut logical_rekeys = Vec::new();
-        for mutation in mutations {
-            let RowIndexMutation::Rekey { from, to } = mutation else {
-                continue;
-            };
-            if rows.get(from).is_none_or(Option::is_none) {
-                return Err(GraphError::RowKeyAbsent);
-            }
-            if rows.get(to).is_some_and(Option::is_some) {
-                return Err(GraphError::DuplicateRowKey);
-            }
-            let value = rows.get_mut(from).and_then(Option::take);
-            rows.insert(to.clone(), value);
-            logical_rekeys.push(LogicalRowRekey {
-                old_address: from.clone(),
-                new_address: to.clone(),
-            });
-        }
-        // Inserted rows are lowered to the shared overflow graph first, so a
-        // row or value over 8 KiB or 32 direct Blob references is stored
-        // through tag 60113 (store-format-3 section 5).
         let mut written = BTreeSet::new();
-        {
-            let mut store =
-                crate::overflow::CaptureStore::new(self, scope, &mut written, scope.max_objects);
-            let mut overflow = crate::overflow::OverflowWriter::new(&mut store);
-            for mutation in mutations {
-                let RowIndexMutation::Insert { key, fields } = mutation else {
-                    continue;
-                };
-                let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
-                if slot.is_some() {
-                    return Err(GraphError::DuplicateRowKey);
-                }
-                let value = overflow
-                    .lower_row(fields)?
-                    .canonical_page_bytes()
-                    .map_err(|_| GraphError::NonCanonicalData)?;
-                *slot = Some(Cow::Owned(value));
-            }
-        }
-
-        let mut changes = RowChanges::new();
-        let mut row_count = expected_count;
-        for (key, value) in rows {
-            let before = pinned.get(&key).map(Vec::as_slice);
-            let change = match (value, before) {
-                (None, None) => continue,
-                (Some(value), Some(before)) if *value == *before => continue,
-                (None, Some(_)) => {
-                    row_count = row_count
-                        .checked_sub(1)
-                        .ok_or(GraphError::InvalidCount(0))?;
-                    RowChange::Remove
-                }
-                (Some(value), before) => {
-                    if before.is_none() {
-                        row_count += 1;
-                    }
-                    RowChange::Put(value.into_owned())
-                }
-            };
-            let key_bytes = key
-                .canonical_bytes()
-                .map_err(|_| GraphError::NonCanonicalData)?;
-            changes.insert(key, (key_bytes, change));
-        }
-        if row_count > MAX_SIGNED_LENGTH {
-            return Err(GraphError::InvalidCount(
-                usize::try_from(row_count).unwrap_or(usize::MAX),
-            ));
-        }
-
-        let maintained = maintain_ordered_map(
+        let RowMapPass {
+            maintained,
+            row_count,
+            logical_rekeys,
+        } = maintain_row_map(
             &domain,
             root.clone(),
             root_node,
-            &changes,
+            expected_count,
+            mutations,
             &mut read_node,
-            &mut |node| self.write_capture_node(node, &mut written, scope.max_objects),
+            &mut crate::overflow::CaptureStore::new(self, scope, &mut written, scope.max_objects),
         )?;
-        if maintained.row_count != row_count {
-            return Err(GraphError::InvalidCount(
-                usize::try_from(maintained.row_count).unwrap_or(usize::MAX),
-            ));
-        }
         // Every object the overflow writer and the page rewrite wrote joins
         // one closure for the durability barrier.
         self.sync_object_closure(&written, scope)?;
@@ -7657,6 +7545,165 @@ fn validate_ordered_root_node(
         }
     }
     Ok(())
+}
+
+/// The outcome of one row-map maintenance pass: the maintained map, the rows
+/// it holds and the logical rekeys the batch made.
+#[derive(Debug)]
+struct RowMapPass {
+    maintained: crate::orp::maintenance::Maintained,
+    row_count: u64,
+    logical_rekeys: Vec<LogicalRowRekey>,
+}
+
+/// Applies `mutations` to the pinned row map whose validated root node
+/// `root_node` holds `expected_count` rows. This is all of
+/// [`NativeGraphContext::maintain_row_index`] except where nodes are read
+/// from and written to: `read_node` reads old nodes and `store` takes every
+/// node and overflow object the pass writes.
+///
+/// Deletes apply first, then rekeys, then inserts, each kind in batch order
+/// and each checked against the rows held by then: a delete or rekey source
+/// that is absent is `RowKeyAbsent`, and a rekey onto a present key or an
+/// insert of one is `DuplicateRowKey`. The first failure in that order is
+/// the one reported. Every key the batch names resolves to one slot, so the
+/// batch may arrive in any order and a rekey may chain onto an earlier
+/// rekey's target or reuse a key the batch removed.
+fn maintain_row_map(
+    domain: &[u8],
+    root: NativeOid,
+    root_node: NodeData,
+    expected_count: u64,
+    mutations: &[RowIndexMutation],
+    read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
+    store: &mut impl crate::overflow::OverflowStore,
+) -> Result<RowMapPass, GraphError> {
+    use crate::orp::maintenance::{
+        RowChange, RowChanges, lookup_ordered_entries, maintain_ordered_map,
+    };
+    use crate::row_store::TypedKey;
+
+    // The pinned value of every key a mutation names, from one descent over
+    // the touched pages.
+    let touched: Vec<TypedKey> = mutations
+        .iter()
+        .flat_map(|mutation| match mutation {
+            RowIndexMutation::Delete { key } | RowIndexMutation::Insert { key, .. } => {
+                [Some(key), None]
+            }
+            RowIndexMutation::Rekey { from, to } => [Some(from), Some(to)],
+        })
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let pinned = lookup_ordered_entries(domain, &root_node, &touched, &mut *read_node)?;
+    let mut rows: BTreeMap<TypedKey, Option<Cow<'_, [u8]>>> = touched
+        .into_iter()
+        .map(|key| {
+            let value = pinned
+                .get(&key)
+                .map(|value| Cow::Borrowed(value.as_slice()));
+            (key, value)
+        })
+        .collect();
+
+    for mutation in mutations {
+        let RowIndexMutation::Delete { key } = mutation else {
+            continue;
+        };
+        let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+        if slot.take().is_none() {
+            return Err(GraphError::RowKeyAbsent);
+        }
+    }
+    let mut logical_rekeys = Vec::new();
+    for mutation in mutations {
+        let RowIndexMutation::Rekey { from, to } = mutation else {
+            continue;
+        };
+        if rows.get(from).is_none_or(Option::is_none) {
+            return Err(GraphError::RowKeyAbsent);
+        }
+        if rows.get(to).is_some_and(Option::is_some) {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let value = rows.get_mut(from).and_then(Option::take);
+        rows.insert(to.clone(), value);
+        logical_rekeys.push(LogicalRowRekey {
+            old_address: from.clone(),
+            new_address: to.clone(),
+        });
+    }
+    // Inserted rows are lowered to the shared overflow graph first, so a row
+    // or value over 8 KiB or 32 direct Blob references is stored through tag
+    // 60113 (store-format-3 section 5).
+    let mut overflow = crate::overflow::OverflowWriter::new(&mut *store);
+    for mutation in mutations {
+        let RowIndexMutation::Insert { key, fields } = mutation else {
+            continue;
+        };
+        let slot = rows.get_mut(key).ok_or(GraphError::ContextMismatch)?;
+        if slot.is_some() {
+            return Err(GraphError::DuplicateRowKey);
+        }
+        let value = overflow
+            .lower_row(fields)?
+            .canonical_page_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        *slot = Some(Cow::Owned(value));
+    }
+
+    let mut changes = RowChanges::new();
+    let mut row_count = expected_count;
+    for (key, value) in rows {
+        let before = pinned.get(&key).map(Vec::as_slice);
+        let change = match (value, before) {
+            (None, None) => continue,
+            (Some(value), Some(before)) if *value == *before => continue,
+            (None, Some(_)) => {
+                row_count = row_count
+                    .checked_sub(1)
+                    .ok_or(GraphError::InvalidCount(0))?;
+                RowChange::Remove
+            }
+            (Some(value), before) => {
+                if before.is_none() {
+                    row_count += 1;
+                }
+                RowChange::Put(value.into_owned())
+            }
+        };
+        let key_bytes = key
+            .canonical_bytes()
+            .map_err(|_| GraphError::NonCanonicalData)?;
+        changes.insert(key, (key_bytes, change));
+    }
+    if row_count > MAX_SIGNED_LENGTH {
+        return Err(GraphError::InvalidCount(
+            usize::try_from(row_count).unwrap_or(usize::MAX),
+        ));
+    }
+
+    let maintained = maintain_ordered_map(
+        domain,
+        root,
+        root_node,
+        &changes,
+        &mut *read_node,
+        &mut |node| store.write_node(node),
+    )?;
+    if maintained.row_count != row_count {
+        return Err(GraphError::InvalidCount(
+            usize::try_from(maintained.row_count).unwrap_or(usize::MAX),
+        ));
+    }
+    Ok(RowMapPass {
+        maintained,
+        row_count,
+        logical_rekeys,
+    })
 }
 
 fn collect_ordered_range_with(
