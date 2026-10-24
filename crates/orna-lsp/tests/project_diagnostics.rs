@@ -185,3 +185,93 @@ fn pull_diagnostics_return_the_published_project_diagnostics() {
     assert_eq!(pulled["items"].as_array().unwrap(), &published);
     client.shutdown();
 }
+
+/// Runs `git` in `directory` with a pinned identity so commits never depend
+/// on the host configuration.
+fn git(directory: &std::path::Path, arguments: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory)
+        .args(["-c", "user.name=kierandrewett", "-c", "user.email=kieran@drewett.dev"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(arguments)
+        .output()
+        .expect("git process");
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("UTF-8 git output").trim().to_owned()
+}
+
+/// A project whose `stdlib/std` gitlink pins a committed snapshot holding
+/// `standard`, with `files` committed beside it: the captured standard
+/// dependency `orna check` expects.
+fn captured_standard_project(standard: &[(&str, &str)], files: &[(&str, &str)]) -> Project {
+    let project = Project::new(&[]);
+    let root = project.root().to_path_buf();
+    let module = root.join("stdlib/std");
+    std::fs::create_dir_all(&module).expect("standard module directory");
+    orna_repository_v1::initialize_repository(&module).expect("standard module repository");
+    for (name, source) in standard {
+        std::fs::write(module.join(name), source).expect("standard source");
+    }
+    git(&module, &["add", "-A"]);
+    git(&module, &["commit", "--quiet", "-m", "standard module snapshot"]);
+    let snapshot = git(&module, &["rev-parse", "HEAD"]);
+
+    std::fs::write(
+        root.join(".gitmodules"),
+        "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://github.com/workingdir/ornadb-std.git\n",
+    )
+    .expect("pinned module declaration");
+    for (name, source) in files {
+        project.write(name, source);
+    }
+    let mut add = vec![".gitmodules", ".orna"];
+    add.extend(files.iter().map(|(name, _)| *name));
+    let mut stage = vec!["add"];
+    stage.extend(add);
+    git(&root, &stage);
+    git(
+        &root,
+        &["update-index", "--add", "--cacheinfo", &format!("160000,{snapshot},stdlib/std")],
+    );
+    git(&root, &["commit", "--quiet", "-m", "capture std snapshot"]);
+    project
+}
+
+const CAPTURED_STD: [(&str, &str); 2] = [
+    ("main.orna", "use math;\npub fn version(): Str = \"1.0.0\";\n"),
+    ("math.orna", "pub fn increment(value: Int): Int = value + 1;\n"),
+];
+
+/// Opens `main.orna` of a captured standard project and returns the published
+/// diagnostics.
+fn check_captured_main(project: &Project, source: &str) -> Vec<Value> {
+    let uri = project.uri("main.orna");
+    let mut client = Client::start();
+    client.open(&uri, source);
+    let diagnostics = client.diagnostics_at(&uri, 1);
+    client.shutdown();
+    diagnostics
+}
+
+#[test]
+fn captured_standard_project_without_standard_imports_has_no_diagnostics() {
+    // Profile captured, no standard import: the production catalogue must
+    // resolve exactly as `orna check` does, with no diagnostics.
+    let source = "pub fn answer(): Int = 41;\n";
+    let project = captured_standard_project(&CAPTURED_STD, &[("main.orna", source)]);
+    assert!(check_captured_main(&project, source).is_empty());
+}
+
+#[test]
+fn captured_standard_import_is_checked_against_the_production_catalogue() {
+    // The pinned `std.math` declarations must resolve through the production
+    // catalogue, which the core-only catalogue alone cannot provide.
+    let source = "use std.math.{increment};\npub fn answer(): Int = increment(41);\n";
+    let project = captured_standard_project(&CAPTURED_STD, &[("main.orna", source)]);
+    assert!(check_captured_main(&project, source).is_empty());
+}

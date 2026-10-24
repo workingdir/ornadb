@@ -1683,6 +1683,50 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
 }
 
 #[test]
+fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_production_catalogue() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[
+            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
+            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+        ],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned standard closure");
+    let catalogue = project
+        .production_catalogue()
+        .expect("production catalogue from the pinned standard profile");
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    assert!(analysis.is_ok(), "analysis through production catalogue failed");
+    let core_only = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    assert!(
+        !core_only.is_ok(),
+        "core-only catalogue must not resolve the pinned standard closure"
+    );
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+    assert!(check.stderr.is_empty());
+}
+
+#[test]
 fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
     let (directory, _module_commit) = captured_standard_project();
 
