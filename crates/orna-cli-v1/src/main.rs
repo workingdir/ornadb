@@ -2030,12 +2030,14 @@ fn run_project_invocation_with_arguments(
                     arguments,
                 ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
+        .map_err(|error| {
+            let mut diagnostic = Diagnostic::target(
                 "E2200",
                 "durable project invocation failed",
                 "retry the project transaction after checking its durable state",
-            )
+            );
+            diagnostic.detail = Some(runtime_failure_detail(&error));
+            diagnostic
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
@@ -2053,7 +2055,7 @@ fn run_project_invocation_with_arguments(
                     "durable project invocation was rejected",
                     "the project transaction failed atomically; no partial changes were committed",
                 );
-                rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+                rejection.detail = Some(failure_detail(&diagnostic));
                 rejection
             }
         }),
@@ -2115,20 +2117,26 @@ fn run_project_stream_invocation_with_project(
                     root_entry,
                 ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
+        .map_err(|error| {
+            let mut invocation = Diagnostic::target(
                 "E2200",
                 "durable project invocation failed",
                 "retry the project transaction after checking its durable state",
-            )
+            );
+            invocation.detail = Some(runtime_failure_detail(&error));
+            invocation
         })?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project stream delivery failed",
-            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
-        )),
+        StageOutcome::Failed(diagnostic) => {
+            let mut delivery = Diagnostic::target(
+                "E2200",
+                "durable project stream delivery failed",
+                "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
+            );
+            delivery.detail = Some(failure_detail(&diagnostic));
+            Err(delivery)
+        }
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
@@ -2150,6 +2158,31 @@ fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Opt
         detail: None,
         body: None,
     })
+}
+
+/// Carries the runtime failure's public code, or its non-disclosing display
+/// text, into the diagnostic detail. The detail is shown with `--debug` only
+/// (ORNA-UX-004 keeps technical causes out of the default rendering).
+fn runtime_failure_detail(error: &orna_runtime_v1::RuntimeError) -> String {
+    let cause = error
+        .public_code()
+        .map_or_else(|| error.to_string(), str::to_owned);
+    format!("runtime failure: {cause}")
+}
+
+/// Renders the evaluator failure code with the codes of its nested causes.
+/// Messages and spans stay redacted at the evaluator boundary.
+fn failure_detail(diagnostic: &orna_foundation_v1::Diagnostic) -> String {
+    let causes = diagnostic.causes();
+    if causes.is_empty() {
+        return format!("failure code: {}", diagnostic.code());
+    }
+    let codes = causes
+        .iter()
+        .map(orna_foundation_v1::Diagnostic::code)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("failure code: {} (causes: {codes})", diagnostic.code())
 }
 fn run_pure_invocation(
     endpoint: &Endpoint,
