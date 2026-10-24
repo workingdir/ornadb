@@ -969,8 +969,11 @@ impl RepositoryFormatContext {
     }
 }
 /// Classifies a native-graph fault on the admitted row-map path. Unavailable
-/// objects stay unavailable (ORNA-ROW-007); every other graph fault keeps its
-/// typed diagnostic.
+/// objects stay unavailable (ORNA-ROW-007). Shape faults in the native graph
+/// are malformed data (store-format-3 section 2, lines 50-55) and keep their
+/// typed diagnostic. Every other fault is an invalid graph context, not a
+/// malformed graph: a Git command failure, quota, cancel, durability or
+/// context-mismatch failure does not prove the stored graph is malformed.
 fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextError {
     use crate::native_graph::GraphError;
     match error {
@@ -981,7 +984,30 @@ fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextE
         | GraphError::PromisedObjectNotMaterialized { .. } => {
             FormatContextError::GraphContextUnavailable
         }
-        other => FormatContextError::GraphMalformed(other),
+        GraphError::InvalidOidWidth { .. }
+        | GraphError::MalformedOid
+        | GraphError::UnknownNodeKind(_)
+        | GraphError::NonCanonicalData
+        | GraphError::NodeDataTooLarge(_)
+        | GraphError::FanoutExceeded(_)
+        | GraphError::HeightExceeded(_)
+        | GraphError::InvalidLength(_)
+        | GraphError::InvalidCount(_)
+        | GraphError::InvalidDomain
+        | GraphError::OverlappingChildRange
+        | GraphError::UncollapsedRoot
+        | GraphError::InvalidDigestLength
+        | GraphError::InvalidEmptyBlob
+        | GraphError::InvalidRange
+        | GraphError::DuplicateRowKey
+        | GraphError::WrongNodeKind { .. }
+        | GraphError::InvalidTreeEnvelope
+        | GraphError::MissingNodeData
+        | GraphError::GitObjectMalformed
+        | GraphError::GitObjectHashMismatch
+        | GraphError::ContentIdentityMismatch
+        | GraphError::ChunkDigestMismatch => FormatContextError::GraphMalformed(error),
+        _ => FormatContextError::GraphContextInvalid,
     }
 }
 
