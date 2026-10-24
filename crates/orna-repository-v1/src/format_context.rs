@@ -134,6 +134,9 @@ pub enum FormatContextError {
     RowMapMismatch,
     GraphContextUnavailable,
     GraphContextInvalid,
+    /// The native graph is present but malformed (store-format-3 section 2).
+    /// The typed graph error stays attached so callers can tell fault classes apart.
+    GraphMalformed(crate::native_graph::GraphError),
     TableBindingMismatch,
 }
 
@@ -156,6 +159,7 @@ impl FormatContextError {
             Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
             Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
             Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
+            Self::GraphMalformed(_) => "ORNA-REPO-CONTEXT-017",
             Self::TableBindingMismatch => "ORNA-REPO-CONTEXT-016",
         }
     }
@@ -189,6 +193,9 @@ impl fmt::Display for FormatContextError {
             Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
             Self::GraphContextUnavailable => "native graph repository data is unavailable",
             Self::GraphContextInvalid => "native graph repository data is invalid",
+            Self::GraphMalformed(error) => {
+                return write!(formatter, "native graph repository data is malformed: {error}");
+            }
             Self::TableBindingMismatch => "table declaration and committed schema binding disagree",
         })
     }
@@ -614,7 +621,7 @@ impl RepositoryFormatContext {
             snapshot_id,
             relation_id,
         )
-        .map_err(|_| FormatContextError::GraphContextInvalid)
+        .map_err(graph_context_error)
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
@@ -811,10 +818,10 @@ impl RepositoryFormatContext {
         let graph = self.open_native_graph(&rows)?;
         let scope = graph
             .open_read_scope()
-            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+            .map_err(graph_context_error)?;
         let descriptor = graph
             .read_schema_descriptor(&scope)
-            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+            .map_err(graph_context_error)?;
         if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
             return Err(FormatContextError::TableBindingMismatch);
         }
@@ -959,6 +966,46 @@ impl RepositoryFormatContext {
         } else {
             Err(FormatContextError::LegacyReadOnly(self.format.number()))
         }
+    }
+}
+/// Classifies a native-graph fault on the admitted row-map path. Unavailable
+/// objects stay unavailable (ORNA-ROW-007). Shape faults in the native graph
+/// are malformed data (store-format-3 section 2, lines 50-55) and keep their
+/// typed diagnostic. Every other fault is an invalid graph context, not a
+/// malformed graph: a Git command failure, quota, cancel, durability or
+/// context-mismatch failure does not prove the stored graph is malformed.
+fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextError {
+    use crate::native_graph::GraphError;
+    match error {
+        GraphError::UnavailableObject
+        | GraphError::UnknownObjectAvailability
+        | GraphError::ObjectUnavailable
+        | GraphError::MissingObject { .. }
+        | GraphError::PromisedObjectNotMaterialized { .. } => {
+            FormatContextError::GraphContextUnavailable
+        }
+        GraphError::MalformedOid
+        | GraphError::UnknownNodeKind(_)
+        | GraphError::NonCanonicalData
+        | GraphError::NodeDataTooLarge(_)
+        | GraphError::FanoutExceeded(_)
+        | GraphError::HeightExceeded(_)
+        | GraphError::InvalidLength(_)
+        | GraphError::InvalidCount(_)
+        | GraphError::InvalidDomain
+        | GraphError::OverlappingChildRange
+        | GraphError::UncollapsedRoot
+        | GraphError::InvalidDigestLength
+        | GraphError::InvalidEmptyBlob
+        | GraphError::DuplicateRowKey
+        | GraphError::WrongNodeKind { .. }
+        | GraphError::InvalidTreeEnvelope
+        | GraphError::MissingNodeData
+        | GraphError::GitObjectMalformed
+        | GraphError::GitObjectHashMismatch
+        | GraphError::ContentIdentityMismatch
+        | GraphError::ChunkDigestMismatch => FormatContextError::GraphMalformed(error),
+        _ => FormatContextError::GraphContextInvalid,
     }
 }
 
@@ -5956,6 +6003,26 @@ mod graph_bridge_tests {
             .expect("read the copied Blob payload");
         assert_eq!(read.bytes(), payload);
         assert_eq!(payload_scope.payload_bytes_read(), payload.len() as u64);
+    }
+
+    #[test]
+    fn operational_graph_errors_are_not_classified_as_malformed() {
+        use crate::native_graph::GraphError;
+        for error in [
+            GraphError::ReadQuotaExceeded,
+            GraphError::MetadataQuotaExceeded,
+            GraphError::InventoryQuotaExceeded,
+            GraphError::ReadCancelled,
+            GraphError::DurabilityFailed,
+            GraphError::ObjectDurabilityUnavailable,
+            GraphError::GitCommandFailed,
+        ] {
+            let mapped = super::graph_context_error(error.clone());
+            assert!(
+                !matches!(mapped, FormatContextError::GraphMalformed(_)),
+                "operational graph error must not be GraphMalformed: {error:?} -> {mapped:?}"
+            );
+        }
     }
 }
 
