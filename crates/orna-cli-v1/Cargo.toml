@@ -24,7 +24,6 @@ missing_errors_doc = "allow"
 [dependencies]
 sha2 = "0.10"
 orna-application-v1 = { path = "../orna-application-v1" }
-orna-client = { path = "../orna-client" }
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
