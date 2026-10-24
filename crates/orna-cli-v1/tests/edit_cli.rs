@@ -178,6 +178,7 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
             insert_only: true,
         }],
     ).await;
+    drop(state);
     let before_value = current_row(&repository, relation_id, "media", b"image").await
         .expect("published image row exists");
     let before_metadata = stored_blob_metadata(&before_value);
