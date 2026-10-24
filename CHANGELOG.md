@@ -103,6 +103,17 @@ been published.
   The build checks that every published code is declared by an operation, is
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
+- A failed stream administration call (pause, resume or checkpoint reset)
+  records the generation its writer fence observed and a stable failure class
+  in its invocation audit row. A retry under the same invocation ID returns
+  the recorded error instead of a storage-unavailable error; a stale capture
+  replays as a stale capture carrying the capture current at replay. A
+  rejected stream-reference resume now records its failure like a rejected
+  pause. When the generation cannot be read, the call returns that error and
+  writes no row, never one with generation 0. A skip lease refused because the
+  failure is no longer open is `sys.failure.state_conflict`, not
+  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
+  no longer takes a lease purpose.
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and

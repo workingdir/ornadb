@@ -4470,10 +4470,9 @@ fn admin_reference_descriptor(
 ///
 /// A `failure:stale_capture` row stores only the admitted generation and the
 /// class (ORNA-ADMIN-001), not the rejected capture. Replay therefore returns
-/// `StaleCapture` with the CWD capture current at replay time. Callers and
-/// tests MUST compare that rejection by class, not by its `current` payload,
-/// which may differ after later commits. A capture failure at replay surfaces
-/// its own error instead of the recorded class.
+/// `StaleCapture` with the CWD capture current at replay time, which equals
+/// the original rejection until a later commit advances the CWD. A capture
+/// failure at replay surfaces its own error instead of the recorded class.
 async fn replay_admin_stream_result(
     connection: &Connection,
     receipt: &AdminInvocationAudit,
@@ -40809,7 +40808,7 @@ mod tests {
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
         let recorded = stream_delivery("runtime-skip-twice", "runtime-skip-twice-next");
-        let expected = orna_stream_v1::CheckpointPrecondition {
+        let expected = CheckpointPrecondition {
             version: 0,
             committed: None,
         };
