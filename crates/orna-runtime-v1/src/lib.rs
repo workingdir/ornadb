@@ -2515,6 +2515,10 @@ pub enum RuntimeError {
     /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
     /// format and remedy.
     LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
+    /// The format recorded at `HEAD` is not a format this build knows, so
+    /// runtime admission is refused before any worktree metadata or runtime
+    /// state is read (ORNA-REPO-CONTEXT-003). The refusal carries its code.
+    UnknownHeadFormat(orna_repository_v1::FormatContextError),
     /// A retry, skip or resolve named a failure version or successor that is
     /// not the stored one (`sys.failure.stale_version`).
     StreamFailureStale,
@@ -2613,6 +2617,7 @@ impl fmt::Display for RuntimeError {
             Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
             Self::LegacyHeadReadOnly(refusal) => refusal.title(),
+            Self::UnknownHeadFormat(_) => "repository format is unknown",
         })
     }
 }
@@ -4630,6 +4635,8 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::StorageUnavailable => "storage_unavailable",
         // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
         RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
+        RuntimeError::UnknownHeadFormat(_) => "unknown_head_format",
     }
 }
 
@@ -41705,9 +41712,9 @@ mod tests {
 
     #[test]
     fn admin_failure_class_round_trips_every_payload_free_variant() {
-        // The 48 payload-free variants. StaleCapture, FaultInjected and
-        // LegacyHeadReadOnly carry payloads the row does not store; they are
-        // checked by the class-only assertions below.
+        // The 48 payload-free variants. StaleCapture, FaultInjected,
+        // LegacyHeadReadOnly and UnknownHeadFormat carry payloads the row does not
+        // store; they are checked by the class-only assertions below.
         let table: &[(RuntimeError, &str)] = &[
             (RuntimeError::InvalidIdentity, "invalid_identity"),
             (RuntimeError::InvalidDigest, "invalid_digest"),
@@ -41774,6 +41781,10 @@ mod tests {
         );
         assert_eq!(
             admin_failure_from_class("legacy_head_read_only"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("unknown_head_format"),
             RuntimeError::RecoveryInvalid,
         );
     }
