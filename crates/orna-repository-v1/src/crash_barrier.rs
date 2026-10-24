@@ -6,13 +6,20 @@
 //!
 //! With the feature enabled, a harness sets `ORNA_TEST_PUBLICATION_CRASH_AT` to
 //! the exact boundary name and `ORNA_TEST_PUBLICATION_CRASH_DIR` to a directory
-//! it owns. When the selected boundary is reached, the process creates
+//! it owns. When the selected boundary is reached, the process publishes
 //! `publication-crash-marker` in that directory exclusively (failing rather than
 //! overwriting) and parks forever so the harness can SIGKILL it at that point.
+//! The marker becomes visible under its final name only after it holds the
+//! complete boundary name, so a harness that sees the marker can read it.
 
 #[cfg(feature = "crash-barriers")]
 mod armed {
-    use std::{io::Write, path::PathBuf, sync::LazyLock, thread};
+    use std::{
+        io::Write,
+        path::{Path, PathBuf},
+        sync::LazyLock,
+        thread,
+    };
 
     const CRASH_AT: &str = "ORNA_TEST_PUBLICATION_CRASH_AT";
     const CRASH_DIR: &str = "ORNA_TEST_PUBLICATION_CRASH_DIR";
@@ -33,17 +40,30 @@ mod armed {
         if selected != boundary {
             return;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(marker)
-            .expect("create new publication crash marker");
-        file.write_all(boundary.as_bytes())
-            .expect("write publication crash marker");
-        file.sync_all().expect("sync publication crash marker");
+        publish_marker_exclusively(marker, boundary);
         loop {
             thread::park();
         }
+    }
+
+    /// Writes and syncs the boundary name in a private staging file, then
+    /// hard-links it to `marker`. `hard_link` fails when `marker` already
+    /// exists, preserving exclusivity, and the final name never refers to a
+    /// partially written file. The staging name is removed after publication.
+    fn publish_marker_exclusively(marker: &Path, boundary: &str) {
+        let directory = marker.parent().expect("marker has a parent directory");
+        let staging = directory.join(format!(".{MARKER_FILE_NAME}.{}.tmp", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .expect("create staged publication crash marker");
+        file.write_all(boundary.as_bytes())
+            .expect("write staged publication crash marker");
+        file.sync_all().expect("sync staged publication crash marker");
+        drop(file);
+        std::fs::hard_link(&staging, marker).expect("publish publication crash marker");
+        std::fs::remove_file(&staging).expect("remove staged publication crash marker");
     }
 }
 
