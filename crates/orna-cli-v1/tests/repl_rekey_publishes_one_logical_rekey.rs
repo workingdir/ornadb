@@ -2,7 +2,8 @@
 //! one logical row rekey, visible to `orna history --diff` as a single
 //! `rekeyed` change rather than a removal plus an addition. A Blob-bearing row
 //! moves with its committed Blob reference unchanged, and a rekey of long keys
-//! publishes through an overflow log row.
+//! publishes a log row whose long addresses are stored through the overflow
+//! graph.
 
 use std::{
     io::Write,
@@ -254,8 +255,8 @@ fn repl_rekey_of_a_blob_bearing_row_moves_its_committed_blob_unchanged() {
 fn repl_rekeys_of_long_keys_publish_through_overflow_log_rows() {
     let (directory, repository, relation_id) = format3_repository(RELOCATE_SOURCE);
     let root = directory.path();
-    // Each address spells about 5 KiB, so a log row holding the hex spelling
-    // of two of them exceeds the 8 KiB inline limit and is stored as overflow.
+    // Each address spells about 5 KiB, so its hex spelling in the log row
+    // exceeds the 8 KiB inline limit and is lowered to the overflow graph.
     let first = "o".repeat(5_000);
     let second = "n".repeat(5_000);
     submit(root, &format!("main.add({first:?}, \"Long\").id"));

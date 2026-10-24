@@ -1,0 +1,342 @@
+{
+ "cases": [
+  {
+   "algorithm": "sha1",
+   "id": "empty",
+   "levels": [
+    [
+     "450fe79aafbe88b2d4e52e5fa6405b5859d06fea"
+    ]
+   ],
+   "recipe": "int-rows",
+   "root": "450fe79aafbe88b2d4e52e5fa6405b5859d06fea",
+   "rows": 0
+  },
+  {
+   "algorithm": "sha1",
+   "id": "int-rows-sha1",
+   "levels": [
+    [
+     "9f0c44964f58ffe453836d66b4f69736ed0c9ac9",
+     "ad6618ce8ae03e9ab7e013e50a7eb2f94af3f29e",
+     "8d40d9df76bfa823368a982d818616c4d135b2a5",
+     "652e677b4a369e682cdb32eb9e7ca5db87d18480",
+     "474f77f3c102c75158f034adb2439c75efa2ed4d",
+     "ee7d1cb114d78af1c4e93802307529003e8b803d",
+     "40a05b580a223ade65cac636e9aeb6810bea57c3",
+     "7fa7735965c85628497d4822cd4366bb0aa1a0be",
+     "f7ee488166e3332afbe1139cca41f3f14657a748",
+     "4a3ebd8cd12674372cf0fd665e8451b8b31082ac",
+     "f9a2e4a7c4e9d6e26cbd3337e3db14ea99002668",
+     "31d02fc47ba339f64d206c9efde85a34803c7ab9",
+     "f706b95e99d42c9936200cddb00a5a5eba177824",
+     "c72d22161249bf7c1bfd887ed4feef26f93aa577",
+     "f513a45d416010eda874399347cd788e84ed28a6",
+     "97b1ca7398c2af58217016ff0df988042baaba44",
+     "d8a4116602e8859394403bcdddf7723f918c35b0",
+     "63be12973b3773e3a1a42aa52f082bd606ddb75d",
+     "1909ecd99167fd20ecc48f922acd43dbab5a511c",
+     "7f18fb7cef1727f277c1ee12025725fd04708878",
+     "960bcee53559cdcd759acf02ce3f7bdc779057ec",
+     "a4dc23a3602d2ca68da2441aeae068e5b1a89b66",
+     "0bdf183364293f03b9e6e83d0b035f01559e5ffd",
+     "81aea9fd63855b8da8084b94148d0859b7f9e620",
+     "ded6b347c746a9ee9b426edf4ab14c4b552d55b1",
+     "dc062946a82bae19e118e7de4e58f936512bf07d",
+     "d6d328de3c7c80b30c120f543835504709dcb5cf",
+     "0d0663cb13fc181363da8dd7dc7925ee6517cb9b",
+     "1d39f235e5cabea341e06f3e7eca14ff49e66c0f",
+     "81c482875dcb4747af9b33bcc348dbc4bfcf93ba",
+     "7cfa1c436c35d0ad05567a57b3ce089a4315bff7",
+     "7f0bd80f0bae623f78e7c04e21478464a1102e19"
+    ],
+    [
+     "841955d3589316ae8a9ff3c061746267f9045895",
+     "37ce18fbbae197cad4d9d42cbffa024059acbea2"
+    ],
+    [
+     "2d34af016172131f1fec6100f6d369824ffbc80f"
+    ]
+   ],
+   "recipe": "int-rows",
+   "root": "2d34af016172131f1fec6100f6d369824ffbc80f",
+   "rows": 3000
+  },
+  {
+   "algorithm": "sha256",
+   "id": "int-rows-sha256",
+   "levels": [
+    [
+     "78626e50293c8347d6114a3d32b6e7207904ebf16bdc11dcd67fb593b5fdc901",
+     "86f696cddca0b5be2628abcb5641f16c697f54d823221ab4251584fc9d66ffdf",
+     "4854723b460e33901636d166c182ac1df143668577e74bee1d6c54c93dbf73ff",
+     "c3ed0a5979c4d65d4f9d3e4198818bf5e46cd47b43d49d9f35aa6b8d5692da64",
+     "9de5b476f2fba502774a4795d905405682a8abe6c6c3579be65d3e7cdfd38da6",
+     "cc00261fee49c211d66dd1cda18e51ca29281738f98fbd2f788b2634a8f3f305",
+     "a5fae6184844fce61b2bd388358774b88f3c637be984f90a9d914a6fc5146a95",
+     "c3dd3c9f2e7a389470faa1daf4e0eb584da63f339f516bbacf13a3a3b56fabab",
+     "948d42f9d9429264fb76ce3d6c9fb008ee454f1626447c3831a2548c3d0a2cb2",
+     "946e9185a7c8f4e00c699883596e360efb48a5a3bbf2d87fdf204c48b253ed33",
+     "7ce9ac7f5bf23a9fe74567540fb9a323feec2c90d8b7fee184bc17113bf2d7e0",
+     "4ea01f896ab927d3729060f2bd3650eb35ad34bf55ca7e5e37ffcfba8db961b2",
+     "a20e113ad509d14d189a682e352349ca774073239dad074904977881e70dbb63",
+     "d3c57dff89e8b92b800f2497367d7f351f6e749812b541b05a6f538a46052c94",
+     "b5c74e2afdfeb4c41a2fbe0afb028f5e860e10875f72d18873e449de04aa7421",
+     "1a2837cf0b4e55bb4802812f441fd01b044b66492a077fab5ae5ad346bf0fb67",
+     "ad13c7b220307e92fefdad00183fe7e3d1a47381dd08a56ff0db5c3b9f337a44",
+     "4ee80378845bab3820f10889bf8e3ed5fcefc48c51ea73c48f466afebd26acc7",
+     "38b1793a8cee87dd07412be16bde622556e076c652a549aff347cf20e0ddc35a",
+     "d7123c5d86e954bd1418adbb27a2cf9fd6a5eb912d155f8403ef749fcd074907",
+     "bd512cabdb3a6de6c73aaae7024d813de3aa73f3f1ed94268a4146a0f71202ae",
+     "43f5a47c7fdfd9c1ab21d1081cc248b694117afb1253b2b7780953f889725cae",
+     "edf88548802683e0589c9b1f21b9d22c5f95b180397773608e8fff4c731ccd37",
+     "237f57783e08a1d6e48955ebfecba9f66a8eaba334891d9d63226c06db64e1c9",
+     "1f4f1fd57581cd5fe33c61280ca107dfd710652ea08e6964035831c8b41e4a8f",
+     "490e68ec20ecb970e2ca7a9ed6ba9f32e05f4d546cd893e3604468dbe6e3d3ad",
+     "c4217345985fdb8d82591c3deb2f0e542699f4f904ac4cf06dcde0bd3ae684f5",
+     "d7011571e6b8613a9e6275eba01b5ec3c4730e99f4a9ae4234e52c6b169c0628",
+     "a36fb1d7f740f8bc4699ae2d0ae45c1ea7493172170e358be7d5730085a21ce0",
+     "688ecd7f2e1b0a875756484371e4ba654eebcc16a3436ea3646e6e83c78583e3",
+     "21c8444162a275d53159ba71805acb003dcf4a45f8cdfec08864368b117f8581",
+     "0f8ae29a5bdcd416522bf66cf74615006ea407fe3cc80ff6f9b3d03cfba3d136"
+    ],
+    [
+     "c06a4c3d8a5dd33e93e8b7a142cebca386ff01f6fe16cdd24e74337905d545c2",
+     "536a36751827f3a03da0ac34c91fc3cfa79cc8ecacf6775cb1165f7a21e99fc1"
+    ],
+    [
+     "f143c9e82762848a77bd6c9ba47376f9174ae4957c8cb3d91d0ebaadc065e54d"
+    ]
+   ],
+   "recipe": "int-rows",
+   "root": "f143c9e82762848a77bd6c9ba47376f9174ae4957c8cb3d91d0ebaadc065e54d",
+   "rows": 3000
+  },
+  {
+   "algorithm": "sha1",
+   "id": "size-bound",
+   "levels": [
+    [
+     "3fa3c4cb5b216ce9c01c2371693a088336371880",
+     "7e20530e7706412b33234048dced4f5fa34fd175",
+     "2e8f9f724c306897a250dcd83faaf56dd7c78ee8",
+     "670b4802262a502eddf44a2c66d4873c06dc6487",
+     "afa5248c1df4fc81cff437f53a2a154344e5aaed",
+     "a9bfae1dac14b3a4b996d2f34e5cd28851d8ddeb"
+    ],
+    [
+     "ab39545decbf506cc5bd7e961ec89bb66298ac93"
+    ]
+   ],
+   "recipe": "text-lengths",
+   "root": "ab39545decbf506cc5bd7e961ec89bb66298ac93",
+   "text_lengths": [
+    6000,
+    6997,
+    7994,
+    6891,
+    7888,
+    6785,
+    7782,
+    6679,
+    7676,
+    6573,
+    7570,
+    6467,
+    7464,
+    6361,
+    7358,
+    6255,
+    7252,
+    6149,
+    7146,
+    6043,
+    7040,
+    8037,
+    6934,
+    7931,
+    6828,
+    7825,
+    6722,
+    7719,
+    6616,
+    7613,
+    6510,
+    7507,
+    6404,
+    7401,
+    6298,
+    7295,
+    6192,
+    7189,
+    6086,
+    7083,
+    8080,
+    6977,
+    7974,
+    6871,
+    7868,
+    6765,
+    7762,
+    6659
+   ]
+  },
+  {
+   "algorithm": "sha1",
+   "id": "exact-node-limit",
+   "levels": [
+    [
+     "4dc63c5c67be16a07fbffa362ce6bbca3bbf5649",
+     "79835b33fbc0eafeb326a67ec625f37707e6b7a9",
+     "cdf602cb5dd3ef743ab2b220c6e82d46eb089e33"
+    ],
+    [
+     "aafe2d7dcb66f9e7e02f471155c11feee5a206a6"
+    ]
+   ],
+   "recipe": "text-lengths",
+   "root": "aafe2d7dcb66f9e7e02f471155c11feee5a206a6",
+   "text_lengths": [
+    7200,
+    7200,
+    7200,
+    7200,
+    7200,
+    7200,
+    7200,
+    7200,
+    7821,
+    7300,
+    7300,
+    7300,
+    7300,
+    7300,
+    7300,
+    7300,
+    7300,
+    7022,
+    100
+   ]
+  },
+  {
+   "algorithm": "sha1",
+   "id": "shared-blob-refs",
+   "levels": [
+    [
+     "de3a42ef0f8b28636f8217482e3554eb8d032c0a",
+     "b7c9443601b1ca4f277cb5fce34baa7c6be39406",
+     "aa7337f9164af94f9e21bf92c26fd5f8a7576906",
+     "a93bfd375b29d30356b0c8ce75793d01ef0b08ac"
+    ],
+    [
+     "da608f030a494a764410da94a63eae69e079ff5a"
+    ]
+   ],
+   "pool": 600,
+   "recipe": "shared-blobs",
+   "refs_per_row": 30,
+   "root": "da608f030a494a764410da94a63eae69e079ff5a",
+   "rows": 60,
+   "stride": 13
+  },
+  {
+   "algorithm": "sha256",
+   "id": "shared-blob-refs-sha256",
+   "levels": [
+    [
+     "1539da4ee44214ad3a8e5e57068ac014d419d106fc2da66358e5659ccd9f0316",
+     "325b9052a57d3c66d777528bea16ea5d069c3198ee41856b6af469977cc79e30",
+     "0d3a4c23341acd1addfee806d73ff26d9a923a3654d4560542f947c812400c7a",
+     "abd655b9f081882e444a239ab40c1e396261926776b2785b58864d92056c2649"
+    ],
+    [
+     "ef550b5f7762d0d78b1d0772036cedde5a10345b22dca341042629d8e2402d43"
+    ]
+   ],
+   "pool": 600,
+   "recipe": "shared-blobs",
+   "refs_per_row": 30,
+   "root": "ef550b5f7762d0d78b1d0772036cedde5a10345b22dca341042629d8e2402d43",
+   "rows": 60,
+   "stride": 13
+  },
+  {
+   "algorithm": "sha1",
+   "id": "long-text-keys",
+   "key_length": 3000,
+   "levels": [
+    [
+     "45d913d3978ecae4008d20a35cfc344b207dc569",
+     "6eab9e24be47bed898c91189ba5b7a132fc12811",
+     "141d4f1a8156aec7897a0cc27d03cf7958e7c160",
+     "bf9e90b428e33a57cc9bdf811cf8d7cbf6f92bb1",
+     "c0616276601e1b19e367dd805465436ccc68e2ae",
+     "9923454feaf1212d774f78033b290a71eef9aa7c",
+     "b53b5be76c190673a11a786359ebb6db3c9db11e",
+     "381131b3d4a91ebe5d3578ca9e0013b33e764494",
+     "3c7b830fc5d4979fe3c257f75f77e6854556564c",
+     "9fa5cd6afc01f78fb6ed5bd8649c42dd744b6793",
+     "5ac49076493de584d40577a3214acfc85d2a960b",
+     "9f44f7de17482372f119fd90690a992953a9d5fa",
+     "5e83cd06d5564d19b4f7359105ea3e043f87cf8b",
+     "521b3634075e82a894a8de688f906323325a9770",
+     "1e05d3cf57c983cc5a181effc80b495cfe8ceae0",
+     "e231e31bc34680551ed0b3cda6b17ddb9c3f2519",
+     "1bc68c4e5dfd5006931dacf1007b43c020594a37",
+     "02c809bbf101203c05836a08c718f8b4bdc819b0",
+     "87d80005b0790edbbca1609179245ecca6f56942",
+     "9b12a59633e6434c51f9f6f80b9f2362f84b70d7",
+     "c3b11c52552878db1bfd01e1b82a07ed0439b281",
+     "cf1244f786790335a2e80667dacfdf3c099556ee",
+     "4806f0fafea55e9a79ee6da1385aa9c0e92e9bc1",
+     "472f291e0c2de1765ef45954fe1557417a0b3db4",
+     "4e3ce34d4a988eefdf4c5342feb959987ad4e762",
+     "d2877a3ba976c8fd4398ac4f51142ff43d8f0a78",
+     "5b4eca225bfafdabce96bcd2f770bf4288100dbf",
+     "2b1dc4b9f467459f460c548b5bcdf8e6080ca9a4",
+     "1f5682072bca6fdc23af1a664e64181af55bf4bb",
+     "d0be78327ce6c34b460e62b9d2c17b963a39250f",
+     "cde1be0f806f4a6ce2e26b067575a71ca7dc7dbe",
+     "e43e27a3395ec8d5a28df149fee3087324fa46d5",
+     "74ef33aef9335b9eca6a60ddf9b713900683e079",
+     "a80dd610e5c84eb4790e127c7ec34bd34d06c096"
+    ],
+    [
+     "8916a329d963c8617c91a032f1fdd260cb80a1c6",
+     "20b277c317617f3d61c8b25b39735ba4f3b9d29a"
+    ],
+    [
+     "2a0850c8306015a6b217c54dcba5be602221373e"
+    ]
+   ],
+   "recipe": "long-text-keys",
+   "root": "2a0850c8306015a6b217c54dcba5be602221373e",
+   "rows": 700
+  },
+  {
+   "algorithm": "sha1",
+   "id": "relations",
+   "levels": [
+    [
+     "2e9bc4644d4a27ce7807de677e5852d94b82a0f0",
+     "be837f3a7a366018cd31f50d548127b25e2227b0",
+     "466cc9f822ff7462309e030fcce9b6c82c660f5c",
+     "9ca5db75c6594c8c32691d9a64c2502bb7402d73",
+     "420b3ede8da913d6da3351bedf5e3a2f7e764b19"
+    ],
+    [
+     "1103da0538273aaeb9f7d60a7cc7723f9f9158fe"
+    ]
+   ],
+   "recipe": "relations",
+   "root": "1103da0538273aaeb9f7d60a7cc7723f9f9158fe",
+   "rows": 300
+  }
+ ],
+ "relations_database_hex": "33333333333333333333333333333333",
+ "rows_domain": {
+  "relation_hex": "11111111111111111111111111111111",
+  "schema_digest_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+ },
+ "scope": "ORP-1 golden roots from tools/final_model.py ordered_map; recipes are rebuilt by orp.rs tests"
+}
