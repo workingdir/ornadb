@@ -492,7 +492,7 @@ fn add_row_refuses_loose_row_in_format3_repository() {
 }
 
 /// A format-3 snapshot that tracks a loose row file mixes formats, whoever
-/// committed it (ORNA-META-001, ORNA-REPO-004; Gate A, "unknown/mixed formats
+/// committed it (ORNA-REPO-004, ORNA-UPGRADE-003; Gate A, "unknown/mixed formats
 /// fail early"). A database `orna init` and `orna commit` created gets a row
 /// file committed past `orna commit` with plain Git; the next `orna commit`,
 /// which changes only source, refuses the inherited row file with
@@ -530,10 +530,12 @@ fn commit_refuses_a_loose_row_already_in_a_format3_head() {
     )
     .unwrap();
     git(&root, &["add", "main.orna"]);
+    let staged = git_text(&root, &["ls-files", "--stage"]);
     let refused = run(&root, &["commit", "-m", "Change source only"]);
     assert_loose_row_refused(&refused, "music/london.orna");
     assert_eq!(git_text(&root, &["rev-parse", "HEAD"]), head, "no commit was made");
     assert_eq!(git_text(&root, &["for-each-ref"]), refs, "no ref moved");
+    assert_eq!(git_text(&root, &["ls-files", "--stage"]), staged, "the index is unchanged");
 }
 
 /// Format-1/2 repositories are loose-row based, so `orna add --row` on an

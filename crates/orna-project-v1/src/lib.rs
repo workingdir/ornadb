@@ -1015,7 +1015,9 @@ impl ProjectLoader {
                 None => read_module(&root, logical_path, total_bytes, self.limits),
             },
             |_, segments| resolve_import(&root, segments, overlays),
-            |tables, total_bytes| discover_worktree_rows(&root, tables, total_bytes, self.limits),
+            |tables, _, total_bytes| {
+                discover_worktree_rows(&root, tables, total_bytes, self.limits)
+            },
         )
     }
 
@@ -1100,9 +1102,9 @@ impl ProjectLoader {
                     resolve_committed_import(&snapshot.source_paths, segments)
                 }
             },
-            |tables, total_bytes| {
+            |tables, modules, total_bytes| {
                 if has_format3_database {
-                    refuse_format3_loose_rows(&snapshot.row_paths, tables)?;
+                    refuse_format3_loose_rows(&snapshot.row_paths, tables, modules)?;
                     Ok(Vec::new())
                 } else {
                     discover_committed_rows(
@@ -1190,9 +1192,9 @@ impl ProjectLoader {
                 )
             },
             |_, segments| resolve_committed_import(&snapshot.source_paths, segments),
-            |tables, total_bytes| {
+            |tables, modules, total_bytes| {
                 if has_format3_database {
-                    refuse_format3_loose_rows(&snapshot.row_paths, tables)?;
+                    refuse_format3_loose_rows(&snapshot.row_paths, tables, modules)?;
                     Ok(Vec::new())
                 } else {
                     discover_private_candidate_rows(
@@ -1483,6 +1485,7 @@ fn load_reachable_project(
     mut resolve_import: impl FnMut(&str, &[&str]) -> Result<String, ProjectLoadError>,
     mut discover_rows: impl FnMut(
         &BTreeSet<String>,
+        &BTreeSet<&str>,
         &mut usize,
     ) -> Result<Vec<LooseRowCandidate>, ProjectLoadError>,
 ) -> Result<LoadedProject, ProjectLoadError> {
@@ -1573,7 +1576,11 @@ fn load_reachable_project(
         });
         modules.push(ModuleInput::new(logical_path, module.source));
     }
-    let loose_rows = discover_rows(&table_paths, &mut total_bytes)?;
+    let module_paths = identities
+        .iter()
+        .map(|identity| identity.logical_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let loose_rows = discover_rows(&table_paths, &module_paths, &mut total_bytes)?;
     for row in &loose_rows {
         // Every loose row file is a row unit (ORNA-SOURCE-003). Reject one that
         // is not a single record expression here, with its parser code, as for
@@ -2225,21 +2232,25 @@ fn discover_private_candidate_rows(
 
 /// Refuses a format-3 snapshot that tracks a loose row file.
 ///
-/// Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004), so a `.orna`
-/// file at a table's row path, `<table>/<key>.orna`, is the legacy loose-row
-/// layout, and a snapshot that tracks one mixes formats (ORNA-META-001,
-/// ORNA-UPGRADE-003; Gate A, "unknown/mixed formats fail early"). A committed
-/// snapshot or commit candidate holding one fails to load with
+/// Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): persisted rows
+/// are ORP-1 records, not loose-row files (03-source-modules, "File
+/// extension"). So a `.orna` file at a table's row path, `<table>/<key>.orna`,
+/// that the module graph did not load is the legacy loose-row layout, and a
+/// snapshot that tracks one mixes formats (ORNA-UPGRADE-003; Gate A,
+/// "unknown/mixed formats fail early"). A file at such a path that a `use`
+/// reached is a module (ORNA-NS-002), never a row. A committed snapshot or
+/// commit candidate holding a loose row fails to load with
 /// ORNA-REPO-CONTEXT-004 naming the first such path, before its bytes are
 /// read, instead of loading with the row silently skipped.
 fn refuse_format3_loose_rows(
     row_paths: &BTreeSet<String>,
     table_paths: &BTreeSet<String>,
+    module_paths: &BTreeSet<&str>,
 ) -> Result<(), ProjectLoadError> {
-    match row_paths
-        .iter()
-        .find(|logical_path| table_owner_and_key(logical_path, table_paths).is_some())
-    {
+    match row_paths.iter().find(|logical_path| {
+        !module_paths.contains(logical_path.as_str())
+            && table_owner_and_key(logical_path, table_paths).is_some()
+    }) {
         Some(logical_path) => Err(ProjectLoadError::FormatContext(
             FormatContextError::MixedFormats {
                 path: logical_path.clone(),

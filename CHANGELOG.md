@@ -5,13 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- A format-3 snapshot that tracks a loose row file (`<table>/<key>.orna`) no
-  longer loads with the row silently skipped: loading the committed snapshot
-  or a commit candidate fails with `ORNA-REPO-CONTEXT-004` naming the file
-  (ORNA-META-001, ORNA-REPO-004). `orna commit` now also refuses a row file
-  that `HEAD` already tracks, not only one the commit adds or changes. The CLI
-  test fixtures no longer commit loose rows into format-3 repositories; row
-  sources go straight into the store.
+- A format-3 snapshot that tracks a loose row file (an unreached
+  `<table>/<key>.orna`) no longer loads with the row silently skipped:
+  loading the committed snapshot or a commit candidate fails with
+  `ORNA-REPO-CONTEXT-004` naming the file (ORNA-REPO-004, ORNA-UPGRADE-003).
+  A module a `use` reaches under a table's directory is still a module.
+  `orna commit` now also refuses a row file that `HEAD` already tracks, not
+  only one the commit adds or changes. The CLI test fixtures no longer commit
+  loose rows into format-3 repositories; row sources go straight into the
+  store.
 - `orna mv OLD NEW` works in a database made by `orna init` once its first
   `orna commit` exists. Like `git mv`, it stages the rename and commits
   nothing. The table's declaration is renamed in the worktree module and in
