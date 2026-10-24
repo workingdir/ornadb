@@ -5756,23 +5756,6 @@ impl RuntimeState {
         .and_then(admin_stream_result)
     }
 
-    /// Applies a pause at the supplied CWD capture with a caller-stable
-    /// invocation identity. A retained receipt for that identity is returned
-    /// without reapplying the transition.
-    pub async fn pause_stream_at_capture_with_invocation_id(
-        &self,
-        lease: WriterLease,
-        key: CheckpointKey,
-        expected_capture: Option<&CwdCapture>,
-        invocation_id: [u8; 16],
-    ) -> Result<StreamAdministrationOutcome, RuntimeError> {
-        let operation = AdminInvocationOperation::Pause { key, reason: None };
-        let descriptor = admin_invocation_descriptor_with_id(&operation, invocation_id);
-        self.apply_admin_invocation_with_descriptor(lease, expected_capture, operation, descriptor)
-            .await
-            .and_then(admin_stream_result)
-    }
-
     /// Applies a pause with a caller-stable invocation identity. A repeated
     /// identity with the same operation returns its retained outcome without
     /// reapplying the transition; reusing it for different arguments fails.
@@ -5855,74 +5838,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = match reference
-            .encode()
-            .map_err(|_| RuntimeError::InvalidObservationReference)
-            .and_then(decode_row_ref)
-        {
-            Ok(row) => row,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let requested = match validate_stream_reference(row, expected_capture) {
-            Ok(requested) => requested,
-            Err(_) => {
-                return Err(self
-                    .record_failed_admin_and_return(
-                        &descriptor,
-                        lease,
-                        RuntimeError::InvalidObservationReference,
-                    )
-                    .await);
-            }
-        };
-        let fence = match self.runtime_observation_fence(lease).await {
-            Ok(fence) => fence,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        if fence.capture() != expected_capture {
-            return Err(self
-                .record_failed_admin_and_return(
-                    &descriptor,
-                    lease,
-                    RuntimeError::StaleCapture {
-                        current: Box::new(fence.capture().clone()),
-                    },
-                )
-                .await);
-        }
-        let view = match self.current_runtime_observations(&fence).await {
-            Ok(view) => view,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference);
-        let key = match key {
-            Ok(key) => key,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Pause { key, reason };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -6235,29 +6153,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = decode_row_ref(
-            reference
-                .encode()
-                .map_err(|_| RuntimeError::InvalidObservationReference)?,
-        )?;
-        let requested = validate_stream_reference(row, expected_capture)
-            .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let fence = self.runtime_observation_fence(lease).await?;
-        if fence.capture() != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(fence.capture().clone()),
-            });
-        }
-        let view = self.current_runtime_observations(&fence).await?;
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference)?;
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Resume { key };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -6416,16 +6314,13 @@ impl RuntimeState {
         }
     }
 
-    /// Records a failed admin call with its admitted generation and class.
-    ///
-    /// Exemption (DESIGN-admin-audit.md slice A): when the attempt-path capture
-    /// failed (`admitted_generation` is `None`) and the re-capture here also
-    /// fails, the capture error is returned and no audit row is written. A
-    /// row is never written with generation 0 or any other placeholder, since
-    /// that would fabricate the observed generation. ORNA-ADMIN-001 requires
-    /// a failed call to record its failure; a capture-failure row needs a
-    /// nullable-generation schema decision (SPEC-QUESTIONS Q13, tracked by a
-    /// bead). Covered by `admin_capture_failure_writes_no_audit_row`.
+    /// Records a failed admin call with its observed generation and stable
+    /// failure class (ORNA-ADMIN-001). `admitted_generation` is the generation
+    /// captured under the lock that admitted the call; a call rejected before
+    /// any capture records the generation current when its failure is
+    /// recorded. If that capture fails too, the capture error is returned and
+    /// no row is written: a row never carries a placeholder generation, and a
+    /// failure row without one would need a nullable generation column.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
@@ -6479,14 +6374,73 @@ impl RuntimeState {
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: RuntimeError,
     ) -> RuntimeError {
         match self
-            .record_failed_admin_descriptor(descriptor, lease, None, &error)
+            .record_failed_admin_descriptor(descriptor, lease, admitted_generation, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
             Err(audit_error) => audit_error,
+        }
+    }
+
+    /// Resolves an admitted `sys.StreamRef` to the checkpoint of the live
+    /// stream it names, under the writer fence and only while
+    /// `expected_capture` is current. Each rejection is recorded under
+    /// `descriptor` as a failed invocation (ORNA-ADMIN-001); a rejection
+    /// decided under the fence records the generation the fence observed.
+    async fn resolve_admin_stream_reference(
+        &self,
+        lease: WriterLease,
+        descriptor: &AdminInvocationDescriptor,
+        reference: &Value,
+        expected_capture: &CwdCapture,
+    ) -> Result<CheckpointKey, RuntimeError> {
+        let fenced = async {
+            let row = decode_row_ref(
+                reference
+                    .encode()
+                    .map_err(|_| RuntimeError::InvalidObservationReference)?,
+            )?;
+            let requested = validate_stream_reference(row, expected_capture)
+                .map_err(|_| RuntimeError::InvalidObservationReference)?;
+            let fence = self.runtime_observation_fence(lease).await?;
+            let generation = admin_observed_generation(fence.capture())?;
+            Ok::<_, RuntimeError>((requested, fence, generation))
+        }
+        .await;
+        let (requested, fence, generation) = match fenced {
+            Ok(fenced) => fenced,
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(descriptor, lease, None, error)
+                    .await);
+            }
+        };
+        let resolved = async {
+            if fence.capture() != expected_capture {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(fence.capture().clone()),
+                });
+            }
+            let view = self.current_runtime_observations(&fence).await?;
+            view.streams
+                .iter()
+                .find_map(|stream| {
+                    let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                    (stream.reference(run).ok().as_ref() == Some(&requested))
+                        .then(|| stream.checkpoint.clone())
+                })
+                .ok_or(RuntimeError::InvalidObservationReference)
+        }
+        .await;
+        match resolved {
+            Ok(key) => Ok(key),
+            Err(error) => Err(self
+                .record_failed_admin_and_return(descriptor, lease, Some(generation), error)
+                .await),
         }
     }
 
