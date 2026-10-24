@@ -2487,6 +2487,101 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
             (Some(left), Some(right)) => blob_aware_eq(left, right),
             _ => Ok(false),
         },
+        (Value::Record(left), Value::Record(right)) => {
+            if left.len() != right.len() {
+                return Ok(false);
+            }
+            for ((left_key, left), (right_key, right)) in left.iter().zip(right) {
+                if left_key != right_key || !blob_aware_eq(left, right)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Value::NominalRecord {
+                type_id: left_type,
+                fields: left_fields,
+            },
+            Value::NominalRecord {
+                type_id: right_type,
+                fields: right_fields,
+            },
+        ) => {
+            if left_type != right_type || left_fields.len() != right_fields.len() {
+                return Ok(false);
+            }
+            for ((left_key, left), (right_key, right)) in left_fields.iter().zip(right_fields) {
+                if left_key != right_key || !blob_aware_eq(left, right)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Value::Enum {
+                type_id: left_type,
+                variant_id: left_variant,
+                payload: left_payload,
+            },
+            Value::Enum {
+                type_id: right_type,
+                variant_id: right_variant,
+                payload: right_payload,
+            },
+        ) => {
+            if left_type != right_type || left_variant != right_variant {
+                return Ok(false);
+            }
+            match (left_payload.as_deref(), right_payload.as_deref()) {
+                (None, None) => Ok(true),
+                (Some(left), Some(right)) => blob_aware_eq(left, right),
+                _ => Ok(false),
+            }
+        }
+        (
+            Value::Range {
+                lower: left_lower,
+                upper: left_upper,
+                upper_inclusive: left_inclusive,
+            },
+            Value::Range {
+                lower: right_lower,
+                upper: right_upper,
+                upper_inclusive: right_inclusive,
+            },
+        ) => {
+            if left_inclusive != right_inclusive {
+                return Ok(false);
+            }
+            Ok(optional_blob_aware_eq(left_lower.as_deref(), right_lower.as_deref())?
+                && optional_blob_aware_eq(left_upper.as_deref(), right_upper.as_deref())?)
+        }
+        (
+            Value::Stream {
+                values: left_values,
+                source_label: left_label,
+                source_digest: left_digest,
+                position: left_position,
+                provider: left_provider,
+            },
+            Value::Stream {
+                values: right_values,
+                source_label: right_label,
+                source_digest: right_digest,
+                position: right_position,
+                provider: right_provider,
+            },
+        ) => {
+            if left_label != right_label
+                || left_digest != right_digest
+                || left_position != right_position
+                || left_provider != right_provider
+            {
+                return Ok(false);
+            }
+            blob_aware_seq_eq(left_values, right_values)
+        }
         (
             Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
             Value::AnnotatedBlob(_) | Value::ContextualBlob(_),
@@ -2509,6 +2604,17 @@ fn blob_aware_seq_eq(left: &[Value], right: &[Value]) -> Result<bool, Evaluation
         }
     }
     Ok(true)
+}
+
+fn optional_blob_aware_eq(
+    left: Option<&Value>,
+    right: Option<&Value>,
+) -> Result<bool, EvaluationError> {
+    match (left, right) {
+        (None, None) => Ok(true),
+        (Some(left), Some(right)) => blob_aware_eq(left, right),
+        _ => Ok(false),
+    }
 }
 
 /// Reads an annotated Blob value into its exact Blob, whichever representation
@@ -18615,6 +18721,54 @@ mod blob_equality_tests {
             blob_aware_eq(
                 &Value::String("a".to_owned()),
                 &Value::String("a".to_owned()),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn blob_equality_recurses_into_compound_values() {
+        let blob = annotated_ovb2(
+            &orna_value_v1::Blob::from_bytes_with_annotation(
+                b"payload".to_vec(),
+                "application/octet-stream",
+                None,
+            )
+            .unwrap(),
+        );
+        let record = |key: &str, value: Value| {
+            Value::Record(std::collections::BTreeMap::from([(key.to_owned(), value)]))
+        };
+
+        assert!(blob_aware_eq(&record("a", blob.clone()), &record("a", blob.clone())).unwrap());
+        assert!(!blob_aware_eq(&record("a", blob.clone()), &record("b", blob.clone())).unwrap());
+        assert!(
+            blob_aware_eq(
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+            )
+            .unwrap()
+        );
+        assert!(
+            !blob_aware_eq(
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: false,
+                },
+                &Value::Range {
+                    lower: Some(Box::new(Value::Int(1.into()))),
+                    upper: None,
+                    upper_inclusive: true,
+                },
             )
             .unwrap()
         );
