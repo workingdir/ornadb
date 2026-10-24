@@ -1470,6 +1470,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
+    let stderr_log = std::fs::File::create(mount_parent.path().join("mount-stderr.log")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
@@ -1478,8 +1479,8 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .expect("start mount --cwd");
     let mut mounted = MountedProcess {
@@ -1507,10 +1508,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = mounted.child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
+        let stderr = std::fs::read_to_string(mount_parent.path().join("mount-stderr.log")).unwrap_or_default();
         panic!("mount process exits cleanly after SIGTERM ({status}): {stderr}");
     }
 
