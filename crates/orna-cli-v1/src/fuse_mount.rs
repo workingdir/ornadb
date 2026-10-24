@@ -577,7 +577,7 @@ impl MountWriter {
     ) -> Result<Arc<Self>, String> {
         let (identity, initial_digest) = super::runtime_identity(repository)
             .map_err(|error| format!("repository runtime identity is unavailable: {error}"))?;
-        let owner_id = super::invocation_owner_id(identity);
+        let owner_id = super::invocation_owner_id();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1929,13 +1929,10 @@ impl WorkspaceFilesystem {
 
         // A mount runs under the lease owner its writer holds, so accepted pins
         // the runtime captured resolve through this graph. A read-only mount takes
-        // the owner the runtime would take; a repository without a runtime
-        // identity keeps the repository-derived owner.
+        // the owner the runtime would take: this process's owner.
         let graph_owner_id = match &writer {
             Some(writer) => Some(writer.owner_id),
-            None => super::runtime_identity(repository)
-                .ok()
-                .map(|(identity, _)| super::invocation_owner_id(identity)),
+            None => Some(super::invocation_owner_id()),
         };
 
         for (relation_id, qualified_name) in tables {

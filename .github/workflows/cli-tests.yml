@@ -52,6 +52,9 @@ jobs:
 
       - name: Test the publication crash-barrier matrix
         run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
+
+      - name: Test the owner fence and durable crash recovery
+        run: cargo test --locked -p orna-runtime-v1 --test owner_fence_gate_d --test durable_crash_recovery -- --nocapture
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     steps:
