@@ -2273,6 +2273,11 @@ impl EffectHandler for SourceMutationEffectHandler {
                 if admission.automatic_key || admission.keys.is_empty() {
                     return Err(Self::effect_error("ORNA-EVAL-TABLE-UNADMITTED"));
                 }
+                if schema.fields.values().any(type_is_blob) {
+                    // Rekeying a row that carries blob content would move the
+                    // content binding without a blob-aware identity transition.
+                    return Err(Self::effect_error("ORNA-EVAL-TABLE-REKEY-BLOB"));
+                }
                 let old_key_bytes = encoded_key(old_key)?;
                 let new_key_bytes = encoded_key(new_key)?;
                 if old_key_bytes == new_key_bytes {
@@ -2379,6 +2384,14 @@ impl EffectHandler for SourceMutationEffectHandler {
         self.explain_catalogue
             .as_ref()
             .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
+    }
+}
+
+fn type_is_blob(ty: &orna_semantic_v1::Type) -> bool {
+    match ty {
+        orna_semantic_v1::Type::Optional(inner) => type_is_blob(inner),
+        orna_semantic_v1::Type::Named(name) => name == "Blob",
+        _ => false,
     }
 }
 
