@@ -6234,8 +6234,10 @@ impl NodeData {
                 check_domain(domain)?;
                 check_height(*height)?;
                 check_count(entries.len())?;
-                check_branch_fence_order(domain, entries)
-                    .map_err(|_| GraphError::NonCanonicalData)?;
+                check_branch_fence_order(domain, entries).map_err(|error| match error {
+                    GraphError::OverlappingChildRange => GraphError::NonCanonicalData,
+                    other => other,
+                })?;
                 array(&mut output, 5);
                 uint(&mut output, 1);
                 uint(&mut output, 2);

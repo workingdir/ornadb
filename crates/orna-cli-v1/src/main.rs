@@ -1827,20 +1827,24 @@ fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUn
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    orna_runtime_v1::repository_runtime_identity(repository).map_err(|_| {
-        Diagnostic::target(
+    orna_runtime_v1::repository_runtime_identity(repository).map_err(|error| match error {
+        orna_runtime_v1::RuntimeError::UnknownHeadFormat(refusal) => Diagnostic::target(
+            refusal.code(),
+            "repository format is unknown",
+            "the repository HEAD records a format this build does not know; use a build that supports it",
+        ),
+        _ => Diagnostic::target(
             "E2200",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
-        )
+        ),
     })
 }
 
-fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
-    // The embedded runtime persists one local writer lease in the worktree's
-    // private state. Reusing the repository-derived owner lets a later CLI
-    // process resume that same local owner without stealing an unknown lease.
-    identity.repository_id
+/// The writer owner for this process. A later process has a different owner, so
+/// it takes the lease over (bumping the epoch) and fences a killed writer's token.
+fn invocation_owner_id() -> [u8; 16] {
+    orna_runtime_v1::process_owner_id()
 }
 
 fn run_project_invocation(
@@ -1993,7 +1997,7 @@ fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2083,7 +2087,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2702,7 +2706,7 @@ fn run_repl_input(
                     .state
                     .as_ref()
                     .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id(transactions.identity)),
+                    .acquire_lease(invocation_owner_id()),
             )
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         transactions.lease = Some(lease);

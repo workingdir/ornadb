@@ -984,8 +984,7 @@ fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextE
         | GraphError::PromisedObjectNotMaterialized { .. } => {
             FormatContextError::GraphContextUnavailable
         }
-        GraphError::InvalidOidWidth { .. }
-        | GraphError::MalformedOid
+        GraphError::MalformedOid
         | GraphError::UnknownNodeKind(_)
         | GraphError::NonCanonicalData
         | GraphError::NodeDataTooLarge(_)
@@ -998,7 +997,6 @@ fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextE
         | GraphError::UncollapsedRoot
         | GraphError::InvalidDigestLength
         | GraphError::InvalidEmptyBlob
-        | GraphError::InvalidRange
         | GraphError::DuplicateRowKey
         | GraphError::WrongNodeKind { .. }
         | GraphError::InvalidTreeEnvelope
@@ -1189,6 +1187,44 @@ impl StoreRootPin {
 }
 
 impl Repository {
+    /// Refuses runtime admission when the format recorded at `HEAD` is not a
+    /// format this build knows (ORNA-REPO-CONTEXT-003). It runs before any
+    /// worktree metadata is read or any runtime state is opened, so a committed
+    /// `HEAD` is never bypassed by the worktree (ORNA-UPGRADE-001).
+    ///
+    /// Fails closed: when `HEAD` tracks a `.orna/database.orna` or
+    /// `.orna/format.orna` record that does not classify as a known format,
+    /// whatever the cause (unknown number, string or overflowing integer,
+    /// syntax-broken or open record, unreadable tree), the gate refuses with
+    /// [`FormatContextError::UnknownFormat`]. It falls through only when `HEAD`
+    /// is unborn or tracks no format record at all. Those cases are decided by
+    /// [`Self::require_writable_head_format`] and the metadata checks after it.
+    pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
+        match self.open_format_context() {
+            Ok(_) => Ok(()),
+            Err(FormatContextError::UnknownFormat) => Err(FormatContextError::UnknownFormat),
+            Err(_) => self.refuse_unclassifiable_head_records(),
+        }
+    }
+
+    /// Decides a `HEAD` whose format context did not open. An unborn `HEAD`
+    /// (no pinnable snapshot) falls through. A `HEAD` that tracks any
+    /// `.orna/database.orna` or `.orna/format.orna` record, or whose metadata
+    /// cannot be read, is refused as an unknown format (fail closed).
+    fn refuse_unclassifiable_head_records(&self) -> Result<(), FormatContextError> {
+        let snapshot = match self.pin_snapshot("HEAD") {
+            Ok(snapshot) => snapshot,
+            Err(FormatContextError::SnapshotUnavailable) => return Ok(()),
+            Err(_) => return Err(FormatContextError::UnknownFormat),
+        };
+        match read_snapshot_metadata(self, &snapshot) {
+            Ok(metadata) if metadata.database.is_none() && metadata.legacy_format.is_none() => {
+                Ok(())
+            }
+            _ => Err(FormatContextError::UnknownFormat),
+        }
+    }
+
     /// Admits durable runtime writes only when the format recorded at `HEAD`
     /// has a writer. A format-1/2 `HEAD` is refused with
     /// [`LegacyWriteRefused`] (ORNA-UPGRADE-001, ORNA-UPGRADE-003), whatever
@@ -1196,11 +1232,29 @@ impl Repository {
     ///
     /// An unborn `HEAD`, a format-3 `HEAD` and unreadable metadata are not
     /// decided here; the metadata checks that follow report them. A prepared
-    /// migration copy ([`Self::holds_prepared_migration`]) stays admitted so
-    /// `orna migrate copy` can carry consumer checkpoints into it.
+    /// migration copy is not admitted here: its `HEAD` is still the legacy
+    /// format, so ordinary durable writes stay refused (ORNA-UPGRADE-001,
+    /// ORNA-UPGRADE-003). Only [`Self::require_migration_carry_head_format`]
+    /// admits a prepared copy, for the migration's own checkpoint carry.
     pub fn require_writable_head_format(&self) -> Result<(), LegacyWriteRefused> {
         let Ok(context) = self.open_format_context() else {
             return Ok(());
+        };
+        if !context.is_read_only() {
+            return Ok(());
+        }
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
+    }
+
+    /// Admits the migration's checkpoint carry only into a prepared copy
+    /// ([`Self::holds_prepared_migration`]) whose recorded `HEAD` format is
+    /// legacy (ORNA-UPGRADE-001). A writable `HEAD` is admitted as usual, and
+    /// an unreadable context is decided by [`Self::require_writable_head_format`].
+    pub fn require_migration_carry_head_format(&self) -> Result<(), LegacyWriteRefused> {
+        let Ok(context) = self.open_format_context() else {
+            return self.require_writable_head_format();
         };
         if !context.is_read_only() || self.holds_prepared_migration() {
             return Ok(());
@@ -1608,6 +1662,11 @@ enum DatabaseRecord {
     LegacySidecar(DatabaseId),
 }
 
+/// Parses a `.orna/database.orna` record. Only the canonical format-3 record
+/// and the one-field legacy sidecar are admitted. A record that names format 1
+/// or 2 beside its `database_id` is refused as an unknown format, never read
+/// as a legacy layout: legacy layouts are read only from `.orna/format.orna`
+/// (ORNA-META-002; pinned by `refuses_legacy_format_numbers_inside_a_database_record`).
 fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextError> {
     let fields = parse_record(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
     if fields.len() == 1 && fields[0].name == "database_id" {
@@ -5944,6 +6003,26 @@ mod graph_bridge_tests {
             .expect("read the copied Blob payload");
         assert_eq!(read.bytes(), payload);
         assert_eq!(payload_scope.payload_bytes_read(), payload.len() as u64);
+    }
+
+    #[test]
+    fn operational_graph_errors_are_not_classified_as_malformed() {
+        use crate::native_graph::GraphError;
+        for error in [
+            GraphError::ReadQuotaExceeded,
+            GraphError::MetadataQuotaExceeded,
+            GraphError::InventoryQuotaExceeded,
+            GraphError::ReadCancelled,
+            GraphError::DurabilityFailed,
+            GraphError::ObjectDurabilityUnavailable,
+            GraphError::GitCommandFailed,
+        ] {
+            let mapped = super::graph_context_error(error.clone());
+            assert!(
+                !matches!(mapped, FormatContextError::GraphMalformed(_)),
+                "operational graph error must not be GraphMalformed: {error:?} -> {mapped:?}"
+            );
+        }
     }
 }
 
