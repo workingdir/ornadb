@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `scripts/orna_extract.py` is an independent extractor. It reads a format-3
+  repository's Git objects at a commit through `git cat-file --batch`, without
+  the engine's readers, and writes the modules, the schema, the rows and each
+  Blob's bytes. It refuses any tracked `.orna/` entry other than `database.orna`
+  and `store` (ORNA-META-001).
 - Work ADRs that Orna-1.1.0 supersedes, or that no longer constrain code, are
   archived under `docs/decisions/archive/1.0/` with an evidence table in
   `STATUS.md`. Duplicate ADR numbers are renumbered: the offline LSP ADR is
