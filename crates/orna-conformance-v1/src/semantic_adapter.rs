@@ -6792,10 +6792,13 @@ fn is_standard_source(unit: &SourceUnit) -> bool {
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
-    summary
-        .effects
-        .iter()
-        .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+    !summary.opaque
+        && summary.effects.iter().all(|effect| {
+            matches!(
+                effect,
+                orna_semantic_v1::EffectKind::TableRead | orna_semantic_v1::EffectKind::TableWrite
+            )
+        })
 }
 
 fn effect_admission_diagnostic() -> Diagnostic {
