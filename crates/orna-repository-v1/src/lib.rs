@@ -2717,6 +2717,8 @@ impl Repository {
                 return Err(RepositoryError::UnsafeManagedPath);
             }
         }
+        self.objects()
+            .check_expansion(expected_head.as_str(), "")?;
         self.reject_final_loose_path_collisions(expected_head, changes)?;
 
         self.runtime.ensure_exists()?;
@@ -2839,6 +2841,8 @@ impl Repository {
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
         }
+        self.objects()
+            .check_expansion(expected_head.as_str(), "")?;
         if store_root.algorithm() != graph.algorithm() {
             return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
                 expected: graph.algorithm().width(),
@@ -6036,8 +6040,9 @@ impl Repository {
         current_head: Option<&GitCommitRef>,
         target: &GitCommitRef,
     ) -> Result<CheckoutGitSubplan, RepositoryError> {
-        if current_head.is_none() {
-            self.objects().check_expansion(target.as_str(), "")?;
+        self.objects().check_expansion(target.as_str(), "")?;
+        if let Some(current) = current_head {
+            self.objects().check_expansion(current.as_str(), "")?;
         }
         let target_paths = match current_head {
             Some(current) => self.git_nul_paths(&[
@@ -10662,6 +10667,51 @@ mod tests {
             before == after,
             "git-ignored content must not enter the CWD observation"
         );
+    }
+
+    /// Opens a repository whose HEAD names a commit nesting one file
+    /// `depth` directories deep: a tree the committed walk refuses by depth.
+    fn repository_on_deep_head(depth: usize) -> (tempfile::TempDir, Repository, GitCommitRef) {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        let commit = crate::test_support::deep_nested_commit(root.path(), depth);
+        git(root.path(), &["update-ref", "HEAD", &commit]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        (root, repository, head)
+    }
+
+    /// G1: the private-commit read-tree of HEAD must be preceded by the
+    /// bounded expansion pre-pass, so a too-deep HEAD is refused.
+    #[test]
+    fn private_commit_refuses_a_head_tree_nested_beyond_the_walk_limit() {
+        let (_root, repository, head) = repository_on_deep_head(300);
+        let change = ManagedFileChange::new(
+            ManagedPath::new("src/x.txt").unwrap(),
+            Some(b"x\n".to_vec()),
+        );
+        assert!(matches!(
+            repository.build_private_commit(&head, &[change], "orna: test deep head"),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// G3: with a current head present, the target tree is still checked
+    /// before the diff against the current tree expands it.
+    #[test]
+    fn checkout_subplan_refuses_a_target_tree_nested_beyond_the_walk_limit() {
+        let (root, repository, deep) = repository_on_deep_head(300);
+        let shallow = git(
+            root.path(),
+            &["commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "shallow"],
+        );
+        git(root.path(), &["update-ref", "refs/heads/shallow", &shallow]);
+        let current = repository.resolve_snapshot(&shallow).unwrap();
+        assert!(matches!(
+            repository.checkout_git_subplan(Some(&current), &deep),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
     }
 
     #[cfg(unix)]
