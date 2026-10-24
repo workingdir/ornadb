@@ -20,7 +20,9 @@ use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
-use orna_project_v1::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema};
+use orna_project_v1::{
+    AdmittedSourceRow, LoadedProject, ResolvedTableSchema, admitted_table_schemas,
+};
 use orna_protocol_v1::{
     Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
     ResultStatus,
@@ -32,7 +34,7 @@ use orna_runtime_v1::{
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
-    Catalogue, ModuleInput, Namespace, SymbolKind, SystemProviders, TableSchema, analyze_with_providers,
+    Catalogue, ModuleInput, Namespace, SystemProviders, TableSchema, analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
@@ -2409,23 +2411,6 @@ fn encoded_table_key(components: &[CanonicalValue]) -> Result<Vec<u8>, Evaluatio
         .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-KEY"))
         .and_then(|key| encoded_key(&key)),
     }
-}
-
-fn admitted_table_schemas(
-    header: &orna_semantic_v1::ModuleHeader,
-) -> BTreeMap<String, TableSchema> {
-    header
-        .symbols
-        .iter()
-        .filter(|(_, symbol)| symbol.kind == SymbolKind::Table)
-        .filter_map(|(name, symbol)| {
-            symbol
-                .table_schema
-                .clone()
-                .filter(|schema| schema.admission.is_some())
-                .map(|schema| (name.clone(), schema))
-        })
-        .collect()
 }
 
 fn application_table_schemas(application: &AdmittedApplication) -> BTreeMap<String, TableSchema> {

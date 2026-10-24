@@ -42,10 +42,9 @@ pub use object_identity::{
     OBJECT_IDENTITY_MANIFEST_PATH,
 };
 pub use table_storage::{
-    CommittedTable, CommittedTableActivation, TableStorageError, admitted_table_schemas,
-    begin_committed_table_activation, committed_table_object_ids, committed_tables,
-    evaluator_row_from_storage, evaluator_rows, has_text_primary_key, normalize_table_mutation,
-    runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
+    CommittedTable, TableStorageError, admitted_table_schemas, committed_tables,
+    evaluator_rows, has_text_primary_key, runtime_key_from_evaluator, storage_row_from_record,
+    stored_field_names,
 };
 
 pub use attachments::{
@@ -509,13 +508,13 @@ pub fn admit_format3_row(
         .iter()
         .map(|field| field.name.as_str())
         .collect::<BTreeSet<_>>();
-    let stored_field_names = fields
+    let stored_names = fields
         .iter()
         .filter(|field| field.role == 1)
         .map(|field| field.name.as_str())
         .collect::<BTreeSet<_>>();
     if row_fields.keys().any(|name| {
-        !key_field_names.contains(*name) && !stored_field_names.contains(*name)
+        !key_field_names.contains(*name) && !stored_names.contains(*name)
     }) {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
