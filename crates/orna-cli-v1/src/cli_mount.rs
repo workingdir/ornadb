@@ -607,10 +607,9 @@ pub(super) fn run_edit(_endpoint: &Endpoint, _path: &str, _row: bool) -> Result<
     Err(mount_error("Workspace editing is unavailable", "orna edit requires Linux VFS support"))
 }
 
-/// Grace period for an unmount that retries EBUSY: a termination signal, or
-/// `orna unmount`. A non-lazy unmount fails with EBUSY while a reference into
-/// the mount is in flight; those references are transient, so the unmount is
-/// retried within this window.
+/// Grace period for a termination-signal unmount. A non-lazy unmount fails
+/// with EBUSY while a reference into the mount is in flight; those references
+/// are transient, so the unmount is retried within this window.
 #[cfg(target_os = "linux")]
 const SIGNAL_UNMOUNT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -645,24 +644,6 @@ async fn unmount_after_signal(
             return Err(error);
         }
         tokio::time::sleep(SIGNAL_UNMOUNT_RETRY).await;
-    }
-}
-
-/// Unmounts a live FUSE mount for `orna unmount`. Same grace window as the
-/// signal path: the kernel can hold the mount busy for a few milliseconds
-/// after the final close while its release is in flight.
-#[cfg(target_os = "linux")]
-fn unmount_with_grace(mountpoint: &Path) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
-    loop {
-        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        if std::time::Instant::now() >= deadline {
-            return Err(error);
-        }
-        std::thread::sleep(SIGNAL_UNMOUNT_RETRY);
     }
 }
 
@@ -902,7 +883,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     let unmount_error = if dead {
                         crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
                     } else {
-                        unmount_with_grace(&mountpoint)
+                        crate::fuse_mount::unmount_mountpoint(&mountpoint)
                     }
                     .err();
                     let remaining = mounted_mount_for_path(&mountpoint)?;
