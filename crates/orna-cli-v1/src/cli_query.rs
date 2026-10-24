@@ -363,28 +363,20 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("no row with key {:?}", options.key.unwrap_or_default()),
         ));
     }
-    // Each field is projected from the row's own stored tuple; a field that
-    // is not a Blob in canonical shape is not a Blob, so it is skipped rather
-    // than reported with a fabricated summary. Naming a field decodes only
-    // that field; otherwise the row is walked once so a Blob at any index is
-    // reported with the index it actually occupies.
+    // Each field is projected from the row's stored tuple, expanded from the
+    // shared overflow graph when the row or one of its values was too large
+    // to stay inline (store-format-3 section 5). A field that is not a Blob in
+    // canonical shape is not a Blob, so it is skipped rather than reported
+    // with a fabricated summary. A Blob at any index is reported with the
+    // index it actually occupies; naming a field keeps only that index.
     let mut listings = Vec::new();
     for row in &rows {
-        match options.field {
-            Some(field) => {
-                let metadata = row.blob_metadata(field).map_err(|error| {
-                    query_error("Row fields could not be decoded", format!("{error:?}"))
-                })?;
-                if let Some(metadata) = metadata {
-                    listings.push((row.key().clone(), field, metadata));
-                }
-            }
-            None => {
-                for (field, metadata) in row.blob_fields().map_err(|error| {
-                    query_error("Row fields could not be decoded", format!("{error:?}"))
-                })? {
-                    listings.push((row.key().clone(), field, metadata));
-                }
+        let fields = graph.row_blob_fields(row, &scope).map_err(|error| {
+            query_error("Row fields could not be decoded", format!("{error:?}"))
+        })?;
+        for (field, metadata) in fields {
+            if options.field.is_none_or(|wanted| wanted == field) {
+                listings.push((row.key().clone(), field, metadata));
             }
         }
     }

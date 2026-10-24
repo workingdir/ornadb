@@ -61,9 +61,9 @@ const STORE_ENTRY: &str = "store";
 /// reviewed commit adds one.
 const TRANSITIONAL_FORMAT3_ENTRIES: [&str; 2] = [
     // The object identity inventory from before it moved into the store.
-    // `orna mv` and LSP rename still write it, and `orna commit` migrates a
-    // staged copy into the store and drops it from the index. Removed by the
-    // store-backed `orna mv`, ornadb-5il1.413.
+    // LSP rename (`orna-lsp` `server.rs`) still writes it, and `orna commit`
+    // migrates a staged copy into the store and drops it from the index.
+    // Removed by the store-backed LSP rename, ornadb-5il1.414.
     crate::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
     // The record a prepared `orna migrate copy` candidate tracks. Removed when
     // the migration coordinates move into commit trailers, ornadb-5il1.314.
@@ -398,12 +398,12 @@ impl crate::GitCommitRef {
 }
 
 /// Opaque proof that the pinned `main.orna` source/schema root was present in
-/// the admitted snapshot. The native commit identity remains repository-owned.
+/// the admitted snapshot as a regular blob. The native commit identity remains
+/// repository-owned.
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
     oid: NativeOid,
-    digest: [u8; 32],
 }
 
 /// Opaque proof that the pinned `.orna/store` tree had a valid native-tree
@@ -541,20 +541,15 @@ impl RepositoryFormatContext {
         &self.snapshot
     }
 
-    /// A non-authoritative schema/root validation seam for later values and
-    /// row layers. It validates only the fixed source root in this slice.
+    /// Pins the committed `main.orna` source root by its native blob OID.
+    ///
+    /// The source bytes are not read here. Store format 3 bounds only
+    /// `database.orna` at 64 KiB (store-format-3 §1); a module source is
+    /// admitted under the source-module bound when a table is bound to it.
+    /// Reading and capping the source on every row-map load would make a
+    /// project with a larger `main.orna` unable to open any row.
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
-        let source = match self
-            .snapshot
-            .read_file(&self.repository, MAIN_SOURCE_PATH, MAX_SCHEMA_ROOT_BYTES)
-        {
-            Ok(source) => source,
-            Err(RepositoryError::GitUnavailable) => {
-                return Err(FormatContextError::SchemaRootUnavailable);
-            }
-            Err(_) => return Err(FormatContextError::SchemaRootInvalid),
-        };
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let oid = committed_path_oid(
             &self.repository,
@@ -572,7 +567,6 @@ impl RepositoryFormatContext {
         Ok(SchemaRootPin {
             snapshot: self.snapshot.clone(),
             oid,
-            digest: Sha256::digest(&source).into(),
         })
     }
 
@@ -1886,6 +1880,62 @@ mod graph_bridge_tests {
         );
     }
 
+    /// store-format-3 §1 bounds only `database.orna` at 64 KiB. A larger
+    /// `main.orna` still pins the schema root, loads the row map and opens
+    /// the graph (A07-storage-rows-09).
+    #[test]
+    fn a_main_source_over_64_kib_still_opens_the_row_map() {
+        let directory = repository();
+        let root = directory.path();
+        let mut source = MAIN_SOURCE.to_owned();
+        while source.len() <= 64 * 1024 {
+            source.push_str("// Padding that keeps this module source above 64 KiB.\n");
+        }
+        fs::write(root.join("main.orna"), &source).expect("write the oversized source");
+        commit(root);
+
+        let relation_id = [0x5a; 16];
+        let initial = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &initial, relation_id);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let rows = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(1, inline_value())],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &rows, 1);
+
+        let pinned = context(root);
+        let schema_root = pinned
+            .validate_schema_root()
+            .expect("an oversized source still pins the schema root");
+        let head_source = git_output(root, &["rev-parse", "HEAD:main.orna"], None);
+        assert_eq!(
+            schema_root.oid.to_hex(),
+            std::str::from_utf8(&head_source)
+                .expect("rev-parse prints an OID")
+                .trim()
+        );
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the row map loads beside an oversized source");
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("the graph opens beside an oversized source");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        assert!(
+            graph
+                .lookup_row(&TypedKey::UInt(1), &scope)
+                .expect("bounded point lookup")
+                .is_some()
+        );
+    }
+
     /// ORNA-META-001: format-3 tracked `.orna/` holds only `database.orna`
     /// and `store`. Any other entry, such as the format-1 compact `storage`
     /// layout, the draft format-2 `blobs` tree or a stray file, mixes formats:
@@ -2021,7 +2071,6 @@ mod graph_bridge_tests {
             );
         }
     }
-
     #[test]
     fn committed_table_bindings_pin_imported_source_repository_uuid_and_schema() {
         let relation_id = [0xa1; 16];
@@ -2281,7 +2330,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
@@ -2646,8 +2695,7 @@ mod graph_bridge_tests {
             .maintain_row_index(
                 &[RowIndexMutation::Insert {
                     key: TypedKey::UInt(0),
-                    value: RowValue::inline(inline_value(), Vec::new())
-                        .expect("canonical prepended row"),
+                    fields: inline_value(),
                 }],
                 &scope,
             )
@@ -2757,7 +2805,7 @@ mod graph_bridge_tests {
             },
             RowIndexMutation::Insert {
                 key: TypedKey::UInt(0),
-                value: RowValue::inline(inline_value(), Vec::new()).expect("canonical row value"),
+                fields: inline_value(),
             },
         ];
         let churn = graph
@@ -2819,6 +2867,91 @@ mod graph_bridge_tests {
                 "key {key} after the maintenance pass"
             );
         }
+    }
+
+    /// store-format-3 section 2: the child ranges of a branch are
+    /// nonoverlapping and exhaustive in fence order. A row map whose second
+    /// page starts inside the first page's range still opens, because the
+    /// loader checks only the root, but a range read across the pages and a
+    /// maintenance pass that rewrites the second page both refuse it, so
+    /// neither a query nor a publication returns or writes rows from
+    /// overlapping pages (ornadb-5il1.129 bead comment, A07-storage-rows-04).
+    #[test]
+    fn range_reads_and_maintenance_reject_overlapping_child_ranges() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x6e; 16];
+        let initial = context(root);
+        if initial.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(root, &initial, relation_id, None);
+        }
+        let seeding = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &seeding, relation_id);
+        let algorithm = seeding
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let domain = row_domain(relation_id, schema_digest);
+        let page = |keys: std::ops::RangeInclusive<u64>| {
+            rows_leaf(
+                root,
+                algorithm,
+                &domain,
+                &keys.map(|key| (key, inline_value())).collect::<Vec<_>>(),
+            )
+        };
+        let fence = |key: u64| TypedKey::UInt(key).canonical_bytes().expect("fence key");
+        // The right page starts at key 15, inside the left page's 1..=20.
+        let (left, right) = (page(1..=20), page(15..=34));
+        let branch = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: domain.clone(),
+                height: 1,
+                entries: vec![
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(20),
+                        child: left,
+                        row_count: 20,
+                    },
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(34),
+                        child: right,
+                        row_count: 20,
+                    },
+                ],
+            },
+        );
+        install_rows_store(root, &seeding, relation_id, &schema_oid, &branch, 40);
+
+        let pinned = context(root);
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the loader checks the root");
+        let graph = pinned.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner scope");
+        assert!(
+            graph
+                .range_rows(
+                    &crate::row_store::KeyRange::new(None, None, 100).expect("whole range"),
+                    &scope,
+                )
+                .is_err(),
+            "a range read refuses overlapping pages"
+        );
+        assert!(
+            graph
+                .maintain_row_index(
+                    &[RowIndexMutation::Delete {
+                        key: TypedKey::UInt(30),
+                    }],
+                    &scope,
+                )
+                .is_err(),
+            "maintenance refuses to rewrite an overlapping page"
+        );
     }
 
     #[test]
@@ -3183,6 +3316,9 @@ mod graph_bridge_tests {
         git(directory, &["update-ref", "refs/heads/main", commit]);
     }
 
+    /// Writes `schema_bytes` as a kind-6 node over a one-chunk byte index.
+    /// The chunk entry carries the chunk's own SHA-256; the node records
+    /// `schema_digest`, which a valid node sets to the bytes' schema identity.
     fn schema_descriptor_node(
         directory: &Path,
         algorithm: GitHashAlgorithm,
@@ -3200,7 +3336,7 @@ mod graph_bridge_tests {
                 entries: vec![ByteIndexEntry {
                     span_length: schema_bytes.len() as u64,
                     target: chunk_oid,
-                    chunk_sha256: Some(schema_digest),
+                    chunk_sha256: Some(Sha256::digest(schema_bytes).into()),
                 }],
             },
         );
@@ -3245,7 +3381,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             directory,
             algorithm,
@@ -4193,7 +4329,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let valid_bytes = MAIN_SOURCE.as_bytes();
-        let valid_digest: [u8; 32] = Sha256::digest(valid_bytes).into();
+        let valid_digest = crate::native_graph::schema_identity_v3(valid_bytes);
 
         let mut tampered_bytes = valid_bytes.to_vec();
         tampered_bytes[0] ^= 1;
@@ -4363,7 +4499,7 @@ mod graph_bridge_tests {
         ]))
         .expect("valid three-field table manifest");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
