@@ -1,0 +1,223 @@
+use orna_semantic_v1::{
+    Catalogue, EffectSummary, ModuleInput, StandardDependencyProfile, analyze_with_catalogue,
+};
+
+fn catalogue_with_wrappers() -> Catalogue {
+    let sources = vec![
+        (
+            "std/wrap_net.orna".to_owned(),
+            "pub fn fetch(url: Str): Str = std.net.http.get(url);\n".to_owned(),
+        ),
+        (
+            "std/wrap_relay.orna".to_owned(),
+            "use std.wrap_net as net;\npub fn relay(url: Str): Str = net.fetch(url);\n".to_owned(),
+        ),
+        (
+            "std/wrap_dice.orna".to_owned(),
+            "pub fn coin(): Int = sys.random.bit();\n".to_owned(),
+        ),
+        (
+            "std/net/pure.orna".to_owned(),
+            "pub fn identity(url: Str): Str = url;\n".to_owned(),
+        ),
+        (
+            "std/io/fs/pure.orna".to_owned(),
+            "pub fn passthrough(path: Str): Str = path;\n".to_owned(),
+        ),
+        (
+            "std/reflection.orna".to_owned(),
+            include_str!("../../../stdlib/std/reflection.orna").to_owned(),
+        ),
+    ];
+    let profile = StandardDependencyProfile::from_sources("orna.std/v1-wrappers", sources.clone())
+        .expect("wrapper dependency profile");
+    Catalogue::authoritative_core()
+        .with_standard_sources(&profile, sources)
+        .expect("verified wrapper catalogue")
+}
+
+/// Returns the consumer function's effect summary and the `code: message` of
+/// each analysis diagnostic so a failure shows the cause.
+fn consumer_summary(source: &str, function: &str) -> (EffectSummary, Vec<String>) {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new("consumer.orna", source)],
+        &catalogue_with_wrappers(),
+    );
+    let diagnostics = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+        .collect();
+    let module = result
+        .modules
+        .values()
+        .find(|module| module.namespace.display() == "consumer")
+        .expect("consumer module");
+    let symbol = module
+        .symbols
+        .get(function)
+        .expect("consumer function summary");
+    (symbol.effects.clone(), diagnostics)
+}
+
+/// Returns the consumer function's `may_fail`, its effect names, and the
+/// `code: message` of each analysis diagnostic so a failure shows the cause.
+fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<String>) {
+    let (summary, diagnostics) = consumer_summary(source, function);
+    (
+        summary.may_fail,
+        summary.effects.iter().map(|kind| kind.as_str().to_owned()).collect(),
+        diagnostics,
+    )
+}
+
+/// Each typed or erased reflective wrapper in `std.reflection` delegates to a
+/// `sys.invoke`/`sys.start`/`sys.await`/`sys.cancel` operation, which is opaque
+/// (SYS-077, SYS-039). The opaque marker must survive the std wrapper boundary.
+#[test]
+fn std_reflection_wrappers_propagate_opaque_through_std_module() {
+    let cases = [
+        (
+            "invoke_as",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): Int = reflection.invoke_as<Int>(f, a);\n",
+        ),
+        (
+            "invoke_value",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.Value = reflection.invoke_value(f, a);\n",
+        ),
+        (
+            "start_as",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.InvocationHandle<Int> = reflection.start_as<Int>(f, a);\n",
+        ),
+        (
+            "start_value",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.InvocationHandle<sys.Value> = reflection.start_value(f, a);\n",
+        ),
+        (
+            "await_result",
+            "pub fn outer(i: sys.InvocationHandle<Int>): sys.InvocationResult<Int> = reflection.await_result(i);\n",
+        ),
+        (
+            "cancel",
+            "pub fn outer(i: sys.InvocationHandle<Int>): Bool = reflection.cancel(i);\n",
+        ),
+    ];
+    for (name, body) in cases {
+        let source = format!("use std.reflection as reflection;\n{body}");
+        let (summary, diagnostics) = consumer_summary(&source, "outer");
+        assert!(
+            summary.opaque && summary.may_fail,
+            "{name}: summary {summary:?}; diagnostics: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn std_wrapper_calling_std_net_propagates_network_through_module_alias() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.wrap_relay.{relay};\npub fn outer(url: Str): Str = relay(url);\n",
+        "outer",
+    );
+
+    assert!(
+        may_fail,
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(effects, vec!["network".to_owned()]);
+}
+
+#[test]
+fn std_wrapper_calling_sys_random_propagates_randomness() {
+    let (may_fail, effects, diagnostics) =
+        consumer_effects("use std.wrap_dice.{coin};\npub fn flip(): Int = coin();\n", "flip");
+
+    assert!(
+        may_fail,
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(effects, vec!["randomness".to_owned()]);
+}
+
+#[test]
+fn pure_parameter_reference_in_std_net_module_has_no_effects() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.net.pure as p;\npub fn outer(u: Str): Str = p.identity(u);\n",
+        "outer",
+    );
+
+    assert!(
+        !may_fail && effects.is_empty(),
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn pure_parameter_reference_in_std_io_fs_module_has_no_effects() {
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.io.fs.pure as p;\npub fn outer(u: Str): Str = p.passthrough(u);\n",
+        "outer",
+    );
+
+    assert!(
+        !may_fail && effects.is_empty(),
+        "effects: {effects:?}; diagnostics: {diagnostics:?}"
+    );
+}
+
+/// A method call on a user impl whose body performs network must not be
+/// accepted silently: method dispatch is not typecheckable, so the call is
+/// rejected instead of joining an unknown method's effects as pure.
+#[test]
+fn method_call_on_user_impl_with_host_body_is_rejected() {
+    let (_, _, diagnostics) = consumer_effects(
+        "pub protocol Fetch { fn fetch(self): Str; }\n\
+         pub type Remote {\n    url: Str,\n    impl Fetch { fn fetch(self): Str = std.wrap_net.fetch(self.url); }\n}\n\
+         pub fn outer(r: Remote): Str = r.fetch();\n",
+        "outer",
+    );
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+/// Protocol-bound dispatch through a generic parameter is rejected for the same
+/// reason: the method's host effects cannot be joined at the call site.
+#[test]
+fn generic_protocol_method_dispatch_is_rejected() {
+    let (_, _, diagnostics) = consumer_effects(
+        "pub protocol Fetch { fn fetch(self): Str; }\n\
+         pub fn generic_fetch<T impl Fetch>(x: T): Str = x.fetch();\n\
+         pub fn outer(): Str = \"u\";\n",
+        "outer",
+    );
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+/// Module-level `let` is not admitted by the frozen parser for a module, so it
+/// cannot carry an unsummarised initialiser past the effect checks.
+#[test]
+fn module_level_let_is_not_admitted() {
+    let result = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "consumer.orna",
+            "use std.wrap_net as net;\npub let greeting = net.fetch(\"u\");\n",
+        )],
+        &catalogue_with_wrappers(),
+    );
+    let diagnostics: Vec<String> = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code().to_string())
+        .collect();
+
+    assert!(
+        diagnostics.iter().any(|code| code == "ORNA-S000-PARSE"),
+        "diagnostics: {diagnostics:?}"
+    );
+}
