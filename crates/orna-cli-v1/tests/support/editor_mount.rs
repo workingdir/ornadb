@@ -195,7 +195,7 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
@@ -227,7 +227,9 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Waits until the Linux mount table lists the process's mountpoint.
 pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mounted.mountpoint) {
+    // Ready means the mount table lists the mountpoint and the mounted root answers.
+    // A bare mountinfo match can precede the first FUSE request being served.
+    while !(mountinfo_contains(&mounted.mountpoint) && mounted.mountpoint.read_dir().is_ok()) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             mounted.exited(status);
         }
