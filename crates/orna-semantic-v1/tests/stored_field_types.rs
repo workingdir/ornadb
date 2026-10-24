@@ -41,6 +41,21 @@ fn stored_field_without_initialiser_rejects_secret_type() {
 }
 
 #[test]
+// Specified: ORNA-SECRET-001 and 29-formats; a transparent alias of `Secret` stores a secret.
+fn stored_field_rejects_alias_of_secret_type() {
+    let source = "type Token = Secret<Str>;\npub table Account(id: Uuid) {\n    token: Token,\n}\n";
+    let analysis = analysis_for(source);
+    assert!(!analysis.is_ok());
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE && diagnostic.message() == SECRET_STORED_MESSAGE
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 // Specified: ORNA-SECRET-001; a secret nested inside a stored container is still stored.
 fn stored_field_rejects_secret_nested_in_list() {
     let analysis = analysis_for(&table_source("tokens: List<Secret<Str>>"));
