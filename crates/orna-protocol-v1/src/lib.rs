@@ -1096,13 +1096,18 @@ fn path(node: &Node) -> Result<Vec<PatchPathComponent>> {
                 (0, 2) if matches!(fields[1], Node::Text(_)) || uuid(&fields[1]).is_ok() => {
                     Ok(PatchPathComponent::Field(fields[1].clone()))
                 }
-                (1, 3) if uuid(&fields[1]).is_ok() && canonical_value(&fields[2]).is_ok() => Ok(
-                    PatchPathComponent::Relation(fields[1].clone(), fields[2].clone()),
-                ),
+                (1, 3) if uuid(&fields[1]).is_ok() => {
+                    canonical_value(&fields[2])?;
+                    Ok(PatchPathComponent::Relation(
+                        fields[1].clone(),
+                        fields[2].clone(),
+                    ))
+                }
                 (2, 2) => Ok(PatchPathComponent::Index(
                     usize::try_from(u64_value(&fields[1])?).map_err(|_| Error::InvalidValue)?,
                 )),
-                (3, 2) if canonical_value(&fields[1]).is_ok() => {
+                (3, 2) => {
+                    canonical_value(&fields[1])?;
                     Ok(PatchPathComponent::Key(fields[1].clone()))
                 }
                 _ => Err(Error::InvalidValue),
