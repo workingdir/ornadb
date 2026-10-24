@@ -1615,7 +1615,9 @@ fn percent_byte(byte: u8) -> String {
 /// True for the names the profile reserves: `.`, `..`, `.git`, `.orna`, and
 /// Windows device basenames in any case with any extension.
 fn is_reserved_component(text: &str) -> bool {
-    if matches!(text, "." | ".." | ".git" | ".orna") {
+    if matches!(text, "." | ".." | ".orna")
+        || orna_foundation_v1::is_git_metadata_component(text.as_bytes())
+    {
         return true;
     }
     let stem = text
@@ -1634,6 +1636,19 @@ fn is_reserved_component(text: &str) -> bool {
     bytes.len() == 4
         && matches!(stem.get(..3), Some("COM" | "LPT"))
         && matches!(bytes[3], b'1'..=b'9')
+}
+
+#[cfg(test)]
+mod git_metadata_reserved_tests {
+    use super::is_reserved_component;
+
+    #[test]
+    fn git_metadata_spellings_are_reserved_components() {
+        for name in [".GIT", "git~1", "GIT~1", ".git.", ".Git ", ".git:stream"] {
+            assert!(is_reserved_component(name), "{name:?} must be reserved");
+        }
+        assert!(!is_reserved_component(".gitignore"));
+    }
 }
 
 /// `~key-<64 hex SHA-256 of the canonical typed key component>` for keys and

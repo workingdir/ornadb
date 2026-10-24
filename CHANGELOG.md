@@ -22,6 +22,7 @@ been published.
   journals, and in compact manifests. The system worktree listing skips a
   Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
   as a user path.
+- Project loading and worktree discovery, the VFS reserved-name check, and the legacy migration copy, clear and hash paths now use the shared Git-metadata predicate, so a `.GIT`, `git~1` or `.git. ` directory is skipped, refused or reserved like `.git`. Before, these sites compared the exact bytes `.git`. Migration hashing no longer counts or hashes a non-canonical nested Git-metadata directory.
 - Publishing row changes to a format-3 table applies them as one sorted merge
   into the table's row map: each existing row moves at most twice, instead of
   being shifted once per change. Publication sends changes in encoded key
