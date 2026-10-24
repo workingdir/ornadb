@@ -271,6 +271,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
                 "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
         },
+        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
+            code: "ORNA-S011-AMBIGUOUS",
+            title: "standard import name is ambiguous",
+            explanation:
+                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            help: "import the functions under distinct names or use their qualified paths",
+        },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
             title: "name could not be resolved",
@@ -2145,10 +2152,12 @@ fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    // Projects that import pinned standard modules take the bounded path below,
-    // which loads those bodies through the verified profile. The single-module
-    // authority admits only the user module, so it would fall back to host code.
-    if project.modules().len() == 1 && project.standard_runtime_modules().is_empty() {
+    // Single-module projects that import pinned standard modules keep the
+    // authority route only when they need publication metadata; the authority
+    // admits only the user module and cannot load standard bodies. Pure ones take
+    // the bounded path below, which loads those bodies through the verified profile.
+    let std_imports = !project.standard_runtime_modules().is_empty();
+    if project.modules().len() == 1 {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
         let (module_name, function) = target.rsplit_once('.').unwrap_or(("", target));
@@ -2160,7 +2169,7 @@ fn run_pure_invocation(
         if identity.namespace() == namespace {
             let authority =
                 ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
-            let admitted = authority
+            let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
                     Diagnostic::target_with_detail(
@@ -2169,7 +2178,16 @@ fn run_pure_invocation(
                         "fix the first reported source contract error, then run check again",
                         error.to_string(),
                     )
-                })?;
+                });
+            let admitted = match admission {
+                Ok(admitted) => Some(admitted),
+                // The bounded path reports the analysis error for std-importing projects.
+                Err(_) if std_imports => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(admitted) = admitted
+                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+            {
             if admitted.requires_publication_metadata() {
                 let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
                     endpoint,
@@ -2215,6 +2233,7 @@ fn run_pure_invocation(
             }
             write_success_line("invocation completed", color_enabled)?;
             return Ok(());
+            }
         }
     }
     let catalogue = semantic_catalogue(&project)?;
@@ -2237,7 +2256,16 @@ fn run_pure_invocation(
             StageOutcome::Cancelled(diagnostic) => {
                 return Err(cancellation_diagnostic(&diagnostic));
             }
-            StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+            StageOutcome::Failed(diagnostic) => {
+                return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                    Diagnostic::target(
+                        "ORNA-S010-IMPORT",
+                        "imported module is unavailable",
+                        "use a captured standard dependency or remove the import",
+                    )
+                }));
+            }
+            StageOutcome::Skipped { .. } => {
                 return Err(Diagnostic::target(
                     "ORNA-S010-IMPORT",
                     "imported module is unavailable",
@@ -2249,7 +2277,15 @@ fn run_pure_invocation(
     match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+        StageOutcome::Failed(diagnostic) => {
+            return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "one-shot invocation requires an executable function-only project",
+                    "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
+                )
+            }));
+        }
+        StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
                 "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
