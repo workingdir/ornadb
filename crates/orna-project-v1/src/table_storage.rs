@@ -5,7 +5,8 @@
 //! other key as its canonical OVB encoding. A *stored tuple* is a canonical
 //! array of the table's non-key field values in descriptor storage order. An
 //! *evaluator* record is a canonical map from field name to value, key fields
-//! included. The functions here are the only place these forms are converted.
+//! included. The functions here perform these conversions for committed-table reads and
+//! evaluator-form mutations; `orna-storage-v1` keeps its own descriptor-level projection.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -13,14 +14,11 @@ use std::fmt;
 
 use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, KeyRange, Repository, RepositoryFormatContext};
-use orna_runtime_v1::{
-    PinnedCommittedRows, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, TableMutation, TableObjectId,
-};
+use orna_runtime_v1::TableObjectId;
 use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value_v1::{decode_canonical_storage_value, Raw, Value};
 
-use crate::{ObjectIdentityManifest, ObjectKind, ProjectLoader};
+use crate::ProjectLoader;
 
 /// Committed table storage violates the descriptor or row contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,23 +156,6 @@ pub fn evaluator_rows(
     Ok(rows.into_iter().collect())
 }
 
-/// Converts one runtime row into its canonical evaluator key and evaluator record.
-pub fn evaluator_row_from_storage(
-    runtime_key: &[u8],
-    storage_row: &[u8],
-    schema: &TableSchema,
-    storage_order: &[String],
-) -> Result<(Vec<u8>, Vec<u8>), TableStorageError> {
-    let (key_names, text_primary_key) = evaluator_keying(schema)?;
-    evaluator_row_with_keying(
-        &key_names,
-        text_primary_key,
-        runtime_key,
-        storage_row,
-        storage_order,
-    )
-}
-
 /// The key-field names and text-key flag that evaluator records of `schema` use.
 fn evaluator_keying(schema: &TableSchema) -> Result<(Vec<String>, bool), TableStorageError> {
     let admission = schema.admission.as_ref().ok_or(TableStorageError)?;
@@ -197,123 +178,6 @@ fn evaluator_row_with_keying(
     let key_bytes = evaluator_key_from_runtime(runtime_key, text_primary_key)?;
     let record = evaluator_record(key_names, &key_bytes, storage_order, storage_row)?;
     Ok((key_bytes, record))
-}
-
-/// Projects one table mutation from evaluator form into the runtime keyspace and binds it to
-/// the committed table identity `object_id`. Key fields are re-encoded as runtime keys, and a
-/// row value is projected from its evaluator record onto the stored tuple. The operation kind,
-/// mutation identity and protected-content evidence are retained.
-pub fn normalize_table_mutation(
-    mutation: TableMutation,
-    schema: &TableSchema,
-    object_id: TableObjectId,
-    storage_order: &[String],
-) -> Result<TableMutation, TableStorageError> {
-    if mutation
-        .table_object_id()
-        .is_some_and(|bound| bound != object_id)
-    {
-        return Err(TableStorageError);
-    }
-    let text_primary_key = has_text_primary_key(schema);
-    let key = runtime_key_from_evaluator(mutation.key(), text_primary_key)?;
-    let rekey_to = mutation
-        .rekey_to()
-        .map(|destination| runtime_key_from_evaluator(destination, text_primary_key))
-        .transpose()?;
-    let stored_row = mutation
-        .value()
-        .map(|record| storage_row_from_record(record, storage_order))
-        .transpose()?;
-    let mutation = mutation
-        .with_reencoded_keys(key, rekey_to)
-        .map_err(|_| TableStorageError)?;
-    let mutation = match stored_row {
-        Some(row) => mutation
-            .with_reencoded_value(row)
-            .map_err(|_| TableStorageError)?,
-        None => mutation,
-    };
-    Ok(mutation.with_table_object_id(object_id))
-}
-
-/// Resolves the committed object identity of each named table at `commit`. A name must match
-/// exactly one live table record; any other result is refused.
-pub fn committed_table_object_ids<'a>(
-    repository: &Repository,
-    commit: &GitCommitRef,
-    names: impl IntoIterator<Item = &'a str>,
-) -> Result<BTreeMap<String, TableObjectId>, TableStorageError> {
-    let identities = ObjectIdentityManifest::read_committed(repository, commit)
-        .map_err(|_| TableStorageError)?;
-    let mut ids = BTreeMap::new();
-    for name in names {
-        let mut matching = identities.records().iter().filter(|record| {
-            record.kind() == ObjectKind::Table
-                && !record.is_retired()
-                && record.qualified_name().rsplit('.').next() == Some(name)
-        });
-        let record = matching.next().ok_or(TableStorageError)?;
-        if matching.next().is_some() {
-            return Err(TableStorageError);
-        }
-        if ids
-            .insert(name.to_owned(), TableObjectId::new(*record.id()))
-            .is_some()
-        {
-            return Err(TableStorageError);
-        }
-    }
-    Ok(ids)
-}
-
-/// The committed `HEAD` base an admitted activation reads and commits through.
-pub struct CommittedTableActivation {
-    /// Activation whose declared relations are the committed rows overlaid by the unpublished tail.
-    pub snapshot: RuntimeTableActivationSnapshot,
-    /// Committed object identity of every admitted table, by name.
-    pub table_ids: BTreeMap<String, TableObjectId>,
-    /// Stored-field order of every admitted table's stored tuples, by name.
-    pub storage_orders: BTreeMap<String, Vec<String>>,
-}
-
-/// Opens an admitted activation over the committed rows of `commit`. The published pin is read
-/// before those rows, so a publication between the two reads fails closed. Every admitted table
-/// must have exactly one live committed identity, and a corrupt committed base fails closed.
-pub async fn begin_committed_table_activation(
-    state: &RuntimeState,
-    repository: &Repository,
-    commit: &GitCommitRef,
-    format_context: &RepositoryFormatContext,
-    tables: &BTreeMap<String, TableSchema>,
-) -> Result<CommittedTableActivation, RuntimeError> {
-    let pin = state.published_pin().await?;
-    let table_ids =
-        committed_table_object_ids(repository, commit, tables.keys().map(String::as_str))
-            .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let committed = committed_tables(repository, format_context, commit, tables, &table_ids)
-        .map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let mut identities = Vec::with_capacity(committed.len());
-    let mut rows = BTreeMap::new();
-    let mut storage_orders = BTreeMap::new();
-    for (name, table) in committed {
-        let object_id = table_ids
-            .get(&name)
-            .copied()
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        identities.push(RuntimeTableIdentity::new(name.clone(), object_id)?);
-        storage_orders.insert(name.clone(), table.storage_order);
-        rows.insert(name, table.rows);
-    }
-    let base = PinnedCommittedRows::new(pin, rows)?;
-    let snapshot = state
-        .begin_admitted_table_activation_over_committed(&identities, base)
-        .await?;
-    Ok(CommittedTableActivation {
-        snapshot,
-        table_ids,
-        storage_orders,
-    })
 }
 
 /// The admitted table schemas a module header declares, keyed by table name. A table whose
