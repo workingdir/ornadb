@@ -104,13 +104,16 @@ been published.
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
 - A failed stream administration call (pause, resume or checkpoint reset)
-  records the generation its writer fence observed and a stable failure class
-  in its invocation audit row. A retry under the same invocation ID returns
-  the recorded error instead of a storage-unavailable error; a stale capture
-  replays as a stale capture carrying the capture current at replay. A
-  rejected stream-reference resume now records its failure like a rejected
-  pause. When the generation cannot be read, the call returns that error and
-  writes no row, never one with generation 0. A skip lease refused because the
+  records a stable failure class in its invocation audit row, with the
+  generation its writer fence observed. A retry under the same invocation ID
+  returns the recorded error instead of a storage-unavailable error. A stale
+  capture stores the capture that rejected the call and replays that same
+  error, even after later commits advance the CWD. A rejected stream-reference
+  resume now records its failure like a rejected pause. When the generation
+  cannot be read, the row records no generation with the `failure:unobservable`
+  class and the call still returns its original error; the observed generation
+  is nullable in the audit schema, migrated in place for existing stores. A
+  skip lease refused because the
   failure is no longer open is `sys.failure.state_conflict`, not
   `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
   no longer takes a lease purpose.
