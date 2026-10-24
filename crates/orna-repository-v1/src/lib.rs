@@ -12514,9 +12514,24 @@ mod tests {
                 overwrite_keeping_mtime(&root_path, b"module main;\n// edited!\n");
             },
         );
-        // The edit lands after the ref moved; the managed write path must refuse to
-        // materialise over bytes that match neither the batch nor the expected state.
-        assert!(result.is_err(), "a post-advance same-size edit must not be silently overwritten");
+        // The edit lands after RefAdvanced is durable. Reconciliation must refuse to
+        // materialise over bytes that match neither the batch nor the expected state
+        // (ORNA-PUB-007: recovery is required, the publication is not reported as complete).
+        assert!(
+            matches!(result, Err(RepositoryError::ManagedContentConflict)),
+            "post-advance same-size edit must fail with ManagedContentConflict, got {result:?}"
+        );
+        // ORNA-PUB-005: the ref names the candidate because it advanced before the edit.
+        assert!(repository.head().unwrap().as_ref() == Some(journal.new_head()), "ref must stay advanced");
+        // The journal is durable at IndexReconciled: the edit hook runs at RefAdvanced
+        // (lib.rs:4796), index reconciliation then succeeds and IndexReconciled is
+        // persisted (lib.rs:4807-4809), and the managed-file conflict is raised while
+        // materialising (lib.rs:4811). Recovery resumes from IndexReconciled.
+        assert_eq!(
+            repository.read_publication_journal().unwrap().unwrap().stage(),
+            PublicationJournalStage::IndexReconciled
+        );
+        // The user's edited bytes are retained, not overwritten by the batch.
         assert_eq!(fs::read(root.path().join("main.orna")).unwrap(), b"module main;\n// edited!\n");
     }
 
