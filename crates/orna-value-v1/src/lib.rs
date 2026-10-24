@@ -1289,8 +1289,12 @@ impl Blob {
         Ok(result)
     }
 
-    /// Two descriptor-backed blobs share a descriptor OID inside one admitted
-    /// context, so they name the same content and need no streaming (ORNA-BLOB-005).
+    /// Two descriptor-backed blobs in one admitted context with equal layout OID
+    /// and equal identity are treated as equal content without streaming
+    /// (ORNA-BLOB-005). A layout OID identifies an encoding, not logical content,
+    /// so this is a trust assumption on the admitted context's resolver: the
+    /// shortcut skips the digest check, and the identity equality is the only
+    /// binding between the two references.
     fn shares_descriptor_witness(&self, other: &Self) -> bool {
         match (&self.content, &other.content, &self.context, &other.context) {
             (
@@ -1331,6 +1335,7 @@ impl Blob {
         }
         let mut left_digest = Sha256::new();
         let mut right_digest = Sha256::new();
+        let mut differs = false;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
@@ -1339,16 +1344,29 @@ impl Blob {
             let left = read_content_range(self, offset, size)?;
             let right = read_content_range(other, offset, size)?;
             if left != right {
-                return Err(Error::ContentCollision);
+                // Keep streaming: a single tampered side must be reported as
+                // corruption, not as a collision, so classification waits for
+                // both full digests (see `exact_content_outcome`).
+                differs = true;
             }
             left_digest.update(&left);
             right_digest.update(&right);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
-        let left = left_digest.finalize();
-        let right = right_digest.finalize();
-        if left[..] != self.identity.sha256 || right[..] != self.identity.sha256 {
+        let left_verified = left_digest.finalize()[..] == self.identity.sha256;
+        let right_verified = right_digest.finalize()[..] == self.identity.sha256;
+        Self::exact_content_outcome(differs, left_verified, right_verified)
+    }
+
+    /// Classify a full streamed comparison. A digest failure on either side is
+    /// corruption and wins over byte differences; only two verified digests with
+    /// differing bytes prove a collision (ORNA-BLOB-005).
+    fn exact_content_outcome(differs: bool, left_verified: bool, right_verified: bool) -> Result<bool> {
+        if !left_verified || !right_verified {
             return Err(Error::ContentDigestMismatch);
+        }
+        if differs {
+            return Err(Error::ContentCollision);
         }
         Ok(true)
     }
@@ -8381,6 +8399,38 @@ mod logical_primary_key_order_tests {
             ])),
         ));
         assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
+    }
+}
+#[cfg(test)]
+mod exact_content_outcome_tests {
+    use super::*;
+
+    // A collision needs two digest-valid sides with differing bytes, which
+    // SHA-256 forbids in practice; the classification is therefore exercised
+    // through this pure seam rather than through `same_content_checked`.
+    #[test]
+    fn verified_digests_with_differing_bytes_are_a_collision() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, true),
+            Err(Error::ContentCollision)
+        ));
+    }
+
+    #[test]
+    fn digest_failure_wins_over_differing_bytes() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, false, true),
+            Err(Error::ContentDigestMismatch)
+        ));
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, false),
+            Err(Error::ContentDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn verified_equal_bytes_are_equal() {
+        assert!(Blob::exact_content_outcome(false, true, true).unwrap());
     }
 }
 
