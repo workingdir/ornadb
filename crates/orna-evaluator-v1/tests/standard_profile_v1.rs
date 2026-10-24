@@ -106,23 +106,13 @@ fn pinned_core_collection_exports_are_declared_in_source() {
             .find(|(source_path, _)| source_path == path)
             .map(|(_, source)| source)
             .expect("the core collection module is pinned");
+        // The relational operations (filter, map, count, ...) are root intrinsics
+        // per 09-standard-library.md:7 and are no longer declared in the pinned
+        // collection source; they are exercised behaviourally by the evaluator
+        // fixtures (e.g. collection_filter_named_callback.orna). Only the operation
+        // still declared in the pinned source is checked here.
         for declaration in [
-            "pub fn filter<T>(rows: [T]",
-            "pub fn map<T, U>(rows: [T]",
-            "pub fn flat_map<T, U>(rows: [T]",
-            "pub fn sort_by<T, K>(rows: [T]",
-            "pub fn take<T>(rows: [T]",
-            "pub fn drop<T>(rows: [T]",
-            "pub fn distinct<T>(rows: [T]",
-            "pub fn union<T>(left: [T], right: [T]",
-            "pub fn count<T>(rows: [T]): Int",
-            "pub fn first<T>(rows: [T]): T?",
-            "pub fn one<T>(rows: [T]",
-            "pub fn sum<T>(rows: [T]): T",
-            "pub fn min<T>(rows: [T]): T?",
-            "pub fn max<T>(rows: [T]): T?",
-            "pub fn every<T>(rows: [T]",
-            "pub fn exists<T>(rows: [T]",
+            "pub fn bucket_by<T, P>(rows: [T], period: P, zone: Str): [[T]]",
         ] {
             assert!(
                 source.contains(declaration),
@@ -1233,7 +1223,7 @@ fn pinned_byte_buffer_utilities_are_included_and_typecheck() {
         "pub fn new_buffer(length: Int): [Int]?",
         "pub fn append_byte(values: [Int], value: Int): [Int]?",
         "pub fn concat(left: [Int], right: [Int]): [Int]?",
-        "pub fn slice(values: [Int], start: Int, count: Int): [Int]?",
+        "pub fn slice(values: [Int], start: Int, byte_count: Int): [Int]?",
         "pub fn chunks(values: [Int], size: Int): [[Int]]?",
         "pub fn read_unsigned(",
         "pub fn write_unsigned(",
@@ -1762,7 +1752,9 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[1].0, REFERENCE_STANDARD_COLLECTION_PATH_V1);
     assert!(sources[1].1.contains("pub fn asof_join<T, Time, Key>"));
     assert_eq!(sources[2].0, REFERENCE_STANDARD_QUERY_PATH_V1);
-    assert!(sources[2].1.contains("pub fn filter<T>"));
+    // `filter` is a root intrinsic (09-standard-library:7); std.query re-exports
+    // intrinsics only optionally (:9), so assert its own pinned declaration.
+    assert!(sources[2].1.contains("pub fn chunk<T>(values: [T], size: Int)"));
     assert_eq!(sources[3].0, REFERENCE_STANDARD_TEXT_PATH_V1);
     assert!(sources[3].1.contains("pub fn normalise(value: Str, form: Str)"));
     for name in [
