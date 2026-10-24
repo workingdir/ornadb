@@ -259,15 +259,20 @@ async fn stale_pause_records_admitted_generation_and_replays_same_error() {
 #[tokio::test]
 async fn stale_resume_records_admitted_generation_and_replays_same_error() {
     let fixture = stale_stream_reference().await;
-    assert_stale_call_replays_recorded_failure(&fixture, [9; 16], "sys.admin.resume_stream", || {
-        fixture
-            .state
-            .resume_stream_reference_at_capture_with_invocation_id(
-                fixture.writer,
-                fixture.reference.clone(),
-                &fixture.activation,
-                [9; 16],
-            )
-    })
+    assert_stale_call_replays_recorded_failure(
+        &fixture,
+        [9; 16],
+        "sys.admin.resume_stream",
+        || {
+            fixture
+                .state
+                .resume_stream_reference_at_capture_with_invocation_id(
+                    fixture.writer,
+                    fixture.reference.clone(),
+                    &fixture.activation,
+                    [9; 16],
+                )
+        },
+    )
     .await;
 }
