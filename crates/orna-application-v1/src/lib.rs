@@ -22,8 +22,7 @@ use orna_live_v1::{
 };
 use orna_project_v1::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema};
 use orna_protocol_v1::{
-    Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
-    ResultStatus,
+    Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
 };
 use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime_v1::{
@@ -2546,17 +2545,29 @@ struct ApplicationReplSession {
 /// validation and owns every durable commit. With a captured activation
 /// context the adapter returns a staged [`LiveEvalTransaction`]; without one,
 /// admitted source effects fail closed instead of silently executing writes.
+///
+/// Every Eval is one input to the session's REPL (30-protocol: "An eval
+/// source is exactly one REPL input"), unless the trusted host explicitly
+/// selected a complete application module with [`Self::with_module`]. The
+/// Eval text never chooses between the two.
 #[derive(Clone, Debug)]
 pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     project: Option<LoadedProject>,
-    logical_path: String,
-    entry: String,
+    eval_module: Option<EvalModule>,
     sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
+}
+
+/// The complete application module a trusted host selected for Eval
+/// admission with [`ApplicationLiveAdapter::with_module`].
+#[derive(Clone, Debug)]
+struct EvalModule {
+    logical_path: String,
+    entry: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2590,14 +2601,13 @@ struct ApplicationWatch {
 }
 
 impl ApplicationLiveAdapter {
-    /// Creates an adapter for the deterministic remote-evaluation module.
+    /// Creates an adapter that submits each Eval to its session's REPL.
     #[must_use]
     pub fn new(authority: ApplicationAuthority) -> Self {
         Self {
             authority,
             project: None,
-            logical_path: "remote_eval.orna".to_owned(),
-            entry: "main".to_owned(),
+            eval_module: None,
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             run_events: Arc::new(Mutex::new(BTreeMap::new())),
             watches: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2652,47 +2662,37 @@ impl ApplicationLiveAdapter {
         repl.submit_with_sys_host_bindings(source, &mut bindings)
     }
 
-    /// Sets the logical module path and entry used for future Eval messages.
+    /// Admits every future Eval message as one complete application module at
+    /// `logical_path` and runs its `entry`, instead of submitting it to the
+    /// session REPL. This is an explicit choice of the trusted host that
+    /// constructs the adapter; it is never inferred from the Eval text, so a
+    /// console input that declares a function named like an entry stays an
+    /// ordinary REPL declaration.
     #[must_use]
     pub fn with_module(
         mut self,
         logical_path: impl Into<String>,
         entry: impl Into<String>,
     ) -> Self {
-        self.logical_path = logical_path.into();
-        self.entry = entry.into();
+        self.eval_module = Some(EvalModule {
+            logical_path: logical_path.into(),
+            entry: entry.into(),
+        });
         self
     }
 
-    /// Admits the Eval message's source through the authority.
+    /// Admits the Eval message's source as the host-selected module.
     fn evaluate_eval_message(&self, message: &Message) -> Result<AdmittedApplication, LiveError> {
-        let Message::Eval { source, .. } = message else {
+        let (Message::Eval { source, .. }, Some(module)) = (message, &self.eval_module) else {
             return Err(LiveError::ApplicationRejected);
         };
         self.authority
             .admit_module(
-                self.logical_path.clone(),
+                module.logical_path.clone(),
                 source.clone(),
-                self.entry.clone(),
+                module.entry.clone(),
             )
             .map_err(LiveError::from)
-    }
-
-    /// Keeps the existing complete-module entry point for clients that send
-    /// an admitted application module. Ordinary Eval input uses the per-session
-    /// ephemeral REPL below.
-    fn is_module_entry(&self, message: &Message) -> bool {
-        let Message::Eval { source, .. } = message else {
-            return false;
-        };
-        let parsed = parse_module_with_file(source, self.logical_path.clone());
-        parsed.is_ok()
-            && parsed.value.items.iter().any(|item| {
-                matches!(
-                    &item.declaration,
-                    Declaration::Function { signature, .. } if signature.name == self.entry
-                )
-            })
     }
 
     /// Creates a REPL session bound to the database and repository identity the
@@ -2751,12 +2751,30 @@ impl ApplicationLiveAdapter {
             .insert(session, ApplicationReplSession { repl });
     }
 
-    fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
-        analyze_with_providers(&[], &self.authority.catalogue, SystemProviders::Production)
-            .modules
-            .values()
-            .flat_map(admitted_table_schemas)
-            .collect()
+    /// The write schemas of the tables a served REPL input may mutate. The
+    /// session REPL is seeded from the loaded project, so the project's own
+    /// tables are admitted alongside the catalogue's, as the local REPL
+    /// admits them. A table name declared twice fails closed instead of one
+    /// declaration silently replacing the other.
+    fn repl_table_schemas(&self) -> Result<BTreeMap<String, TableSchema>, ApplicationError> {
+        let modules = self
+            .project
+            .as_ref()
+            .map_or(&[][..], LoadedProject::modules);
+        let analysis = analyze_with_providers(
+            modules,
+            &self.authority.catalogue,
+            SystemProviders::Production,
+        );
+        let mut tables = BTreeMap::new();
+        for module in analysis.modules.values() {
+            for (name, schema) in admitted_table_schemas(module) {
+                if tables.insert(name, schema).is_some() {
+                    return Err(ApplicationError::InvalidTableMetadata);
+                }
+            }
+        }
+        Ok(tables)
     }
 
     /// Builds the success envelope for one evaluated request.
@@ -2972,7 +2990,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         request: [u8; 16],
         message: &Message,
     ) -> std::result::Result<Envelope, LiveError> {
-        if !self.is_module_entry(message) {
+        if self.eval_module.is_none() {
             let Message::Eval { source, .. } = message else {
                 return Err(LiveError::ApplicationRejected);
             };
@@ -2986,8 +3004,10 @@ impl LiveApplication for ApplicationLiveAdapter {
                     return Err(LiveError::from(ApplicationError::Evaluation(code)));
                 }
             };
-            let value = result
-                .unwrap_or_else(|| CanonicalValue::new(OvbRaw::Null).expect("null is canonical"));
+            // A declaration, binding or import yields no value; its result is
+            // typed Unit, because a success result always carries a complete
+            // typed value and a bare null is not one (30-protocol).
+            let value = result.unwrap_or_else(CanonicalValue::unit);
             self.publish_repl_candidate(session, repl);
             self.record_run_success(session, value.clone());
             return self.success_envelope(request, eval_fingerprint(message)?, value);
@@ -3007,7 +3027,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         _work: &'a mut LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
-            if !self.is_module_entry(message) {
+            if self.eval_module.is_none() {
                 let Message::Eval { source, .. } = message else {
                     return Err(LiveError::ApplicationRejected);
                 };
@@ -3018,9 +3038,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         .submit_repl_input(&mut repl, source)
                     {
                         Ok(value) => {
-                            let value = value.unwrap_or_else(|| {
-                                CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
-                            });
+                            let value = value.unwrap_or_else(CanonicalValue::unit);
                             self.publish_repl_candidate(session, repl);
                             self.record_run_success(session, value.clone());
                             let envelope =
@@ -3044,7 +3062,9 @@ impl LiveApplication for ApplicationLiveAdapter {
                         return Err(LiveError::from(ApplicationError::Evaluation(code)));
                     }
                 };
-                let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                let mut handler = SourceMutationEffectHandler::new(
+                    self.repl_table_schemas().map_err(LiveError::from)?,
+                );
                 // The REPL serves `sys.explain` from the activation's pinned CWD
                 // snapshot (ORNA-SYS-008), as the module activation does. A pure
                 // evaluation has no activation context, so no catalogue is pinned
@@ -3070,9 +3090,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         }
                     };
                 let mutations = handler.into_mutations().map_err(LiveError::from)?;
-                let value = value.unwrap_or_else(|| {
-                    CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
-                });
+                let value = value.unwrap_or_else(CanonicalValue::unit);
                 let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
                 if mutations.is_empty() {
                     self.publish_repl_candidate(session, successor);
@@ -3198,7 +3216,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         effects: Option<&'a dyn LiveAdminEffectDispatcher>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
-            if !self.is_module_entry(message) {
+            if self.eval_module.is_none() {
                 return self
                     .dispatch_eval_with_work(session, request, message, context, work)
                     .await;
@@ -3320,32 +3338,19 @@ impl LiveApplication for ApplicationLiveAdapter {
         let state = watches
             .get_mut(&key)
             .ok_or(LiveError::ApplicationRejected)?;
-        // This application adapter has no dependency scheduler yet. An
-        // explicit resync re-evaluates the read-only expression. When the
-        // renderer-neutral tree changes, publish a root replacement delta;
-        // unchanged trees retain the complete-snapshot fallback.
+        // This application adapter has no dependency scheduler yet, so an
+        // explicit resync re-evaluates the read-only expression. A client
+        // resyncs because it lost its base revision, so the answer is always
+        // the latest full snapshot under the resync's own request ID
+        // (30-protocol message registry, type 2). A changed tree advances the
+        // watch revision; an unchanged tree repeats the current snapshot.
         let present = self.watch_value(session, &state.source)?;
         if present != state.present {
-            let base_revision = state.revision;
-            let new_revision = state
+            state.revision = state
                 .revision
                 .checked_add(1)
                 .ok_or(LiveError::ApplicationRejected)?;
-            let patches =
-                PatchList::replace_root(&present).map_err(|_| LiveError::ApplicationRejected)?;
-            state.revision = new_revision;
             state.present = present;
-            return Ok(Envelope {
-                request: None,
-                watch: Some(watch),
-                message: Message::Delta {
-                    base_revision,
-                    new_revision,
-                    patches,
-                    snapshot: state.snapshot.clone(),
-                },
-                extensions: BTreeMap::new(),
-            });
         }
         Ok(self.live_snapshot(request, watch, state))
     }
@@ -3572,7 +3577,10 @@ mod tests {
     fn live_adapter_evaluates_eval_and_preserves_result_identity() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
-        let mut adapter = ApplicationLiveAdapter::new(authority);
+        // Admitting the Eval as a complete module is the host's explicit
+        // choice; the Eval text never selects it (A14-04).
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_module("remote_eval.orna", "main");
         let request = [8; 16];
         let fingerprint = [9; 32];
         let message = Message::Eval {
@@ -3615,6 +3623,52 @@ mod tests {
                 .expect("canonical integer"),
             )
         );
+    }
+
+    /// ORNA-EVAL-006 and 30-protocol ("An eval source is exactly one REPL
+    /// input"), A14-04: without a host-selected module, console input that
+    /// declares a function named like an entry is an ordinary REPL
+    /// declaration. It yields Unit, persists for the session and runs only
+    /// when called. Before, the adapter admitted any input declaring `main`
+    /// as a one-shot module and returned its result.
+    #[test]
+    fn default_adapter_keeps_a_console_entry_function_as_a_repl_declaration() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let declared = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [8; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/source-admission-main.orna"),
+                [9; 32],
+            ),
+        )
+        .expect("the session REPL admits the declaration");
+        assert!(matches!(
+            &declared.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::unit()
+        ));
+        let called = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [10; 16],
+            &eval_message("main()", [11; 32]),
+        )
+        .expect("the declared function persists for the session");
+        assert!(matches!(
+            &called.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::new(OvbRaw::Int(41.into())).unwrap()
+        ));
     }
 
     #[test]
@@ -3684,7 +3738,7 @@ mod tests {
     }
 
     #[test]
-    fn served_repl_publishes_values_and_line_column_errors_as_present_deltas() {
+    fn served_repl_publishes_values_and_line_column_errors_in_resync_snapshots() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let mut adapter =
@@ -3728,21 +3782,8 @@ mod tests {
             ),
         )
         .expect("project-free input evaluates in the admitted REPL");
-        let value_delta =
-            LiveApplication::resync(&mut adapter, session, [75; 16], watch, &Message::Resync)
-                .expect("successful runs update the event watch");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = value_delta.message
-        else {
-            panic!("new run event is a presentation delta");
-        };
-        let present = present
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("the delta applies to the initial tree");
+        let (revision, present) = resync_snapshot(&mut adapter, session, [75; 16], watch);
+        assert_eq!(revision, 1, "a changed tree advances the watch revision");
         assert_eq!(
             present,
             expected_run_events(&[expected_run_event(1, true, 42, None)])
@@ -3766,21 +3807,8 @@ mod tests {
             ),
             Err(LiveError::ApplicationRejected)
         );
-        let error_delta =
-            LiveApplication::resync(&mut adapter, session, [78; 16], watch, &Message::Resync)
-                .expect("failed runs update the event watch");
-        let Message::Delta {
-            base_revision: 1,
-            new_revision: 2,
-            patches,
-            ..
-        } = error_delta.message
-        else {
-            panic!("failed run event is a presentation delta");
-        };
-        let present = present
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("the second delta applies to the updated tree");
+        let (revision, present) = resync_snapshot(&mut adapter, session, [78; 16], watch);
+        assert_eq!(revision, 2);
         assert_eq!(
             present,
             expected_run_events(&[
@@ -3791,7 +3819,7 @@ mod tests {
     }
 
     #[test]
-    fn served_repl_typed_run_event_deltas_are_isolated_across_presentations_and_live_sessions() {
+    fn served_repl_typed_run_event_snapshots_are_isolated_across_presentations_and_live_sessions() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let mut adapter =
@@ -3878,46 +3906,16 @@ mod tests {
             ),
         )
         .expect("first session evaluates independently");
-        let delta_a =
-            LiveApplication::resync(&mut adapter, session_a, [77; 16], watch_a, &Message::Resync)
-                .expect("first session sees its typed event delta");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_a.message
-        else {
-            panic!("first session event is a revision-one delta");
-        };
-        let present_a = initial_present_a
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("first session delta applies to its typed snapshot");
         let expected_a = expected_run_events(&[expected_run_event(1, true, 42, None)]);
-        assert_eq!(present_a, expected_a);
-
-        let delta_a_second = LiveApplication::resync(
-            &mut adapter,
-            session_a,
-            [85; 16],
-            watch_a_second,
-            &Message::Resync,
-        )
-        .expect("first session's second watch advances independently");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_a_second.message
-        else {
-            panic!("first session's second watch gets its own revision-one delta");
-        };
         assert_eq!(
-            initial_present_a_second
-                .apply_patches(&patches, orna_protocol_v1::Limits::default())
-                .expect("second first-session delta applies to its own snapshot"),
-            expected_a
+            resync_snapshot(&mut adapter, session_a, [77; 16], watch_a),
+            (1, expected_a.clone()),
+            "first session sees its typed event in a revision-one snapshot"
+        );
+        assert_eq!(
+            resync_snapshot(&mut adapter, session_a, [85; 16], watch_a_second),
+            (1, expected_a.clone()),
+            "first session's second watch advances independently"
         );
 
         let unchanged_b =
@@ -3958,45 +3956,15 @@ mod tests {
             ),
         )
         .expect("second session evaluates independently");
-        let delta_b =
-            LiveApplication::resync(&mut adapter, session_b, [81; 16], watch_b, &Message::Resync)
-                .expect("second session sees its own typed event delta");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_b.message
-        else {
-            panic!("second session event is a revision-one delta");
-        };
-        let present_b = initial_present_b
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("second session delta applies to its typed snapshot");
-        assert_eq!(present_b, expected_a);
-
-        let delta_b_second = LiveApplication::resync(
-            &mut adapter,
-            session_b,
-            [87; 16],
-            watch_b_second,
-            &Message::Resync,
-        )
-        .expect("second session's second watch advances independently");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_b_second.message
-        else {
-            panic!("second session's second watch gets its own revision-one delta");
-        };
         assert_eq!(
-            initial_present_b_second
-                .apply_patches(&patches, orna_protocol_v1::Limits::default())
-                .expect("second session's second delta applies to its own snapshot"),
-            expected_a
+            resync_snapshot(&mut adapter, session_b, [81; 16], watch_b),
+            (1, expected_a.clone()),
+            "second session sees its own typed event in a revision-one snapshot"
+        );
+        assert_eq!(
+            resync_snapshot(&mut adapter, session_b, [87; 16], watch_b_second),
+            (1, expected_a.clone()),
+            "second session's second watch advances independently"
         );
 
         let unchanged_a =
@@ -4100,6 +4068,65 @@ mod tests {
         fs::remove_dir_all(root).expect("test project is removed");
     }
 
+    /// G-2: the served REPL's write schemas union the catalogue's tables with
+    /// the loaded project's. A project table that reuses a catalogue table
+    /// name fails closed with `InvalidTableMetadata` instead of one declaration
+    /// silently replacing the other.
+    #[test]
+    fn served_repl_table_schemas_reject_a_project_table_named_like_a_catalogue_table() {
+        use orna_repository_v1::Repository;
+        use orna_semantic_v1::StandardDependencyProfile;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-served-repl-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        let project_source = "pub table Note(id: Int) { text: Str, }\n";
+        fs::write(root.join("main.orna"), project_source).expect("project fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let catalogue_source = "pub table Note(id: Int) { text: Str, }\n";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-collision",
+            [("std/store.orna".into(), catalogue_source.into())],
+        )
+        .expect("standard profile");
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(
+                &profile,
+                [("std/store.orna".into(), catalogue_source.into())],
+            )
+            .expect("standard catalogue");
+        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            catalogue,
+            Limits::default(),
+        ))
+        .with_loaded_project(project);
+        let result = adapter.repl_table_schemas();
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+        assert_eq!(
+            result.map(|tables| tables.keys().cloned().collect::<Vec<_>>()),
+            Err(ApplicationError::InvalidTableMetadata),
+        );
+    }
+
     fn expected_run_event(
         sequence: u64,
         succeeded: bool,
@@ -4160,6 +4187,34 @@ mod tests {
             events.to_vec(),
         )
         .unwrap()
+    }
+
+    /// Resyncs `watch` and returns the revision and tree of the answer, which
+    /// must be the watch's latest full snapshot under the resync's own
+    /// request ID (30-protocol message registry, type 2;
+    /// A13-live-serving-08). A delta would assume a base the resyncing client
+    /// has lost.
+    fn resync_snapshot(
+        adapter: &mut ApplicationLiveAdapter,
+        session: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+    ) -> (u64, PresentNode) {
+        let response = LiveApplication::resync(adapter, session, request, watch, &Message::Resync)
+            .expect("an explicit resync is answered");
+        assert_eq!(
+            response.request,
+            Some(request),
+            "the snapshot names its resync"
+        );
+        assert_eq!(response.watch, Some(watch));
+        let Message::Snapshot {
+            revision, present, ..
+        } = response.message
+        else {
+            panic!("an explicit resync is answered with a full snapshot");
+        };
+        (revision, present)
     }
 
     #[test]
@@ -4300,7 +4355,9 @@ mod tests {
         };
         assert_eq!(status, ResultStatus::Success);
         assert_eq!(returned_fingerprint, fingerprint);
-        assert_eq!(value, Some(CanonicalValue::new(OvbRaw::Null).unwrap()));
+        // A declaration's success result is typed Unit; a bare null is not a
+        // complete typed value and cannot be encoded (30-protocol).
+        assert_eq!(value, Some(CanonicalValue::unit()));
 
         drop(context);
         drop(state);
