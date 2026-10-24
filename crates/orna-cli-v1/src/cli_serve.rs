@@ -1915,7 +1915,11 @@ fn run_git_http_backend(
         .parent()
         .ok_or_else(|| io::Error::other("repository parent is unavailable"))?;
     let mut command = Command::new("git");
-    scrub_host_git_environment(&mut command);
+    // The CGI child gets no inherited environment, so server tokens, proxy
+    // settings and ambient GIT_* routing or config never reach it.
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
     command
         .arg("http-backend")
         .current_dir(root)
@@ -1969,44 +1973,6 @@ fn run_git_http_backend(
         return Err(io::Error::other("Git HTTP backend failed"));
     }
     parse_cgi_response(&cgi_output)
-}
-
-fn scrub_host_git_environment(command: &mut Command) {
-    for variable in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_IMPLICIT_WORK_TREE",
-        "GIT_PREFIX",
-        "GIT_NAMESPACE",
-        "GIT_REPLACE_REF_BASE",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_GRAFT_FILE",
-        "GIT_SHALLOW_FILE",
-        "GIT_PROTOCOL",
-    ] {
-        command.env_remove(variable);
-    }
-    for (variable, _) in std::env::vars_os() {
-        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
-            || variable
-                .as_encoded_bytes()
-                .starts_with(b"GIT_CONFIG_VALUE_")
-        {
-            command.env_remove(variable);
-        }
-    }
 }
 
 fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
