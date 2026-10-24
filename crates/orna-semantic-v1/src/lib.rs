@@ -26660,21 +26660,55 @@ fn secret_identity_spellings(
         if target != name {
             continue;
         }
-        let mut exporters = modules
-            .iter()
-            .filter(|(exporter, header)| {
-                *exporter != namespace
-                    && header.exports.get(name).is_some_and(|export| {
-                        export.kind == symbol.kind && export.ty == symbol.ty
-                    })
-            })
-            .map(|(exporter, _)| exporter);
-        if let (Some(exporter), None) = (exporters.next(), exporters.next()) {
-            spellings.insert(name.clone(), nominal_identity(exporter, name));
-        }
+        spellings.insert(name.clone(), imported_type_identity(name, tree, modules));
     }
     spellings
 }
+
+/// Canonical identity of the type `name` that `tree` imports. The identity comes from the
+/// module the import names (`use <path>.{name}`, or a glob of that path), never from a search
+/// across modules. When that module or its export cannot be determined, the name is treated as
+/// secret-possible (fail closed) via the `Secret` identity, which the secret walk always accepts.
+fn imported_type_identity(
+    name: &str,
+    tree: &SyntaxTree,
+    modules: &BTreeMap<Namespace, ModuleHeader>,
+) -> String {
+    let imported_from = |explicit: bool| {
+        tree.items
+            .iter()
+            .filter_map(|item| match &item.declaration {
+                Declaration::Use { path, tail } => {
+                    let names_it = match tail {
+                        UseTail::Names(names) => explicit && names.iter().any(|n| n.name == name),
+                        UseTail::Glob { .. } => !explicit,
+                        UseTail::None | UseTail::Alias { .. } => false,
+                    };
+                    names_it.then(|| Namespace(path.iter().map(|s| s.name.clone()).collect()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut sources = imported_from(true);
+    if sources.is_empty() {
+        sources = imported_from(false);
+    }
+    for target in sources {
+        let exported = modules
+            .get(&target)
+            .and_then(|header| header.exports.get(name))
+            .is_some_and(|export| export.kind == SymbolKind::Type);
+        if exported {
+            return nominal_identity(&target, name);
+        }
+    }
+    FAIL_CLOSED_SECRET_IDENTITY.to_owned()
+}
+
+/// Identity given to an imported type whose definition cannot be determined. The secret walk
+/// treats `Secret` as secret, so such a name is never accepted as a stored value.
+const FAIL_CLOSED_SECRET_IDENTITY: &str = "Secret";
 
 /// Adds the nominal rows and transparent aliases of `tree` to the secret graph, keyed by
 /// canonical identity. Member and target names are rewritten through `spellings`, so a
