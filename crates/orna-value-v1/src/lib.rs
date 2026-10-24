@@ -134,7 +134,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Canonical CBOR's supported data model. `Tag` is public for schema and
 /// protocol adapters, but both construction and decoding validate the closed
 /// Orna tag registry before bytes may be emitted.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub enum Raw {
     Null,
     Bool(bool),
@@ -191,7 +191,7 @@ impl fmt::Debug for Raw {
 }
 
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct Value(Raw);
 
 impl fmt::Debug for Value {
@@ -214,6 +214,22 @@ impl Value {
     }
     pub fn raw(&self) -> &Raw {
         &self.0
+    }
+    /// Builds the stored table-reference identity `[database, table, key]`
+    /// (tag 60021, ORNA-REF-001). The key must be one primary-key value; no row
+    /// or snapshot context is embedded.
+    pub fn table_reference(database_id: [u8; 16], table_id: [u8; 16], key: Raw) -> Result<Self> {
+        if !is_permitted_key(&key) {
+            return Err(Error::InvalidValue);
+        }
+        Self::new(Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![
+                uuid_raw(database_id),
+                uuid_raw(table_id),
+                key,
+            ])),
+        ))
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode_raw(&self.0)
@@ -2529,6 +2545,46 @@ fn is_primary_key_component(raw: &Raw) -> bool {
     )
 }
 
+/// Strict identity rule for [`Value::table_reference`] and for decoded 60021
+/// keys: the permitted-key clauses of 07-tables.md:272-281 applied recursively.
+/// A stored reference identity must be snapshot-free (08-relations.md:31), so
+/// pinned references (60010), Float and malformed 60008/60015/60021 keys are
+/// refused. The Unit key (60014, empty array) is admitted because a reference
+/// to a keyless table carries it (grammar/orna.ebnf:38-39; 29-formats.md:37;
+/// stored admission in `validate_table_reference_value`). Tuple primary keys
+/// keep base acceptance for pinned (60010) components; that is a deferred
+/// decision (see `table_reference_decode_rejects_non_permitted_key`).
+fn is_permitted_key(raw: &Raw) -> bool {
+    match raw {
+        Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
+        Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
+        Raw::Tag(60014, payload) => matches!(payload.as_ref(), Raw::Array(values) if values.is_empty()),
+        Raw::Tag(60008, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [type_id, variant_id, Raw::Null]
+                    if uuid_array(type_id).is_ok() && uuid_array(variant_id).is_ok()
+            )
+        ),
+        Raw::Tag(60015, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if !values.is_empty() && values.iter().all(is_permitted_key)
+        ),
+        Raw::Tag(60021, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [database_id, table_id, key]
+                    if uuid_array(database_id).is_ok()
+                        && uuid_array(table_id).is_ok()
+                        && is_permitted_key(key)
+            )
+        ),
+        _ => false,
+    }
+}
+
 fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
     let ordering = match (left, right) {
         (Raw::Bool(left), Raw::Bool(right)) => left.cmp(right),
@@ -2578,6 +2634,14 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .then(compare_key_component(left_key, right_key)?)
                 .then(compare_raw_order(left_snapshot, right_snapshot)?)
         }
+        // Unit (60014) is the sole key of a keyless table (29-formats.md:37):
+        // one possible value, so two Units compare Equal.
+        (Raw::Tag(60014, left), Raw::Tag(60014, right)) => {
+            if !array(left)?.is_empty() || !array(right)?.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            Ordering::Equal
+        }
         (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
             compare_key_components(array(left)?, array(right)?)?
         }
@@ -2590,10 +2654,15 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
             let [right_db, right_table, right_key] = right.as_slice() else {
                 return Err(Error::InvalidValue);
             };
-            uuid_array(left_db)?
-                .cmp(&uuid_array(right_db)?)
-                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
-                .then(compare_key_component(left_key, right_key)?)
+            if uuid_array(left_db)? != uuid_array(right_db)?
+                || uuid_array(left_table)? != uuid_array(right_table)?
+            {
+                // Spec-silent: 08-relations.md:31 defines identity equality for
+                // references but no ordering across tables. Reject rather than
+                // invent one.
+                return Err(Error::InvalidValue);
+            }
+            compare_key_component(left_key, right_key)?
         }
         _ => return Err(Error::InvalidValue),
     };
@@ -2608,6 +2677,36 @@ fn compare_key_components(left: &[Raw], right: &[Raw]) -> Result<Ordering> {
         }
     }
     Ok(left.len().cmp(&right.len()))
+}
+
+fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
+    match (left, right) {
+        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
+        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
+        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
+        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
+        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
+        (Raw::Array(left), Raw::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_raw_order(left, right)?;
+                if ordering != Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
+        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
+            match left_tag {
+                60000 => compare_decimal_raw(
+                    &Raw::Tag(*left_tag, left.clone()),
+                    &Raw::Tag(*right_tag, right.clone()),
+                ),
+                60015 => compare_key_components(array(left)?, array(right)?),
+                _ => compare_raw_order(left, right),
+            }
+        }
+        _ => Err(Error::InvalidValue),
+    }
 }
 
 fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
@@ -2672,36 +2771,6 @@ fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
     } else {
         ordering
     })
-}
-
-fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
-    match (left, right) {
-        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
-        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
-        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
-        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
-        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
-        (Raw::Array(left), Raw::Array(right)) => {
-            for (left, right) in left.iter().zip(right) {
-                let ordering = compare_raw_order(left, right)?;
-                if ordering != Ordering::Equal {
-                    return Ok(ordering);
-                }
-            }
-            Ok(left.len().cmp(&right.len()))
-        }
-        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
-            match left_tag {
-                60000 => compare_decimal_raw(
-                    &Raw::Tag(*left_tag, left.clone()),
-                    &Raw::Tag(*right_tag, right.clone()),
-                ),
-                60015 => compare_key_components(array(left)?, array(right)?),
-                _ => compare_raw_order(left, right),
-            }
-        }
-        _ => Err(Error::InvalidValue),
-    }
 }
 
 /// A type-directed failure from a canonical value decoder.
@@ -5301,6 +5370,11 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             }
             uuid_array(&a[0])?;
             uuid_array(&a[1])?;
+            // ORNA-KEY-003/005 (07-tables.md:283-287): a reference key component
+            // must be a permitted key value, on decode as well as construction.
+            if !is_permitted_key(&a[2]) {
+                return Err(Error::InvalidTag);
+            }
         }
         60022 => {
             let a = array(v)?;

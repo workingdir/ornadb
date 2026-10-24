@@ -1178,7 +1178,7 @@ fn generic_calls_retain_callee_effect_and_failure_summaries() {
         .symbols
         .get("reads")
         .expect("generic filesystem function");
-    assert!(reads.effects.effects.contains("filesystem"));
+    assert!(reads.effects.effects.contains(&orna_semantic_v1::EffectKind::Filesystem));
     assert!(reads.effects.may_fail);
 
     // Failure is not a forbidden assertion effect: evaluation failure inside
@@ -1415,7 +1415,7 @@ fn imported_nested_from_metadata_resolves_qualified_targets_and_effects() {
     expect_accepted(&result);
     let main = result.modules.get(&Namespace(vec![])).expect("main module");
     let convert = main.symbols.get("convert").expect("conversion function");
-    assert!(convert.effects.effects.contains("database write"));
+    assert!(convert.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(convert.effects.may_fail);
 }
 
