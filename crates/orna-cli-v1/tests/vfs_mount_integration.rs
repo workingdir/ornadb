@@ -244,6 +244,23 @@ fn fuse_test_available() -> bool {
     }
 }
 
+/// Whether python3, which runs the dirty document helper, is available. Its
+/// tests skip with a note when it is missing, and fail under `ORNA_REQUIRE_FUSE=1`.
+fn dirty_document_helper_available() -> bool {
+    let available = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            !fuse_test_required(),
+            "ORNA_REQUIRE_FUSE=1 requires python3 for the dirty document helper"
+        );
+        eprintln!("SKIP: python3 is unavailable for the dirty document helper");
+    }
+    available
+}
+
 fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
     if fuse_test_required() {
         return false;
@@ -1016,6 +1033,9 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
 /// blocks unmount, the mount shows the owner's accepted row, and a save against
 /// that row resolves the draft.
 async fn cwd_mount_close_flush_after_owner_routed_edit_is_stale() {
+    if !dirty_document_helper_available() {
+        return;
+    }
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
     };
@@ -1768,6 +1788,9 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
 #[tokio::test]
 /// ORNA-VFS-024: unmount refuses an unresolved draft and succeeds after fsync accepts it.
 async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
+    if !dirty_document_helper_available() {
+        return;
+    }
     if !fuse_test_available() {
         return;
     }
