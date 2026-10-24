@@ -1,4 +1,4 @@
-use orna_client::live_presentation::{LivePresentationUpdate, WatchPresentation};
+use orna_live_v1::live_presentation::{LivePresentationUpdate, WatchPresentation};
 use orna_protocol_v1::{Envelope, Limits};
 
 fn frame(code: u8, watch: [u8; 16], body: Vec<u8>) -> Envelope {
