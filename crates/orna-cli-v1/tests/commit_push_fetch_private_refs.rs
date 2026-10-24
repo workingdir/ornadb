@@ -10,7 +10,7 @@
 //!   commit is created, and a missing Git identity fails before any commit
 //!   object exists.
 //!
-//! Every verb is the real `orna-cli-v1` binary against real Git repositories.
+//! Every verb is the real `orna` binary against real Git repositories.
 //! The format-3 table comes from the shared CLI test harness: a repository
 //! made by `orna init` has no store root yet, so it cannot pass reviewed
 //! commit validation.
@@ -57,7 +57,7 @@ const INHERITED_GIT_VARIABLES: [&str; 10] = [
 /// Runs the CLI with a private, empty home directory, so the only Git
 /// identity it can find is the one the repository under test configures.
 fn orna(directory: &Path, home: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("HOME", home)
@@ -141,7 +141,7 @@ fn stage_source_change(directory: &Path, line: &str) {
 /// `refs/orna/pins/` (CAPTURE-3).
 fn capture_blob_row(root: &Path, home: &Path, key: &str) {
     fs::write(root.join("recording.mp3"), format!("synthetic audio for {key}")).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .args(["--db", root.to_str().expect("UTF-8 path"), "repl"])
         .env("HOME", home)

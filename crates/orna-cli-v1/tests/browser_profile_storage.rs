@@ -26,7 +26,7 @@ const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixture
 const BROWSER_PROFILE_BLOB: &[u8] = include_bytes!("fixtures/media/pixel.png");
 
 fn run_repl(directory: &Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
@@ -45,13 +45,13 @@ fn run_repl(directory: &Path, input: &str) -> Output {
 }
 
 fn run_publish(directory: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(directory)
         .arg("publish")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
-        .expect("run orna-cli-v1 publish")
+        .expect("run orna publish")
 }
 
 fn git_head(directory: &Path) -> String {
