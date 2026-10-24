@@ -223,8 +223,8 @@ pub use object_reference::{
 /// Ordinary names such as `.gitignore`, `.github`, `.gitmodules`, `foo.git`,
 /// `git~2`, and `git-notes.md` do not match. Case folding is ASCII-only, as in
 /// Git, so `.gıt` (U+0131) and `.GİT` (U+0130) stay ordinary names: Git 2.53
-/// accepts both, and the NTFS `$UpCase` table that `mkntfs` writes maps no
-/// non-ASCII code point into ASCII. `.git:x`, `.git.`, and `a\.git` are
+/// accepts both. Whether an NTFS `$UpCase` table folds either into ASCII is
+/// unverified on a Windows volume. `.git:x`, `.git.`, and `a\.git` are
 /// ordinary names on Linux but are refused here, as Git's default
 /// `core.protectNTFS` refuses them. A name that is not UTF-8 is compared as
 /// bytes and never meets the HFS+ rule, so `.git\xFF` stays an ordinary name
