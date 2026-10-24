@@ -52,7 +52,7 @@ fn mount_registry_lock(paths: &RuntimePaths, exclusive: bool) -> Result<fs::File
 }
 
 /// Why a mount view could not be attached or reported.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MountError {
     /// The host filesystem refused a mountpoint or registry operation.
     HostFilesystem,

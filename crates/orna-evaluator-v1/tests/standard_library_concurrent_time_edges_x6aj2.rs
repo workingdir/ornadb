@@ -13,7 +13,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 }
 
 fn captured_concurrent_sources() -> Vec<(String, String)> {
-    orna_standard::reference_standard_sources_v1()
+    orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/concurrent/main.orna")
         .collect()
