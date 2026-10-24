@@ -140,6 +140,26 @@ been published.
   The build checks that every published code is declared by an operation, is
   global, or belongs to a non-callable surface (the `sys.repl` singleton or the
   VFS).
+- A failed stream administration call (pause, resume or checkpoint reset)
+  records a stable failure class in its invocation audit row, with the
+  generation its writer fence observed. A retry under the same invocation ID
+  returns the recorded error instead of a storage-unavailable error. A stale
+  capture stores the capture that rejected the call and replays that same
+  error, even after later commits advance the CWD. A rejected stream-reference
+  resume now records its failure like a rejected pause.
+- When the CWD generation cannot be read, the row records no generation (NULL)
+  with a `failure:unobservable:<class>` outcome, and the first call still
+  returns its original error. A retry replays `<class>` as the same error when
+  the class is payload-free. The payload-carrying classes `stale_capture`,
+  `fault_injected` and `legacy_head_read_only`, and a bare legacy
+  `failure:unobservable` row, replay as `RecoveryInvalid`, because their
+  payload was never stored. The observed generation is nullable in the audit
+  schema, migrated in place for existing stores; unobservable rows are
+  excluded from the checkpoint-reset generation ordering.
+- A skip lease refused because the
+  failure is no longer open is `sys.failure.state_conflict`, not
+  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
+  no longer takes a lease purpose.
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and
