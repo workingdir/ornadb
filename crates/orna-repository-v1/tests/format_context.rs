@@ -530,6 +530,42 @@ fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
 }
 
 #[test]
+fn migration_carry_gate_refuses_a_legacy_head_without_a_prepared_copy() {
+    for (record, format) in [
+        (ORNADB_1_0_FORMAT_ONE, 1),
+        (DRAFT_FORMAT_TWO, 2),
+    ] {
+        let directory = repository(Some(SIDECAR_DATABASE), Some(record), false);
+        let repository = Repository::discover(directory.path()).unwrap();
+        assert!(!repository.holds_prepared_migration());
+        let refusal = repository
+            .require_migration_carry_head_format()
+            .unwrap_err();
+        assert_eq!(refusal.format(), format);
+        assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-015");
+    }
+
+    let format_three = repository(Some(CANONICAL_DATABASE), None, true);
+    assert_eq!(
+        Repository::discover(format_three.path())
+            .unwrap()
+            .require_migration_carry_head_format(),
+        Ok(())
+    );
+    let unborn = TempDir::new().unwrap();
+    git(
+        unborn.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    assert_eq!(
+        Repository::discover(unborn.path())
+            .unwrap()
+            .require_migration_carry_head_format(),
+        Ok(())
+    );
+}
+
+#[test]
 fn does_not_downgrade_an_invalid_database_entry_to_legacy() {
     let directory = repository(Some(INVALID_DATABASE), Some(ORNADB_1_0_FORMAT_ONE), false);
     replace_database_with_directory(directory.path());
