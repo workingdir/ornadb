@@ -2419,6 +2419,13 @@ impl NativeGraphContext {
         let mut revisions = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
+            self.repository
+                .objects()
+                .check_expansion(&tree, "")
+                .map_err(|error| match error {
+                    crate::RepositoryError::SourceTreeLimit => GraphError::SourceTreeLimit,
+                    _ => GraphError::GitCommandFailed,
+                })?;
             let listing = self.git_output(&["ls-tree", "-r", "-t", "--full-tree", &tree])?;
             let text = std::str::from_utf8(&listing).map_err(|_| GraphError::GitObjectMalformed)?;
             // Each entry is `<mode> SP <type> SP <oid> TAB <path>`.
@@ -8094,6 +8101,31 @@ mod persisted_orp_tests {
         (directory, graph)
     }
 
+    /// G2: the frozen-candidate read-tree of `expected_head` must be preceded
+    /// by the bounded expansion pre-pass, so a too-deep head is refused.
+    #[test]
+    fn frozen_candidate_refuses_a_head_tree_nested_beyond_the_walk_limit() {
+        let (directory, graph) = capture_test_context();
+        crate::test_support::configure_fixture_git_identity(directory.path());
+        let deep = crate::test_support::deep_nested_commit(directory.path(), 300);
+        crate::test_support::git_with_input(
+            directory.path(),
+            &["update-ref", "HEAD", &deep],
+            "",
+        );
+        let repository = crate::Repository::discover(directory.path()).expect("open repository");
+        let head = repository.head().expect("read head").expect("born head");
+        assert!(matches!(
+            repository.build_frozen_publication_candidate(
+                &head,
+                &graph,
+                graph.store_root(),
+                "orna: test deep head",
+            ),
+            Err(crate::RepositoryError::SourceTreeLimit)
+        ));
+    }
+
     /// Builds the capture fixture context for a repository path, creating the
     /// repository if it does not exist yet. Every fixture object is
     /// content-addressed and the owner identity is fixed, so the same path
@@ -12665,6 +12697,7 @@ pub enum GraphError {
     InvalidDomain,
     InvalidDigestLength,
     InvalidEmptyBlob,
+    SourceTreeLimit,
     InvalidByteIndex,
     InvalidRange,
     InvalidBlobAnnotation,
@@ -12794,6 +12827,9 @@ impl fmt::Display for GraphError {
                 f.write_str("Git object bytes do not match their native ID")
             }
             Self::ChunkTooLarge(size) => write!(f, "chunk size {size} exceeds OGB-2 bound"),
+            Self::SourceTreeLimit => {
+                f.write_str("committed source tree exceeds the bounded walk limit")
+            }
             Self::GitCommandFailed => f.write_str("required local Git command failed"),
             Self::CaptureReadFailed => f.write_str("authorized Blob capture input failed"),
             Self::ObjectUnavailable => f.write_str("required native Git object is unavailable"),
