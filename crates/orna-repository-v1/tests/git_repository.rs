@@ -606,7 +606,7 @@ fn committed_overlong_entries_list_without_a_path_limit() {
     // `deep/` make a 4108-byte path, past the old 4096-byte total cap, while
     // each name stays within the object reader's per-entry bound. The 4108-byte
     // record exceeds `list_tree_entries`' separate 4 KiB record bound, so the
-    // ls-tree listing is not asserted here.
+    // ls-tree listing is asserted on a tree that holds only the long name.
     let long_component = format!("{}.md", "a".repeat(300));
     let deep_component = "c".repeat(255);
     let mut deep = raw_tree_object(root.path(), &[("100644", "leaf.txt", &blob)]);
@@ -633,7 +633,17 @@ fn committed_overlong_entries_list_without_a_path_limit() {
     expected_deep.push("leaf.txt");
     assert!(paths.contains(&expected_deep));
     assert!(paths.contains(&PathBuf::from("docs").join(&long_component)));
-    // list_committed_tree keeps its own 4 KiB record bound; see the comment above.
+    let name_only = raw_tree_object(root.path(), &[("40000", "docs", &docs)]);
+    publish_raw_commit(root.path(), &name_only, "overlong-name");
+    let commit = repo.resolve_snapshot("overlong-name").unwrap();
+    let listed = repo.list_committed_tree(&commit, 100).unwrap();
+    let long_path = PathBuf::from("docs").join(&long_component);
+    assert!(
+        listed
+            .iter()
+            .any(|entry| entry.path().as_path() == long_path.as_path()),
+        "ls-tree lists a committed name longer than NAME_MAX"
+    );
 }
 
 #[test]
@@ -657,6 +667,57 @@ fn checkout_plan_accepts_user_directories_named_like_git_metadata() {
         .map(|path| path.as_path().to_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(affected, [".GIT/a", "Sub/.GIT/notes"]);
+}
+
+#[test]
+fn force_checkout_keeps_user_directories_named_like_git_metadata() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "user data\n").unwrap();
+    fs::create_dir_all(root.path().join(".GIT")).unwrap();
+    fs::write(root.path().join(".GIT/a"), "user data\n").unwrap();
+    // Status observes the user directories as ordinary untracked data.
+    repo.worktree_state().unwrap();
+
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(43))
+        .unwrap();
+    // Only the committed target path conflicts, so the leniently listed user
+    // names never reach `git restore`.
+    let ordinary = ManagedPath::new("ordinary.txt").unwrap();
+    assert_eq!(
+        plan.git().discardable_paths(),
+        std::slice::from_ref(&ordinary)
+    );
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+    repo.execute_validated_force_checkout(&discard).unwrap();
+
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "target");
+    for user_file in ["Sub/.GIT/notes", ".GIT/a"] {
+        assert_eq!(
+            fs::read_to_string(root.path().join(user_file)).unwrap(),
+            "user data\n",
+            "{user_file} stays as the user wrote it"
+        );
+    }
 }
 
 #[test]
