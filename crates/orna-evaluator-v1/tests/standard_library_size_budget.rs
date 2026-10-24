@@ -43,7 +43,7 @@ fn limits(size: usize) -> Limits {
 /// `xs` holds `0..size`, `letters` holds `size` scalars and `page` holds
 /// `size / 10` lines of nine scalars, each ending in LF.
 fn session(size: usize) -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();
