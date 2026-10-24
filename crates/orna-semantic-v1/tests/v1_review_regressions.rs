@@ -265,7 +265,7 @@ fn qualified_annotation_names_use_imported_module_scope() {
 #[test]
 fn generic_and_function_type_annotations_remain_resolvable() {
     let result = analyze_main(include_str!(
-        "fixtures/inline-v1_review_regressions/f79e48c1615f.orna"
+        "fixtures/inline-v1_review_regressions/8af43e36596d.orna"
     ));
     expect_accepted(&result);
 }
