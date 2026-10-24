@@ -13,7 +13,10 @@ use std::fmt;
 
 use num_bigint::BigInt;
 use orna_repository_v1::{GitCommitRef, KeyRange, Repository, RepositoryFormatContext};
-use orna_runtime_v1::{TableMutation, TableObjectId};
+use orna_runtime_v1::{
+    PinnedCommittedRows, RuntimeError, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, TableMutation, TableObjectId,
+};
 use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value_v1::{decode_canonical_storage_value, Raw, Value};
 
@@ -262,6 +265,55 @@ pub fn committed_table_object_ids<'a>(
         }
     }
     Ok(ids)
+}
+
+/// The committed `HEAD` base an admitted activation reads and commits through.
+pub struct CommittedTableActivation {
+    /// Activation whose declared relations are the committed rows overlaid by the unpublished tail.
+    pub snapshot: RuntimeTableActivationSnapshot,
+    /// Committed object identity of every admitted table, by name.
+    pub table_ids: BTreeMap<String, TableObjectId>,
+    /// Stored-field order of every admitted table's stored tuples, by name.
+    pub storage_orders: BTreeMap<String, Vec<String>>,
+}
+
+/// Opens an admitted activation over the committed rows of `commit`. The published pin is read
+/// before those rows, so a publication between the two reads fails closed. Every admitted table
+/// must have exactly one live committed identity, and a corrupt committed base fails closed.
+pub async fn begin_committed_table_activation(
+    state: &RuntimeState,
+    repository: &Repository,
+    commit: &GitCommitRef,
+    format_context: &RepositoryFormatContext,
+    tables: &BTreeMap<String, TableSchema>,
+) -> Result<CommittedTableActivation, RuntimeError> {
+    let pin = state.published_pin().await?;
+    let table_ids =
+        committed_table_object_ids(repository, commit, tables.keys().map(String::as_str))
+            .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let committed = committed_tables(repository, format_context, commit, tables, &table_ids)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let mut identities = Vec::with_capacity(committed.len());
+    let mut rows = BTreeMap::new();
+    let mut storage_orders = BTreeMap::new();
+    for (name, table) in committed {
+        let object_id = table_ids
+            .get(&name)
+            .copied()
+            .ok_or(RuntimeError::RecoveryInvalid)?;
+        identities.push(RuntimeTableIdentity::new(name.clone(), object_id)?);
+        storage_orders.insert(name.clone(), table.storage_order);
+        rows.insert(name, table.rows);
+    }
+    let base = PinnedCommittedRows::new(pin, rows)?;
+    let snapshot = state
+        .begin_admitted_table_activation_over_committed(&identities, base)
+        .await?;
+    Ok(CommittedTableActivation {
+        snapshot,
+        table_ids,
+        storage_orders,
+    })
 }
 
 /// The admitted table schemas a module header declares, keyed by table name. A table whose
