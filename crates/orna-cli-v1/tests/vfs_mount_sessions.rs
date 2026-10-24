@@ -53,6 +53,7 @@ const EIO: i32 = 5;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
 const EPERM: i32 = 1;
+const EXDEV: i32 = 18;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -925,5 +926,90 @@ async fn blob_unlink_and_rename_are_refused_with_eperm() {
         b"london-mp3-bytes",
         "a refused Blob unlink or rename leaves the stored content unchanged",
     );
+    session.finish();
+}
+
+/// Structural mutations refused on the live writable mount are EPERM, not EROFS:
+/// EROFS is reserved for historical and read-only views (profiles/vfs-1.md:139;
+/// 41-vfs.md:103-105). A rename across rows is EXDEV, as rename(2) requires.
+/// Every refusal leaves the stored rows unchanged.
+#[tokio::test]
+async fn live_mount_structural_refusals_are_eperm_and_cross_row_rename_is_exdev() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) = media_session(&[
+        ("london", "London", b"london-mp3-bytes".as_slice()),
+        ("paris", "Paris", b"paris-mp3-bytes".as_slice()),
+    ])
+    .await;
+    let london_before = session.read("london");
+    assert_errno(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(session.mountpoint().join("Music").join("notes.txt")),
+        EPERM,
+        "a create directly in the table directory is refused",
+    );
+    assert_errno(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(session.row("london").join("notes.txt")),
+        EPERM,
+        "a create of a non-blob name inside a row is refused",
+    );
+    assert_errno(
+        fs::remove_file(session.document("london")),
+        EPERM,
+        "unlinking a row's data.orna is refused",
+    );
+    assert_errno(
+        fs::rename(
+            session.row("london").join("content.mp3"),
+            session.row("paris").join("moved.mp3"),
+        ),
+        EXDEV,
+        "a Blob rename across rows is refused with EXDEV",
+    );
+    assert_eq!(
+        session.read("london"),
+        london_before,
+        "refused structural mutations leave the row document unchanged",
+    );
+    assert_eq!(
+        fs::read(session.row("london").join("content.mp3")).unwrap(),
+        b"london-mp3-bytes",
+        "a refused cross-row rename leaves the Blob in its row",
+    );
+    session.finish();
+}
+
+/// A temp-file save renamed to any name other than the row's `data.orna` is
+/// refused with EPERM (41-vfs.md:103-105); the same temp file still completes
+/// the save to `data.orna` afterwards.
+#[tokio::test]
+async fn temporary_rename_to_another_name_is_eperm_and_still_saves() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    let before = session.read("london");
+    let scratch = session.row("london").join(".data.orna.save");
+    fs::write(&scratch, music_row("London renamed")).expect("write a temp file in a row");
+    assert_errno(
+        fs::rename(&scratch, session.row("london").join("other.txt")),
+        EPERM,
+        "a temp-file rename to a name other than data.orna is refused",
+    );
+    assert_eq!(
+        session.read("london"),
+        before,
+        "the refused rename leaves the row document unchanged",
+    );
+    fs::rename(&scratch, session.document("london"))
+        .expect("the refused temp file still saves to data.orna");
+    assert!(session.read("london").contains("London renamed"));
     session.finish();
 }

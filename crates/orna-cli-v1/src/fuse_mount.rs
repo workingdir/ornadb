@@ -58,15 +58,12 @@ fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
     }
 }
 
-/// Errno for a mutation refused on a node of a live mount. A Blob projection has
-/// no candidate, so a mutation of it is unsupported and returns EPERM
-/// (profiles/vfs-1.md:110, :139; 41-vfs.md:103-105). Other non-writable nodes
-/// keep EROFS.
-fn refused_mutation_errno(kind: Option<&NodeKind>) -> Errno {
-    match kind {
-        Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => Errno::EPERM,
-        _ => Errno::EROFS,
-    }
+/// Errno for a mutation refused on the live writable mount. Every such refusal
+/// is a denied or unsupported operation, so it is EPERM (41-vfs.md:103-105;
+/// profiles/vfs-1.md:139). EROFS is reserved for the kernel read-only snapshot
+/// mount (spawn_read_only), which never reaches these handlers.
+fn refused_mutation_errno() -> Errno {
+    Errno::EPERM
 }
 
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
@@ -3076,7 +3073,7 @@ impl Filesystem for WorkspaceFilesystem {
                 state.nodes.get(&parent.0).map(|node| &node.kind),
                 Some(NodeKind::Row(_))
             ) {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let destination = match state.lookup_child(parent.0, OsStr::new("data.orna")) {
@@ -3089,7 +3086,7 @@ impl Filesystem for WorkspaceFilesystem {
             let save = match state.nodes.get(&destination).map(|node| &node.kind) {
                 Some(NodeKind::Document { save, .. }) => Arc::clone(save),
                 _ => {
-                    reply.error(Errno::EROFS);
+                    reply.error(Errno::EPERM);
                     return;
                 }
             };
@@ -3104,7 +3101,7 @@ impl Filesystem for WorkspaceFilesystem {
                     .cloned()
             };
             if !is_editor_temporary_name(name) && blob_field.is_none() {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let baseline = save
@@ -3183,8 +3180,12 @@ impl Filesystem for WorkspaceFilesystem {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if parent != newparent || flags != RenameFlags::empty() {
-            reply.error(Errno::EROFS);
+        if flags != RenameFlags::empty() {
+            reply.error(Errno::EPERM);
+            return;
+        }
+        if parent != newparent {
+            reply.error(Errno::EXDEV);
             return;
         }
         let mut draft_state = self
@@ -3226,9 +3227,7 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) = state.nodes.get(&source_inode).map(|node| &node.kind)
             else {
-                reply.error(refused_mutation_errno(
-                    state.nodes.get(&source_inode).map(|node| &node.kind),
-                ));
+                reply.error(refused_mutation_errno());
                 return;
             };
             let (save, target, scratch, blob_field, baseline, identity) = (
@@ -3243,7 +3242,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .as_ref()
                 .map_or("data.orna", |field| field.file_name.as_str());
             if newname.to_str() != Some(expected_name) {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let destination_inode = match state.lookup_child(newparent.0, newname) {
@@ -3274,7 +3273,7 @@ impl Filesystem for WorkspaceFilesystem {
                 }
                 (Some(_), Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_))) => {}
                 _ => {
-                    reply.error(Errno::EROFS);
+                    reply.error(Errno::EPERM);
                     return;
                 }
             }
@@ -3409,7 +3408,7 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&parent.0).map(|node| &node.kind),
             Some(NodeKind::Row(_))
         ) {
-            reply.error(Errno::EROFS);
+            reply.error(Errno::EPERM);
             return;
         }
         let inode = match state.lookup_child(parent.0, OsStr::new(name)) {
@@ -3427,7 +3426,7 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&inode).map(|node| &node.kind),
             Some(NodeKind::Temporary { .. })
         ) {
-            reply.error(refused_mutation_errno(state.nodes.get(&inode).map(|node| &node.kind)));
+            reply.error(refused_mutation_errno());
             return;
         }
         if draft_state
@@ -3446,7 +3445,7 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) => (Arc::clone(save), Arc::clone(identity), Arc::clone(scratch)),
             _ => {
-                reply.error(refused_mutation_errno(state.nodes.get(&inode).map(|node| &node.kind)));
+                reply.error(refused_mutation_errno());
                 return;
             }
         };
@@ -3879,9 +3878,7 @@ impl Filesystem for WorkspaceFilesystem {
                     state.nodes.get(&inode.0).map(|node| &node.kind),
                     Some(NodeKind::Document { .. })
                 ) {
-                    reply.error(refused_mutation_errno(
-                        state.nodes.get(&inode.0).map(|node| &node.kind),
-                    ));
+                    reply.error(refused_mutation_errno());
                     return;
                 }
                 if size > DRAFT_FILE_BOUND_BYTES as u64 {
@@ -6117,8 +6114,8 @@ mod hardening_tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::{
-        Errno, NodeKind, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY,
-        create_editor_draft, denied_attribute_change, refused_mutation_errno,
+        Errno, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY, create_editor_draft,
+        denied_attribute_change, refused_mutation_errno,
     };
 
     #[test]
@@ -6255,12 +6252,7 @@ mod hardening_tests {
     }
 
     #[test]
-    fn refused_mutation_is_eperm_for_blob_bytes_and_erofs_otherwise() {
-        assert_eq!(
-            refused_mutation_errno(Some(&NodeKind::BlobBytes(std::sync::Arc::from(&b"blob"[..])))),
-            Errno::EPERM,
-        );
-        assert_eq!(refused_mutation_errno(Some(&NodeKind::Bytes(Vec::new()))), Errno::EROFS);
-        assert_eq!(refused_mutation_errno(None), Errno::EROFS);
+    fn live_mount_refusal_is_eperm() {
+        assert_eq!(refused_mutation_errno(), Errno::EPERM);
     }
 }
