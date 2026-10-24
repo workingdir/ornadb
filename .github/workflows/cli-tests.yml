@@ -44,13 +44,13 @@ jobs:
 
       # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
       # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
+      # publication_crash_matrix needs the crash-barriers feature. Its job below runs it with
+      # that feature, so this step skips it and names that job (--covered-by).
       - name: Test the orna-cli-v1 integration suite
         env:
           ORNA_REQUIRE_FUSE: "1"
-        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata
+        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --covered-by test:publication_crash_matrix=publication-crash-matrix
 
-      - name: Test the publication crash-barrier matrix
-        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --target test:publication_crash_matrix --features crash-barriers --timeout-minutes 30
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 60

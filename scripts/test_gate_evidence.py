@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shlex
 import sys
 import textwrap
+import tomllib
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -24,6 +28,7 @@ from scripts.gate_evidence import (
     ParsedLog,
     TargetRun,
     classify,
+    enabled_features,
     evaluate_selector,
     gate_rollup,
     index_artifact,
@@ -750,6 +755,157 @@ class ReviewFindingTests(unittest.TestCase):
             problems = json.loads(out.read_text(encoding="utf-8"))["problems"]
             self.assertTrue(any("records must test " + "b" * 40 in problem for problem in problems), problems)
             self.assertTrue(any("remove its baseline entry" in problem for problem in problems), problems)
+
+
+# Answers `cargo metadata` from $FAKE_CARGO_METADATA, logs every call to $FAKE_CARGO_CALLS and, like
+# Cargo, refuses to build `crash_matrix` (required-features = ["crash-barriers"]) without --features.
+FAKE_TEST_CARGO = textwrap.dedent(
+    """\
+    #!/usr/bin/env python3
+    import os, sys
+    arguments = sys.argv[1:]
+    with open(os.environ["FAKE_CARGO_CALLS"], "a", encoding="utf-8") as calls:
+        calls.write(" ".join(arguments) + "\\n")
+    if arguments[0] == "metadata":
+        print(os.environ["FAKE_CARGO_METADATA"])
+        sys.exit(0)
+    if "crash_matrix" in arguments and "--features" not in arguments:
+        print("error: target `crash_matrix` in package `orna-demo-v1` requires the features: `crash-barriers`", file=sys.stderr)
+        sys.exit(101)
+    print("running 1 test")
+    print("test round_trips ... ok")
+    print("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s")
+    """
+)
+DEMO_METADATA = {
+    "packages": [
+        {
+            "name": "orna-demo-v1",
+            "features": {"crash-barriers": []},
+            "targets": [
+                {"name": "orna_demo_v1", "kind": ["lib"], "test": True},
+                {"name": "crash_matrix", "kind": ["test"], "test": True, "required-features": ["crash-barriers"]},
+            ],
+        }
+    ]
+}
+
+
+def option_values(words: list[str], option: str) -> list[str]:
+    return [words[index + 1] for index, word in enumerate(words[:-1]) if word == option]
+
+
+class RequiredFeatureTests(unittest.TestCase):
+    """CLI tests run 40027702260 failed: `test -p orna-cli-v1` ran publication_crash_matrix without crash-barriers."""
+
+    def run_test(self, *options: str) -> tuple[int, str, list[str]]:
+        """Run `test -p orna-demo-v1` against the fake cargo; return the exit code, stderr and cargo calls."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo = root / "bin/cargo"
+            cargo.parent.mkdir()
+            cargo.write_text(f"#!{sys.executable}\n" + FAKE_TEST_CARGO.split("\n", 1)[1], encoding="utf-8")
+            cargo.chmod(0o755)
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            calls = root / "calls"
+            environment = {
+                "PATH": f"{cargo.parent}{os.pathsep}{os.environ['PATH']}",
+                "FAKE_CARGO_CALLS": str(calls),
+                "FAKE_CARGO_METADATA": json.dumps(DEMO_METADATA),
+            }
+            stderr = io.StringIO()
+            with patch.dict(os.environ, environment), redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                try:
+                    code = main(["test", "-p", "orna-demo-v1", "--baseline", str(baseline), *options])
+                except SystemExit as stopped:
+                    code = stopped.code
+            invoked = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+            return code, stderr.getvalue(), invoked
+
+    def test_a_target_needing_features_the_run_leaves_off_is_skipped_and_names_its_job(self) -> None:
+        code, stderr, calls = self.run_test("--covered-by", "test:crash_matrix=crash-matrix")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn(
+            "ornadb: skipped orna-demo-v1 test:crash_matrix: requires features crash-barriers, covered by crash-matrix",
+            stderr,
+        )
+        self.assertEqual(calls[1:], ["test --locked -p orna-demo-v1 --lib -- --exact --nocapture"])
+
+    def test_an_unclaimed_target_needing_features_fails_before_any_test_runs(self) -> None:
+        code, stderr, calls = self.run_test()
+
+        self.assertEqual(code, 2, stderr)
+        self.assertIn("orna-demo-v1 test:crash_matrix requires features crash-barriers", stderr)
+        self.assertIn("--covered-by test:crash_matrix=JOB", stderr)
+        self.assertEqual([call.split()[0] for call in calls], ["metadata"])
+
+    def test_a_claim_for_a_target_the_run_builds_is_rejected(self) -> None:
+        code, stderr, calls = self.run_test("--features", "crash-barriers", "--covered-by", "test:crash_matrix=crash-matrix")
+
+        self.assertEqual(code, 2, stderr)
+        self.assertIn("--covered-by test:crash_matrix: no selected target needs features this run leaves off", stderr)
+        self.assertEqual([call.split()[0] for call in calls], ["metadata"])
+
+    def test_a_run_that_enables_the_features_runs_the_target_with_them(self) -> None:
+        code, stderr, calls = self.run_test("--target", "test:crash_matrix", "--features", "crash-barriers")
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(
+            calls[1:],
+            ["test --locked -p orna-demo-v1 --test crash_matrix --features crash-barriers -- --exact --nocapture"],
+        )
+
+    def test_enabled_features_follow_default_and_feature_chains_but_not_dependencies(self) -> None:
+        package = {
+            "features": {
+                "default": ["barriers"],
+                "barriers": ["crash-barriers", "orna-repository-v1/crash-barriers"],
+                "crash-barriers": ["dep:fault"],
+                "fault": ["dep:fault"],
+                "slow": [],
+            }
+        }
+
+        self.assertEqual(enabled_features(package, None), {"default", "barriers", "crash-barriers"})
+        self.assertEqual(
+            enabled_features(package, "slow, fault"), {"default", "barriers", "crash-barriers", "slow", "fault"}
+        )
+        self.assertEqual(enabled_features({"features": {"slow": []}}, None), set())
+
+    def test_each_covering_job_runs_its_target_with_the_required_features(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        jobs = yaml.safe_load((root / ".github/workflows/cli-tests.yml").read_text(encoding="utf-8"))["jobs"]
+        commands = {
+            name: [shlex.split(step["run"]) for step in job["steps"] if "gate_evidence.py test" in step.get("run", "")]
+            for name, job in jobs.items()
+        }
+        claims = [
+            (package, *claim.split("=", 1))
+            for words in sum(commands.values(), [])
+            for claim in option_values(words, "--covered-by")
+            for package in option_values(words, "-p")
+        ]
+
+        self.assertIn(("orna-cli-v1", "test:publication_crash_matrix", "publication-crash-matrix"), claims)
+        for package, label, job in claims:
+            manifest = tomllib.loads((root / "crates" / package / "Cargo.toml").read_text(encoding="utf-8"))
+            required = {
+                feature
+                for entry in manifest.get("test", [])
+                if f"test:{entry['name']}" == label
+                for feature in entry.get("required-features", [])
+            }
+            self.assertTrue(required, f"{package} {label} requires no features")
+            runs = [
+                words
+                for words in commands.get(job, [])
+                if package in option_values(words, "-p")
+                and label in option_values(words, "--target")
+                and required <= {name for value in option_values(words, "--features") for name in value.split(",")}
+            ]
+            self.assertTrue(runs, f"job {job} does not run {package} {label} with features {sorted(required)}")
 
 
 if __name__ == "__main__":
