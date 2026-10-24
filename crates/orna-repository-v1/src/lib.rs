@@ -344,6 +344,13 @@ const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
+/// Longest a publication waits for the repository coordination lock before it
+/// reports `RepositoryBusy`. Bounded so a hung holder or a same-thread
+/// re-entry cannot block publication forever; long enough to queue behind any
+/// short coordination section that holds the lock.
+const COORDINATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Sleep between try-lock attempts while the coordination lock is contended.
+const COORDINATION_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 const MAX_MIGRATION_IDENTITY_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_MIGRATION_ANNOTATION_DEFAULTS: usize = 1_000_000_000;
 
@@ -4672,7 +4679,7 @@ impl Repository {
         if journal.compact_manifest().is_some() {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
-        let _coordination_lock = self.acquire_coordination_lock_blocking()?;
+        let _coordination_lock = self.acquire_coordination_lock_for_publication()?;
         if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
         self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
@@ -4686,6 +4693,12 @@ impl Repository {
             // same recovery operation, not a second publisher. Any differing
             // journal remains fenced rather than replacing its evidence.
             Some(retained) if retained != *journal => {
+                // Ordering (ORNA-PUB-009 before recovery signal): a head that has
+                // already moved past this publisher's expected head is an ordinary
+                // lost CAS -> StaleHead (retriable). The retained batch is untouched.
+                // Only an unmoved head with a foreign retained journal means the
+                // earlier publication has not advanced the ref: PublicationPending
+                // (ORNA-PUB-006 recovery required).
                 if self.head()?.as_ref() != Some(journal.old_head()) {
                     return Err(RepositoryError::StaleHead);
                 }
@@ -8343,14 +8356,35 @@ impl Repository {
         Ok(CoordinationLock { file })
     }
 
-    /// Waits for the coordination lock. Publication uses this so a concurrent
-    /// publisher queues behind the winner and then fails its compare-and-set
-    /// (ORNA-PUB-009) instead of reporting a transient busy state.
-    fn acquire_coordination_lock_blocking(&self) -> Result<CoordinationLock, RepositoryError> {
+    /// Acquires the coordination lock for publication, waiting at most
+    /// `COORDINATION_LOCK_WAIT`. A publisher that loses a race queues briefly
+    /// behind the winner and then fails its compare-and-set (ORNA-PUB-009).
+    /// A held or hung lock, or a same-thread re-entry, is reported as
+    /// `RepositoryBusy` once the bound elapses; it never blocks indefinitely.
+    fn acquire_coordination_lock_for_publication(
+        &self,
+    ) -> Result<CoordinationLock, RepositoryError> {
         let file = self.open_coordination_lock_file()?;
-        file.lock_exclusive()
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        Ok(CoordinationLock { file })
+        let deadline = std::time::Instant::now() + COORDINATION_LOCK_WAIT;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(CoordinationLock { file }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(RepositoryError::RepositoryBusy);
+                    }
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        std::thread::sleep(COORDINATION_LOCK_POLL);
+                    }
+                }
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
     }
 
     fn open_coordination_lock_file(&self) -> Result<fs::File, RepositoryError> {

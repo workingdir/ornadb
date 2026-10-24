@@ -98,4 +98,4 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
           RUST_TEST_THREADS: 2
-        run: cargo test --locked -p orna-repository-v1 --lib --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-repository-v1 --lib --test req_publication_cas --no-fail-fast -- --nocapture
