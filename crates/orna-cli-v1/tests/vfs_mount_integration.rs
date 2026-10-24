@@ -796,36 +796,44 @@ impl MountedMusicRow {
             .expect("run edit --row against mounted absolute row directory")
     }
 
-    /// Commits `source_row` over `Music/london` as a writer outside this mount.
-    async fn replace_row_as_other_writer(&self, source_row: &str) {
+    /// Commits `source_row` over `Music/london` through `orna edit`. The live
+    /// mount owner executes that edit (ORNA-TURSO-005: other local writers
+    /// coordinate with the owner or fail), so HEAD and the row advance without
+    /// the mount's captured baseline following them.
+    fn replace_row_through_owner(&self, source_row: &str) {
+        let editor = self.scripts.path().join("owner-routed-edit");
+        std::fs::write(
+            &editor,
+            format!("#!/bin/sh\nprintf '%s\\n' '{source_row}' > \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+            .arg("--db")
+            .arg(self.repository_directory.path())
+            .args(["edit", "Music/london/data.orna"])
+            .env("EDITOR", &editor)
+            .output()
+            .expect("run orna edit through the mount owner");
+        assert_saved(&output, "owner-routed other-writer edit");
+    }
+
+    /// A writer outside the mount that takes the writer lease directly is
+    /// refused while the mount owns it (ORNA-TURSO-005).
+    async fn assert_direct_writer_refused(&self) {
         let state = RuntimeState::open(&self.repository, self.runtime_identity, self.digest)
             .await
             .unwrap();
-        let writer = state
+        let Err(refusal) = state
             .acquire_lease(self.runtime_identity.repository_id)
             .await
-            .unwrap();
-        let head = self.repository.head().unwrap().unwrap();
-        let format_context =
-            format3::format3_context_for_snapshot(&self.repository, head.as_str());
-        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
-        media_commit::commit_source_captures_for_table(
-            &self.repository,
-            &state,
-            writer,
-            &mut bindings,
-            self.relation_id,
-            &format_context,
-            "Music",
-            &[media_commit::SourceCaptureRow {
-                key: "london",
-                blob_fields: &[],
-                source_row,
-                ordinal: 0x9a,
-                insert_only: false,
-            }],
-        )
-        .await;
+        else {
+            panic!("a direct foreign lease must be refused while the mount owns the writer");
+        };
+        assert!(
+            matches!(refusal, orna_runtime_v1::RuntimeError::LeaseHeld),
+            "a direct foreign lease is refused as LeaseHeld: {refusal:?}"
+        );
     }
 
     /// The `Music/london` row bytes the store holds now. Call after `unmount`.
@@ -898,7 +906,8 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
         return;
     };
     assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
-    row.replace_row_as_other_writer("{ title: \"other\", }\n").await;
+    row.assert_direct_writer_refused().await;
+    row.replace_row_through_owner("{ title: \"other\", }");
     let repository = row.repository_directory.path().to_path_buf();
     std::fs::write(repository.join("notes.txt"), "advance HEAD\n").unwrap();
     format3::git(&repository, &["add", "notes.txt"]);
