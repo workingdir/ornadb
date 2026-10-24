@@ -902,7 +902,7 @@ impl Catalogue {
                         "parallel",
                         function(
                             vec![Type::List(Box::new(Type::Error))],
-                            Type::Stream(Box::new(Type::Error)),
+                            Type::List(Box::new(Type::Error)),
                         ),
                     ),
                     (
@@ -917,6 +917,13 @@ impl Catalogue {
                                 ("duration", Type::Named("std.DURATION".into())),
                             ],
                             Type::Error,
+                        ),
+                    ),
+                    (
+                        "sleep",
+                        named_function(
+                            vec![("duration", Type::Named("std.DURATION".into()))],
+                            Type::Null,
                         ),
                     ),
                 ],
@@ -1412,7 +1419,7 @@ impl Catalogue {
                         "parallel",
                         function(
                             vec![Type::List(Box::new(Type::Error))],
-                            Type::Stream(Box::new(Type::Error)),
+                            Type::List(Box::new(Type::Error)),
                         ),
                     ),
                     fixture_function(
@@ -12191,7 +12198,14 @@ fn infer_case_arm_body(
     }
     let body = infer(&arm.body, scope, local, diagnostics);
     effects.join(&body.effects);
-    if let Some(expected) = result.as_ref() {
+    // ORNA-CASE-004 joins reachable bodies. `null` is a member of `T?`
+    // (ORNA-TYPE-001), so a `null` body followed by an `Optional` body joins
+    // to that `Optional` type; the reverse order is already accepted by types_match.
+    let widens_null = matches!(result.as_ref(), Some(Type::Null))
+        && matches!(body.ty, Type::Optional(_));
+    if widens_null {
+        *result = Some(body.ty);
+    } else if let Some(expected) = result.as_ref() {
         require_same(expected, &body.ty, diagnostics);
     } else {
         *result = Some(body.ty);
@@ -16600,11 +16614,10 @@ fn infer_success_pipeline(
         return input;
     };
     let Expr::Name { text, .. } = callee.as_ref() else {
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "pipeline stage is outside this semantic slice",
-        ));
-        return input;
+        // ORNA-PIPE-004: any callable may be a stage. A qualified callee such
+        // as `alias.op` is checked as a named callable with the piped value as
+        // its first argument, the same path the list pipeline uses.
+        return infer_named_pipeline_stage(input, callee, arguments, scope, local, diagnostics);
     };
     let (element, is_stream) = match &input.ty {
         Type::Relation(element) => (element.as_ref().clone(), false),
@@ -17170,6 +17183,7 @@ fn infer_named_pipeline_stage(
     let callee = infer(callee, scope, local, diagnostics);
     let mut effects = input.effects;
     effects.join(&callee.effects);
+    let callee_is_error = matches!(callee.ty, Type::Error);
     let Type::Function {
         parameters,
         parameter_names,
@@ -17188,10 +17202,12 @@ fn infer_named_pipeline_stage(
             };
             effects.join(&value.effects);
         }
-        diagnostics.push(diag(
-            DIAG_UNSUPPORTED,
-            "pipeline stage is not a supported named callable",
-        ));
+        if !callee_is_error {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                "pipeline stage is not a supported named callable",
+            ));
+        }
         return Inferred {
             ty: Type::Error,
             effects,
@@ -18364,7 +18380,7 @@ fn intrinsic_value_type(name: &str) -> Option<Type> {
         "log" => Some(function(vec![Type::Text], Type::Null)),
         "parallel" => Some(function(
             vec![Type::List(Box::new(Type::Error))],
-            Type::Stream(Box::new(Type::Error)),
+            Type::List(Box::new(Type::Error)),
         )),
         "merge_streams" => Some(function(
             vec![Type::List(Box::new(Type::Error))],
