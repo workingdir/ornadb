@@ -634,8 +634,14 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
 
 /// Refusals answered at once. Each waits up to [`REFUSAL_HEAD_TIMEOUT`] for
 /// its request head on a thread of its own; beyond this many, the connection
-/// is closed without an answer so refusal threads stay bounded.
+/// is answered from the accept loop by [`refuse_saturated`] instead.
 const MAX_REFUSALS_IN_FLIGHT: usize = 16;
+
+/// Bound on each wait the accept loop makes while answering a saturated
+/// refusal: first for the request line to arrive, then for the canned 503 to
+/// be written. One saturated refusal therefore holds the accept loop for at
+/// most twice this long.
+const SATURATED_REFUSAL_WAIT: StdDuration = StdDuration::from_millis(5);
 
 /// Hands a connection beyond the cap to [`refuse_connection`] on its own
 /// thread, so the accept loop never waits on a silent peer.
@@ -644,6 +650,7 @@ fn refuse_off_loop(stream: TcpStream, in_flight: &Arc<AtomicUsize>) {
         (active < MAX_REFUSALS_IN_FLIGHT).then_some(active + 1)
     });
     if claimed.is_err() {
+        refuse_saturated(stream);
         return;
     }
     let worker = Arc::clone(in_flight);
@@ -655,6 +662,50 @@ fn refuse_off_loop(stream: TcpStream, in_flight: &Arc<AtomicUsize>) {
         });
     if spawned.is_err() {
         in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Answers a connection that arrives while every refusal thread is busy,
+/// from the accept loop, without a head read. The request line is only
+/// peeked, so the route shape can be chosen while the bytes stay unread, and
+/// both the peek and the write are bounded by [`SATURATED_REFUSAL_WAIT`]. A
+/// peer that sends nothing in time gets the generic shape.
+fn refuse_saturated(mut stream: TcpStream) {
+    let orna_route = peek_is_orna_route(&stream, Instant::now() + SATURATED_REFUSAL_WAIT);
+    let response = if orna_route {
+        live_error_response(503, "live.unavailable", "request rejected")
+    } else {
+        unavailable_response()
+    };
+    let head = response_head(&response);
+    let _ = write_before(
+        &mut stream,
+        &[&head, &response.body],
+        Instant::now() + SATURATED_REFUSAL_WAIT,
+    );
+    let _ = stream.shutdown(Shutdown::Write);
+}
+
+/// Peeks at the start of a connection's request line until it can classify
+/// the route or `deadline` passes. Bytes are never consumed.
+fn peek_is_orna_route(stream: &TcpStream, deadline: Instant) -> bool {
+    // The longest `/orna/` method prefix, `DELETE /orna/`, is 13 bytes.
+    const CLASSIFY_BYTES: usize = 13;
+    let mut probe = [0_u8; CLASSIFY_BYTES];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
+        }
+        match stream.peek(&mut probe) {
+            Ok(read) if read >= CLASSIFY_BYTES || probe[..read].contains(&b'\n') => {
+                return is_orna_request_line(&probe[..read]);
+            }
+            // Nothing, or only part of the line so far: wait briefly for more.
+            Ok(0) => return false,
+            Ok(_) => std::thread::sleep(StdDuration::from_micros(200)),
+            Err(_) => return false,
+        }
     }
 }
 
@@ -3727,6 +3778,52 @@ mod tests {
             started.elapsed() < REFUSAL_HEAD_TIMEOUT,
             "a silent peer delayed the next refusal"
         );
+    }
+
+    /// 30-protocol:21: once every refusal thread is busy, a connection over
+    /// the cap is still answered from the accept loop. A `/orna/` route gets
+    /// the protocol error shape, and a generic route gets the generic 503,
+    /// rather than a silent close.
+    #[test]
+    fn saturated_refusal_still_answers_with_the_route_shape() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=saturated"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+        // Silent peers fill every refusal thread; each holds its thread until
+        // REFUSAL_HEAD_TIMEOUT. They are accepted in connect order, so the
+        // probes below arrive after the pool is full.
+        let _silent: Vec<std::net::TcpStream> = (0..MAX_REFUSALS_IN_FLIGHT)
+            .map(|_| std::net::TcpStream::connect(address).expect("silent peer"))
+            .collect();
+
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert_eq!(
+            refused.body,
+            r#"{"code":"live.unavailable","message":"request rejected"}"#
+        );
+
+        let generic = exchange(address, &format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n"));
+        assert_eq!(generic.status, 503);
+        assert_eq!(generic.body, r#"{"error":"temporarily_unavailable"}"#);
     }
 
     /// ORNA-WIRE-005: a request body must arrive within one transfer budget
