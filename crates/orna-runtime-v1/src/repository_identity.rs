@@ -23,8 +23,15 @@ pub fn repository_runtime_identity(
 }
 
 /// Derives the identity for the migration's own checkpoint carry into a
-/// prepared copy. Only this path admits a prepared copy whose `HEAD` is still
-/// legacy; every other caller uses [`repository_runtime_identity`].
+/// prepared copy. This is the only sanctioned entry for migration carry: it
+/// is the sole caller that admits a prepared copy whose `HEAD` is still
+/// legacy. Every other caller uses [`repository_runtime_identity`].
+///
+/// Residual API risk (recorded on ornadb-5il1.396): this function is `pub`
+/// and nothing in the type system restricts it to the migration, so a
+/// downstream crate could call it directly. No token machinery is added here;
+/// the restriction is by convention and by the single call site in
+/// `migration_copy`.
 pub fn migration_copy_runtime_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {

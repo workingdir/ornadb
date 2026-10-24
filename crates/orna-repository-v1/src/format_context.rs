@@ -1163,14 +1163,20 @@ impl Repository {
         })
     }
 
-    /// Admits the migration's checkpoint carry into a prepared copy
-    /// ([`Self::holds_prepared_migration`]) whose `HEAD` is still legacy; every
-    /// other legacy `HEAD` is refused as by [`Self::require_writable_head_format`].
+    /// Admits the migration's checkpoint carry only into a prepared copy
+    /// ([`Self::holds_prepared_migration`]) whose recorded `HEAD` format is
+    /// legacy (ORNA-UPGRADE-001). A writable `HEAD` is admitted as usual, and
+    /// an unreadable context is decided by [`Self::require_writable_head_format`].
     pub fn require_migration_carry_head_format(&self) -> Result<(), LegacyWriteRefused> {
-        if self.holds_prepared_migration() {
+        let Ok(context) = self.open_format_context() else {
+            return self.require_writable_head_format();
+        };
+        if !context.is_read_only() || self.holds_prepared_migration() {
             return Ok(());
         }
-        self.require_writable_head_format()
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
     }
 
     /// Whether this worktree holds a prepared format migration: a readable
