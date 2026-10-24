@@ -133,6 +133,9 @@ jobs:
       - name: Prove evaluator table-reference value identity and ordering
         run: cargo test --locked -p orna-evaluator-v1 --lib table_reference_value_tests
 
+      - name: Prove representation-independent Blob equality
+        run: cargo test --locked -p orna-evaluator-v1 --lib blob_equality_ignores_representation_and_respects_annotation
+
       - name: Prove final-vector VFS path components
         run: cargo test --locked -p orna-runtime-v1 --test final_vector_paths
 
