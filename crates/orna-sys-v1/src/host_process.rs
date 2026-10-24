@@ -13,9 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use orna_sys_macros::sys_host_operation;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use orna_sys_macros::sys_host_operation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessProviderError {
@@ -280,6 +280,10 @@ impl ProcessProvider {
             thread::sleep(Duration::from_millis(2));
         };
 
+        // The leader has exited, but a background grandchild may still hold the
+        // output pipes. Kill the group so the readers reach EOF; this is a no-op
+        // for the reaped leader itself (std's `kill` is inert after `wait`).
+        kill_process_tree(&mut child);
         join_reader(stdout_thread);
         join_reader(stderr_thread);
         if let Some(writer) = input_thread {
@@ -422,6 +426,35 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(15),
             "timeout waited for a grandchild holding the output pipes"
+        );
+    }
+
+    /// A child that exits normally while a background grandchild still holds
+    /// the output pipes must not block the call on that grandchild.
+    #[test]
+    fn normal_exit_kills_background_grandchildren_that_hold_the_output_pipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut provider = ProcessProvider::new(Duration::from_secs(60), 4096).unwrap();
+        provider
+            .allow_command("/bin/sh", &root, Vec::<String>::new())
+            .unwrap();
+
+        let started = Instant::now();
+        let result = provider.run(
+            "/bin/sh",
+            &["-c".to_owned(), "sleep 30 & exit 0".to_owned()],
+            root.to_str().unwrap(),
+            &[],
+            None,
+            Some(Duration::from_secs(60)),
+            4096,
+        );
+
+        assert_eq!(result.map(|output| output.exit_status), Ok(Some(0)),);
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "normal exit waited for a background grandchild holding the output pipes"
         );
     }
 }
