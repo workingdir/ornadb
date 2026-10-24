@@ -12439,6 +12439,102 @@ mod tests {
         assert_eq!(repository.head().unwrap(), Some(candidate.commit().clone()));
     }
 
+    fn overwrite_keeping_mtime(path: &std::path::Path, bytes: &[u8]) {
+        let modified = fs::metadata(path).unwrap().modified().unwrap();
+        fs::write(path, bytes).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    #[test]
+    fn reviewed_candidate_detects_same_size_same_mtime_edit_before_ref_advance() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// reviewed\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([40; 16]), super::Uuid::from_bytes([41; 16]), 21,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(22), vec![0x81, 0x00],
+        ).unwrap();
+        let head_before = repository.head().unwrap();
+
+        // Same length, restored mtime: only a content compare can see this edit.
+        overwrite_keeping_mtime(&root.path().join("main.orna"), b"module main;\n// edited!\n");
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+        assert_eq!(repository.head().unwrap(), head_before, "a stale review must not advance the ref");
+        assert_eq!(git(root.path(), &["for-each-ref", "refs/orna/"]), "");
+    }
+
+    #[test]
+    fn reviewed_candidate_detects_same_size_same_mtime_edit_after_ref_advance() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// reviewed\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([42; 16]), super::Uuid::from_bytes([43; 16]), 23,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(24), vec![0x81, 0x00],
+        ).unwrap();
+        let head = review.cwd.head().unwrap().clone();
+        let path = ManagedPath::new("main.orna").unwrap();
+        let candidate = repository.build_private_commit(
+            &head, &[ManagedFileChange::new(path.clone(), Some(staged.to_vec()))], "reviewed",
+        ).unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head, candidate.commit().clone(), review.index_tree.clone(), [44; 16],
+            vec![PublicationJournalEntry::new(path, Some(staged.to_vec()), Some(staged.to_vec()))],
+        ).unwrap();
+        let root_path = root.path().join("main.orna");
+        let result = repository.publish_candidate_impl_with_migration(
+            &review.cwd.index, &candidate, &mut journal, false, Some(&review),
+            |stage| if stage == PublicationJournalStage::RefAdvanced {
+                overwrite_keeping_mtime(&root_path, b"module main;\n// edited!\n");
+            },
+        );
+        // The edit lands after RefAdvanced is durable. Reconciliation must refuse to
+        // materialise over bytes that match neither the batch nor the expected state
+        // (ORNA-PUB-007: recovery is required, the publication is not reported as complete).
+        assert!(
+            matches!(result, Err(RepositoryError::ManagedContentConflict)),
+            "post-advance same-size edit must fail with ManagedContentConflict, got {result:?}"
+        );
+        // ORNA-PUB-005: the ref names the candidate because it advanced before the edit.
+        assert!(repository.head().unwrap().as_ref() == Some(journal.new_head()), "ref must stay advanced");
+        // The journal is durable at IndexReconciled: the edit hook runs at RefAdvanced
+        // (lib.rs:4796), index reconciliation then succeeds and IndexReconciled is
+        // persisted (lib.rs:4807-4809), and the managed-file conflict is raised while
+        // materialising (lib.rs:4811). Recovery resumes from IndexReconciled.
+        assert_eq!(
+            repository.read_publication_journal().unwrap().unwrap().stage(),
+            PublicationJournalStage::IndexReconciled
+        );
+        // The user's edited bytes are retained, not overwritten by the batch.
+        assert_eq!(fs::read(root.path().join("main.orna")).unwrap(), b"module main;\n// edited!\n");
+    }
+
     #[test]
     fn reviewed_candidate_commit_preserves_unstaged_work_and_replays_result() {
         let root = tempfile::TempDir::new().unwrap();
