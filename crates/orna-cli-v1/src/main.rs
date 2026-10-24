@@ -2140,6 +2140,9 @@ fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Opt
 /// text, into the diagnostic detail. The detail is shown with `--debug` only
 /// (ORNA-UX-004 keeps technical causes out of the default rendering).
 fn runtime_failure_detail(error: &orna_runtime_v1::RuntimeError) -> String {
+    if let orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) = error {
+        return format!("runtime failure: {} ({})", refusal.code(), refusal.title());
+    }
     let cause = error
         .public_code()
         .map_or_else(|| error.to_string(), str::to_owned);
@@ -2163,13 +2166,14 @@ fn failure_detail(diagnostic: &orna_foundation_v1::Diagnostic) -> String {
 
 /// Maps a failed durable project invocation to `E2200`. The runtime's public
 /// code, or its non-disclosing display text, is carried in the detail, which
-/// renders only with `--debug` (ORNA-UX-004).
+/// renders only with `--debug` (ORNA-UX-004). A legacy head refusal names its
+/// own remedy, because retrying the transaction cannot clear it.
 fn durable_invocation_failed(error: &orna_runtime_v1::RuntimeError) -> Diagnostic {
-    let mut diagnostic = Diagnostic::target(
-        "E2200",
-        "durable project invocation failed",
-        "retry the project transaction after checking its durable state",
-    );
+    let help = match error {
+        orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) => refusal.remedy(),
+        _ => "retry the project transaction after checking its durable state",
+    };
+    let mut diagnostic = Diagnostic::target("E2200", "durable project invocation failed", help);
     diagnostic.detail = Some(runtime_failure_detail(error));
     diagnostic
 }
@@ -2185,6 +2189,7 @@ fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagno
     delivery.detail = Some(failure_detail(diagnostic));
     delivery
 }
+
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
@@ -4266,7 +4271,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_delivery_failure_lists_evaluator_and_nested_cause_codes() {
+    fn failure_detail_formats_attached_cause_codes() {
         let severity = orna_foundation_v1::DiagnosticSeverity::Error;
         let message = || orna_foundation_v1::SafeText::new("redacted").expect("safe text");
         let cause = orna_foundation_v1::Diagnostic::new(
