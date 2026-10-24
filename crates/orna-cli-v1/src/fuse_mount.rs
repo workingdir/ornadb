@@ -1996,8 +1996,9 @@ struct DraftRefusal {
     unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
-/// Unsynced Document drafts are discarded on release; a Document whose fsync was
-/// rejected stays unresolved until a later sync of the same file is accepted.
+/// Unsynced Document drafts are retained on release with cause `unsynced`; a
+/// Document whose fsync was rejected stays unresolved until a later sync of the
+/// same file is accepted.
 /// Replacement scratch drafts remain unresolved until their rename is accepted
 /// or the scratch is removed.
 #[derive(Default)]
