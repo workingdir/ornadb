@@ -19,6 +19,24 @@ pub fn repository_runtime_identity(
     repository
         .require_writable_head_format()
         .map_err(RuntimeError::LegacyHeadReadOnly)?;
+    migration_metadata_identity(repository)
+}
+
+/// Derives the identity for the migration's own checkpoint carry into a
+/// prepared copy. Only this path admits a prepared copy whose `HEAD` is still
+/// legacy; every other caller uses [`repository_runtime_identity`].
+pub fn migration_copy_runtime_identity(
+    repository: &Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
+    repository
+        .require_migration_carry_head_format()
+        .map_err(RuntimeError::LegacyHeadReadOnly)?;
+    migration_metadata_identity(repository)
+}
+
+fn migration_metadata_identity(
+    repository: &Repository,
+) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
     let metadata = inspect_metadata_for_runtime(repository)
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(metadata) = metadata else {

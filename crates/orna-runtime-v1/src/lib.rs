@@ -66,7 +66,9 @@ mod query;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
 mod repository_identity;
-pub use repository_identity::{repository_runtime_identity, runtime_identity_for_database_id};
+pub use repository_identity::{
+    migration_copy_runtime_identity, repository_runtime_identity, runtime_identity_for_database_id,
+};
 mod stream_carry;
 pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use catalogue::{

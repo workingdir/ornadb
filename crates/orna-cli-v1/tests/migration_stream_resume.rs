@@ -9,7 +9,7 @@ use orna_runtime_v1::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
     StreamMutationBatch, WriterLease, import_stream_carry, read_stream_carry,
-    repository_runtime_identity, runtime_identity_for_database_id,
+    migration_copy_runtime_identity, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -196,7 +196,7 @@ fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
 fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
         let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -298,7 +298,7 @@ fn stream_carry_import_without_recorded_continuity_writes_nothing() {
         let refused = import_stream_carry(&destination_repository, &carry, None).await;
         assert_eq!(refused, Err(RuntimeError::StreamIdentityMismatch));
 
-        let (identity, digest) = repository_runtime_identity(&destination_repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&destination_repository).unwrap();
         let state = RuntimeState::open(&destination_repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -353,7 +353,7 @@ fn migration_carry_without_bridge_origin_refuses_open() {
     );
     runtime().block_on(async {
         let repository = Repository::discover(&destination).unwrap();
-        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
         RuntimeState::open(&repository, identity, digest)
             .await
             .expect("intact destination opens before forging");
