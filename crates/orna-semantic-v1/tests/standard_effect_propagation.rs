@@ -1,4 +1,6 @@
-use orna_semantic_v1::{Catalogue, ModuleInput, StandardDependencyProfile, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, EffectSummary, ModuleInput, StandardDependencyProfile, analyze_with_catalogue,
+};
 
 fn catalogue_with_wrappers() -> Catalogue {
     let sources = vec![
@@ -22,6 +24,10 @@ fn catalogue_with_wrappers() -> Catalogue {
             "std/io/fs/pure.orna".to_owned(),
             "pub fn passthrough(path: Str): Str = path;\n".to_owned(),
         ),
+        (
+            "std/reflection.orna".to_owned(),
+            include_str!("../../../stdlib/std/reflection.orna").to_owned(),
+        ),
     ];
     let profile = StandardDependencyProfile::from_sources("orna.std/v1-wrappers", sources.clone())
         .expect("wrapper dependency profile");
@@ -30,9 +36,9 @@ fn catalogue_with_wrappers() -> Catalogue {
         .expect("verified wrapper catalogue")
 }
 
-/// Returns the consumer function's `may_fail`, its effect names, and the
-/// `code: message` of each analysis diagnostic so a failure shows the cause.
-fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<String>) {
+/// Returns the consumer function's effect summary and the `code: message` of
+/// each analysis diagnostic so a failure shows the cause.
+fn consumer_summary(source: &str, function: &str) -> (EffectSummary, Vec<String>) {
     let result = analyze_with_catalogue(
         &[ModuleInput::new("consumer.orna", source)],
         &catalogue_with_wrappers(),
@@ -51,11 +57,59 @@ fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<Str
         .symbols
         .get(function)
         .expect("consumer function summary");
+    (symbol.effects.clone(), diagnostics)
+}
+
+/// Returns the consumer function's `may_fail`, its effect names, and the
+/// `code: message` of each analysis diagnostic so a failure shows the cause.
+fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<String>) {
+    let (summary, diagnostics) = consumer_summary(source, function);
     (
-        symbol.effects.may_fail,
-        symbol.effects.effects.iter().map(|kind| kind.as_str().to_owned()).collect(),
+        summary.may_fail,
+        summary.effects.iter().map(|kind| kind.as_str().to_owned()).collect(),
         diagnostics,
     )
+}
+
+/// Each typed or erased reflective wrapper in `std.reflection` delegates to a
+/// `sys.invoke`/`sys.start`/`sys.await`/`sys.cancel` operation, which is opaque
+/// (SYS-077, SYS-039). The opaque marker must survive the std wrapper boundary.
+#[test]
+fn std_reflection_wrappers_propagate_opaque_through_std_module() {
+    let cases = [
+        (
+            "invoke_as",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): Int = reflection.invoke_as<Int>(f, a);\n",
+        ),
+        (
+            "invoke_value",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.Value = reflection.invoke_value(f, a);\n",
+        ),
+        (
+            "start_as",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.InvocationHandle<Int> = reflection.start_as<Int>(f, a);\n",
+        ),
+        (
+            "start_value",
+            "pub fn outer(f: sys.FunctionRef, a: sys.ArgumentMap): sys.InvocationHandle<sys.Value> = reflection.start_value(f, a);\n",
+        ),
+        (
+            "await_result",
+            "pub fn outer(i: sys.InvocationHandle<Int>): sys.InvocationResult<Int> = reflection.await_result(i);\n",
+        ),
+        (
+            "cancel",
+            "pub fn outer(i: sys.InvocationHandle<Int>): Bool = reflection.cancel(i);\n",
+        ),
+    ];
+    for (name, body) in cases {
+        let source = format!("use std.reflection as reflection;\n{body}");
+        let (summary, diagnostics) = consumer_summary(&source, "outer");
+        assert!(
+            summary.opaque && summary.may_fail,
+            "{name}: summary {summary:?}; diagnostics: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]
