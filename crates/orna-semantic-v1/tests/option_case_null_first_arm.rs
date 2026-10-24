@@ -1,5 +1,7 @@
 //! Option `case` arms with a `null` arm nested under a `Some` arm
-//! (ORNA-CASE-001 exhaustive closed scrutinee; ORNA-TYPE-001 `T?` is `Option<T>`).
+//! (ORNA-CASE-001 exhaustive closed scrutinee; ORNA-CASE-003 source-order arms;
+//! ORNA-CASE-004 reachable bodies MUST type-unify; ORNA-TYPE-001 `T?` is `Option<T>`,
+//! so `Null` joins with `T?` to `T?`).
 //! `std.option.xor` uses this shape verbatim, so the analyzer must accept it.
 
 use orna_semantic_v1::{Analysis, ModuleInput, analyze};
@@ -22,8 +24,8 @@ fn nested_null_first_case_arm_under_some_is_accepted() {
         r#"
 pub fn xor<T>(left: T?, right: T?): T? = case left {
     Some(_): case right {
-        null: left,
         Some(_): null,
+        null: left,
     },
     null: right,
 };
