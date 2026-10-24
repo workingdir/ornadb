@@ -7996,6 +7996,31 @@ mod persisted_orp_tests {
         (directory, graph)
     }
 
+    /// G2: the frozen-candidate read-tree of `expected_head` must be preceded
+    /// by the bounded expansion pre-pass, so a too-deep head is refused.
+    #[test]
+    fn frozen_candidate_refuses_a_head_tree_nested_beyond_the_walk_limit() {
+        let (directory, graph) = capture_test_context();
+        crate::test_support::configure_fixture_git_identity(directory.path());
+        let deep = crate::test_support::deep_nested_commit(directory.path(), 300);
+        crate::test_support::git_with_input(
+            directory.path(),
+            &["update-ref", "HEAD", &deep],
+            "",
+        );
+        let repository = crate::Repository::discover(directory.path()).expect("open repository");
+        let head = repository.head().expect("read head").expect("born head");
+        assert!(matches!(
+            repository.build_frozen_publication_candidate(
+                &head,
+                &graph,
+                graph.store_root(),
+                "orna: test deep head",
+            ),
+            Err(crate::RepositoryError::SourceTreeLimit)
+        ));
+    }
+
     /// Builds the capture fixture context for a repository path, creating the
     /// repository if it does not exist yet. Every fixture object is
     /// content-addressed and the owner identity is fixed, so the same path
