@@ -4103,7 +4103,9 @@ mod tests {
 
     /// G-4: the served runtime is opened under this process's owner, the same
     /// owner `orna run`, the REPL and mounts use in this process. It holds the
-    /// writer lease for that owner at epoch 1, and re-acquisition is idempotent.
+    /// worktree's runtime owner lock and the writer lease for that owner at
+    /// epoch 1. Re-acquisition is idempotent, and a different owner is refused
+    /// even through the served runtime that holds the lock.
     #[test]
     fn served_runtime_holds_the_process_owner_lease() {
         let directory = tempfile::tempdir().expect("temporary project");
@@ -4128,11 +4130,22 @@ mod tests {
             .expect("the repository owner acquires the served lease");
         assert_eq!(lease.owner_id, owner);
         assert_eq!(lease.epoch, 1);
+        assert!(clone.runtime.holds_runtime_owner_lock());
         assert_eq!(
             executor
                 .block_on(clone.runtime.acquire_lease(owner))
                 .expect("the holder re-acquires its own lease"),
             lease
+        );
+        assert!(matches!(
+            executor.block_on(clone.runtime.acquire_lease([7; 16])),
+            Err(orna_runtime_v1::RuntimeError::LeaseHeld)
+        ));
+        assert_eq!(
+            executor
+                .block_on(clone.runtime.current_lease())
+                .expect("read the served lease"),
+            Some(lease)
         );
     }
 

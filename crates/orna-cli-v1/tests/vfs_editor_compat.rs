@@ -22,9 +22,9 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EditorMount, mountinfo_contains, repository_with_music_row, require_fuse_or_skip,
-    run_orna_unmount, spawn_editor_mount, spawn_mount_process, start_editor_mount,
-    start_editor_mount_with_source, write_and_sync,
+    EditorMount, FOREIGN_OWNER, mountinfo_contains, repository_with_music_row,
+    require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, spawn_mount_process,
+    start_editor_mount, start_editor_mount_with_source, write_and_sync,
 };
 
 #[tokio::test]
@@ -132,7 +132,9 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     );
 }
 
-/// ORNA-VFS-006: a writer without the selected worktree lease cannot submit an edit.
+/// ORNA-VFS-006, ORNA-TURSO-005: while another live writer owns the worktree,
+/// holding its runtime owner lock and writer lease, the mount is only a
+/// secondary participant and cannot submit an edit.
 #[tokio::test]
 async fn editor_saves_reject_a_foreign_writer_lease() {
     if !require_fuse_or_skip() {
@@ -167,6 +169,15 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
         state.acquire_lease(runtime_identity.repository_id).await,
         Err(orna_runtime_v1::RuntimeError::LeaseHeld),
     ));
+    assert_eq!(
+        state
+            .current_lease()
+            .await
+            .unwrap()
+            .map(|lease| lease.owner_id),
+        Some(FOREIGN_OWNER),
+        "the refused save must leave the live foreign writer's lease in place",
+    );
 }
 
 fn save_with_vim_in_place(path: &Path) {
@@ -399,7 +410,7 @@ async fn stale_persisted_temporary_scratch_is_skipped_at_mount_start() {
     // The target repository has no `london` row, so the copied record cannot resolve.
     let initial = "{ title: \"Other\", artist: \"Kieran\", }\n";
     let (target_directory, target_repository, _) =
-        repository_with_music_row("paris", 0x93, initial, false).await;
+        repository_with_music_row("paris", 0x93, initial).await;
     let target_store = target_repository
         .runtime_paths()
         .root()
