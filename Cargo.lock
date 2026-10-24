@@ -1468,7 +1468,6 @@ dependencies = [
 name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
- "base64",
  "bytes",
  "fuser",
  "getrandom 0.3.4",
@@ -1497,7 +1496,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tungstenite",
 ]
 
 [[package]]
@@ -1570,7 +1568,6 @@ dependencies = [
 name = "orna-evaluator-v1"
 version = "1.0.0"
 dependencies = [
- "base64",
  "getrandom 0.3.4",
  "icu_properties",
  "libm",
@@ -1652,7 +1649,6 @@ dependencies = [
  "orna-semantic-v1",
  "orna-standard-sources",
  "orna-syntax-v1",
- "serde",
  "serde_json",
  "tempfile",
  "url",
@@ -1791,7 +1787,6 @@ dependencies = [
 name = "orna-standard"
 version = "1.0.0"
 dependencies = [
- "orna-artifact",
  "orna-core",
  "orna-semantic-v1",
  "orna-standard-sources",
@@ -1832,7 +1827,6 @@ name = "orna-syntax-v1"
 version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
- "proptest",
  "serde_json",
  "syntect",
  "unicode-ident",
