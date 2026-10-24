@@ -22,8 +22,8 @@ use orna_project_v1::{
 };
 use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
-    HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding, Repository,
-    RowMapSnapshot, RuntimeGeneration, TypedKey,
+    GraphError, HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding,
+    Repository, RepositoryReadScope, RowMapSnapshot, RuntimeGeneration, TypedKey,
     MountRowBaselines,
 };
 use orna_runtime_v1::{
@@ -38,7 +38,9 @@ use orna_runtime_v1::{
 };
 use orna_storage_v1::COMPACT_FILE_BOUND_BYTES;
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
-use orna_value_v1::{Format3Context, Raw, SchemaDescriptor, decode_canonical_storage_value};
+use orna_value_v1::{
+    Format3Context, Raw, SchemaDescriptor, blob_metadata_from_raw, decode_canonical_storage_value,
+};
 use sha2::{Digest, Sha256};
 
 /// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
@@ -82,25 +84,22 @@ struct VfsScratchStore {
 impl VfsScratchStore {
     fn open(runtime_root: &Path) -> Result<Self, String> {
         let directory = runtime_root.join(VFS_SCRATCH_DIRECTORY);
-        let created = match fs::create_dir(&directory) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-            Err(error) => {
-                return Err(format!(
-                    "temporary scratch directory could not be created: {error}"
-                ));
+        let created = {
+            use std::os::unix::fs::DirBuilderExt as _;
+            match fs::DirBuilder::new().mode(0o700).create(&directory) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => {
+                    return Err(format!(
+                        "temporary scratch directory could not be created: {error}"
+                    ));
+                }
             }
         };
         if created {
             Self::sync_directory(runtime_root)?;
-        } else {
-            let metadata = fs::symlink_metadata(&directory).map_err(|error| {
-                format!("temporary scratch directory could not be inspected: {error}")
-            })?;
-            if !metadata.file_type().is_dir() {
-                return Err("temporary scratch directory is not a real directory".into());
-            }
         }
+        ensure_private_directory(&directory, "temporary scratch directory")?;
         Self::sync_directory(&directory)?;
         Ok(Self { directory })
     }
@@ -393,6 +392,90 @@ const VFS_RETAINED_DRAFT_HEADER: &str = "orna-vfs-retained-draft 1";
 /// Recovery storage refuses new records past this count. Every record holds
 /// one draft within the draft file bound, so the store stays bounded.
 const VFS_RETAINED_DRAFT_LIMIT: usize = 256;
+/// Editor drafts hold full candidate bytes, so they live in this private
+/// subdirectory of the recovery store rather than the shared temp directory.
+const VFS_EDITOR_DRAFT_DIRECTORY: &str = "editor-drafts";
+
+/// Creates the explicit editor draft for `edit` (ORNA-VFS-024 recovery). The
+/// file is created exclusively (O_EXCL) at mode 0600 under an unpredictable
+/// name, inside a 0700 directory of the runtime recovery store. It is kept on
+/// disk so a failed edit can be retained and reported by path.
+fn create_editor_draft(runtime_root: &Path) -> Result<(File, PathBuf), String> {
+    fs::create_dir_all(runtime_root)
+        .map_err(|error| format!("runtime recovery root could not be created: {error}"))?;
+    let retained = runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY);
+    ensure_private_directory(&retained, "retained draft directory")?;
+    let directory = retained.join(VFS_EDITOR_DRAFT_DIRECTORY);
+    ensure_private_directory(&directory, "editor draft directory")?;
+    let leftovers = count_editor_drafts(&directory)?;
+    if leftovers >= VFS_RETAINED_DRAFT_LIMIT {
+        return Err(format!(
+            "editor draft store is full ({leftovers} leftover drafts, limit {VFS_RETAINED_DRAFT_LIMIT}); remove stale orna-edit-*.draft files"
+        ));
+    }
+    let staged = tempfile::Builder::new()
+        .prefix("orna-edit-")
+        .suffix(".draft")
+        .rand_bytes(16)
+        .tempfile_in(&directory)
+        .map_err(|error| error.to_string())?;
+    staged.keep().map_err(|error| error.error.to_string())
+}
+
+/// Creates `directory` (mode 0700) when absent, then requires an existing
+/// entry to be a real directory (symlinks refused), owned by the effective
+/// uid. A group/other-accessible directory owned by us is tightened to 0700.
+fn ensure_private_directory(directory: &Path, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    match fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("{label} could not be created: {error}")),
+    }
+    let metadata = fs::symlink_metadata(directory)
+        .map_err(|error| format!("{label} could not be inspected: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(format!("{label} is not a real directory"));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err(format!("{label} is not owned by the current user"));
+    }
+    if metadata.mode() & 0o077 != 0 {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("{label} could not be restricted to 0700: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Counts leftover `orna-edit-*.draft` files so the recovery store stays
+/// bounded: creation refuses once the count reaches the retained-draft limit.
+fn count_editor_drafts(directory: &Path) -> Result<usize, String> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("editor draft directory could not be read: {error}"))?;
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("editor draft entry could not be read: {error}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("orna-edit-") && name.ends_with(".draft") {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Denies ownership, mode and flag changes. A mount carries no POSIX
+/// permission model (access is owner-only by mount policy), so chmod/chown and
+/// chflags are refused with EPERM. Read-only views never reach this check: the
+/// kernel refuses their attribute writes with EROFS first.
+fn denied_attribute_change(
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    flags: Option<fuser::BsdFileFlags>,
+) -> Option<Errno> {
+    (mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some()).then_some(Errno::EPERM)
+}
 
 /// One candidate kept in recovery storage.
 struct RetainedDraft {
@@ -1513,15 +1596,7 @@ pub(super) fn edit_path(
     } else {
         None
     };
-    let draft_path = std::env::temp_dir().join(format!(
-        "orna-edit-{}-{}.draft",
-        std::process::id(),
-        super::cli_request_nonce()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&draft_path)
+    let (mut file, draft_path) = create_editor_draft(repository.runtime_paths().root())
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
     file.write_all(&initial_bytes)
@@ -1852,6 +1927,17 @@ impl WorkspaceFilesystem {
             writer.capture_mount_activation(&activation_tables)?;
         }
 
+        // A mount runs under the lease owner its writer holds, so accepted pins
+        // the runtime captured resolve through this graph. A read-only mount takes
+        // the owner the runtime would take; a repository without a runtime
+        // identity keeps the repository-derived owner.
+        let graph_owner_id = match &writer {
+            Some(writer) => Some(writer.owner_id),
+            None => super::runtime_identity(repository)
+                .ok()
+                .map(|(identity, _)| super::invocation_owner_id(identity)),
+        };
+
         for (relation_id, qualified_name) in tables {
             let schema = loader
                 .resolve_committed_source_table_schema(
@@ -1868,10 +1954,13 @@ impl WorkspaceFilesystem {
             let rows = context
                 .load_row_map(relation_id)
                 .map_err(|error| format!("committed row map could not be opened: {error}"))?;
-            let graph =
-                Arc::new(context.open_native_graph(&rows).map_err(|error| {
-                    format!("committed native graph could not be opened: {error}")
-                })?);
+            let graph = Arc::new(
+                match graph_owner_id {
+                    Some(owner_id) => context.open_native_graph_for_owner(&rows, owner_id),
+                    None => context.open_native_graph(&rows),
+                }
+                .map_err(|error| format!("committed native graph could not be opened: {error}"))?,
+            );
             let value_context = context.open_value_context(relation_id).map_err(|error| {
                 format!("committed row value context could not be opened: {error:?}")
             })?;
@@ -3341,8 +3430,8 @@ impl Filesystem for WorkspaceFilesystem {
         flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if mode.is_some() || uid.is_some() || gid.is_some() || flags.is_some() {
-            reply.error(Errno::EIO);
+        if let Some(errno) = denied_attribute_change(mode, uid, gid, flags) {
+            reply.error(errno);
             return;
         }
         if let Some(size) = size {
@@ -3526,6 +3615,9 @@ impl FsBuilder {
         }
     }
 
+    /// Attributes report uid/gid 0 and advisory permission bits. chmod and
+    /// chown are refused with EPERM by `denied_attribute_change`, so the bits
+    /// here never grant or revoke access.
     fn attr(&self, inode: u64) -> Option<FileAttr> {
         let node = self.nodes.get(&inode)?;
         let (kind, size, permissions, links) = match &node.kind {
@@ -4167,8 +4259,20 @@ impl FsBuilder {
                 .pinned_field_layout
                 .field_type(field.field_id())
                 .ok_or_else(|| "committed field has no schema type".to_owned())?;
-            if let Some(metadata) = field.blob_metadata() {
-                let value_oid = metadata
+            // A selected Blob takes this branch even when the pinned field is a null
+            // optional, so a CWD replacement renders. A committed Blob keeps the branch for
+            // every non-null selection, so a selection that is not a Blob is still refused.
+            if selects_blob(&value)
+                || (field.blob_metadata().is_some() && !stored_value_is_null(&value))
+            {
+                // The selected value is the Blob the mount shows: the CWD value when
+                // the runtime holds the row, otherwise the pinned value. A null
+                // selection shows no Blob and takes the null branch below.
+                let payload = selected_blob_payload(&value);
+                let selected = blob_metadata_from_raw(payload).map_err(|error| {
+                    format!("committed Blob field {field_name} holds no Blob value: {error:?}")
+                })?;
+                let value_oid = selected
                     .descriptor_oid()
                     .ok_or_else(|| "committed Blob field has no descriptor identity".to_owned())?;
                 let algorithm = match value_oid.len() {
@@ -4178,18 +4282,57 @@ impl FsBuilder {
                 };
                 let descriptor = NativeOid::new(algorithm, value_oid.as_bytes())
                     .map_err(|error| format!("committed Blob descriptor is invalid: {error:?}"))?;
-                let stored = source
+                let read = source
                     .graph
-                    .read_stored_blob_value(&row, &descriptor, &row_scope)
-                    .map_err(|error| {
-                        format!("committed Blob reference could not be admitted: {error:?}")
-                    })?;
-                let annotation = stored.annotation();
-                let suffix = annotation.suffix().or(metadata.suffix()).map(str::to_owned);
-                let media_type = annotation.media_type().to_owned();
+                    .read_stored_blob_value(&row, &descriptor, &row_scope);
+                let (media_type, suffix, reference) = match read {
+                    Ok(stored) => {
+                        // The pinned row names this descriptor, so its reference is the
+                        // committed Blob. The media type and suffix are the selected value's:
+                        // the descriptor carries no annotation, so a CWD row may annotate the
+                        // same content differently from the pinned row. The descriptor fixes
+                        // the content identity, so the selected length and digest must agree.
+                        let identity = ContentIdentity::new(selected.length(), selected.sha256())
+                            .map_err(|error| {
+                                format!("committed Blob identity is invalid: {error:?}")
+                            })?;
+                        if stored.reference().content_identity() != identity {
+                            return Err(format!(
+                                "committed Blob field {field_name} does not match its selected identity"
+                            ));
+                        }
+                        (
+                            selected.media_type().to_owned(),
+                            selected.suffix().map(str::to_owned),
+                            stored.reference().clone(),
+                        )
+                    }
+                    // A CWD replacement stores a descriptor the pinned row does not
+                    // name. Only an accepted pin the runtime holds may supply it.
+                    Err(GraphError::DescriptorNotInRow) => {
+                        let reference = admit_accepted_replacement(
+                            self.writer.as_deref(),
+                            &source.graph,
+                            &descriptor,
+                            selected.length(),
+                            selected.sha256(),
+                            &row_scope,
+                        )?;
+                        (
+                            selected.media_type().to_owned(),
+                            selected.suffix().map(str::to_owned),
+                            reference,
+                        )
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "committed Blob reference could not be admitted: {error:?}"
+                        ));
+                    }
+                };
                 let file_name = orna_runtime_v1::vfs::project_content_name(
                     field_name,
-                    annotation.media_type(),
+                    media_type.as_str(),
                     suffix.as_deref(),
                 )
                 .map_err(|error| {
@@ -4200,16 +4343,16 @@ impl FsBuilder {
                 let projected = if is_optional_field(field_type) {
                     VfsStoredField::content_optional(
                         field_name.clone(),
-                        annotation.media_type(),
+                        media_type.as_str(),
                         suffix.clone(),
-                        metadata.length(),
+                        selected.length(),
                     )
                 } else {
                     VfsStoredField::content(
                         field_name.clone(),
-                        annotation.media_type(),
+                        media_type.as_str(),
                         suffix.clone(),
-                        metadata.length(),
+                        selected.length(),
                     )
                 };
                 projected_fields.push(projected);
@@ -4218,10 +4361,10 @@ impl FsBuilder {
                     file_name: file_name.clone(),
                     media_type,
                     suffix,
-                    reference: stored.reference().clone(),
+                    reference: reference.clone(),
                     replacement_bytes: None,
                 });
-                blob_files.push((file_name, stored.reference().clone()));
+                blob_files.push((file_name, reference));
             } else if stored_value_is_null(&value) {
                 projected_fields.push(VfsStoredField::null(field_name.clone()));
             } else {
@@ -4733,6 +4876,58 @@ fn is_optional_field(field_type: &Raw) -> bool {
 fn stored_value_is_null(value: &Raw) -> bool {
     matches!(value, Raw::Null)
         || matches!(value, Raw::Tag(60013, option) if matches!(option.as_ref(), Raw::Array(parts) if matches!(parts.as_slice(), [Raw::Int(index)] if index.to_string() == "0")))
+}
+
+/// The Blob payload a row field value selects: a present optional's payload, or the bare Blob.
+fn selected_blob_payload(value: &Raw) -> &Raw {
+    match value {
+        Raw::Tag(60013, option) => match option.as_ref() {
+            Raw::Array(parts) => match parts.as_slice() {
+                [Raw::Int(index), payload] if index.to_string() == "1" => payload,
+                _ => value,
+            },
+            _ => value,
+        },
+        _ => value,
+    }
+}
+
+/// Whether a selected row value shows a Blob: a bare Blob or a present optional's Blob.
+fn selects_blob(value: &Raw) -> bool {
+    matches!(selected_blob_payload(value), Raw::Tag(orna_value_v1::ROV3_BLOB_TAG, _))
+}
+
+/// Admits the accepted pin that holds the selected replacement content for a descriptor the
+/// pinned row does not name. Every pin matching the selected length and SHA-256 is tried in
+/// turn; when none is admitted the Blob is refused rather than served from the committed row.
+fn admit_accepted_replacement(
+    writer: Option<&MountWriter>,
+    graph: &NativeGraphContext,
+    descriptor: &NativeOid,
+    length: u64,
+    sha256: [u8; 32],
+    scope: &RepositoryReadScope,
+) -> Result<AdmittedBlobReference, String> {
+    let writer = writer.ok_or_else(|| {
+        "committed Blob content is absent from the row and no CWD runtime holds it".to_owned()
+    })?;
+    let pins = writer
+        .runtime
+        .block_on(writer.state.accepted_content_pins_for_descriptor(descriptor))
+        .map_err(|error| format!("accepted content pins could not be listed: {error:?}"))?;
+    let identity = ContentIdentity::new(length, sha256)
+        .map_err(|error| format!("committed Blob identity is invalid: {error:?}"))?;
+    let mut refusal = "no accepted pin holds the selected Blob content".to_owned();
+    for pin in pins
+        .iter()
+        .filter(|pin| pin.content_length() == length && *pin.content_sha256() == sha256)
+    {
+        match graph.admit_accepted_blob_pin(pin.pin_id(), descriptor, identity, scope) {
+            Ok(reference) => return Ok(reference),
+            Err(error) => refusal = format!("accepted Blob pin could not be admitted: {error:?}"),
+        }
+    }
+    Err(refusal)
 }
 
 fn render_stored_source_value(value: &Raw) -> Result<String, String> {
@@ -5551,5 +5746,99 @@ mod tests {
                 .unwrap(),
             Some(indexed_inode),
         );
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::{
+        Errno, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY, create_editor_draft,
+        denied_attribute_change,
+    };
+
+    #[test]
+    fn editor_draft_is_private_exclusive_and_unpredictable() {
+        let runtime = tempfile::tempdir().unwrap();
+        let (first, first_path) = create_editor_draft(runtime.path()).unwrap();
+        let (_second, second_path) = create_editor_draft(runtime.path()).unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        assert_eq!(first_path.parent(), Some(directory.as_path()));
+        assert_eq!(second_path.parent(), Some(directory.as_path()));
+        assert_ne!(first_path, second_path);
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn ownership_mode_and_flag_changes_are_denied_with_eperm() {
+        assert_eq!(denied_attribute_change(None, None, None, None), None);
+        assert_eq!(
+            denied_attribute_change(Some(0o600), None, None, None),
+            Some(Errno::EPERM)
+        );
+        assert_eq!(
+            denied_attribute_change(None, Some(0), None, None),
+            Some(Errno::EPERM)
+        );
+        assert_eq!(
+            denied_attribute_change(None, None, Some(0), None),
+            Some(Errno::EPERM)
+        );
+    }
+
+    #[test]
+    fn editor_draft_directory_pre_created_symlink_is_refused() {
+        let runtime = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let retained = runtime.path().join(VFS_RETAINED_DRAFT_DIRECTORY);
+        std::fs::create_dir(&retained).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), retained.join(VFS_EDITOR_DRAFT_DIRECTORY))
+            .unwrap();
+        let error = create_editor_draft(runtime.path()).unwrap_err();
+        assert!(error.contains("not a real directory"), "{error}");
+        assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn editor_draft_directory_pre_created_world_writable_is_tightened() {
+        let runtime = tempfile::tempdir().unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (_draft, _path) = create_editor_draft(runtime.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn editor_draft_creation_refuses_when_leftover_store_is_full() {
+        let runtime = tempfile::tempdir().unwrap();
+        let directory = runtime
+            .path()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..super::VFS_RETAINED_DRAFT_LIMIT {
+            std::fs::write(directory.join(format!("orna-edit-{index}.draft")), b"").unwrap();
+        }
+        let error = create_editor_draft(runtime.path()).unwrap_err();
+        assert!(error.contains("editor draft store is full"), "{error}");
     }
 }

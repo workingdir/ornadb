@@ -6,9 +6,8 @@
 //! committed identity inventory is reconciled into the store. An unborn
 //! branch's first commit creates the branch ref.
 
-use orna_repository_v1::relation_admission::{
-    OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError, StagedRelation,
-};
+use orna_repository_v1::FormatContextError;
+use orna_repository_v1::relation_admission::{OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError};
 
 use super::*;
 
@@ -49,6 +48,23 @@ fn staging_error(title: &'static str, detail: String) -> Diagnostic {
     )
 }
 
+/// The candidate tracks a path its recorded repository format does not
+/// admit: an `.orna/` entry other than `database.orna` and `store`, or a
+/// loose row file a format-3 candidate writes (ORNA-META-001, ORNA-REPO-004).
+/// Capture, the source loader and the commit gate all refuse it with format
+/// admission's own code (ORNA-REPO-CONTEXT-004) and the path in the title,
+/// since attached details are shown only with `--debug`.
+fn mixed_formats(error: &FormatContextError) -> Diagnostic {
+    Diagnostic {
+        code: error.code(),
+        title: Cow::Owned(error.to_string()),
+        help: "a format-3 snapshot tracks only `.orna/database.orna` and `.orna/store`, and rows change through `orna publish`; unstage that path with `git restore --staged PATH`, then retry; no commit was created",
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    }
+}
+
 /// A retained publication or checkout recovery record owns the index, so
 /// staging refuses without touching it; the diagnostic names that condition
 /// and its remedy before any generic staging failure.
@@ -78,6 +94,9 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
             )
         }
         RelationAdmissionError::EmptyIndex => nothing_to_commit(),
+        RelationAdmissionError::Format(error @ FormatContextError::MixedFormats { .. }) => {
+            mixed_formats(&error)
+        }
         other => staging_error(title, other.to_string()),
     }
 }
@@ -101,8 +120,11 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
         .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
     let project = orna_project_v1::ProjectLoader::default()
         .load_private_candidate(repository, staged.candidate())
-        .map_err(|error| {
-            staging_error("staged source could not be loaded", format!("{error:?}"))
+        .map_err(|error| match error {
+            orna_project_v1::ProjectLoadError::FormatContext(
+                error @ FormatContextError::MixedFormats { .. },
+            ) => mixed_formats(&error),
+            error => staging_error("staged source could not be loaded", format!("{error:?}")),
         })?;
     let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
@@ -129,36 +151,24 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
                 )
             })?;
     let database_id = *staged.database_id().as_bytes();
-    let mut relations = Vec::new();
-    let mut names = BTreeMap::new();
-    for (namespace, module) in &analysis.modules {
-        let module_name = namespace.display();
-        for (name, symbol) in &module.symbols {
-            let admitted = symbol.kind == orna_semantic_v1::SymbolKind::Table
-                && symbol
-                    .table_schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.admission.is_some());
-            if !admitted {
-                continue;
-            }
-            let table = project
-                .source_table_schema_in_database(&identities, database_id, &module_name, name)
-                .map_err(|error| {
-                    staging_error(
-                        "staged table schema could not be built",
-                        format!("{name}: {error:?}"),
-                    )
-                })?;
-            names.insert(*table.table_object_id(), name.clone());
-            relations.push(StagedRelation::new(
-                *table.table_object_id(),
-                table.descriptor().clone(),
-            ));
-        }
-    }
+    let staged_relations = orna_application_v1::build_format3_store_relations(
+        &project,
+        &analysis,
+        &identities,
+        database_id,
+    )
+    .map_err(|error| {
+        staging_error(
+            "staged table schema could not be built",
+            format!("{}: {:?}", error.table(), error.error()),
+        )
+    })?;
     let admission = repository
-        .stage_store_admission(&staged, &relations, &identities.to_stored())
+        .stage_store_admission(
+            &staged,
+            staged_relations.relations(),
+            &identities.to_stored(),
+        )
         .map_err(|error| {
             relation_failure(error, "staged store could not admit the staged tables")
         })?;
@@ -167,7 +177,7 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
         .iter()
         .filter(|relation| **relation != OBJECT_IDENTITY_RELATION_ID)
         .map(|relation| {
-            let name = names.get(relation).map_or("", String::as_str);
+            let name = staged_relations.table_name(relation).unwrap_or("");
             format!(
                 "admitted table {name} as relation {}",
                 orna_repository_v1::Uuid::from_bytes(*relation).simple()
@@ -194,6 +204,9 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             "Git author identity is not configured",
             "set `user.name` and `user.email` with `git config`, then retry; no commit was created",
         ),
+        RepositoryError::FormatContext(mixed @ FormatContextError::MixedFormats { .. }) => {
+            return mixed_formats(mixed);
+        }
         // sys.admin.assertion_failed
         RepositoryError::InvalidCommitCandidate => (
             "E2302",

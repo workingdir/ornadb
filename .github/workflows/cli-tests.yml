@@ -15,10 +15,16 @@ env:
   RUST_TEST_THREADS: 2
 
 # Keep each ref's native CLI gate independent. A worker branch must not replace
-# main's pending test run.
+# main's pending test run. A newer push to the same pull request cancels that
+# pull request's older run (otherwise every push queues behind the previous run and
+# the wait multiplies). A push to main is keyed on its commit and is never
+# cancelled: with one group per ref GitHub replaces a pending run when a newer one
+# queues, so merges landing close together lost their CLI run (nine main runs ended
+# "cancelled" with no jobs between a6d716278 and 8f49ea74e), and a red head could
+# not be traced to the merge that caused it.
 concurrency:
-  group: cli-tests-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: cli-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cli-tests:
@@ -37,13 +43,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y emacs-nox
 
+      # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
+      # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
       - name: Test the orna-cli-v1 integration suite
         env:
           ORNA_REQUIRE_FUSE: "1"
-        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata
 
       - name: Test the publication crash-barrier matrix
         run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
+
+      # Owner-lease and crash-recovery tests. Fencing is NOT yet enforced in production
+      # (W76 F1; beads .127/.220): owner_fence_gate_d fences by test-body takeover and asserts
+      # same-owner reacquire at epoch 1, which a production fix will change. durable_crash_recovery
+      # re-executes the test binary through /bin/sh and ulimit, so it is Linux-only (ubuntu-latest).
+      - name: Test owner-lease and durable crash recovery (production fence not yet enforced)
+        run: cargo test --locked -p orna-runtime-v1 --test owner_fence_gate_d --test durable_crash_recovery -- --nocapture
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     steps:
