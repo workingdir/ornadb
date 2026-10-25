@@ -2980,6 +2980,13 @@ fn repl_request_fingerprint(
     hasher.finalize().into()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Running request rows counted when the first sys binding dispatches.
+    static FIRST_SYS_DISPATCH_RUNNING: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
@@ -3077,13 +3084,27 @@ fn run_repl_input(
         session_id: transactions.session_id,
         request_id: query_id,
     };
-    let scope = ReplTransactionScope {
-        project: &transactions.project,
-        repository,
-        format_context: &transactions.format_context,
-        runtime_context: snapshot.context(),
-        request,
+    #[cfg(test)]
+    let observe_first_dispatch = || {
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| {
+            if first.get().is_none() {
+                let running = transactions
+                    .runtime
+                    .block_on(state.running_requests())
+                    .expect("running requests at first sys dispatch");
+                first.set(Some(running.len()));
+            }
+        });
     };
+    let scope = ReplTransactionScope::new(
+        &transactions.project,
+        repository,
+        &transactions.format_context,
+        snapshot.context(),
+        request,
+    );
+    #[cfg(test)]
+    let scope = scope.with_dispatch_observer(&observe_first_dispatch);
     let writer = transactions.lease.expect("runtime writer lease initialized");
     transactions
         .runtime
@@ -5578,6 +5599,37 @@ mod repl_request_effect_tests {
             .block_on(state.running_requests())
             .expect("running requests");
         assert!(running.is_empty(), "a committed REPL insert leaves no running request");
+    }
+
+    #[test]
+    fn sys_dispatch_observes_request_row_already_running() {
+        let (directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| first.set(None));
+        std::fs::write(directory.path().join("probe.bin"), b"probe").expect("probe file");
+        let input = format!(
+            "sys.blob.capture_file({:?}, \"probe.bin\", 65536)",
+            directory.path().to_string_lossy().as_ref()
+        );
+        run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            &input,
+        )
+        .expect("the blob capture succeeds");
+        let running_at_first_dispatch = FIRST_SYS_DISPATCH_RUNNING.with(std::cell::Cell::get);
+        assert_eq!(
+            running_at_first_dispatch,
+            Some(1),
+            "the request row is reserved before the first sys binding runs"
+        );
     }
 
     /// Runs an insert whose commit fails at `point` and asserts the uncertain
