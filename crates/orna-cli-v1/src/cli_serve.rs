@@ -957,19 +957,24 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
         };
         return write_response(reader.get_mut(), response, transfer);
     };
+    // Refuse from the head alone, before the body is read or allocated, so a
+    // foreign or cross-origin request cannot make this host wait for or
+    // buffer up to the route's body limit. This runs before the size check so
+    // an oversize foreign request is refused as foreign, not sized.
+    if let Some(refusal) = state.loopback.refusal(&request) {
+        return write_response(reader.get_mut(), refusal, transfer);
+    }
     if body_length > request_body_limit(&request.path) {
         let response = if request.path.starts_with("/orna/") {
             live_error_response(413, "wire.limit", "request body exceeds its limit")
         } else {
-            bad_request_response()
+            Response::new(
+                413,
+                "application/json",
+                br#"{"error":"payload_too_large"}"#.to_vec(),
+            )
         };
         return write_response(reader.get_mut(), response, transfer);
-    }
-    // Refuse from the head alone, before the body is read or allocated, so a
-    // foreign or cross-origin request cannot make this host wait for or
-    // buffer up to the route's body limit.
-    if let Some(refusal) = state.loopback.refusal(&request) {
-        return write_response(reader.get_mut(), refusal, transfer);
     }
     let Ok(body) = read_request_body(&mut reader, body_length, transfer.deadline(body_length))
     else {
@@ -2279,6 +2284,23 @@ fn write_before(stream: &mut TcpStream, parts: &[&[u8]], deadline: Instant) -> i
     Ok(())
 }
 
+/// Headers on every HTML document `orna serve` produces (ORNA-APP-012,
+/// ORNA-APP-013). The pages carry only inline styles and no script, so the
+/// policy admits no script, object, frame, form or base target at all.
+/// `frame-ancestors 'none'` and `X-Frame-Options: DENY` refuse framing by any
+/// origin, including this one. `nosniff` stops MIME sniffing an HTML body as
+/// another type. The referrer is withheld so an address path is not leaked to
+/// a link target.
+const HTML_SECURITY_HEADERS: [(&str, &str); 4] = [
+    (
+        "Content-Security-Policy",
+        "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    ),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+];
+
 /// The status line and headers of `response`, through the blank line that
 /// ends them.
 fn response_head(response: &Response) -> Vec<u8> {
@@ -2301,6 +2323,11 @@ fn response_head(response: &Response) -> Vec<u8> {
     let mut head = format!("HTTP/1.1 {} {reason}\r\n", response.status);
     if !response.content_type.is_empty() {
         let _ = write!(head, "Content-Type: {}\r\n", response.content_type);
+    }
+    if response.content_type.starts_with("text/html") {
+        for (name, value) in HTML_SECURITY_HEADERS {
+            let _ = write!(head, "{name}: {value}\r\n");
+        }
     }
     for (name, value) in &response.headers {
         let _ = write!(head, "{name}: {value}\r\n");
@@ -2486,6 +2513,89 @@ mod tests {
         assert_eq!(
             live_error_response(400, "wire.invalid_message", "malformed request").body,
             br#"{"code":"wire.invalid_message","message":"malformed request"}"#.to_vec()
+        );
+    }
+
+    #[test]
+    fn html_pages_carry_csp_nosniff_framing_and_referrer_headers() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=pages"],
+        );
+        std::fs::write(directory.path().join("main.orna"), SERVE_FIXTURE)
+            .expect("vendored project source");
+        git_succeeds(directory.path(), &["add", "main.orna"]);
+        git_succeeds(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=kierandrewett",
+                "-c",
+                "user.email=kieran@drewett.dev",
+                "commit",
+                "--quiet",
+                "-m",
+                "pages",
+            ],
+        );
+        let repository = Repository::discover(directory.path()).expect("database repository");
+        let commit = repository.head().expect("read HEAD").expect("commit");
+        let commit_id = commit.as_str();
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let host = address.to_string();
+
+        for path in [
+            format!("/tree/{commit_id}/"),
+            format!("/blob/{commit_id}/main.orna"),
+        ] {
+            let page = exchange(
+                address,
+                &format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+            );
+            assert_eq!(page.status, 200, "{path}");
+            assert!(page.head.contains("Content-Type: text/html"), "{path}");
+            for header in [
+                "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                "X-Content-Type-Options: nosniff",
+                "X-Frame-Options: DENY",
+                "Referrer-Policy: no-referrer",
+            ] {
+                assert!(page.head.contains(header), "{path} lacks {header}: {}", page.head);
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_non_orna_body_is_413_and_foreign_origin_is_refused_before_sizing() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=sizes"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let host = address.to_string();
+        let declared = MAX_REQUEST_BODY_BYTES + 1;
+
+        let own = exchange(
+            address,
+            &format!(
+                "POST /tree/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nContent-Length: {declared}\r\n\r\n"
+            ),
+        );
+        assert_eq!(own.status, 413, "{}", own.head);
+        assert_eq!(own.body, r#"{"error":"payload_too_large"}"#);
+
+        let foreign = exchange(
+            address,
+            &format!(
+                "POST /tree/x/ HTTP/1.1\r\nHost: {host}\r\nOrigin: http://evil.example\r\nContent-Length: {declared}\r\n\r\n"
+            ),
+        );
+        assert_eq!(
+            foreign.status, 403,
+            "a foreign origin is refused before its body size is judged: {}",
+            foreign.head
         );
     }
 
