@@ -14,6 +14,7 @@ been published.
   Glob imports (`use std.<module>.*`) bind the module's public exports; `use std.<module>
   as _` binds only the names the module records in its prelude; a named alias binds no
   names. A standard body calls its own module helpers, never a user function of the same name.
+- Publication recovery re-verifies `.orna/store` payloads at the `IndexReconciled` stage before worktree materialisation, so a managed store edit made inside the `index` kill window is retained (E2300) and HEAD is not rewound. `publication_crash_matrix` gains a later-tail leg at every kill boundary (`prepared` included) and a managed-store kill-window leg (ornadb-5il1.406, ornadb-5il1.407).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
