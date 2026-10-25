@@ -736,6 +736,28 @@ impl LiveApplication for TransactionalApplication {
         Err(Error::UnsupportedOperation)
     }
 }
+
+/// Applies its effects inside a plain Eval and answers with a response that
+/// does not correlate to the request. The host must retain the terminal
+/// without a value and never re-invoke the application for that request.
+struct MismatchedApplication {
+    calls: usize,
+}
+
+impl LiveApplication for MismatchedApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], message: &Message) -> Result<Envelope, Error> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.calls += 1;
+        Ok(unit_result([99; 16], *fingerprint))
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WatchEventMode {
     Pure,
@@ -8751,6 +8773,126 @@ fn delete_requires_current_unexpired_bearer_and_original_origin() {
     assert_eq!(expired_deletion.calls, 0);
 }
 
+/// 30-protocol §Session creation and ownership and portable codes: a session
+/// whose lifetime elapsed answers 410 with the portable `wire.session_expired`
+/// code, not the generic closed-session `live.expired`. Exercised on resume,
+/// where the expired boundary error reaches the wire mapping.
+#[test]
+fn expired_session_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let resume = wire(
+        "POST",
+        "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+        &format!(r#"{{"resume_token":"{credential}","protocol":"orna.present.v1"}}"#),
+    );
+    let resumed = block_on(transport.handle(resume, 100, &mut authority, &mut issuer, &mut deletion));
+    assert_eq!(resumed.status, 410);
+    assert_eq!(
+        resumed.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
+/// 30-protocol §Session creation and ownership and portable codes: the
+/// WebSocket upgrade path reaches the same expired-boundary mapping as HTTP
+/// resume, so an elapsed session answers 410 with `wire.session_expired`
+/// before any reservation or pending upgrade is created.
+#[test]
+fn expired_session_websocket_upgrade_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let refused = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 100)
+        .unwrap_err();
+    assert_eq!(refused.status, 410);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
+/// 30-protocol §Protocol messages (ORNA-PROTO admission): when the per-session
+/// application work bound is full, a well-formed Eval is refused before any
+/// request state exists and receives a correlated `wire.limit` diagnostic on
+/// the same socket, leaving the socket and session usable.
+#[test]
+fn application_work_bound_refuses_admission_with_correlated_wire_limit() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let session_token = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1)).status,
+        101
+    );
+
+    let supervisor = transport.application_work_supervisor();
+    let mut held = Vec::new();
+    for index in 0..4096_u32 {
+        let mut request = [0; 16];
+        request[..4].copy_from_slice(&index.to_be_bytes());
+        held.push(supervisor.admit([1; 16], request).unwrap());
+    }
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .expect("an admission limit is returned as a wire diagnostic, not a transport error");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("a refused admission should produce a correlated diagnostic output");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([30; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    assert!(
+        payload.windows(b"wire.limit".len()).any(|window| window == b"wire.limit"),
+        "the diagnostic must carry the portable wire.limit code"
+    );
+    drop(held);
+}
+
 #[test]
 fn frames_are_bounded_binary_canonical_and_cancellable() {
     let mut host = host();
@@ -10817,6 +10959,72 @@ fn durable_runtime_recovery_does_not_cancel_or_replay_a_running_request() {
     ));
     assert_eq!(application.calls, 0);
     drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = eval([1; 16], [26; 16], "1");
+    let mut application = MismatchedApplication { calls: 0 };
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    // The application has already applied its effects, so the uncorrelated
+    // answer must be retained without a value rather than reported as a
+    // pre-execution rejection (ORNA-PROTO-004; 30-protocol.md L121).
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            diagnostic: None,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 1);
+    drop(host);
+
+    // A restarted durable host must replay the retained terminal under the
+    // same request ID without invoking the application again.
+    let mut restarted = durable_host(open_durable_state(&repository));
+    let mut restarted_issuer = Issuer(1, None);
+    let restarted_credential = create(&mut restarted, &mut restarted_issuer);
+    block_on(restarted.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &restarted_credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut replay_application = MismatchedApplication { calls: 0 };
+    let replay = block_on(restarted.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(request),
+        &mut replay_application,
+    ))
+    .unwrap();
+    assert_eq!(replay.response, first.response);
+    assert_eq!(replay_application.calls, 0);
+    drop(restarted);
     remove_test_repository(&root);
 }
 
