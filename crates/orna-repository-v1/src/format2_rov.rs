@@ -252,6 +252,43 @@ mod tests {
         }
     }
 
+    // When the draft compatibility archive is readable, every inline golden
+    // value must equal its `stored_reference_cbor` and `length` in the archive's
+    // `Orna-1.1.0/tests/blob-vectors.json`. Skipped (with a note) when the
+    // archive or `unzip` is unavailable.
+    #[test]
+    fn inline_golden_vectors_match_draft_zip_when_readable() {
+        let zip = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../../reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip"
+        );
+        let output = match std::process::Command::new("unzip")
+            .args(["-p", zip, "Orna-1.1.0/tests/blob-vectors.json"])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => {
+                eprintln!("skipping: draft zip not readable at {zip}");
+                return;
+            }
+        };
+        let doc: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("blob-vectors.json parses");
+        let vectors = doc["vectors"].as_array().expect("vectors array");
+        for (name, encoded, length) in GOLDEN {
+            let vector = vectors
+                .iter()
+                .find(|v| v["name"] == *name)
+                .unwrap_or_else(|| panic!("{name}: missing in draft zip"));
+            assert_eq!(
+                vector["stored_reference_cbor"].as_str(),
+                Some(*encoded),
+                "{name} stored_reference_cbor"
+            );
+            assert_eq!(vector["length"].as_u64(), Some(*length), "{name} length");
+        }
+    }
+
     #[test]
     fn rejects_malformed_storage_references() {
         let golden = hex(GOLDEN[1].1);
