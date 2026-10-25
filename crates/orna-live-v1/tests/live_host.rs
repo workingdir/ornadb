@@ -24,6 +24,7 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
+    ActivationEffectReport, DeclaredEffectSet,
     FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
     RuntimeActivationContext, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
     TerminalOutcome,
@@ -582,6 +583,7 @@ impl LiveApplication for CompetingTerminalApplication {
             )
             .unwrap()],
             [4; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::new(NoFault),
         )
         .for_request(RequestIdentity {
@@ -655,6 +657,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -700,6 +703,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -941,6 +945,7 @@ impl LiveApplication for WatchEventApplication {
                         )
                         .unwrap()],
                         [201; 32],
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
                     )
                     .for_request(RequestIdentity {
@@ -959,6 +964,7 @@ impl LiveApplication for WatchEventApplication {
                         )
                         .unwrap()],
                         [202; 32],
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(NoFault),
                     )
                     .for_request(RequestIdentity {
@@ -11090,6 +11096,7 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11175,6 +11182,7 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11332,6 +11340,7 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );

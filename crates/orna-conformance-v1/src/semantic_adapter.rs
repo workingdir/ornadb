@@ -28,7 +28,8 @@ use orna_foundation_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
+    ActivationEffectReport, CheckpointResetRequest, DeclaredEffectSet, FaultInjector,
+    FaultPoint, ListStreamSource, NoFault, RequestIdentity,
     RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
     RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
     StreamHandler, StreamHandlerResult,
@@ -2625,6 +2626,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -2798,6 +2800,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal,
                 validator: &mut validator,
                 faults,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -3962,6 +3965,7 @@ impl DurableTransactionalEvaluator {
                 outcome: terminal,
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -6813,6 +6817,18 @@ fn admit_transaction_project(
 
 fn is_standard_source(unit: &SourceUnit) -> bool {
     unit.source_id.starts_with("std/")
+}
+
+/// Declares the effect set of a semantic activation (REQUEST-1 step 5). A
+/// system host may reach effects outside the table transaction, so its
+/// presence declares them possible; otherwise the activation performs only
+/// Orna table writes.
+fn declared_effect_report(sys_host_attached: bool) -> ActivationEffectReport {
+    ActivationEffectReport::declare(if sys_host_attached {
+        DeclaredEffectSet::ExternalPossible
+    } else {
+        DeclaredEffectSet::None
+    })
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
