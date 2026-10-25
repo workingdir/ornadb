@@ -10,9 +10,17 @@ been published.
   `orna mv` (reviewable with Git; `orna commit` keeps the identity). An identity
   that cannot be carried leaves the rename applied and shows a warning with code
   `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`). Concurrent
-  inventory changes are guarded by the staged-store `StaleIndex` check, not an outer
-  coordination lock: the install path already takes that lock, so an outer one would
-  self-deadlock.
+  inventory changes are guarded by the staged-store `StaleIndex` check. An outer
+  coordination lock was not added because the install path takes the same lock
+  non-blockingly: a re-entrant attempt fails with `RepositoryBusy`, so the install
+  would fail rather than deadlock.
+- `orna mount status --json` now reports `writable`, `read_only`, `unresolved_drafts`
+  (each `{path, detail}`), and `draft_error`. The record of a `--cwd` mount now
+  stores `read_only false`, matching the FUSE session that was already writable;
+  the record and status previously reported it read-only. Records written by this
+  build carry a `read_only` value that older binaries reject as invalid (RecordInvalid).
+  The `--read-only` flag from profiles/vfs-1.md:20 is not implemented; every `--cwd`
+  mount is writable.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
