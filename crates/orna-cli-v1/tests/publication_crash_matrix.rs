@@ -638,7 +638,21 @@ fn coordinated_gc_and_repack(repository: &Repository, root: &Path) {
 // index-install parks after the reconciled index is installed but before
 // its IndexReconciled journal stage is durable (ORNA-PUB-007).
 async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) {
-    for boundary in ["index-lock", "capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
+    for boundary in [
+        "index-lock",
+        "capture",
+        "row",
+        "candidate",
+        "ref-cas-pre-journal",
+        "ref-cas",
+        "store-worktree",
+        "index-install",
+        "index",
+        "worktree",
+        "ref-index",
+        "runtime-complete",
+        "tail",
+    ] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
@@ -679,7 +693,18 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let pre_journal = repository.read_publication_journal().unwrap().is_some();
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
-        assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        let journal_expected = matches!(
+            boundary,
+            "ref-cas-pre-journal"
+                | "ref-cas"
+                | "store-worktree"
+                | "index-install"
+                | "index"
+                | "worktree"
+                | "ref-index"
+                | "runtime-complete"
+        );
+        assert!(pre_journal == journal_expected, "unexpected journal state at {boundary}");
         // Before the Prepared journal, every publication pin an attempt holds must be its own base
         // index tree or its own candidate commit (parent = base head). Anything else is foreign.
         if matches!(boundary, "index-lock" | "capture" | "row" | "candidate") {
