@@ -8,9 +8,11 @@ been published.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
-  barrier and asserts, after `orna publish` recovery: HEAD equals the base before
-  the ref CAS and equals the journaled candidate at or after it; the recovered
-  candidate is parented on the captured HEAD; exactly one publication commit
+  barrier and asserts, after `orna publish` recovery: HEAD equals the base at the
+  pre-CAS barriers (`ref-cas-pre-journal`, `store-worktree`) and equals the
+  journaled candidate at the post-CAS barriers (`worktree`, `runtime-complete`)
+  while the journal is present; the recovered candidate is checked to be parented
+  on the captured HEAD only at the pre-CAS barriers; exactly one publication commit
   exists; a second publish is a no-op; staged and unstaged user work, pins, the
   runtime tail, the writer lease and locks are preserved or released; and
   `git fsck` passes. Managed-worktree and index reconciliation checks run only for
