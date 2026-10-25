@@ -629,3 +629,88 @@ fn history_resolves_an_integer_looking_key_to_its_committed_row() {
         "the integer spelling must resolve to the committed row:\n{stderr}"
     );
 }
+
+/// Any `--from`/`--until` bound on a composite key is refused, whatever its
+/// spelling, because a bound of one component has no order over the pair.
+#[test]
+fn a_bound_on_a_composite_key_is_refused_for_every_spelling() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n",
+        "Stock",
+    );
+    assert_success(
+        &orna_repl(
+            &root,
+            r#"main.Stock.insert({ location: "north", sku: "widget", quantity: 3 })"#,
+        ),
+        "REPL composite insert",
+    );
+    publish(&root, "Add one stock row");
+
+    for bound in ["text:north", "int:1", "uint:1", "bytes:0102"] {
+        let refused = orna(&root, &["query", relation.as_str(), "--from", bound, "--format", "json"]);
+        assert!(
+            !refused.status.success()
+                && transcript(&refused).contains("composite primary key")
+                && transcript(&refused).contains("ornadb-5il1.461"),
+            "a {bound} bound on a composite key is refused with the remedy:\n{}",
+            transcript(&refused)
+        );
+    }
+}
+
+/// A `Str` primary key is spelled `text:KEY` in a bound; `bytes:HEX` is
+/// refused naming the valid spelling, never answered empty.
+#[test]
+fn a_bytes_bound_on_a_str_key_is_refused_naming_text() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Note(id: Str) { body: Str, }\n",
+        "Note",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Note.insert({ id: "alpha", body: "a" })"#),
+        "REPL text insert",
+    );
+    publish(&root, "Add one note");
+
+    let refused = orna(&root, &["query", relation.as_str(), "--from", "bytes:61", "--format", "json"]);
+    assert!(
+        !refused.status.success() && transcript(&refused).contains("text:KEY"),
+        "a bytes bound on a Str key is refused naming text:KEY:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// A `Bool` primary key is not addressable by a bound or `--key`; both are
+/// refused with the bead that tracks it rather than answered.
+#[test]
+fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Flag(on: Bool) { body: Str, }\n",
+        "Flag",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Flag.insert({ on: true, body: "yes" })"#),
+        "REPL bool insert",
+    );
+    publish(&root, "Add one flag");
+
+    let bounded = orna(&root, &["query", relation.as_str(), "--from", "text:true", "--format", "json"]);
+    assert!(
+        !bounded.status.success() && transcript(&bounded).contains("ornadb-5il1.461"),
+        "a bound on a Bool key is refused naming ornadb-5il1.461:\n{}",
+        transcript(&bounded)
+    );
+    let keyed = orna(&root, &["query", relation.as_str(), "--key", "text:true", "--format", "json"]);
+    assert!(
+        !keyed.status.success() && transcript(&keyed).contains("ornadb-5il1.461"),
+        "a --key lookup on a Bool key is refused naming ornadb-5il1.461:\n{}",
+        transcript(&keyed)
+    );
+}
