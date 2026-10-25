@@ -2676,9 +2676,9 @@ enum WriterAuthority {
     /// recorded owner is never presumed departed.
     #[cfg(test)]
     Unmanaged,
-    /// Another live runtime holds the worktree's owner lock. This handle may
-    /// re-acquire a lease its own owner already holds, but it can neither
-    /// create the lease nor fence its holder.
+    /// Another live runtime holds the worktree's owner lock. This handle is a
+    /// secondary participant: it may neither read, acquire, create nor fence
+    /// the writer lease, nor admit requests under it (ORNA-TURSO-005).
     Secondary,
     /// This handle holds the worktree's runtime owner lock under `lock_id`.
     /// Every lease it creates, re-acquires or takes over is bound to that
@@ -2734,6 +2734,60 @@ pub struct RuntimeActivationContext {
     committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
+/// The effect set an activation declares before its table transaction opens
+/// (REQUEST-1 step 5). The declaration is the only input that can grant the
+/// Orna-controlled token: a caller that cannot prove its activation performs
+/// no effect outside Orna's table transaction must declare `ExternalPossible`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeclaredEffectSet {
+    /// The activation's only effects are Orna table writes (`ORNA-CAP-005`).
+    None,
+    /// The activation may perform an effect outside Orna's transaction boundary.
+    ExternalPossible,
+}
+
+/// Proof that a caller declared [`DeclaredEffectSet::None`] for one
+/// activation or request transaction. It is not verification: the runtime
+/// cannot observe the effects a caller performs, so trust rests on callers
+/// declaring truthfully. The private field keeps struct literals outside this
+/// module impossible; the value is obtained only via
+/// [`ControlledEffectToken::from_declaration`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlledEffectToken(());
+
+impl ControlledEffectToken {
+    /// Returns the token only for a declaration of no external effects.
+    #[must_use]
+    pub fn from_declaration(declared: DeclaredEffectSet) -> Option<Self> {
+        match declared {
+            DeclaredEffectSet::None => Some(Self(())),
+            DeclaredEffectSet::ExternalPossible => None,
+        }
+    }
+}
+
+/// The effect report every table-request activation presents to the runtime
+/// commit boundary. There is no default: a caller either declares no external
+/// effects, which yields a [`ControlledEffectToken`], or declares possible
+/// external effects. The positive controlled marker is written only for the
+/// former; the latter stays conservatively uncertain on recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActivationEffectReport {
+    ControlledOnly(ControlledEffectToken),
+    ExternalPossible,
+}
+
+impl ActivationEffectReport {
+    /// Builds the report for a declared effect set.
+    #[must_use]
+    pub fn declare(declared: DeclaredEffectSet) -> Self {
+        match ControlledEffectToken::from_declaration(declared) {
+            Some(token) => Self::ControlledOnly(token),
+            None => Self::ExternalPossible,
+        }
+    }
+}
+
 /// Reusable source-derived work for one captured table activation.
 ///
 /// The live layer may carry this owned plan across asynchronous callback
@@ -2745,6 +2799,7 @@ pub struct StagedTableActivation {
     mutations: Vec<TableMutation>,
     next_digest: [u8; 32],
     faults: Arc<dyn FaultInjector>,
+    effects: ActivationEffectReport,
 }
 
 impl StagedTableActivation {
@@ -2753,6 +2808,7 @@ impl StagedTableActivation {
         mutations: Vec<TableMutation>,
         next_digest: [u8; 32],
         faults: Arc<dyn FaultInjector>,
+        effects: ActivationEffectReport,
     ) -> Result<Self, RuntimeError> {
         if mutations.is_empty() {
             return Err(RuntimeError::EmptyMutationBatch);
@@ -2762,7 +2818,13 @@ impl StagedTableActivation {
             mutations,
             next_digest,
             faults,
+            effects,
         })
+    }
+
+    /// Returns the effect report the commit boundary applies.
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
     }
 
     pub fn context(&self) -> &RuntimeActivationContext {
@@ -3222,6 +3284,7 @@ pub struct ValidatedTableRequestActivationCommit<'a> {
     pub outcome: TerminalOutcome,
     pub validator: &'a mut dyn TableActivationCandidateValidator,
     pub faults: &'a dyn FaultInjector,
+    pub effects: ActivationEffectReport,
 }
 
 struct StreamDeliveryParts<'a> {
@@ -4803,7 +4866,7 @@ impl RuntimeState {
             },
             // A second live runtime in the same worktree opens as a secondary
             // participant instead of refusing every verb that needs the
-            // runtime. It cannot create the writer lease or fence its holder,
+            // runtime. It cannot read, acquire, create or fence the writer lease,
             // and the reclamation of departed owners' pins stays with the
             // owner that holds the lock.
             Err(RepositoryError::RepositoryBusy) => WriterAuthority::Secondary,
@@ -5152,6 +5215,7 @@ impl RuntimeState {
         if owner.epoch == 0 {
             return Err(RuntimeError::InvalidIdentity);
         }
+        self.require_lease_authority()?;
         validate_observation_text(&registration.function)?;
         if let Some(source) = &registration.source_identity {
             validate_observation_text(source)?;
@@ -5247,6 +5311,7 @@ impl RuntimeState {
         validate_request_identity(registration.request)?;
         validate_id(registration.invocation_id)?;
         validate_writer_lease(owner)?;
+        self.require_lease_authority()?;
         validate_observation_text(&registration.function)?;
         if let Some(source) = &registration.source_identity {
             validate_observation_text(source)?;
@@ -5432,6 +5497,7 @@ impl RuntimeState {
         writer: Option<WriterLease>,
         registration: StreamObservationRegistration,
     ) -> Result<StreamObservation, RuntimeError> {
+        self.require_lease_authority()?;
         validate_observation_text(&registration.producer)?;
         if let Some(consumer) = &registration.consumer {
             validate_observation_text(consumer)?;
@@ -7142,13 +7208,15 @@ impl RuntimeState {
     /// owner assignment remain separate durable steps. On a successful first
     /// call, typed table rows, the mutation/checkpoint capture, and the
     /// validated terminal outcome commit together. Before the table
-    /// transaction opens, the activation durably records the positive
-    /// controlled-transaction marker unless a possible external effect is
-    /// already on record. If the controlled table transaction faults before
-    /// commit, this method records a runtime-owned rollback receipt bound to
-    /// that marker. Only this method observes the transaction unwind after
-    /// the controlled table boundary; an externally marked activation, or one
-    /// with no positive evidence, remains conservatively uncertain.
+    /// transaction opens, the activation durably records its effect report:
+    /// a [`ControlledEffectToken`] writes the positive controlled-transaction
+    /// marker, while [`ActivationEffectReport::ExternalPossible`] records
+    /// possible external effects, which keeps recovery uncertain. If a
+    /// controlled table transaction faults before commit, this method records
+    /// a runtime-owned rollback receipt bound to that marker. A possible
+    /// external effect never receives a receipt, so its rollback stays
+    /// uncertain. Only this method observes the transaction unwind after the
+    /// controlled table boundary.
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_table_request_activation(
         &self,
@@ -7160,7 +7228,9 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
+        effects: ActivationEffectReport,
     ) -> Result<RequestActivationCommit, RuntimeError> {
+        let controlled = matches!(effects, ActivationEffectReport::ControlledOnly(_));
         match self
             .commit_table_request_activation_tx(
                 lease,
@@ -7171,6 +7241,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
+                effects,
                 None,
                 None,
             )
@@ -7178,10 +7249,13 @@ impl RuntimeState {
         {
             Err(RequestActivationTransactionError::RolledBack(error)) => {
                 // A receipt follows only the explicit rollback observed at
-                // the runtime-owned boundary. Commit failures never enter
-                // this branch because their durable outcome is unknowable.
-                self.record_controlled_rollback_proof(identity, fingerprint, lease)
-                    .await?;
+                // the runtime-owned boundary of a controlled activation.
+                // Commit failures never enter this branch because their
+                // durable outcome is unknowable.
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, lease)
+                        .await?;
+                }
                 Err(error)
             }
             Ok(committed) => {
@@ -7214,6 +7288,7 @@ impl RuntimeState {
             staged.next_digest(),
             outcome,
             staged.faults(),
+            staged.effects(),
         )
         .await
     }
@@ -7260,7 +7335,9 @@ impl RuntimeState {
             outcome,
             validator,
             faults,
+            effects,
         } = request;
+        let controlled = matches!(effects, ActivationEffectReport::ControlledOnly(_));
         match self
             .commit_table_request_activation_tx(
                 writer,
@@ -7271,21 +7348,26 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
+                effects,
                 Some(validator),
                 admission,
             )
             .await
         {
             Err(RequestActivationTransactionError::RolledBack(error)) => {
-                self.record_controlled_rollback_proof(identity, fingerprint, writer)
-                    .await
-                    .map_err(TableActivationError::Runtime)?;
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                        .await
+                        .map_err(TableActivationError::Runtime)?;
+                }
                 Err(TableActivationError::Runtime(error))
             }
             Err(RequestActivationTransactionError::RolledBackValidation(diagnostic)) => {
-                self.record_controlled_rollback_proof(identity, fingerprint, writer)
-                    .await
-                    .map_err(TableActivationError::Runtime)?;
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                        .await
+                        .map_err(TableActivationError::Runtime)?;
+                }
                 Err(TableActivationError::ValidationFailed(diagnostic))
             }
             Ok(committed) => Ok(committed),
@@ -7318,14 +7400,16 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
+        effects: ActivationEffectReport,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
-        // The marker commits on its own first: it is the precondition for an
-        // observed-rollback receipt and changes nothing for crash recovery.
-        self.record_activation_controlled_marker(lease, identity, fingerprint)
+        // The effect report commits on its own first: it is the precondition
+        // for an observed-rollback receipt and changes nothing for crash
+        // recovery beyond recording what the activation may have done.
+        self.record_activation_effects(lease, identity, fingerprint, effects)
             .await?;
         let transaction = self
             .connection
@@ -10405,9 +10489,12 @@ impl RuntimeState {
     /// (ORNA-TASK-003, REQUEST-1 step 5). The replacement is therefore
     /// admitted only after recovery. A different owner bound to this
     /// handle's own lock is live and is refused with `LeaseHeld`, as is every
-    /// different owner seen by a handle without the lock.
+    /// different owner seen by a handle without the lock. A secondary handle
+    /// refuses every lease operation, including its own owner's re-acquire
+    /// (ORNA-TURSO-005).
     pub async fn acquire_lease(&self, owner_id: [u8; 16]) -> Result<WriterLease, RuntimeError> {
         validate_id(owner_id)?;
+        self.require_lease_authority()?;
         let lock_id = self.writer_authority.lock_id();
         let tx = self
             .connection
@@ -10416,9 +10503,6 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let lease = match bound_writer_lease_tx(&tx).await? {
             None => {
-                if matches!(self.writer_authority, WriterAuthority::Secondary) {
-                    return Err(RuntimeError::LeaseHeld);
-                }
                 tx.execute(
                     "INSERT INTO writer_lease (singleton, owner_id, epoch, lock_owner_id)
                      VALUES (1, ?1, 1, ?2)",
@@ -10462,12 +10546,15 @@ impl RuntimeState {
     }
 
     /// Reads the current writer lease without changing runtime state.
+    /// A secondary handle is refused with `LeaseHeld`: only the owner reads the
+    /// lease, so a second participant cannot obtain a bearer lease.
     ///
     /// This read does not establish that the owner is abandoned. The caller
     /// must supply that liveness proof to [`Self::takeover_lease`], whose
     /// owner-and-epoch compare-and-swap closes the race with a concurrent
     /// takeover.
     pub async fn current_lease(&self) -> Result<Option<WriterLease>, RuntimeError> {
+        self.require_lease_authority()?;
         let mut rows = self
             .connection
             .query(
@@ -10509,6 +10596,7 @@ impl RuntimeState {
     ) -> Result<WriterLease, RuntimeError> {
         validate_id(abandoned.owner_id)?;
         validate_id(replacement)?;
+        self.require_lease_authority()?;
         if abandoned.epoch == 0 {
             return Err(RuntimeError::InvalidIdentity);
         }
@@ -10790,6 +10878,7 @@ impl RuntimeState {
     ) -> Result<WriterLease, RuntimeError> {
         validate_id(abandoned)?;
         validate_id(replacement)?;
+        self.require_lease_authority()?;
         let expected = self.current_lease().await?;
         let Some(expected) = expected.filter(|lease| lease.owner_id == abandoned) else {
             return Err(RuntimeError::OwnerLost);
@@ -12436,6 +12525,10 @@ impl RuntimeState {
         issue_capability: bool,
     ) -> Result<(RequestStatus, Option<RequestAdmissionCapability>), RuntimeError> {
         validate_request_identity(identity)?;
+        // ORNA-TURSO-005: a handle that does not own the worktree lock must
+        // coordinate with the owner or fail. A reservation is a durable write,
+        // so a secondary handle is refused before it can insert a row.
+        self.require_lease_authority()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -12688,15 +12781,18 @@ impl RuntimeState {
     }
 
     /// Durably records that this owner entered a request transaction that the
-    /// runtime expected to be Orna-controlled. The marker is tied to the exact
-    /// request fingerprint and owner, but it is not a rollback receipt: crash
-    /// recovery remains uncertain until a durable transaction-boundary proof
-    /// exists.
+    /// runtime expected to be Orna-controlled. The caller must hold a
+    /// [`ControlledEffectToken`], which proves only that a declaration of no
+    /// external effects was made for this transaction; the runtime does not
+    /// verify that declaration. The marker is tied to the exact request
+    /// fingerprint and owner, but it is not a rollback receipt: crash recovery
+    /// remains uncertain until a durable transaction-boundary proof exists.
     pub async fn record_controlled_transaction(
         &self,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
         owner: WriterLease,
+        _declared: &ControlledEffectToken,
     ) -> Result<(), RuntimeError> {
         validate_request_identity(identity)?;
         validate_id(owner.owner_id)?;
@@ -12783,6 +12879,35 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records the activation's mandatory effect report before its table
+    /// transaction opens (REQUEST-1 step 5). A [`ControlledEffectToken`]
+    /// writes the positive controlled marker. An activation that declares
+    /// possible external effects downgrades recovery to uncertain; a failure
+    /// to record that downgrade aborts the activation, because an unreported
+    /// external effect could later be mistaken for a rollback. A terminal
+    /// request is replayed from durable state and has no further effects to
+    /// report, so its replay does not require the downgrade.
+    async fn record_activation_effects(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        effects: ActivationEffectReport,
+    ) -> Result<(), RuntimeError> {
+        match effects {
+            ActivationEffectReport::ControlledOnly(_) => {
+                self.record_activation_controlled_marker(lease, identity, fingerprint)
+                    .await
+            }
+            ActivationEffectReport::ExternalPossible => {
+                match self.request_status_for_identity(identity).await? {
+                    Some(status) if status.state.is_terminal() => Ok(()),
+                    _ => self.record_external_effect(identity, fingerprint, lease).await,
+                }
+            }
+        }
     }
 
     /// Records that an effect outside Orna's transaction boundary may have
@@ -13387,6 +13512,7 @@ impl RuntimeState {
         next: RequestState,
         terminal_outcome: Option<TerminalOutcome>,
     ) -> Result<RequestStatus, RuntimeError> {
+        self.require_lease_authority()?;
         validate_request_identity(identity)?;
         debug_assert_eq!(next.is_terminal(), terminal_outcome.is_some());
         let tx = self
@@ -14811,6 +14937,16 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Refuses a secondary handle before it touches the writer lease. Only the
+    /// owner-lock holder coordinates lease transitions; any other local writer
+    /// fails rather than reopening the writable state (ORNA-TURSO-005).
+    fn require_lease_authority(&self) -> Result<(), RuntimeError> {
+        if matches!(self.writer_authority, WriterAuthority::Secondary) {
+            return Err(RuntimeError::LeaseHeld);
+        }
+        Ok(())
+    }
+
     async fn require_owner(&self, tx: &Connection, lease: WriterLease) -> Result<(), RuntimeError> {
         self.require_current_owner(tx, lease).await?;
         // A takeover with no durable Running request has nothing to recover.
@@ -14878,6 +15014,7 @@ impl RuntimeState {
         tx: &Connection,
         lease: WriterLease,
     ) -> Result<(), RuntimeError> {
+        self.require_lease_authority()?;
         let mut rows = tx
             .query(
                 "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
@@ -22021,6 +22158,10 @@ mod tests {
     fn outcome(value: u8) -> TerminalOutcome {
         TerminalOutcome::new(vec![value]).unwrap()
     }
+    fn controlled_token() -> ControlledEffectToken {
+        ControlledEffectToken::from_declaration(DeclaredEffectSet::None)
+            .expect("a None declaration yields the controlled token")
+    }
     fn git(path: &Path, args: &[&str]) {
         assert!(
             Command::new("git")
@@ -22283,6 +22424,27 @@ mod tests {
                 repository_id: id(2),
             },
             digest(3),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Opens a same-worktree handle outside the owner lock. Only for tests that
+    /// exercise the database compare-and-swap between handles; production
+    /// second local writers are secondary and fail closed (ORNA-TURSO-005).
+    async fn open_unmanaged_state(repo: &Repository) -> RuntimeState {
+        let identity = RuntimeIdentity {
+            database_id: id(1),
+            repository_id: id(2),
+        };
+        let graph_repository_id = current_graph_repository_id(repo, identity.database_id).unwrap();
+        RuntimeState::open_path_with_graph_repository_id(
+            &repo.runtime_paths().state_db(),
+            identity,
+            digest(3),
+            Some(graph_repository_id),
+            Some(repo.runtime_paths().compact_runtime_receipt_public_key()),
+            WriterAuthority::Unmanaged,
         )
         .await
         .unwrap()
@@ -23772,6 +23934,7 @@ mod tests {
                         outcome: outcome(90),
                         validator: &mut validator,
                         faults: &NoFault,
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -23837,6 +24000,7 @@ mod tests {
                         outcome: outcome(99),
                         validator: &mut rejecting,
                         faults: &Fail(FaultPoint::BeforeTableWrite),
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &activation_catalogue(None, 199),
                 )
@@ -23928,6 +24092,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &Fail(point),
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -23976,6 +24141,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut rejecting,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &admission,
             )
@@ -24011,6 +24177,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &NoFault,
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -24033,6 +24200,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &invalid,
             )
@@ -24059,6 +24227,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &admission,
             )
@@ -24085,6 +24254,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &invalid_batch,
             )
@@ -36362,7 +36532,7 @@ mod tests {
             .expect("worker runtime");
         runtime.block_on(async move {
             let repository = Repository::discover(worktree).expect("worker repository");
-            let state = open_state(&repository).await;
+            let state = open_unmanaged_state(&repository).await;
             let writer = state.acquire_lease(id(4)).await.expect("worker writer");
             let capture = state.capture().await.expect("worker capture");
             state
@@ -46435,6 +46605,7 @@ mod tests {
                 digest(44),
                 outcome(45),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -46474,6 +46645,7 @@ mod tests {
                 outcome: outcome(51),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
             })
             .await
             .unwrap();
@@ -46528,6 +46700,7 @@ mod tests {
                 outcome: outcome(57),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
             })
             .await;
 
@@ -46680,6 +46853,7 @@ mod tests {
                 digest(62),
                 outcome(63),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -46743,6 +46917,7 @@ mod tests {
                         digest(10),
                         outcome(11),
                         &Fail(point),
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                     )
                     .await,
                 Err(RuntimeError::FaultInjected(point))
@@ -46809,6 +46984,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -46923,6 +47099,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTerminalClaim))
@@ -47007,6 +47184,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
@@ -47136,6 +47314,67 @@ mod tests {
         );
     }
 
+    // Gate D: an activation that reports possible external effects and then
+    // faults in its table transaction never receives a rollback receipt, so
+    // recovery stays uncertain even though the rollback was observed.
+    #[tokio::test]
+    async fn external_possible_fault_never_records_a_rollback_receipt() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::ExternalPossible,
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        assert_eq!(
+            ledger_effect_evidence(&state, identity).await,
+            (2, None, None),
+            "a possible external effect must never carry a rollback receipt"
+        );
+
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(12),
+                outcome(13),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+    }
+
     // Gate D: the activation records its positive controlled marker in its
     // own durable step before the table transaction, so the rollback receipt
     // is bound to that marker; a successful commit clears the evidence.
@@ -47167,6 +47406,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47213,6 +47453,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47260,6 +47501,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::EmptyMutationBatch)
@@ -47289,6 +47531,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47310,6 +47553,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47383,6 +47627,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::OwnerLost)
@@ -47437,6 +47682,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47491,6 +47737,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47522,6 +47769,7 @@ mod tests {
                 digest(14),
                 outcome(15),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -48240,6 +48488,109 @@ mod tests {
                 .status,
             FailureStatus::Replaying
         );
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_reserve_a_request_without_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let identity = request(41, 42);
+        assert_eq!(
+            secondary.reserve_request(identity, digest(43)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            secondary
+                .reserve_request_with_admission(identity, digest(43))
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+    }
+
+    fn secondary_observed_registration(identity: RequestIdentity, invocation: u8) -> RunObservationRegistration {
+        RunObservationRegistration {
+            request: identity,
+            consumer_identity: stream_delivery("secondary", "admission").consumer,
+            function: "pkg.secondary".into(),
+            source_identity: None,
+            invocation_id: id(invocation),
+        }
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_begin_observed_requests_with_an_owner_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(170)).await.unwrap();
+        let identity = request(171, 172);
+        let fingerprint = digest(173);
+        assert_eq!(
+            secondary
+                .begin_observed_request(secondary_observed_registration(identity, 174), fingerprint, lease)
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+        let (_, capability) = owner
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        assert_eq!(
+            secondary
+                .begin_observed_request_with_admission(
+                    secondary_observed_registration(identity, 174),
+                    fingerprint,
+                    lease,
+                    capability.expect("owner-bound admission capability"),
+                )
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            owner
+                .request_status_for_identity(identity)
+                .await
+                .unwrap()
+                .map(|status| status.state),
+            Some(RequestState::Reserved)
+        );
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_take_over_or_recover_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(180)).await.unwrap();
+        assert_eq!(
+            secondary.takeover_lease(lease, id(181)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            secondary.recover_abandoned(id(180), id(181)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(owner.current_lease().await.unwrap(), Some(lease));
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_read_or_reacquire_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(190)).await.unwrap();
+        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.acquire_lease(id(190)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(owner.acquire_lease(id(190)).await.unwrap(), lease);
     }
 
     #[tokio::test]
@@ -49044,6 +49395,10 @@ mod tests {
         state.begin_session_deletion(id(5), owner).await.unwrap();
         assert_eq!(
             external.reserve_request(request(5, 8), digest(9)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(5, 8), digest(9)).await,
             Err(RuntimeError::SessionClosed)
         );
         assert_eq!(
@@ -49071,6 +49426,10 @@ mod tests {
         state.finish_session_deletion(id(5), owner).await.unwrap();
         assert_eq!(
             external.reserve_request(request(5, 11), digest(12)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(5, 11), digest(12)).await,
             Err(RuntimeError::SessionClosed)
         );
 
@@ -49412,10 +49771,19 @@ mod tests {
             .await
             .unwrap();
 
-        let other = open_state(&repo).await;
+        let other = open_unmanaged_state(&repo).await;
         let replacement = other.takeover_lease(old, id(145)).await.unwrap();
+        let secondary = open_state(&repo).await;
+        assert_eq!(
+            secondary.reserve_request(request(146, 147), digest(148)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(
             other.reserve_request(request(146, 147), digest(148)).await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            state.reserve_request(request(146, 147), digest(148)).await,
             Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
@@ -49443,7 +49811,7 @@ mod tests {
             .unwrap();
         other.complete_takeover_recovery(replacement).await.unwrap();
         assert_eq!(
-            other
+            state
                 .reserve_request(request(146, 147), digest(148))
                 .await
                 .unwrap()
@@ -49555,8 +49923,8 @@ mod tests {
             .await
             .unwrap();
 
-        let first = open_state(&repo).await;
-        let second = open_state(&repo).await;
+        let first = open_unmanaged_state(&repo).await;
+        let second = open_unmanaged_state(&repo).await;
         let first_candidate = id(165);
         let second_candidate = id(166);
         let (first_takeover, second_takeover) = tokio::join!(
@@ -49587,8 +49955,17 @@ mod tests {
 
         assert_eq!(first.current_lease().await.unwrap(), Some(winner));
         assert_eq!(winner.epoch, abandoned.epoch + 1);
+        let secondary = open_state(&repo).await;
+        assert_eq!(
+            secondary.reserve_request(request(167, 168), digest(169)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(
             second.reserve_request(request(167, 168), digest(169)).await,
+            Err(RuntimeError::RecoveryPending)
+        );
+        assert_eq!(
+            state.reserve_request(request(167, 168), digest(169)).await,
             Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
@@ -49629,13 +50006,43 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.status.state, RequestState::Orphaned);
         assert_eq!(
-            second
+            state
                 .reserve_request(request(167, 168), digest(169))
                 .await
                 .unwrap()
                 .state,
             RequestState::Reserved
         );
+    }
+
+    #[tokio::test]
+    async fn stale_owner_completion_is_fenced_after_cross_connection_takeover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let abandoned = state.acquire_lease(id(176)).await.unwrap();
+        let (identity, fingerprint, _) =
+            begin_continuable_request(&state, abandoned, 177, 178, 179).await;
+        let successor = open_unmanaged_state(&repo).await;
+        let replacement = successor.takeover_lease(abandoned, id(180)).await.unwrap();
+
+        assert_eq!(
+            state
+                .complete_observed_request_with_owner(identity, fingerprint, abandoned, outcome(181))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        let recovered = successor
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(abandoned),
+                replacement,
+                outcome(182),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(state.current_lease().await.unwrap(), Some(replacement));
     }
 
     #[tokio::test]
@@ -50256,6 +50663,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -50420,7 +50828,7 @@ mod tests {
                 .unwrap();
         }
         state
-            .record_controlled_transaction(controlled, digest(8), owner)
+            .record_controlled_transaction(controlled, digest(8), owner, &controlled_token())
             .await
             .unwrap();
         state
@@ -50573,7 +50981,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .record_controlled_transaction(identity, fingerprint, owner)
+            .record_controlled_transaction(identity, fingerprint, owner, &controlled_token())
             .await
             .unwrap();
         let completed = state
@@ -50999,6 +51407,7 @@ mod tests {
                 digest(176),
                 outcome(177),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -53062,6 +53471,7 @@ mod tests {
             mutations.clone(),
             digest(8),
             Arc::new(NoFault),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )
         .unwrap();
 
@@ -53069,7 +53479,13 @@ mod tests {
         assert_eq!(staged.mutations(), mutations.as_slice());
         assert_eq!(staged.next_digest(), digest(8));
         assert!(matches!(
-            StagedTableActivation::from_source(context, Vec::new(), digest(8), Arc::new(NoFault),),
+            StagedTableActivation::from_source(
+                context,
+                Vec::new(),
+                digest(8),
+                Arc::new(NoFault),
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
+            ),
             Err(RuntimeError::EmptyMutationBatch)
         ));
     }
