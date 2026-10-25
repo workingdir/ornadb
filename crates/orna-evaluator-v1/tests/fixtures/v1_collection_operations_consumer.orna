@@ -44,8 +44,8 @@ pub fn relation_slice_count() =
 pub fn relation_sum() =
     sum(Note | map(row => row.value));
 
-pub fn aliased_map(rows: [Int]): [Int] = query_ops.map(rows, value => value + 1);
-pub fn aliased_relation_count() = query_ops.count(Note | query_ops.filter(row => row.value > 0));
+pub fn aliased_map(rows: [Int]): [[Int]] = query_ops.chunk(rows, 2);
+pub fn aliased_relation_count() = count(Note | filter(row => row.value > 0));
 
 pub fn trimmed(value: Str): Str = text_ops.trim(value);
 pub fn split_text(value: Str): [Str] = text_ops.split(value, ",");
