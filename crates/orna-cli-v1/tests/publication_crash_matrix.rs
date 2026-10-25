@@ -1165,6 +1165,70 @@ async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound()
     assert!(exercised > 0, "no boundary left a managed store payload leaf to edit");
 }
 
+/// W196 (b) / E2300 remedy: the discard sequence printed by MANAGED_EDIT_HELP, run literally on
+/// a skip-worktree store payload leaf (edit, refusal, `git checkout -- <path>`, retry), restores
+/// the committed bytes and lets `orna publish` complete.
+#[tokio::test]
+async fn managed_store_discard_remedy_restores_payload_and_publishes() {
+    let mut exercised = 0;
+    for boundary in ["ref-cas", "index-install", "index"] {
+        let (directory, _source, repository, state, _source_commit, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        let payload = root.join(".orna/store/data");
+        exercised += 1;
+        let relative = payload.strip_prefix(root).unwrap().to_str().unwrap().to_owned();
+        let committed = git_output(root, &["show", &format!("HEAD:{relative}")], None);
+        let original = std::fs::read(&payload).unwrap();
+        let mut edited = original.clone();
+        edited[0] ^= 0x01;
+        std::fs::write(&payload, &edited).unwrap();
+        let pre_head = head(&repository);
+
+        let rejected = cli(root, &["--debug", "publish"]);
+        assert!(!rejected.status.success(), "recovery accepted a payload edit at {boundary}");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("E2300"), "payload edit at {boundary} not reported as E2300: {stderr}");
+        assert_eq!(head(&repository), pre_head, "HEAD moved by rejected recovery at {boundary}");
+
+        let restore = format!("git show HEAD:{relative} > {relative}");
+        let status = Command::new("sh").arg("-c").arg(&restore).current_dir(root).status().unwrap();
+        assert!(status.success(), "`{restore}` failed at {boundary}");
+        assert_eq!(
+            std::fs::read(&payload).unwrap(),
+            committed,
+            "`{restore}` did not restore committed bytes at {boundary}"
+        );
+        let resumed = cli(root, &["--debug", "publish"]);
+        assert!(
+            resumed.status.success(),
+            "publish after discard at {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after discard at {boundary}");
+    }
+    assert!(exercised > 0, "no boundary left a managed store payload leaf to discard");
+}
+
+
 /// W14-01 / ORNA-PUB-016: a `commit` killed after the Orna index lock is taken
 /// must not strand Git's index lock. The next commit reclaims the dead lock,
 /// recovers, and then succeeds. The index-install (ref advanced, IndexReconciled
