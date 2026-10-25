@@ -219,12 +219,24 @@ async fn admitted_literal_stream_cannot_poll_or_invoke_its_callback_before_the_r
         "the for_each insert callback must not run before the runner owns the lease"
     );
 
+    // The runner must hold the runtime owner lock itself, so release this
+    // handle before it runs and reopen as the owner to read the lease.
+    drop(state);
     assert!(matches!(
         evaluator
             .execute_source(&repository, identity, blocker.owner_id, [73; 32], &source)
             .await,
         Ok(StageOutcome::Passed)
     ));
+
+    let state = RuntimeState::open_with_owner_id(
+        &repository,
+        identity,
+        [73; 32],
+        blocker.owner_id,
+    )
+    .await
+    .expect("reopen runtime state as lease owner");
 
     assert_eq!(state.current_lease().await, Ok(Some(blocker)));
     let checkpoint = state
