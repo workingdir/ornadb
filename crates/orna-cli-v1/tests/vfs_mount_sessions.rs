@@ -53,7 +53,6 @@ const EIO: i32 = 5;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
 const EPERM: i32 = 1;
-const EXDEV: i32 = 18;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -75,6 +74,17 @@ async fn music_repository(titles: &[(&str, &str)]) -> (TempDir, Repository, [u8;
 fn assert_errno<T: std::fmt::Debug>(result: std::io::Result<T>, expected: i32, context: &str) {
     let error = result.expect_err(context);
     assert_eq!(error.raw_os_error(), Some(expected), "{context}: {error}");
+}
+
+/// `renameat2(2)` with explicit flags, through rustix: `std::fs::rename` cannot
+/// pass any. The crate forbids `unsafe`, so no libc call is made here.
+fn rename_with_flags(
+    from: &Path,
+    to: &Path,
+    flags: rustix::fs::RenameFlags,
+) -> std::io::Result<()> {
+    rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, flags)
+        .map_err(std::io::Error::from)
 }
 
 fn assert_success(output: &Output, context: &str) {
@@ -931,10 +941,12 @@ async fn blob_unlink_and_rename_are_refused_with_eperm() {
 
 /// Structural mutations refused on the live writable mount are EPERM, not EROFS:
 /// EROFS is reserved for historical and read-only views (profiles/vfs-1.md:139;
-/// 41-vfs.md:103-105). A rename across rows is EXDEV, as rename(2) requires.
-/// Every refusal leaves the stored rows unchanged.
+/// 41-vfs.md:103-105). A cross-row rename is also EPERM, not EXDEV: EXDEV would
+/// let `mv` and `cp` fall back to copy-then-unlink, which the refused unlink of
+/// the source would leave half-applied. Every refusal leaves the stored rows
+/// unchanged.
 #[tokio::test]
-async fn live_mount_structural_refusals_are_eperm_and_cross_row_rename_is_exdev() {
+async fn live_mount_structural_refusals_are_eperm() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -970,8 +982,40 @@ async fn live_mount_structural_refusals_are_eperm_and_cross_row_rename_is_exdev(
             session.row("london").join("content.mp3"),
             session.row("paris").join("moved.mp3"),
         ),
-        EXDEV,
-        "a Blob rename across rows is refused with EXDEV",
+        EPERM,
+        "a Blob rename across rows is refused with EPERM, not EXDEV",
+    );
+    assert_errno(
+        fs::rename(
+            session.document("london"),
+            session.row("london").join("other.orna"),
+        ),
+        EPERM,
+        "renaming a row's data.orna to another name is refused",
+    );
+    assert_errno(
+        rename_with_flags(
+            &session.row("london").join("content.mp3"),
+            &session.row("london").join("renamed.mp3"),
+            rustix::fs::RenameFlags::NOREPLACE,
+        ),
+        EPERM,
+        "a same-row rename with flags is refused",
+    );
+    let truncate = std::process::Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], 0)"])
+        .arg(session.row("london").join("content.mp3"))
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run python3 os.truncate on a Blob");
+    assert!(
+        !truncate.status.success(),
+        "a path-based truncate of a Blob is refused",
+    );
+    assert!(
+        String::from_utf8_lossy(&truncate.stderr).contains("Operation not permitted"),
+        "a path-based truncate of a Blob fails with EPERM, got: {}",
+        String::from_utf8_lossy(&truncate.stderr),
     );
     assert_eq!(
         session.read("london"),
