@@ -80,6 +80,54 @@ fn project_with_main(source: &str) -> tempfile::TempDir {
     project
 }
 
+/// Like `project_with_main`, but `Note` has a committed table identity: `orna
+/// commit` admits `main.orna`, one row is seeded through the REPL and published,
+/// so `serve` reaches evaluation. Without a committed identity `serve` refuses
+/// the table before any evaluation (`serve.table_identity_unavailable`).
+fn committed_table_project(source: &str) -> tempfile::TempDir {
+    let project = tempfile::tempdir().expect("temporary Orna project");
+    let initialized = Command::new(BINARY)
+        .arg("init")
+        .current_dir(project.path())
+        .output()
+        .expect("initialize project");
+    assert!(initialized.status.success(), "initialize: {initialized:?}");
+    git(project.path(), &["config", "user.name", "Orna test"]);
+    git(project.path(), &["config", "user.email", "orna-test@example.invalid"]);
+    git(project.path(), &["config", "commit.gpgsign", "false"]);
+    std::fs::write(project.path().join("main.orna"), source).expect("write main.orna");
+    git(project.path(), &["add", "main.orna", ".orna/database.orna"]);
+    let committed = Command::new(BINARY)
+        .args(["commit", "-m", "Declare Note"])
+        .current_dir(project.path())
+        .output()
+        .expect("commit project");
+    assert!(committed.status.success(), "commit: {committed:?}");
+    let root = project.path().to_str().expect("UTF-8 path");
+    let mut repl = Command::new(BINARY)
+        .args(["--db", root, "repl"])
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start REPL");
+    repl.stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"main.Note.insert({ id: 0, body: \"seed\" })\n:quit\n")
+        .expect("write REPL input");
+    let seeded = repl.wait_with_output().expect("REPL exits");
+    assert!(seeded.status.success(), "seed: {seeded:?}");
+    let published = Command::new(BINARY)
+        .args(["publish", "--message", "seed"])
+        .current_dir(project.path())
+        .output()
+        .expect("publish the seeded row");
+    assert!(published.status.success(), "publish: {published:?}");
+    project
+}
+
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
     let port = listener.local_addr().unwrap().port();
@@ -161,7 +209,7 @@ fn absent_serve_entry_reports_startup_diagnostic_and_no_root_page() {
 
 #[test]
 fn serve_that_attempts_a_write_is_refused_and_commits_nothing() {
-    let project = project_with_main(
+    let project = committed_table_project(
         "pub table Note(id: Int) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.insert({ id: 1, body: \"written\" });\n}\n",
     );
     let (_server, address) = start_server(project.path());
