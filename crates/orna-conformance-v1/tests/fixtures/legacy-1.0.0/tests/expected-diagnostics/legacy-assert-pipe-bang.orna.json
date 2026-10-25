@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-assert-pipe-bang.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA-A091-010",
+  "message_contains": "`|!` is not assertion syntax; use `assert`",
+  "status": "expected-not-executed"
+}

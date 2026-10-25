@@ -1,0 +1,70 @@
+name: CLI Gate B
+
+# Gate B: a 10 GiB network payload streamed into a Blob with bounded RSS and zero
+# metadata reads. The test takes between one and two hours (3611 s, 5032 s and 6091 s
+# in the last three runs on main), so it does not run inside the per-PR cli-tests job.
+#
+# When it runs:
+# - on every push to main, once per commit (the group is keyed on the commit);
+# - on demand (workflow_dispatch; dispatches of one ref queue behind each other);
+# - on a pull request that carries the `gate-b` label. Add the label to a pull request
+#   whose change reaches the dependency closure of the orna-cli-v1 tests (28 workspace
+#   crates: `cargo metadata --format-version 1` lists them; the data path is mostly
+#   orna-cli-v1, evaluator, repository, runtime, storage, sys, value, syntax, project,
+#   stream, foundation and the stdlib). A new commit cancels that pull request's older
+#   run.
+#
+# Why not on every pull request that touches a listed path: the old path list named
+# 7 of the 28 closure crates (a change to orna-syntax-v1 alone matched nothing), and each
+# run holds a runner for one to two hours. At 22:30Z on 2026-10-23 ten Gate B runs were
+# in progress (eight for pull requests) and three were queued, which delayed every other
+# CI job, and two pull requests merged before their Gate B run finished. No branch
+# protection rule requires this check. The run on main after each merge is the evidence;
+# a pull request author who wants it earlier adds the label.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types:
+      - opened
+      - labeled
+      - synchronize
+      - reopened
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+# Push: one group per commit. Dispatch: one group per ref (dispatches queue, none is
+# cancelled). Pull request: one group per pull request when the job will run, so a new
+# commit cancels the older run; a pull request run that will not execute the job (no
+# gate-b label, or another label was added) gets a unique group, so it can never cancel
+# a running labelled Gate B run.
+concurrency:
+  group: cli-gate-b-${{ github.event_name }}-${{ (github.event_name == 'push' && github.sha) || (github.event_name == 'workflow_dispatch' && github.ref) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b') && github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate-b:
+    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'gate-b') && (github.event.action != 'labeled' || github.event.label.name == 'gate-b')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Gate B large network payload
+        env:
+          ORNA_REQUIRE_FUSE: "1"
+        run: cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact

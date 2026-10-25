@@ -1,4 +1,4 @@
-//! Bounded, logical traceability for the published Orna 1.0.0 reference bundle.
+//! Bounded, logical traceability for the published Orna 1.1.0 reference bundle.
 //! The report intentionally contains identifiers and statuses, never source bodies or host paths.
 
 pub mod citation_ratchet;
@@ -16,8 +16,14 @@ use std::{
     path::{Component, Path},
 };
 
-const VERSION: &str = "1.0.0";
-const NORMATIVE_PAYLOAD_COUNT: usize = 46;
+const VERSION: &str = "1.1.0";
+const NORMATIVE_PAYLOAD_COUNT: usize = 58;
+/// The only named algorithm results the 1.1.0 model register records twice; each
+/// pair is byte-identical in the vendored `evidence/model-results.json`.
+const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] = [
+    "golden MIME audio/mpeg",
+    "golden MIME application/gzip",
+];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -114,7 +120,13 @@ pub enum Status {
 #[derive(Deserialize)]
 struct Release {
     version: String,
+    counts: ReleaseCounts,
     normative_payload_sha256: BTreeMap<String, String>,
+}
+#[derive(Deserialize)]
+struct ReleaseCounts {
+    requirements: usize,
+    scenario_oracles: usize,
 }
 #[derive(Deserialize)]
 struct Requirement {
@@ -170,6 +182,15 @@ struct Fixture {
     diagnostic: Option<String>,
     #[serde(default)]
     expected_diagnostic: Option<String>,
+    #[serde(default)]
+    evidence_level: Option<String>,
+}
+impl Fixture {
+    fn is_bounded_syntax(&self) -> bool {
+        self.evidence_level
+            .as_deref()
+            .is_some_and(|level| level.starts_with("Bounded syntax only"))
+    }
 }
 #[derive(Deserialize)]
 struct InvalidMetadata {
@@ -204,7 +225,12 @@ struct Scenarios {
 struct Scenario {
     id: String,
     requirements: Vec<String>,
-    evidence_level: String,
+    /// Present on every 1.1.0 scenario oracle.
+    implementation_status: Option<String>,
+    /// Present on the 149 scenarios that declare an evidence level; absent on the
+    /// 130 gate-matrix oracles, which are scoped by `implementation_status` alone.
+    #[serde(default)]
+    evidence_level: Option<String>,
 }
 #[derive(Deserialize)]
 struct Models {
@@ -213,6 +239,7 @@ struct Models {
 #[derive(Deserialize)]
 struct Model {
     name: String,
+    passed: bool,
 }
 
 /// Generate the frozen traceability report without implementation execution
@@ -287,9 +314,12 @@ fn generate_inner(
     let requirements: Vec<Requirement> = read_json(root, "tests/requirements.json")?;
     let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
     let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
+    if release.version != manifest.version {
+        return Err(err("release version disagrees with the conformance manifest"));
+    }
     let invalid: InvalidMetadata = read_json(root, "tests/invalid-metadata.json")?;
     let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
-    let models: Models = read_json(root, "evidence/contract-models.json")?;
+    let models: Models = read_json(root, "evidence/model-results.json")?;
     validate(
         root,
         &requirements,
@@ -299,6 +329,16 @@ fn generate_inner(
         &scenarios,
         &models,
     )?;
+    if release.counts.requirements == 0
+        || release.counts.scenario_oracles == 0
+        || release.counts.requirements != requirements.len()
+        || release.counts.scenario_oracles != scenarios.scenarios.len()
+        || manifest.counts.valid == 0
+        || manifest.counts.invalid == 0
+        || manifest.counts.project == 0
+    {
+        return Err(err("release counts disagree with the reference artefacts"));
+    }
     let evidence_by_id = evidence
         .requirements
         .iter()
@@ -329,18 +369,22 @@ fn generate_inner(
         .collect();
     let mut report = Report {
         format: "orna.traceability.v1".into(),
-        specification_version: VERSION.into(),
+        specification_version: release.version.clone(),
         normative_payloads: normative_payloads(&release.normative_payload_sha256, &requirements)?,
         publication_digests: release.normative_payload_sha256,
         requirements: requirement_traces,
-        named_algorithms: models
-            .results
-            .into_iter()
-            .map(|model| InventoryEntry {
-                logical_id: model.name,
-                status: Status::SpecifiedModelOnly,
-            })
-            .collect(),
+        named_algorithms: {
+            let mut seen = BTreeSet::new();
+            models
+                .results
+                .into_iter()
+                .filter(|model| seen.insert(model.name.clone()))
+                .map(|model| InventoryEntry {
+                    logical_id: model.name,
+                    status: Status::SpecifiedModelOnly,
+                })
+                .collect()
+        },
         schema_profile_members: schema_profile_members(root)?,
         fixture_classes: fixture_classes(&manifest),
         behavioral_scenarios: scenarios
@@ -354,15 +398,15 @@ fn generate_inner(
                 {
                     Status::JustifiedGap
                 } else {
-                    status_from_level(&scenario.evidence_level)
+                    scenario_status(scenario)?
                 };
-                ScenarioTrace {
+                Ok(ScenarioTrace {
                     scenario_id: scenario.id.clone(),
                     requirements: scenario.requirements.clone(),
                     status,
-                }
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         bounded_production_evidence: Vec::new(),
     };
     if let Some(witnesses) = engine_witnesses {
@@ -640,7 +684,8 @@ fn apply_scenario_execution_witnesses(
                 witness.scenario_id()
             ))
         })?;
-        if scenario.evidence_level != "implementation scenario, not executed by an Orna engine"
+        if scenario.evidence_level.as_deref()
+            != Some("implementation scenario, not executed by an Orna engine")
             || !scenario
                 .requirements
                 .iter()
@@ -764,15 +809,10 @@ fn validate(
             *counts.entry(fixture.kind.as_str()).or_insert(0usize) += 1;
             counts
         });
-    if manifest.version != VERSION
-        || manifest.counts.total != manifest.fixtures.len()
+    if manifest.counts.total != manifest.fixtures.len()
         || manifest.counts.valid != fixture_counts.get("valid").copied().unwrap_or(0)
         || manifest.counts.invalid != fixture_counts.get("invalid").copied().unwrap_or(0)
         || manifest.counts.project != fixture_counts.get("project").copied().unwrap_or(0)
-        || manifest.fixtures.len() != 167
-        || fixture_counts.get("valid") != Some(&86)
-        || fixture_counts.get("invalid") != Some(&80)
-        || fixture_counts.get("project") != Some(&1)
         || !unique(manifest.fixtures.iter().map(|f| f.id.as_str()))
         || !unique(manifest.fixtures.iter().map(|f| f.path.as_str()))
     {
@@ -812,10 +852,17 @@ fn validate(
                     fixture.id
                 )));
             }
+            // Bounded-syntax fixtures (evidence_level "Bounded syntax only": final/main,
+            // final/data, final/database) await separate semantic admission for final
+            // row/header contexts, so they may omit resolve and typecheck. Any value they
+            // do state must still be pass.
             "valid"
                 if fixture.expect.get("parse").map(String::as_str) != Some("pass")
-                    || fixture.expect.get("resolve").map(String::as_str) != Some("pass")
-                    || fixture.expect.get("typecheck").map(String::as_str) != Some("pass") =>
+                    || ["resolve", "typecheck"].into_iter().any(|phase| {
+                        let expected = fixture.expect.get(phase).map(String::as_str);
+                        expected != Some("pass")
+                            && !(fixture.is_bounded_syntax() && expected.is_none())
+                    }) =>
             {
                 return Err(err(format!(
                     "valid fixture lacks required pass expectations: {}",
@@ -866,9 +913,9 @@ fn validate(
         .iter()
         .map(|fixture| fixture.path.as_str())
         .collect::<BTreeSet<_>>();
-    if invalid.version != VERSION
+    if invalid.version != manifest.version
         || invalid.count != invalid.fixtures.len()
-        || invalid.fixtures.len() != 80
+        || invalid.count != manifest.counts.invalid
         || metadata_paths.len() != invalid.fixtures.len()
         || metadata_paths != invalid_paths
     {
@@ -900,7 +947,7 @@ fn validate(
             .as_deref()
             .ok_or_else(|| err(format!("expected diagnostic is missing: {}", fixture.id)))?;
         let expected: ExpectedDiagnostic = read_json(root, expected_path)?;
-        if expected.version != VERSION
+        if expected.version != manifest.version
             || expected.fixture != fixture.path
             || expected.failing_phase != metadata.failing_phase
             || expected.failing_phase != fixture.failing_phase.as_deref().unwrap_or_default()
@@ -915,24 +962,58 @@ fn validate(
             )));
         }
     }
-    if scenarios.version != VERSION
-        || scenarios.count != 144
-        || scenarios.scenarios.len() != 144
+    if scenarios.version != manifest.version
+        || scenarios.count != scenarios.scenarios.len()
         || !unique(scenarios.scenarios.iter().map(|s| s.id.as_str()))
     {
         return Err(err("scenario count or identifiers are invalid"));
     }
     for scenario in &scenarios.scenarios {
-        if scenario.requirements.is_empty() || scenario.evidence_level.is_empty() {
+        if scenario.requirements.is_empty()
+            || scenario
+                .implementation_status
+                .as_deref()
+                .is_none_or(str::is_empty)
+            || scenario.evidence_level.as_deref().is_some_and(str::is_empty)
+        {
             return Err(err(
-                "scenario has an empty requirement link or evidence field",
+                "scenario lacks requirement links, implementation_status, or a non-empty evidence level",
             ));
         }
     }
-    if models.results.is_empty() || !unique(models.results.iter().map(|m| m.name.as_str())) {
+    let mut result_counts = BTreeMap::new();
+    for model in &models.results {
+        if model.name.is_empty() || !model.passed {
+            return Err(err("named algorithm result is empty or not passing"));
+        }
+        *result_counts.entry(model.name.as_str()).or_insert(0usize) += 1;
+    }
+    if models.results.is_empty()
+        || result_counts.iter().any(|(name, count)| {
+            *count > 1 && (!EXACT_DUPLICATE_MODEL_RESULTS.contains(name) || *count != 2)
+        })
+    {
         return Err(err("named algorithm inventory is invalid"));
     }
     Ok(())
+}
+
+/// Scenario status for implementation-scenario oracles. A scenario with an
+/// evidence level is classified by it; a scenario without one must be
+/// `not-executed` and is a justified gap. Anything else is rejected.
+fn scenario_status(scenario: &Scenario) -> Result<Status> {
+    let implementation_status = scenario
+        .implementation_status
+        .as_deref()
+        .ok_or_else(|| err(format!("scenario lacks implementation_status: {}", scenario.id)))?;
+    match scenario.evidence_level.as_deref() {
+        Some(level) => Ok(status_from_level(level)),
+        None if implementation_status == "not-executed" => Ok(Status::JustifiedGap),
+        None => Err(err(format!(
+            "scenario has no evidence_level and is not not-executed: {}",
+            scenario.id
+        ))),
+    }
 }
 fn normative_payloads(
     digests: &BTreeMap<String, String>,
@@ -967,6 +1048,9 @@ fn normative_payloads(
         };
         validate_payload(&payload)?;
         payloads.push(payload);
+    }
+    if payloads.is_empty() {
+        return Err(err("normative payload report is incomplete"));
     }
     if payloads.len() != NORMATIVE_PAYLOAD_COUNT {
         return Err(err("normative payload report is incomplete"));
@@ -1194,7 +1278,11 @@ mod tests {
     #[test]
     fn covers_every_normative_release_payload() {
         let report = generate(corpus()).expect("valid corpus");
-        assert_eq!(report.normative_payloads.len(), NORMATIVE_PAYLOAD_COUNT);
+        let release: Release = read_json(&corpus(), "release.json").expect("vendored release");
+        assert_eq!(
+            report.normative_payloads.len(),
+            release.normative_payload_sha256.len()
+        );
         assert_eq!(
             report
                 .normative_payloads
@@ -1495,7 +1583,7 @@ mod tests {
         value["normative_payload_sha256"]
             .as_object_mut()
             .expect("digest inventory")
-            .remove("profiles/key-path.md");
+            .remove("profiles/live-protocol.md");
         fs::write(&release, serde_json::to_vec(&value).expect("json")).expect("write");
         assert!(generate(&root).is_err());
         let _ = fs::remove_dir_all(root);

@@ -1,0 +1,1048 @@
+{
+  "scope": "Publication consistency only",
+  "passed": true,
+  "checks": 208,
+  "results": [
+    {
+      "name": "json provenance/scenario-dispositions.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json provenance/requirement-changes.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json provenance/inputs.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/requirement-evidence.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/path-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/final-scenarios.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/float-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/scenarios.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/invalid-metadata.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/media-fixtures.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/numeric-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/legacy-scenarios.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/protocol-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/final-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/conformance-manifest.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/snapshot-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/requirements.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/project-manifest.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/value-vectors.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/conformance-1.1.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/database.schema.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/media-1.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/live-messages.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/coordinates.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/session.schema.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json profiles/store-3.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json evidence/checks.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json evidence/protocol-models.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json evidence/syntax-probe.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json evidence/group-results.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json evidence/model-results.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json source/manifest.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json api/additions-1.1.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json api/retired.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json api/sys.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/assert-owner-type-mismatch.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/top-level-on.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/top-level-expression.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/assignment-expression.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/reserved-std.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-sys-storage-call.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/module-single-table-assertion.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/currency-static-symbol.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/effectful-display.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/range-key-overlap-magic.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-top-level-impl.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/missing-required-field.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/mutate-sys-commit.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/incompatible-dimensions.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/question-on-int.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/transaction-block.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-constraints-block.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-assert-self-pipe.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/assert-empty.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-store.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/record-punning.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/unparenthesized-lambda-stage.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/money-float.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-ingest.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-return-arrow.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/module-zero-table-assertion.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/relation-equality.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-assert-else.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/calendar-bucket-no-zone.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-currency-declaration.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/currency-addition.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-field-unique.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-tryfrom.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-result.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/key-update.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/computed-field-effect.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-field-check.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/reserved-sys.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/row-declaration.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/affine-addition.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/float-key.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/affine-sum.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/float-money-implicit.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/assert-effectful-table.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/rekey-auto-id.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-pipe-lambda.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-failure-replay-method.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/question-coalesce-adjacent.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-failure-resolve-method.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-postfix-question.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-opaque.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-ensure.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/implicit-conversion-chain.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-log.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/computed-field-update.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-stream-skip-method.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-refined-where.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/unknown-field.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-fact.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/computed-field-insert.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-assert-owner-pipe.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-colon-bound.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/static-protocol-function.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-match.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/two-durable-sources.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-sys-runtime.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/comparison-chain.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-checkpoint-reset-method.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/unsafe-row-key-repeat.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-view.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/assert-missing-semicolon.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-var.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/secret-display.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-stream-retry-method.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/duplicate-key.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/cross-database-write.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/wrong-field-type.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-empty-closure.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/legacy-assert-pipe-bang.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json tests/expected-diagnostics/ambiguous-consumer.orna.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json examples/blob-library/manifest.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "json examples/reference/expectations.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "requirement uniqueness",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "one repository writer",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter scope",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter concepts",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter source-modules",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter lexical",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter types",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter expressions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter tables",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter relations",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter standard-library",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter execution",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter streams",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter checkpoints",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter presentation",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter pages",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter system",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter administration",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter repl",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter cli",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter repository",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter embedded",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter branching",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter publication",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter storage",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter git-history",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter evolution",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter security",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter secrets",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter serving",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter formats",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter protocol",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter blob-values",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter blob-storage",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter ingestion",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter source-apps",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter vfs",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter media-policy",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter upgrade",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter examples",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter conformance",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter diagnostics",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter system-reference",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter grammar",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "chapter references",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count singletons",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count opaque_identifiers",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count reference_aliases",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count value_types",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count enums",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count relations",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count functions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API count failure_codes",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "unique API functions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no placement functions",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "one StorageProfile",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "annotation APIs",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "API signature and field type closure",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "schema database.schema.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "schema session.schema.json",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "header accepts only format3",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "header rejects extra key",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "engine evidence honest",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "scenario count",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "scenario uniqueness",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "scenario requirement closure",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "no old profile files",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "legacy wire registry unchanged",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "legacy grammar unchanged",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "legacy numeric vectors unchanged",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax verify_release.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax write_vectors.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax check_float_vectors.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax value_model.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax package_release.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax build_publication.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax check_path_vectors.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax model_checks.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax generate_api_reference.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax git_model.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax final_model.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax blob_model.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax validate.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax syntax_probe.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax protocol_model.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "python syntax run_checks.py",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "HTML IDs unique",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "HTML local links",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "entry/profile local links",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "orchestrator exact models",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no required MIME registry in .orna",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "errors": []
+}

@@ -1,0 +1,4 @@
+pub table Contact(id: Str) {
+    name: Str,
+    email: Str?,
+}

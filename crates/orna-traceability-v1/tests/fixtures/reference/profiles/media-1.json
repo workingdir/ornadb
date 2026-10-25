@@ -1,0 +1,167 @@
+{
+  "profile": "MIME-1",
+  "version": 1,
+  "maximum_media_type_bytes": 1024,
+  "maximum_parameters": 32,
+  "maximum_suffix_bytes": 32,
+  "unknown_preferred": "bin",
+  "aliases": {
+    "application/javascript": "text/javascript",
+    "application/ecmascript": "text/javascript",
+    "text/ecmascript": "text/javascript",
+    "audio/x-wav": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/x-flac": "audio/flac"
+  },
+  "entries": {
+    "application/gzip": {
+      "preferred": "gz",
+      "compatible": [
+        "gz",
+        "tar.gz",
+        "tgz"
+      ]
+    },
+    "application/json": {
+      "preferred": "json",
+      "compatible": [
+        "json"
+      ]
+    },
+    "application/octet-stream": {
+      "preferred": "bin",
+      "compatible": [
+        "bin"
+      ]
+    },
+    "application/pdf": {
+      "preferred": "pdf",
+      "compatible": [
+        "pdf"
+      ]
+    },
+    "application/wasm": {
+      "preferred": "wasm",
+      "compatible": [
+        "wasm"
+      ]
+    },
+    "application/zip": {
+      "preferred": "zip",
+      "compatible": [
+        "zip"
+      ]
+    },
+    "audio/flac": {
+      "preferred": "flac",
+      "compatible": [
+        "flac"
+      ]
+    },
+    "audio/mp4": {
+      "preferred": "m4a",
+      "compatible": [
+        "m4a",
+        "m4b",
+        "mp4",
+        "mpg4"
+      ]
+    },
+    "audio/mpeg": {
+      "preferred": "mp3",
+      "compatible": [
+        "mp1",
+        "mp2",
+        "mp3"
+      ]
+    },
+    "audio/ogg": {
+      "preferred": "ogg",
+      "compatible": [
+        "oga",
+        "ogg",
+        "opus"
+      ]
+    },
+    "audio/wav": {
+      "preferred": "wav",
+      "compatible": [
+        "wav"
+      ]
+    },
+    "image/gif": {
+      "preferred": "gif",
+      "compatible": [
+        "gif"
+      ]
+    },
+    "image/jpeg": {
+      "preferred": "jpg",
+      "compatible": [
+        "jpe",
+        "jpeg",
+        "jpg"
+      ]
+    },
+    "image/png": {
+      "preferred": "png",
+      "compatible": [
+        "png"
+      ]
+    },
+    "image/svg+xml": {
+      "preferred": "svg",
+      "compatible": [
+        "svg"
+      ]
+    },
+    "image/webp": {
+      "preferred": "webp",
+      "compatible": [
+        "webp"
+      ]
+    },
+    "text/css": {
+      "preferred": "css",
+      "compatible": [
+        "css"
+      ]
+    },
+    "text/javascript": {
+      "preferred": "js",
+      "compatible": [
+        "js",
+        "mjs"
+      ]
+    },
+    "text/plain": {
+      "preferred": "txt",
+      "compatible": [
+        "text",
+        "txt"
+      ]
+    },
+    "video/mp4": {
+      "preferred": "mp4",
+      "compatible": [
+        "m4v",
+        "mp4"
+      ]
+    },
+    "video/webm": {
+      "preferred": "webm",
+      "compatible": [
+        "webm"
+      ]
+    }
+  },
+  "unknown_policy": "explicit safe hint accepted; no execution or validation claim",
+  "default_hint_canonicalization": "a hint equal to the preferred suffix is stored as null",
+  "parameter_rules": "RFC9110 token/quoted-string; reject controls and non-ASCII; lowercase essence/names/charset; reject duplicate parameter names; sort names; quote only values that are not tokens",
+  "normative_model": "tools/final_model.py",
+  "sources": [
+    "https://www.rfc-editor.org/rfc/rfc9110.html",
+    "https://www.rfc-editor.org/rfc/rfc9239.html",
+    "https://www.iana.org/assignments/media-types/audio/mpeg"
+  ]
+}

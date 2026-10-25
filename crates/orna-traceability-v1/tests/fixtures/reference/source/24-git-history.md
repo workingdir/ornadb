@@ -1,59 +1,39 @@
 # 24. Git history, remotes and partial clones {#git-history}
 
-## Complete logical commits
 
-**ORNA-GIT-001** A commit MUST logically name the complete database snapshot, including all segment objects it references.
+**ORNA-GIT-001** A committed snapshot MUST identify all required local source, rows and content through native Git reachability and all dependencies through exact gitlinks/recorded origins.
+**ORNA-GIT-002** Partial clones MAY defer blob payloads using ordinary filters and promisor remotes; unknown missing objects MUST be distinguished from promised objects.
+**ORNA-GIT-003** A successful full/offline export MUST include all selected snapshot closure and recursive pinned dependencies, not just a pointer-only clone or mounted text files.
+**ORNA-GIT-004** Fetch/push/clone MUST preserve Git compatibility and never require LFS to retrieve required content.
+**ORNA-GIT-005** Sparse checkout MUST control materialized paths only; it MUST NOT be presented as an availability or confidentiality boundary.
 
-**ORNA-GIT-002** A partial clone MAY omit local copies of promised blobs while preserving their object IDs and reachability.
+## Lazy reads
 
-**ORNA-GIT-003** Laziness is a local materialization property, not permission to create incomplete logical commits.
+Use blobless no-checkout cloning where the remote supports it, then fetch
+needed metadata/rows/ranges in bounded batches. A server can refuse filtering;
+the command MUST report fallback/estimated scope before silently transferring
+an enormous repository. Native Git transfers complete objects, not sub-object
+byte ranges. Read-ahead is separately bounded and observable.
 
-## Partial clone
+**ORNA-GIT-006** Metadata-only queries and updates MUST read zero media payload bytes; metadata objects and tree traffic MUST be accounted separately.
+**ORNA-GIT-007** A full mirror of the superproject is not a complete submodule copy; export verification MUST recursively account for dependency object databases.
+**ORNA-GIT-008** Refs required for allocator/consumer continuity MUST be synchronized with their existing ordering/validation rules; private edit/capture pins MUST NOT be exposed by ordinary push.
+**ORNA-GIT-009** Git host size/push/object limits MUST be reported as deployment constraints. Native format compatibility MUST NOT be advertised as unlimited GitHub storage.
 
-Recommended clone behavior for large repositories:
+## Retention and security
 
-```bash
-git clone --filter=blob:none --no-checkout <remote>
-```
+A metadata edit does not duplicate a recording. Re-encoding all its bytes can
+cost another full recording. Chunk reuse is byte reuse, not semantic media
+compression. Old reachable ancestry keeps its content; deleting the current
+row does not erase its history. History rewrite/export-to-new-root is explicit,
+reviewed and never a background prune policy.
 
-followed by selective checkout/materialization.
+**ORNA-GIT-010** Collection MUST preserve content reachable from retained commits, local pins, pending accepted changes, open pins and unfinished recovery journals.
+**ORNA-GIT-011** Repository clone credentials MUST be treated as access to repository content; VFS path hiding, namespaces or filtered clone are not row-level permissions.
+**ORNA-GIT-012** Offline failure MUST name unavailable scope without exposing secrets; it MUST NOT silently use a current host file or another snapshot.
 
-**ORNA-GIT-004** A partial-clone-aware implementation MUST distinguish sparse checkout (working-tree paths) from partial clone (locally present Git objects).
-
-**ORNA-GIT-005** Query planning SHOULD use committed manifests to identify required segment blobs before fetching them.
-
-**ORNA-GIT-006** Missing promised objects MAY be fetched lazily from configured promisor remotes.
-
-## Large Object Promisors
-
-Git's Large Object Promisor work is relevant but not assumed universally available.
-
-**ORNA-GIT-007** Orna MUST NOT require github.com or any specific host to support an external large-object promisor.
-
-**ORNA-GIT-008** A self-hosted implementation MAY place large Git blobs on a separate promisor remote while the main remote serves commits, trees and normal blobs.
-
-## Remotes
-
-Normal Git semantics apply:
-
-```bash
-orna remote add origin server:~/git/example.git
-orna push -u origin main
-```
-
-**ORNA-REMOTE-001** Moving a repository to another host MUST use ordinary remote, push and set-url operations rather than requiring commit conversion.
-
-**ORNA-REMOTE-002** Orna MUST NOT invent a `remote migrate` command for behavior already expressible by Git.
-
-**ORNA-REMOTE-003** Orna-aware `clone`, `fetch`, `pull` and `push` MUST synchronize required internal refs under `refs/orna/*` in addition to ordinary requested branch/tag refs.
-
-**ORNA-REMOTE-004** Before a branch snapshot whose allocator watermark depends on an internal allocator ref becomes visible on a remote, that remote's allocator ref MUST be advanced to at least that watermark. An implementation MAY use an atomic multi-ref update; otherwise it advances the allocator ref first. A failed later branch update may create gaps but MUST NOT permit ID reuse.
-
-**ORNA-REMOTE-005** A repository transferred with plain Git remains readable. If required `refs/orna/*` continuity is absent or stale, Orna MUST diagnose the condition before allocating IDs or claiming checkpoint/allocator continuity; it MUST NOT silently guess.
-
-## No rolling-window history
-
-**ORNA-GIT-009** Orna MUST NOT silently delete old table rows from HEAD merely because older commits retain them.
-
-**ORNA-GIT-010** Retention or history rewriting MUST be explicit and destructive behavior MUST be clearly diagnosed.
-
+Complete copy algorithm: freeze/pin a source or CWD root; enumerate its native
+closure and dependency commits; hydrate/verify all selected objects; create a
+portable archive/mirror plus explicit dependency map; run an independent
+read-only reconstruction with the original remote disabled. No historical
+application execution is required to recover typed records or bytes.

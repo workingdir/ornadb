@@ -1,0 +1,1 @@
+pub fn hottest(values: [Float<C>]) = values | max;

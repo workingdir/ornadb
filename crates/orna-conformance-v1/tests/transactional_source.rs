@@ -87,8 +87,8 @@ fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
     )));
 
     assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
 }
@@ -239,8 +239,8 @@ fn parsed_relation_first_reads_canonical_candidate_rows_and_never_publishes_on_f
         r#"Note.insert({ id: 2, text: "two" }); Note.insert({ id: 1, text: "one" }); assert (Note.first() ?? Note.insert({ id: 99, text: "fallback" })).id == 1; assert false;"#,
     ));
     assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(
         rolled_back.committed_row("Note", &Value::int(1.into())),
@@ -486,8 +486,8 @@ fn parsed_filter_count_failure_rolls_back_candidate_rows() {
     )));
 
     assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
@@ -530,8 +530,8 @@ fn parsed_pipeline_count_read_your_writes_succeeds_before_a_distinct_failure_rol
     ));
 
     assert!(matches!(
-        outcome,
-        StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        &outcome,
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(runtime.committed_row("Note", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Note", &Value::int(8.into())), None);
@@ -606,8 +606,8 @@ fn parsed_map_window_count_preserves_order_before_late_failure_rolls_back() {
     let outcome = runtime.execute_source(&unit);
     assert!(
         matches!(
-            outcome,
-            StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+            &outcome,
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
         ),
         "late assertion should fail after relation observation: {outcome:?}"
     );
@@ -855,19 +855,21 @@ fn relation_predicate_folds_preserve_paired_optional_values() {
     )));
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    // Tuples are tag 60015 over an ordered array (spec 29-formats).
+    let tuple = |values: Vec<Raw>| Raw::Tag(60015, Box::new(Raw::Array(values)));
     let expected_keys = [
-        Raw::Array(vec![
+        tuple(vec![
             Raw::Null,
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+            tuple(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
         ]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+        tuple(vec![
+            tuple(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
             Raw::Null,
         ]),
-        Raw::Array(vec![Raw::Null, Raw::Null]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
-            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        tuple(vec![Raw::Null, Raw::Null]),
+        tuple(vec![
+            tuple(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            tuple(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
         ]),
     ];
     for (index, expected_key) in expected_keys.iter().enumerate() {
@@ -1549,7 +1551,7 @@ fn ordinary_function_decimal_quantifier_false_results_roll_back_candidate_rows()
     let every_outcome = every_runtime.execute_source(&every_unit);
     assert!(
         matches!(&every_outcome, StageOutcome::Failed(diagnostic)
-            if diagnostic.code() == "ORNA-EVAL-ASSERT"),
+            if diagnostic.code() == "ORNA-A091-008"),
         "false every result did not fail its assertion: {every_outcome:?}"
     );
     for id in [1, 2] {
@@ -1572,7 +1574,7 @@ fn ordinary_function_decimal_quantifier_false_results_roll_back_candidate_rows()
     let exists_outcome = exists_runtime.execute_source(&exists_unit);
     assert!(
         matches!(&exists_outcome, StageOutcome::Failed(diagnostic)
-            if diagnostic.code() == "ORNA-EVAL-ASSERT"),
+            if diagnostic.code() == "ORNA-A091-008"),
         "false exists result did not fail its assertion: {exists_outcome:?}"
     );
     assert_eq!(
@@ -1711,7 +1713,7 @@ fn parsed_relation_map_flat_map_preserves_order_and_count_before_rollback() {
 
     assert!(matches!(
         &outcome,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2] {
         assert_eq!(
@@ -1767,7 +1769,7 @@ fn parsed_decimal_relation_distinct_rolls_back_rows_after_later_failure() {
 
     assert!(matches!(
         &outcome,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in 1..=4 {
         assert_eq!(
@@ -1837,7 +1839,7 @@ fn parsed_decimal_reversed_filtered_count_observes_candidate_writes_and_rolls_ba
     ));
     assert!(matches!(
         &failed,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(
         rolled_back.committed_row("Reading", &Value::int(2.into())),
@@ -2029,7 +2031,7 @@ fn parsed_decimal_filtered_first_observes_candidate_writes_and_rolls_back_on_fai
     ));
     assert!(matches!(
         &failed,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2, 99] {
         assert_eq!(
@@ -2143,7 +2145,7 @@ fn parsed_decimal_reversed_filtered_first_observes_candidate_writes_and_rolls_ba
     ));
     assert!(matches!(
         &failed,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     for id in [1, 2, 99] {
         assert_eq!(
@@ -2487,7 +2489,7 @@ fn parsed_decimal_primary_key_delete_rolls_back_when_a_later_failure_occurs() {
     assert!(
         matches!(
             &outcome,
-            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
         ),
         "later source failure did not roll back Decimal delete: {outcome:?}"
     );
@@ -2644,7 +2646,7 @@ fn parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-S021-TYPE"
+                if diagnostic.code() == "E3002"
         ),
         "Decimal update key patch did not fail during source admission: {outcome:?}"
     );
@@ -2798,7 +2800,7 @@ fn parsed_decimal_primary_key_upsert_reads_candidate_rows_and_rolls_back_on_fail
     ));
     assert!(matches!(
         &failed,
-        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT"
+        StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008"
     ));
     assert_eq!(
         rolled_back.committed_row("Reading", &key),
@@ -2870,10 +2872,13 @@ fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
         "#,
     ));
 
+    // E2001 for a non-Decimal literal in a Decimal field is mapped BY ANALOGY to the spec's
+    // tests/expected-diagnostics/wrong-field-type.orna.json (primary_diagnostic E2001, field type
+    // mismatch). No Decimal-specific spec fixture was found.
     assert!(
         matches!(
             &outcome,
-            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "E2001"
         ),
         "invalid Decimal component did not fail during source admission: {outcome:?}"
     );
