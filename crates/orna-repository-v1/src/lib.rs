@@ -10672,9 +10672,26 @@ mod tests {
     fn git_discovery_symlinked_worktree_does_not_fall_through_to_real_parent() {
         let root = tempfile::tempdir().unwrap();
         let child = corrupt_child_under_healthy_parent(root.path());
-        let outside = root.path().join("outside");
-        fs::create_dir_all(&outside).unwrap();
-        let link = outside.join("L");
+        let healthy = child.parent().unwrap();
+        let init = Command::new("git")
+            .current_dir(healthy)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "healthy",
+            ])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let plain = root.path().join("x");
+        fs::create_dir_all(&plain).unwrap();
+        let link = plain.join("L");
         std::os::unix::fs::symlink(&child, &link).unwrap();
         assert!(!head_probe_succeeds_bound(&link));
     }
