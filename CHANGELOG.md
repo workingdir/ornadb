@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna mount status --json` now reports `writable`, `read_only`, `unresolved_drafts`
+  (each `{path, detail}`), and `draft_error`. The record of a `--cwd` mount now
+  stores `read_only false`, matching the FUSE session that was already writable;
+  the record and status previously reported it read-only. Records written by this
+  build carry a `read_only` value that older binaries reject as invalid (RecordInvalid).
+  The `--read-only` flag from profiles/vfs-1.md:20 is not implemented; every `--cwd`
+  mount is writable.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
