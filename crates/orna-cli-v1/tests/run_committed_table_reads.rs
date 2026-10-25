@@ -131,7 +131,10 @@ fn table_scan_orders_committed_rows_by_ascending_primary_key() {
     let directory = committed_rows_inserted_out_of_order();
     let first = orna(
         directory.path(),
-        &["repl", "main.music | map(row => row.id) | first() ?? \"none\""],
+        &[
+            "repl",
+            "main.music | map(row => row.id) | first() ?? \"none\"",
+        ],
     );
     assert_success(&first, "first committed row");
     assert!(
@@ -141,7 +144,10 @@ fn table_scan_orders_committed_rows_by_ascending_primary_key() {
     );
     let second = orna(
         directory.path(),
-        &["repl", "main.music | map(row => row.id) | drop(1) | first() ?? \"none\""],
+        &[
+            "repl",
+            "main.music | map(row => row.id) | drop(1) | first() ?? \"none\"",
+        ],
     );
     assert_success(&second, "second committed row");
     assert!(
@@ -189,7 +195,10 @@ fn table_scan_orders_int_keys_numerically() {
     );
     let second = orna(
         directory.path(),
-        &["repl", "main.nums | map(row => row.n) | drop(1) | first() ?? 0"],
+        &[
+            "repl",
+            "main.nums | map(row => row.n) | drop(1) | first() ?? 0",
+        ],
     );
     assert_success(&second, "second Int key");
     assert!(
@@ -360,4 +369,50 @@ fn invoke_reads_committed_rows_while_runtime_owner_lock_is_held() {
         "invoke did not complete under a held lock: {}",
         combined(&output)
     );
+}
+
+const STOCK_SOURCE: &str = "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n\
+pub fn main() = Stock | count();\n";
+
+/// ORNA-ORDER-001 over a composite key: rows scan by ascending canonical key
+/// tuple (location, then sku). Inserted b/x, a/y, a/x, so the scan order is
+/// a/x, a/y, b/x.
+#[test]
+fn table_scan_orders_composite_keys_by_tuple() {
+    let (directory, _repository, _relation) =
+        format3::format3_repository_for_table(STOCK_SOURCE, "Stock");
+    for row in [
+        "main.Stock.insert({ location: \"b\", sku: \"x\", quantity: 1 })",
+        "main.Stock.insert({ location: \"a\", sku: \"y\", quantity: 2 })",
+        "main.Stock.insert({ location: \"a\", sku: \"x\", quantity: 3 })",
+    ] {
+        assert_success(&orna(directory.path(), &["repl", row]), "REPL seed insert");
+    }
+    assert_success(
+        &orna(directory.path(), &["publish", "--message", "seed"]),
+        "publish seeded rows",
+    );
+    let cases = [
+        (
+            "main.Stock | map(row => row.sku) | first() ?? \"none\"",
+            "\"x\" : Str",
+        ),
+        (
+            "main.Stock | map(row => row.sku) | drop(1) | first() ?? \"none\"",
+            "\"y\" : Str",
+        ),
+        (
+            "main.Stock | map(row => row.location) | drop(2) | first() ?? \"none\"",
+            "\"b\" : Str",
+        ),
+    ];
+    for (expression, expected) in cases {
+        let output = orna(directory.path(), &["repl", expression]);
+        assert_success(&output, expression);
+        assert!(
+            combined(&output).contains(expected),
+            "{expression} must yield {expected}: {}",
+            combined(&output)
+        );
+    }
 }
