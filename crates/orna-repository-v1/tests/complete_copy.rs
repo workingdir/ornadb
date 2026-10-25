@@ -343,6 +343,58 @@ fn complete_copy_carries_nested_pins_and_restores_them_offline() {
     );
 }
 
+/// HIGH-1 regression at the real entry point: the process working directory is
+/// the parent of a relative dependency directory. Run in a child process so the
+/// process-global working directory cannot race sibling tests.
+#[test]
+fn complete_copy_relative_dependency_does_not_fall_through_to_the_parent() {
+    const CHILD: &str = "ORNA_COMPLETE_COPY_RELATIVE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = PathBuf::from(std::env::var_os(CHILD).expect("child root"));
+        let project = root.join("library");
+        let dependency = root.join("std-dependency");
+        let archive = root.join("relative-archive");
+        let repository = Repository::discover(&project).expect("discover superproject");
+        let sources = [DependencySource {
+            path: "deps/std".to_owned(),
+            directory: PathBuf::from("std-dependency"),
+        }];
+        std::env::set_current_dir(&root).expect("enter parent directory");
+        let manifest = export_complete_copy(&repository, "HEAD", &archive, &sources)
+            .expect("export with a relative dependency directory");
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].path, "deps/std");
+        assert_eq!(
+            manifest.dependencies[0].commit,
+            git_stdout(&dependency, &["rev-parse", "HEAD"])
+        );
+        return;
+    }
+
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(
+        &project,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+    let status = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("complete_copy_relative_dependency_does_not_fall_through_to_the_parent")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD, root.path())
+        .status()
+        .expect("run child export");
+    assert!(status.success(), "relative dependency export failed: {status}");
+}
+
 #[test]
 fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     let root = TempDir::new().expect("create fixture root");

@@ -1654,6 +1654,10 @@ fn encode_oid(digest: &[u8]) -> String {
 /// refs, index, and worktree are never written, so an export cannot move a
 /// branch, disturb an edit, or create a pin (ORNA-GIT-008).
 fn write_bundle(source: &Path, commit: &str, bundle: &Path) -> Result<(), CompleteCopyError> {
+    // The source is also passed to `git fetch` as an argument while Git runs
+    // inside it, so a relative path would be resolved twice. Make it absolute once.
+    let source = std::path::absolute(source)?;
+    let source = source.as_path();
     // Fetching a temporary branch into the staging repository both creates the
     // ref Git needs for bundling and pulls any objects the source's own
     // database holds only through a promisor or an alternate.
