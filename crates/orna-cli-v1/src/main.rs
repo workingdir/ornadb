@@ -2217,10 +2217,10 @@ fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    // Single-module projects that import pinned standard modules keep the
-    // authority route only when they need publication metadata; the authority
-    // admits only the user module and cannot load standard bodies. Pure ones take
-    // the bounded path below, which loads those bodies through the verified profile.
+    // Single-module projects that import pinned standard modules take the
+    // authority route only when they need publication metadata. Every other
+    // standard-importing project takes the bounded path below, which loads the
+    // reachable standard bodies through the verified profile.
     let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];

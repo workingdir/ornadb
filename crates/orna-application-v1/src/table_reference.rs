@@ -24,7 +24,7 @@ pub(crate) fn entry_references_tables(
     entry: &str,
     tables: &BTreeSet<&str>,
 ) -> bool {
-    if !functions.contains_key(entry) {
+    if functions.get_entry(entry).is_none() {
         return true;
     }
     let mut pending = vec![entry];
@@ -33,7 +33,7 @@ pub(crate) fn entry_references_tables(
         if !visited.insert(name) {
             continue;
         }
-        let Some(function) = functions.get(name) else {
+        let Some(function) = functions.get_entry(name) else {
             continue;
         };
         let mut identifiers = BTreeSet::new();
@@ -44,13 +44,13 @@ pub(crate) fn entry_references_tables(
         {
             return true;
         }
-        for key in functions.keys() {
-            if !visited.contains(key.as_str())
+        for key in functions.visible_names() {
+            if !visited.contains(key)
                 && identifiers
                     .iter()
                     .any(|identifier| names_function(key, identifier))
             {
-                pending.push(key.as_str());
+                pending.push(key);
             }
         }
     }
