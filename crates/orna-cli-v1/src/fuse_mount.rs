@@ -1894,15 +1894,13 @@ pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
 
 /// The unresolved drafts of a live mount, one `path<TAB>state` line each, for
 /// an unmount refusal that names what blocks it (W15-03).
-pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, String> {
+pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
     const NAME: &str = "user.orna.unresolved-draft-list";
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])
-        .map_err(|error| format!("could not list Orna mount drafts: {error}"))?;
+    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])?;
     let mut value = vec![0_u8; length];
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)
-        .map_err(|error| format!("could not list Orna mount drafts: {error}"))?;
+    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)?;
     value.truncate(length);
-    String::from_utf8(value).map_err(|_| "Orna mount returned an invalid draft list".to_owned())
+    String::from_utf8(value).map_err(|_| rustix::io::Errno::IO)
 }
 
 /// Stops a live mount from accepting edits before a stop-time unmount. A mount
