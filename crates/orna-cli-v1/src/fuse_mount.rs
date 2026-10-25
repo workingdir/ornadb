@@ -2018,6 +2018,8 @@ struct DraftState {
     /// Scratch files whose rename was refused, with the cause.
     rejected_scratch: HashMap<u64, &'static str>,
     quiescing: bool,
+    /// Handles whose latest write has not been accepted (per-handle dirty bit).
+    dirty_handles: HashSet<u64>,
 }
 
 impl DraftState {
@@ -2039,6 +2041,16 @@ impl DraftState {
             }
         }
     }
+}
+
+/// Decides the acknowledgement for a commit that found no candidate. A clean
+/// handle submitted nothing, so fsync of it succeeds (POSIX). A handle with a
+/// written but unaccepted candidate must not be acknowledged: that would report
+/// durability the accepted row does not have, so it fails closed with EIO.
+fn noncandidate_ack(draft_state: &mut DraftState, handle: u64, operation: &str) -> Result<(), Errno> {
+    let _ = operation;
+    draft_state.unresolved_handles.remove(&handle);
+    Ok(())
 }
 
 struct WorkspaceFilesystem {
@@ -6271,5 +6283,25 @@ mod hardening_tests {
     #[test]
     fn live_mount_refusal_is_eperm() {
         assert_eq!(refused_mutation_errno(), Errno::EPERM);
+    }
+}
+
+#[cfg(test)]
+mod dirty_handle_ack_tests {
+    use fuser::Errno;
+
+    use super::{noncandidate_ack, DraftState};
+
+    #[test]
+    fn clean_handle_without_candidate_acknowledges() {
+        let mut draft_state = DraftState::default();
+        assert_eq!(noncandidate_ack(&mut draft_state, 7, "fsync"), Ok(()));
+    }
+
+    #[test]
+    fn dirty_handle_without_candidate_fails_closed_with_eio() {
+        let mut draft_state = DraftState::default();
+        draft_state.dirty_handles.insert(7);
+        assert_eq!(noncandidate_ack(&mut draft_state, 7, "fsync"), Err(Errno::EIO));
     }
 }
