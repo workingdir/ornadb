@@ -24,11 +24,16 @@ been published.
   This covers Blob write-open, Blob unlink and same-row rename, create in a
   table directory or in a row with a non-blob name, unlink of a row's
   `data.orna`, rename with flags, rename to a name other than the row's
-  `data.orna` or Blob field, and rename of a non-temporary node. A rename across
-  rows returns `EXDEV`. `EROFS` is reserved for the kernel read-only
-  historical mount (`mount --at`), which never reaches these handlers.
-  Path-truncate of a Blob returns `EPERM` by code inspection only; no test covers
-  it yet. Zero-length and sparse-hole Blob coverage remains open.
+  `data.orna` or Blob field, rename of a non-temporary node, and rename across
+  rows. A cross-row rename is `EPERM`, not `EXDEV`: `EXDEV` would make `mv` and
+  `cp` fall back to copy-then-unlink, which writes the bytes into the other row
+  before the refused source unlink leaves the original behind. `EROFS` is
+  reserved for the kernel read-only historical mount (`mount --at`), which never
+  reaches these handlers. Rename with flags, rename of a row's `data.orna`, and
+  path-truncate of a Blob are covered by `live_mount_structural_refusals_are_eperm`.
+  Rename with flags uses `EPERM` where rename(2) would use `EINVAL`; `EPERM`
+  follows the unsupported-mutation rule (41-vfs.md:103-105). Zero-length and
+  sparse-hole Blob coverage remains open.
 - A malformed format-3 native graph now reports a typed `GraphMalformed` cause
   under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
   faults such as overlapping child ranges, broken counts, over-wide fanout, and

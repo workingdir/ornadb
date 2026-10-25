@@ -3185,7 +3185,7 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         if parent != newparent {
-            reply.error(Errno::EXDEV);
+            reply.error(Errno::EPERM);
             return;
         }
         let mut draft_state = self
@@ -3267,7 +3267,7 @@ impl Filesystem for WorkspaceFilesystem {
                     // scratch captured its baseline; the scratch still targets
                     // the same row and keeps its own baseline (ORNA-VFS-011).
                     if !same_row(&save, destination_save) {
-                        reply.error(Errno::EXDEV);
+                        reply.error(Errno::EPERM);
                         return;
                     }
                 }
