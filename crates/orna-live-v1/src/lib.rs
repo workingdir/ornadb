@@ -5121,10 +5121,15 @@ fn validate_result_response(
 /// Validates a sync Eval/Event response after the application has run.
 ///
 /// The application publishes its effects before the host validates the
-/// envelope, so a response that cannot be validated must not become a generic
-/// failure a retry could mistake for "nothing happened". It is retained as
-/// `RetainedWithoutValue` instead. Fingerprint mismatches keep their own
-/// correlated diagnostic.
+/// envelope. Every validation failure after that point (encoding, request or
+/// watch correlation, non-Result shape, and fingerprint mismatch) is retained
+/// as `RetainedWithoutValue`. Nothing that has already been executed may look
+/// like "not executed": the terminal must not be a generic failure or a
+/// correlated `wire.request_mismatch` diagnostic that a client could mistake
+/// for a pre-dispatch rejection and resend under a fresh request ID
+/// (ORNA-PROTO-004; 30-protocol.md L121). The specific mismatch reason is not
+/// stored in the durable terminal. Pre-dispatch mismatches keep their
+/// correlated `wire.request_mismatch` diagnostic on the operational path.
 fn validate_applied_result_response(
     request: [u8; 16],
     fingerprint: [u8; 32],
@@ -5132,7 +5137,9 @@ fn validate_applied_result_response(
     limits: ProtocolLimits,
 ) -> Result<DispatchOutcome> {
     match validate_result_response(request, fingerprint, response, limits) {
-        Err(Error::ApplicationRejected) => Ok(retained_without_value_outcome(request, fingerprint)),
+        Err(Error::ApplicationRejected | Error::RequestMismatch) => {
+            Ok(retained_without_value_outcome(request, fingerprint))
+        }
         result => result,
     }
 }
@@ -8737,10 +8744,16 @@ mod tests {
         }
     }
 
-    struct WrongRequestApplication;
+    /// Counts eval invocations so retry tests can prove the application ran
+    /// exactly once for a request ID.
+    #[derive(Default)]
+    struct WrongRequestApplication {
+        calls: usize,
+    }
 
     impl LiveApplication for WrongRequestApplication {
         fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
             // Effects are already applied when the application answers for a
             // different request; the host cannot validate that response.
             Ok(Envelope {
@@ -8761,10 +8774,16 @@ mod tests {
         }
     }
 
-    struct WrongFingerprintApplication;
+    /// Applied effects followed by a result that correlates to the request but
+    /// carries the wrong fingerprint.
+    #[derive(Default)]
+    struct WrongFingerprintApplication {
+        calls: usize,
+    }
 
     impl LiveApplication for WrongFingerprintApplication {
         fn eval(&mut self, _: [u8; 16], request: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
             Ok(Envelope {
                 request: Some(request),
                 watch: None,
@@ -9577,7 +9596,7 @@ mod tests {
         let mut transport =
             LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
         let mut socket = WebSocketState::new([4; 16]);
-        let mut application = WrongRequestApplication;
+        let mut application = WrongRequestApplication::default();
         let response = diagnostic_output(
             futures::executor::block_on(transport.receive_with_application(
                 &mut socket,
@@ -9600,6 +9619,7 @@ mod tests {
                 .response
                 .unwrap()
         );
+        assert_eq!(application.calls, 1);
 
         // An exact retry replays that terminal result instead of rerunning the
         // application under the same request ID.
@@ -9613,15 +9633,16 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
     }
 
     #[test]
-    fn applied_eval_with_fingerprint_mismatch_keeps_request_mismatch_diagnostic() {
+    fn applied_eval_with_fingerprint_mismatch_is_retained_without_value() {
         let request = [6; 16];
         let mut transport =
             LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
         let mut socket = WebSocketState::new([4; 16]);
-        let mut application = WrongFingerprintApplication;
+        let mut application = WrongFingerprintApplication::default();
         let response = diagnostic_output(
             futures::executor::block_on(transport.receive_with_application(
                 &mut socket,
@@ -9631,13 +9652,33 @@ mod tests {
             ))
             .unwrap(),
         );
-        // A fingerprint mismatch is a correlated request_mismatch diagnostic,
-        // not a retained-without-value result: the response does not match the
-        // request it claims to answer.
+        // Effects were applied before the fingerprint mismatch was seen. The
+        // terminal must be retained-without-value, not a correlated
+        // wire.request_mismatch that a client could read as "not executed"
+        // (ORNA-PROTO-004; 30-protocol.md L121).
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("a post-effect mismatch must complete with a retained Result");
+        };
+        let fingerprint = *fingerprint;
         assert_eq!(
             response,
-            portable_diagnostic(request, None, "wire.request_mismatch").unwrap()
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
         );
+        assert_eq!(application.calls, 1);
+
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
     }
 
     #[test]
