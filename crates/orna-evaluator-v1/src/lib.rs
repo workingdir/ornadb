@@ -934,6 +934,25 @@ impl<const N: usize> From<[(String, PureFunction); N]> for Functions {
     }
 }
 
+impl Functions {
+    /// Iterates the admitted module's own function bodies mutably. Shared
+    /// standard bodies are immutable and are never rewritten here.
+    pub fn local_iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut PureFunction)> {
+        self.local.iter_mut()
+    }
+
+    /// Merges `other`'s own functions and aliases into this table; a same-key
+    /// entry from `other` replaces this table's. The standard layer is adopted
+    /// only when this table has none.
+    pub fn extend(&mut self, other: Functions) {
+        self.local.extend(other.local);
+        self.local_aliases.extend(other.local_aliases);
+        if self.standard.is_none() {
+            self.standard = other.standard;
+        }
+    }
+}
+
 impl FromIterator<(String, PureFunction)> for Functions {
     fn from_iter<I: IntoIterator<Item = (String, PureFunction)>>(entries: I) -> Self {
         Self {
