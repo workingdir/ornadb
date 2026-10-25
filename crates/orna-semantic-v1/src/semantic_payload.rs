@@ -460,7 +460,15 @@ impl Producer<'_> {
                             array(Vec::new()),
                             array(encoded_parameters),
                             result_node,
-                            array(symbol.effects.effects.iter().map(|s| text(s)).collect()),
+                            array(
+                                symbol
+                                    .effects
+                                    .effects
+                                    .iter()
+                                    .map(|kind| text(kind.as_str()))
+                                    .chain(symbol.effects.opaque.then(|| text("opaque")))
+                                    .collect(),
+                            ),
                             Raw::Bool(symbol.effects.may_fail),
                             body,
                         ],

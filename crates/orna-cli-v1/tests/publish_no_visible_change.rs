@@ -80,6 +80,7 @@ async fn commit_capture(
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
     source_key: &str,
+    media_root: &Path,
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
@@ -95,12 +96,11 @@ async fn commit_capture(
     let schema = loader
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
         .expect("resolve the Object table from its committed identity");
+    // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
+    // source is the fixture document, never a committed file.
     let logical_path = format!("Object/{source_key}.orna");
-    let row_source = repository
-        .read_committed_file(source_commit, &logical_path, 1 << 20)
-        .expect("the committed project contains this source Object row");
-    let row_source = std::str::from_utf8(&row_source)
-        .expect("the committed source Object row is valid UTF-8");
+    let row_source = object_source_row(media_root, source_key);
+    let row_source = row_source.as_str();
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
@@ -173,6 +173,7 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -188,8 +189,7 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -219,6 +219,7 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xe0,
         true,
         relation_id,
@@ -286,8 +287,7 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -323,6 +323,7 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xe1,
         true,
         relation_id,
@@ -360,8 +361,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     // `orna publish` opens the runtime through the repository's own identity,
@@ -398,6 +398,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xb0,
         true,
         relation_id,
@@ -443,6 +444,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xc0,
         false,
         relation_id,
@@ -498,8 +500,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let deleted_path = root_path.join("delete-me.orna");
@@ -542,6 +543,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xd0,
         true,
         relation_id,
