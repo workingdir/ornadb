@@ -65,6 +65,8 @@ pub enum OgbError {
     Malformed(&'static str),
     /// Structure is valid but content bytes do not match a recorded digest or length.
     Integrity(&'static str),
+    /// The verified content is larger than the caller's read limit. Not corruption.
+    Limit { total: u64, limit: u64 },
 }
 
 impl std::fmt::Display for OgbError {
@@ -73,6 +75,10 @@ impl std::fmt::Display for OgbError {
             Self::Missing { oid_hex } => write!(f, "OGB-1 object {oid_hex} is missing"),
             Self::Malformed(why) => write!(f, "OGB-1 structure is malformed: {why}"),
             Self::Integrity(why) => write!(f, "OGB-1 integrity check failed: {why}"),
+            Self::Limit { total, limit } => write!(
+                f,
+                "OGB-1 content of {total} bytes exceeds the read limit of {limit} bytes"
+            ),
         }
     }
 }
@@ -94,6 +100,27 @@ pub struct OgbVerified {
 pub fn verify_ogb_root<S: OgbObjects>(
     store: &S,
     root_entries: &[OgbTreeEntry],
+) -> Result<OgbVerified, OgbError> {
+    verify_root(store, root_entries, None)
+}
+
+/// Verifies a content root exactly as [`verify_ogb_root`] does, and returns its
+/// full content bytes. A root whose total length exceeds `max_len` is refused
+/// with [`OgbError::Limit`] before any chunk is read.
+pub fn read_ogb_root<S: OgbObjects>(
+    store: &S,
+    root_entries: &[OgbTreeEntry],
+    max_len: u64,
+) -> Result<(OgbVerified, Vec<u8>), OgbError> {
+    let mut payload = Vec::new();
+    let verified = verify_root(store, root_entries, Some((&mut payload, max_len)))?;
+    Ok((verified, payload))
+}
+
+fn verify_root<S: OgbObjects>(
+    store: &S,
+    root_entries: &[OgbTreeEntry],
+    mut payload: Option<(&mut Vec<u8>, u64)>,
 ) -> Result<OgbVerified, OgbError> {
     exact_names(root_entries, &["data", "meta"])?;
     let meta_entry = find(root_entries, "meta")?;
@@ -123,6 +150,14 @@ pub fn verify_ogb_root<S: OgbObjects>(
     if total > OGB_MAX_LENGTH {
         return Err(OgbError::Malformed("meta total range"));
     }
+    if let Some((_, max_len)) = payload.as_ref() {
+        if total > *max_len {
+            return Err(OgbError::Limit {
+                total,
+                limit: *max_len,
+            });
+        }
+    }
     let Item::Bytes(data_oid) = data_oid else {
         return Err(OgbError::Malformed("meta data oid"));
     };
@@ -141,6 +176,7 @@ pub fn verify_ogb_root<S: OgbObjects>(
         None,
         &mut hasher,
         &mut streamed,
+        payload.as_mut().map(|(buffer, _)| &mut **buffer),
     )?;
     let actual: [u8; 32] = hasher.finalize().into();
     if streamed != total {
@@ -155,7 +191,8 @@ pub fn verify_ogb_root<S: OgbObjects>(
     })
 }
 
-/// Recursively verifies one data node. Chunk bytes are fed to `hasher` in order.
+/// Recursively verifies one data node. Chunk bytes are fed to `hasher` in order,
+/// and appended to `payload` when the caller asked for the content.
 fn verify_node<S: OgbObjects>(
     store: &S,
     oid: &[u8],
@@ -164,6 +201,7 @@ fn verify_node<S: OgbObjects>(
     expected_height: Option<u64>,
     hasher: &mut Sha256,
     streamed: &mut u64,
+    mut payload: Option<&mut Vec<u8>>,
 ) -> Result<(), OgbError> {
     let entries = tree(store, oid)?;
     let index_entry = find(&entries, "index")?;
@@ -252,6 +290,9 @@ fn verify_node<S: OgbObjects>(
                 return Err(OgbError::Integrity("chunk digest"));
             }
             hasher.update(&data);
+            if let Some(buffer) = payload.as_mut() {
+                buffer.extend_from_slice(&data);
+            }
             *streamed += length;
         } else {
             if digest != Item::Null {
@@ -265,6 +306,7 @@ fn verify_node<S: OgbObjects>(
                 Some(height - 1),
                 hasher,
                 streamed,
+                payload.as_deref_mut(),
             )?;
         }
         end = stop;
@@ -540,6 +582,38 @@ mod tests {
             "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f"
         );
     }
+
+    #[test]
+    fn read_returns_verified_payload_bytes() {
+        let (store, root) = abc_root(b"abc");
+        let (verified, payload) = read_ogb_root(&store, &root, 3).unwrap();
+        assert_eq!(payload, b"abc");
+        assert_eq!(verified.total_length, 3);
+        assert_eq!(verified.content_sha256, sha256(b"abc"));
+    }
+
+    #[test]
+    fn read_refuses_content_above_limit_before_reading_chunks() {
+        let (mut store, root) = abc_root(b"abc");
+        // Remove the chunk: a limit refusal must not need to touch it.
+        store.objects.remove(&git_sha1_oid("blob", b"abc"));
+        assert_eq!(
+            read_ogb_root(&store, &root, 2),
+            Err(OgbError::Limit { total: 3, limit: 2 })
+        );
+    }
+
+    #[test]
+    fn read_does_not_return_payload_when_chunk_is_tampered() {
+        let (mut store, root) = abc_root(b"abc");
+        let oid = git_sha1_oid("blob", b"abc");
+        store.objects.insert(oid, Obj::Blob(b"abd".to_vec()));
+        assert!(matches!(
+            read_ogb_root(&store, &root, 3),
+            Err(OgbError::Integrity(_))
+        ));
+    }
+
 
     #[test]
     fn rejects_tampered_chunk_bytes_as_integrity_failure() {
