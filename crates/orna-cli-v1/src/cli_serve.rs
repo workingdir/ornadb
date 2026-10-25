@@ -667,6 +667,9 @@ fn new_serve_state(
         tls: false,
         ..TransportLimits::default()
     };
+    // Shared read-only handle to the runtime the host owns, taken before the
+    // host moves into the transport. `serve` reads stored rows through it.
+    let serving_runtime = host.runtime_state();
     let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -674,6 +677,7 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
+    let app = app.map(|app| app.with_runtime(serving_runtime));
     let std_snapshot = project
         .as_ref()
         .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);

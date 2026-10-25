@@ -1753,6 +1753,15 @@ enum DurableAdmission {
 // perform I/O. The explicit lint allowance records that deliberate seam.
 #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 impl LiveHost {
+    /// Returns a shared handle to the durable runtime this host owns, or
+    /// `None` when the host was built without one. The handle is read-only
+    /// shared access: it neither transfers the writer lease nor the runtime
+    /// owner, so existing callers are unaffected.
+    #[must_use]
+    pub fn runtime_state(&self) -> Option<Arc<RuntimeState>> {
+        self.runtime.clone()
+    }
+
     /// Creates a bounded live host around the supplied security and serving
     /// state machines.
     ///
