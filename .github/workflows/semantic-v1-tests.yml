@@ -34,5 +34,9 @@ jobs:
       # scripts/semantic-known-red.txt are excluded from the run and then each one
       # must still fail when run alone: a new failure or a listed test that passes
       # both fail this job.
+      # The list may only shrink. Raising SEMANTIC_KNOWN_RED_MAX requires owner
+      # approval stated in the PR description.
       - name: Check semantic v1 tests against the known-red list
+        env:
+          SEMANTIC_KNOWN_RED_MAX: "40"
         run: scripts/check-semantic-known-red.sh

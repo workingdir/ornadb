@@ -18121,9 +18121,12 @@ fn require_same(expected: &Type, actual: &Type, diagnostics: &mut Vec<Diagnostic
     }
 }
 
-/// Like `require_same`, but reports `ORNA091-E-CONVERSION-CHAIN` when the
-/// actual nominal type reaches the expected one only through a multi-step
-/// `From` chain (ORNA-CONVERT-007). A plain mismatch stays `ORNA-S021-TYPE`.
+/// Like `require_same`, but used only at function-return checks. It reports
+/// `ORNA091-E-CONVERSION-CHAIN` when the actual nominal type reaches the
+/// expected one only through a multi-step `From` chain. ORNA-CONVERT-007
+/// names no code; `ORNA091-E-CONVERSION-CHAIN` is a project-local code. A
+/// plain mismatch stays `ORNA-S021-TYPE`. Let, argument and field sites use
+/// `require_same` and do not get this code.
 fn require_same_in(
     scope: &Scope,
     expected: &Type,
