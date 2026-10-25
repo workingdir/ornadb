@@ -2646,9 +2646,9 @@ fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
 
 /// Binds unqualified names from `use std.<module>.{name}` declarations to the
 /// admitted standard functions. A user function keeps its own name, and an
-/// alias is inserted only where no user function occupies the name. Glob and
-/// module-alias imports are refused, an imported name must exist in the pinned
-/// module, and one unqualified name may not bind two different functions.
+/// alias is inserted only where no user function occupies the name. An imported
+/// name must exist in the pinned module, and one unqualified name may not bind
+/// two different functions. Glob and alias forms bind nothing (see below).
 fn bind_standard_imports(
     functions: &mut Functions,
     items: &[Item],
@@ -2667,11 +2667,13 @@ fn bind_standard_imports(
             .collect::<Vec<_>>()
             .join(".");
         let names = match tail {
-            UseTail::None => continue,
             UseTail::Names(names) => names,
-            UseTail::Glob { .. } | UseTail::Alias { .. } => {
-                return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
-            }
+            // Glob and alias forms (`use std.x.*`, `use std.prelude as _`) bind no
+            // unqualified names here, so a call through them still fails as an
+            // unresolved name rather than binding a function silently. This keeps
+            // projects that already import them admitted; the prelude-as-`_` and
+            // glob binding rules are not implemented on this route.
+            UseTail::None | UseTail::Glob { .. } | UseTail::Alias { .. } => continue,
         };
         for name in names {
             let target = format!("{namespace}.{}", name.name);
