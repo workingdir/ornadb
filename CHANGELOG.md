@@ -13,6 +13,27 @@ been published.
   handle does not re-admit a refusal that a later accepted save resolved.
   Earlier builds did not attempt acceptance at close and did not keep unsynced
   drafts on release.
+- A FUSE write-intent open of a Blob projection (any write access mode, or
+  `O_TRUNC`) now fails at open with `EPERM` and leaves the blob unchanged. It
+  used to succeed or be ignored, and the later write failed with `EBADF`
+  (profiles/vfs-1.md:104-106). Tools that write a Blob in place, such as `cp`
+  onto `content.mp3` or an editor with `backupcopy=yes`, now see the error at
+  open.
+- The errno rule for the live writable mount is now uniform: every refused
+  mutation there returns `EPERM` (41-vfs.md:103-105; profiles/vfs-1.md:139).
+  This covers Blob write-open, Blob unlink and same-row rename, create in a
+  table directory or in a row with a non-blob name, unlink of a row's
+  `data.orna`, rename with flags, rename to a name other than the row's
+  `data.orna` or Blob field, rename of a non-temporary node, and rename across
+  rows. A cross-row rename is `EPERM`, not `EXDEV`: `EXDEV` would make `mv` and
+  `cp` fall back to copy-then-unlink, which writes the bytes into the other row
+  before the refused source unlink leaves the original behind. `EROFS` is
+  reserved for the kernel read-only historical mount (`mount --at`), which never
+  reaches these handlers. Rename with flags, rename of a row's `data.orna`, and
+  path-truncate of a Blob are covered by `live_mount_structural_refusals_are_eperm`.
+  Rename with flags uses `EPERM` where rename(2) would use `EINVAL`; `EPERM`
+  follows the unsupported-mutation rule (41-vfs.md:103-105). Zero-length and
+  sparse-hole Blob coverage remains open.
 - A malformed format-3 native graph now reports a typed `GraphMalformed` cause
   under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
   faults such as overlapping child ranges, broken counts, over-wide fanout, and
