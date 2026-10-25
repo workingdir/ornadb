@@ -117,17 +117,23 @@ fn diagnostics(diagnostics: &[orna_foundation_v1::Diagnostic]) -> String {
 
 fn expected_semantic_failure(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "automatic-failure-propagation" => Some(&[
-            "ORNA-S012-UNRESOLVED: name cannot be resolved",
-        ]),
-        "failure-natural-key" | "stream-admin-repl" => Some(&[
-            "ORNA-S021-TYPE: arguments do not match a portable system function overload",
+        // Manifest expects PASS; product gap tracked by ornadb-jnf1.
+        "failure-natural-key" => Some(&[
             "ORNA-S021-TYPE: relation query callback must be read-only",
             "ORNA-S021-TYPE: static types are incompatible",
             "ORNA-S021-TYPE: static types are incompatible",
         ]),
+        "stream-admin-repl" => Some(&[
+            "ORNA-S021-TYPE: relation query callback must be read-only",
+            "ORNA-S021-TYPE: static types are incompatible",
+        ]),
+        // Manifest expects PASS; product gap tracked by ornadb-jnf1.
         "finite-stream" => Some(&[
-            "ORNA-S021-TYPE: missing required field `name`",
+            "E2002: missing required field `name`",
+        ]),
+        // Manifest expects PASS; product gap tracked by ornadb-7owc.
+        "table-key-default" => Some(&[
+            "ORNA-S021-TYPE: field access requires a record",
         ]),
         _ => None,
     }

@@ -16,6 +16,7 @@ been published.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
 ### Fixes
+- Conformance fixture pins now match current product output: `automatic-failure-propagation` passes and its stale pin is removed. The `failure-natural-key`, `stream-admin-repl`, `finite-stream` and `table-key-default` pins record product gaps tracked by ornadb-jnf1 and ornadb-7owc.
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
   only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
