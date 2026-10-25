@@ -600,16 +600,21 @@ fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
         "orna query --from int:0 --kind text/plain",
     );
     assert_eq!(scanned["rows"], 300, "{scanned}");
+    // The rows are text-only, so no field is a Blob and the annotation plan
+    // has no coordinates to evaluate: candidates and matched are both zero.
+    assert_eq!(scanned["plan"]["candidates"], 0, "{scanned}");
+    assert_eq!(scanned["plan"]["matched"], 0, "{scanned}");
+    assert_eq!(scanned["blobs"], 0, "{scanned}");
 }
 
 /// `orna history` resolves an integer-looking key with the spelling that
-/// `orna query --key` uses. The row lookup runs before the revision walk, so
-/// a committed `Int`-keyed row that the lookup finds is never reported as
-/// "Row is not committed". The walk itself needs a Blob-bearing row (a
-/// descriptor tree); that precondition is a separate, pre-existing limit and
-/// is deliberately not asserted here.
+/// `orna query --key` uses. The row lookup runs first, so the committed
+/// `Int`-keyed row `7` is found and the walk is reached. A text-only row has
+/// no descriptor tree, so the walk then refuses with `DescriptorNotInRow`;
+/// that exact error proves the lookup resolved the row. A Blob-bearing row
+/// would yield revisions instead, which this fixture does not build.
 #[test]
-fn history_resolves_an_integer_looking_key_to_its_committed_row() {
+fn history_resolves_an_integer_looking_key_past_the_row_lookup() {
     let directory = TempDir::new().expect("a temporary directory");
     let (root, relation) = committed_table(
         &directory,
@@ -625,8 +630,12 @@ fn history_resolves_an_integer_looking_key_to_its_committed_row() {
     let history = orna(&root, &["history", relation.as_str(), "7", "--format", "json"]);
     let stderr = transcript(&history);
     assert!(
+        !history.status.success() && stderr.contains("DescriptorNotInRow"),
+        "the integer spelling resolves to the row, then the walk reports DescriptorNotInRow:\n{stderr}"
+    );
+    assert!(
         !stderr.contains("Row is not committed"),
-        "the integer spelling must resolve to the committed row:\n{stderr}"
+        "the integer spelling must not report the row as uncommitted:\n{stderr}"
     );
 }
 
