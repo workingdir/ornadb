@@ -2,21 +2,23 @@
 //!
 //! Source: the superseded draft compatibility material in
 //! `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`, entry
-//! `Orna-1.1.0/Orna-1.1.0.md`, section "Binary descriptors" (draft
-//! ORNA-OGB-004 full verification and draft ORNA-OGB-005 range reads). The
-//! draft IDs are superseded: the final spec reuses ORNA-OGB-001..009 for other
-//! requirements. The authority for reading retained format-2 bytes is the final
-//! clause ORNA-ROW-013 (versioned readers retained) and ORNA-UPGRADE-002
-//! (format-1/2 commits readable under their original decoders). The byte
-//! layouts follow the draft text and the draft model `tools/blob_model.py`.
+//! `Orna-1.1.0/Orna-1.1.0.md`, section "Binary descriptors". The draft clause IDs
+//! ORNA-OGB-004 (full verification) and ORNA-OGB-005 (range reads) are superseded
+//! draft IDs: the final spec reuses ORNA-OGB-001..009 for other requirements, so
+//! they appear here only as draft provenance. The authority for reading retained
+//! format-2 bytes is the final clauses ORNA-ROW-013 (versioned readers retained)
+//! and ORNA-UPGRADE-001/002 (readers dispatch by recorded format; format-1/2
+//! commits stay readable under their original decoders). The byte layouts follow
+//! the draft text and the draft model `tools/blob_model.py`.
 //!
 //! This module never writes, never fetches over the network and never resolves
 //! `.orna/blobs/` itself. The caller supplies an [`OgbObjects`] view of the Git
 //! object database. A missing object is reported as [`OgbError::Missing`],
 //! which is distinct from structural or integrity failures.
 //!
-//! Not wired into any repository read path yet. ORNA-ROW-013 and ORNA-UPGRADE-002
-//! are not met until a reader consumes this module.
+//! Consumed by `format2_read`, the Blob-field read API. It is not yet reachable
+//! from a production row read path; see the follow-up beads cross-linked from
+//! ornadb-nne7.
 
 // `sha2` 0.11 implements `digest` 0.11 while `sha1` 0.10 implements `digest`
 // 0.10; name each trait through its own crate so both hashers resolve.
@@ -27,6 +29,8 @@ use sha2::{Digest as Sha2Digest, Sha256};
 pub const OGB_MAX_LENGTH: u64 = (1 << 63) - 1;
 /// Largest admitted leaf chunk: 1 MiB.
 pub const OGB_MAX_CHUNK: u64 = 1 << 20;
+/// Largest content one read call returns: 8 MiB (ORNA-BLOB-011).
+pub const OGB_MAX_READ_CALL: u64 = 8 << 20;
 /// Maximum entries per index node.
 pub const OGB_FANOUT: usize = 256;
 /// Maximum tree height, enforced before recursion.
@@ -92,8 +96,8 @@ pub struct OgbVerified {
     pub total_length: u64,
 }
 
-/// Verifies every node and recomputes the raw-content SHA-256 (draft ORNA-OGB-004,
-/// superseded ID; authority ORNA-ROW-013 / ORNA-UPGRADE-002).
+/// Verifies every node and recomputes the raw-content SHA-256 (superseded draft
+/// ID ORNA-OGB-004; authority ORNA-ROW-013 / ORNA-UPGRADE-001/002).
 ///
 /// `root_entries` are the entries of the content-root tree, which must contain
 /// exactly `meta` and `data`.
@@ -105,15 +109,17 @@ pub fn verify_ogb_root<S: OgbObjects>(
 }
 
 /// Verifies a content root exactly as [`verify_ogb_root`] does, and returns its
-/// full content bytes. A root whose total length exceeds `max_len` is refused
-/// with [`OgbError::Limit`] before any chunk is read.
+/// full content bytes. The effective limit is the smaller of `max_len` and
+/// [`OGB_MAX_READ_CALL`] (ORNA-BLOB-011). A root whose total length exceeds it is
+/// refused with [`OgbError::Limit`] before any chunk is read.
 pub fn read_ogb_root<S: OgbObjects>(
     store: &S,
     root_entries: &[OgbTreeEntry],
     max_len: u64,
 ) -> Result<(OgbVerified, Vec<u8>), OgbError> {
+    let limit = max_len.min(OGB_MAX_READ_CALL);
     let mut payload = Vec::new();
-    let verified = verify_root(store, root_entries, Some((&mut payload, max_len)))?;
+    let verified = verify_root(store, root_entries, Some((&mut payload, limit)))?;
     Ok((verified, payload))
 }
 
@@ -538,7 +544,7 @@ pub(crate) mod tests {
     }
 
     /// Builds the one-chunk root described by the zip vector "abc" and returns
-    /// `(store, root_entries)`. Descriptor bytes follow draft ORNA-OGB-004 layout.
+    /// `(store, root_entries)`. Descriptor bytes follow the superseded draft ORNA-OGB-004 layout.
     pub(crate) fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
         let mut store = MemStore::default();
         let digest: [u8; 32] = Sha256::digest(b"abc").into();
@@ -604,6 +610,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn read_refuses_content_above_per_call_ceiling_even_with_larger_caller_limit() {
+        let (mut store, root) = abc_root(b"abc");
+        let total = OGB_MAX_READ_CALL + 1;
+        let digest: [u8; 32] = Sha256::digest(b"abc").into();
+        let data_oid = root.iter().find(|e| e.name == "data").unwrap().oid.clone();
+        let mut meta = vec![0x84, 0x01];
+        cbor_bytes(&digest, &mut meta);
+        // Canonical CBOR uint with a four-byte argument (0x1a) for values above 65535.
+        meta.push(0x1a);
+        meta.extend_from_slice(&(total as u32).to_be_bytes());
+        cbor_bytes(&data_oid, &mut meta);
+        let meta_oid = store.put_blob(&meta);
+        let root = vec![
+            entry("data", MODE_TREE, &data_oid),
+            entry("meta", MODE_BLOB, &meta_oid),
+        ];
+        assert_eq!(
+            read_ogb_root(&store, &root, u64::MAX),
+            Err(OgbError::Limit {
+                total,
+                limit: OGB_MAX_READ_CALL,
+            })
+        );
+    }
+
+    #[test]
     fn read_does_not_return_payload_when_chunk_is_tampered() {
         let (mut store, root) = abc_root(b"abc");
         let oid = git_sha1_oid("blob", b"abc");
@@ -613,7 +645,6 @@ pub(crate) mod tests {
             Err(OgbError::Integrity(_))
         ));
     }
-
 
     #[test]
     fn rejects_tampered_chunk_bytes_as_integrity_failure() {
@@ -867,8 +898,9 @@ pub(crate) mod tests {
     #[test]
     fn rejects_fanout_above_256() {
         let mut store = MemStore::default();
-        let children: Vec<(u64, Vec<u8>, Option<[u8; 32]>)> =
-            (1..=257u64).map(|stop| (stop, vec![0u8; 20], None)).collect();
+        let children: Vec<(u64, Vec<u8>, Option<[u8; 32]>)> = (1..=257u64)
+            .map(|stop| (stop, vec![0u8; 20], None))
+            .collect();
         let index = index_bytes(0, 257, &children);
         let root = put_root(&mut store, vec![], &index, sha256(b""), 257);
         assert_eq!(
