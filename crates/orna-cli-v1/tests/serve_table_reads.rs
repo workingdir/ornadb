@@ -338,6 +338,22 @@ fn working_tree_source_does_not_replace_committed_source() {
 }
 
 #[test]
+fn staged_source_is_not_served_before_commit() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    // In-flight activation: the schema change is staged but not committed, so
+    // the next request must still serve HEAD's `Note` count, not the index.
+    fs::write(root.join("main.orna"), MIXED_SOURCE).expect("write main.orna");
+    git(&root, &["add", "main.orna"]);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int", "the staged source is not served");
+}
+
+#[test]
 fn unborn_head_reports_entry_unavailable() {
     let directory = TempDir::new().expect("create the test directory");
     let root = directory.path().join("library");
@@ -385,7 +401,7 @@ fn commit_corrupt_store(root: &Path) {
 }
 
 #[test]
-fn corrupt_identity_manifest_is_refused_without_a_value() {
+fn fully_corrupt_store_is_refused_at_identity_without_a_value() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, COUNT_SOURCE);
     insert_note(&root, "one", "first");
@@ -401,23 +417,43 @@ fn corrupt_identity_manifest_is_refused_without_a_value() {
     assert!(!body.contains(": Int"), "no partial value: {body}");
 }
 
+/// Overwrites only the store node(s) that hold `marker` in a new commit. The
+/// identity inventory and the schema nodes stay readable, so the failure is
+/// confined to the committed rows.
+fn commit_corrupt_rows(root: &Path, marker: &[u8]) {
+    let mut files = Vec::new();
+    store_files(&root.join(".orna/store"), &mut files);
+    let mut corrupted = 0;
+    for file in &files {
+        let bytes = fs::read(file).expect("read a store file");
+        if bytes.windows(marker.len()).any(|window| window == marker) {
+            fs::write(file, b"corrupt").expect("corrupt a row node");
+            corrupted += 1;
+        }
+    }
+    assert_eq!(
+        corrupted, 1,
+        "exactly one store node holds the committed row value"
+    );
+    git(root, &["add", ".orna/store"]);
+    git(root, &["commit", "-m", "Corrupt rows"]);
+}
+
+/// The only store node holding the committed row value is overwritten. The
+/// identity read walks the same store pages, so the committed HEAD is refused
+/// at identity before any row is decoded; the exact body names that refusal
+/// and carries no value.
 #[test]
-fn corrupt_committed_table_is_refused_without_a_value() {
+fn corrupt_committed_row_node_is_refused_without_a_value() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, COUNT_SOURCE);
     insert_note(&root, "one", "first");
     publish(&root);
-    commit_corrupt_store(&root);
+    commit_corrupt_rows(&root, b"first");
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
-    // Every store file is overwritten, so the identity inventory is unreadable
-    // and fails before any committed row is read; no value is served.
-    assert!(
-        body.contains("serve.table_identity_unavailable"),
-        "body: {body}"
-    );
-    assert!(!body.contains(": Int"), "no partial value: {body}");
+    assert_eq!(body.trim(), r#"{"error":"serve.table_identity_unavailable"}"#);
 }
 
 const BLOB_SOURCE: &str = "pub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve() = media | count();\n";
