@@ -507,48 +507,37 @@ fn an_int_keyed_store_answers_point_range_and_missing_key_queries() {
 }
 
 /// A table whose primary key has two components has no single typed key
-/// spelling, so a predicate scan over it, which must page the rows, is refused
-/// with the typed diagnostic naming bead ornadb-5il1.461. Plain listings keep
-/// working as they did before the refusal existed.
+/// spelling, yet a predicate scan over it pages the rows in tuple order, so
+/// every row is evaluated across page boundaries.
 #[test]
-fn a_composite_key_predicate_scan_is_refused_but_plain_listing_works() {
+fn a_composite_key_predicate_scan_pages_every_row() {
     let directory = TempDir::new().expect("a temporary directory");
     let (root, relation) = committed_table(
         &directory,
         "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n",
         "Stock",
     );
-    assert_success(
-        &orna_repl(
+    let inserts = (0..300)
+        .map(|index| {
+            format!(
+                r#"main.Stock.insert({{ location: "north", sku: "widget {index:03}", quantity: {index} }})"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL composite inserts");
+    publish(&root, "Add three hundred stock rows");
+
+    let scanned = json(
+        &orna(
             &root,
-            r#"main.Stock.insert({ location: "north", sku: "widget", quantity: 3 })"#,
+            &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
         ),
-        "REPL composite insert",
+        "orna query composite predicate scan",
     );
-    publish(&root, "Add one stock row");
-
-    let listed = orna(&root, &["query", relation.as_str(), "--format", "json"]);
-    assert!(
-        listed.status.success(),
-        "a plain listing of a composite-key table succeeds:\n{}",
-        transcript(&listed)
-    );
-    assert_eq!(json(&listed, "orna query (composite plain listing)")["rows"], 1);
-
-    let refused = orna(
-        &root,
-        &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
-    );
-    assert!(
-        !refused.status.success(),
-        "a predicate scan over a composite key is refused:\n{}",
-        transcript(&refused)
-    );
-    assert!(
-        transcript(&refused).contains("ornadb-5il1.461"),
-        "the refusal names bead ornadb-5il1.461:\n{}",
-        transcript(&refused)
-    );
+    assert_eq!(scanned["rows"], 300, "{scanned}");
+    assert_eq!(scanned["plan"]["candidates"], 0, "{scanned}");
+    assert_eq!(scanned["blobs"], 0, "{scanned}");
 }
 
 /// A bound whose spelling does not match the table's `Int` primary key is
@@ -695,7 +684,8 @@ fn a_bytes_bound_on_a_str_key_is_refused_naming_text() {
 }
 
 /// A `Bool` primary key is not addressable by a bound or `--key`; both are
-/// refused with the bead that tracks it rather than answered.
+/// refused with the bead that tracks it. A predicate scan over it still pages
+/// every row.
 #[test]
 fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
     let directory = TempDir::new().expect("a temporary directory");
@@ -709,6 +699,15 @@ fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
         "REPL bool insert",
     );
     publish(&root, "Add one flag");
+
+    let scanned = json(
+        &orna(
+            &root,
+            &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
+        ),
+        "orna query Bool predicate scan",
+    );
+    assert_eq!(scanned["rows"], 1, "{scanned}");
 
     let bounded = orna(&root, &["query", relation.as_str(), "--from", "text:true", "--format", "json"]);
     assert!(

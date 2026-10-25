@@ -1025,6 +1025,7 @@ impl NativeGraphContext {
                 None,
                 None,
                 range.lower_inclusive(),
+                range.resume_after(),
                 range.upper_exclusive(),
                 range.limit(),
                 &mut entries,
@@ -1080,6 +1081,7 @@ impl NativeGraphContext {
             None,
             None,
             range.lower_inclusive(),
+            range.resume_after(),
             range.upper_exclusive(),
             range.limit(),
             &mut entries,
@@ -1428,6 +1430,7 @@ impl NativeGraphContext {
             None,
             None,
             None,
+            None,
             limit,
             &mut raw,
         )?;
@@ -1527,6 +1530,7 @@ impl NativeGraphContext {
                 None,
                 None,
                 range.lower_inclusive(),
+                range.resume_after(),
                 range.upper_exclusive(),
                 range.limit(),
                 &mut entries,
@@ -7589,6 +7593,7 @@ fn collect_ordered_range_with(
     expected_height: Option<u8>,
     lower_exclusive: Option<&crate::row_store::TypedKey>,
     lower_inclusive: Option<&crate::row_store::TypedKey>,
+    resume_after: Option<&crate::row_store::TypedKey>,
     upper_exclusive: Option<&crate::row_store::TypedKey>,
     limit: usize,
     output: &mut Vec<OrderedLeafEntry>,
@@ -7611,6 +7616,9 @@ fn collect_ordered_range_with(
                     return Err(GraphError::NonCanonicalData);
                 }
                 previous = Some(key.clone());
+                if resume_after.is_some_and(|after| key <= *after) {
+                    continue;
+                }
                 if lower_inclusive.is_some_and(|lower| key < *lower) {
                     continue;
                 }
@@ -7661,7 +7669,11 @@ fn collect_ordered_range_with(
                 // range does descend into is fully validated below. A bounded
                 // range therefore reads the pages that overlap its interval
                 // rather than the whole index.
-                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower);
+                // A resume cursor skips a child whose fence is at or below it,
+                // for the same reason a lower bound does: no key it holds can
+                // order after the cursor.
+                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower)
+                    && resume_after.is_none_or(|after| fence > *after);
                 let mut past_upper = false;
                 if within_lower {
                     let child = read_node(&entry.child)?;
@@ -7691,6 +7703,7 @@ fn collect_ordered_range_with(
                             Some(height - 1),
                             previous_fence.as_ref(),
                             lower_inclusive,
+                            resume_after,
                             upper_exclusive,
                             limit,
                             output,
