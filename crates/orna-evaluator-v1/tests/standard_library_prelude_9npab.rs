@@ -68,6 +68,18 @@ fn curated_prelude_helpers_compute_versioned_collection_text_and_option_values()
     }
 }
 
+/// ORNA-IMPORT-003 and ORNA-IMPORT-005 bind `use std.prelude as _;` only in the
+/// importing lexical scope. Its `count` must not rebind the bare `count` inside
+/// `std.list`, which would recurse `std.list.length -> count -> list.length`.
+#[test]
+fn prelude_import_does_not_rebind_bare_names_inside_std_modules() {
+    let mut session = pinned_prelude_session();
+    assert_eq!(session.submit("use std.prelude as _;"), Ok(None));
+    assert_eq!(session.submit("use std.list as list;"), Ok(None));
+    assert_eq!(session.submit("list.length([3, 1, 3]) == 3"), Ok(Some(bool_value(true))));
+    assert_eq!(session.submit("count([3, 1, 3]) == 3"), Ok(Some(bool_value(true))));
+}
+
 #[test]
 fn prelude_names_and_bytes_are_bound_to_the_selected_snapshot() {
     let sources = prelude_sources();
