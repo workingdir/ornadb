@@ -855,19 +855,22 @@ fn relation_predicate_folds_preserve_paired_optional_values() {
     )));
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    // Tuples are encoded as tag 60015 over an ordered array (Orna-1.1.0
+    // 29-formats.md, row 60015). Absent optional components are Null.
+    let tuple = |values: Vec<Raw>| Raw::Tag(60015, Box::new(Raw::Array(values)));
     let expected_keys = [
-        Raw::Array(vec![
+        tuple(vec![
             Raw::Null,
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+            tuple(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
         ]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+        tuple(vec![
+            tuple(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
             Raw::Null,
         ]),
-        Raw::Array(vec![Raw::Null, Raw::Null]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
-            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        tuple(vec![Raw::Null, Raw::Null]),
+        tuple(vec![
+            tuple(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            tuple(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
         ]),
     ];
     for (index, expected_key) in expected_keys.iter().enumerate() {
