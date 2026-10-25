@@ -467,4 +467,24 @@ mod stored_reference_tests {
         assert!(validate_stored_references(&reference([2; 16], [8; 16], Raw::Int(7.into())), &identity).is_err());
         assert!(validate_stored_references(&reference([1; 16], [9; 16], Raw::Int(7.into())), &identity).is_err());
     }
+
+    #[test]
+    fn tuple_field_admits_only_the_tag_60015_array_encoding() {
+        // Spec 29-formats: tuples are Tag(60015, Array). A bare array in a tuple column is
+        // not that encoding and must be refused (matches_value false => ORNA-CONFORMANCE-ROW-TYPE).
+        let parsed = parse_row("{ coordinates: (51, \"north\") }");
+        let Expr::Record { fields, .. } = &parsed.value else {
+            panic!("row fixture must parse as a record");
+        };
+        let expression = &fields[0].value;
+        let ty = Type::Tuple(vec![Type::Int, Type::Text]);
+        let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
+        let tagged = Raw::Tag(60015, Box::new(bare.clone()));
+
+        assert!(matches_value(&tagged, &ty, expression));
+        assert!(
+            !matches_value(&bare, &ty, expression),
+            "a bare array in a tuple column must not admit"
+        );
+    }
 }
