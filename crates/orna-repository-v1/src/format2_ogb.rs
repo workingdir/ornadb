@@ -1,16 +1,22 @@
 //! OGB-1 content-root verification for format-2 Blob storage (read-only).
 //!
-//! Sole authority: the draft compatibility material in
+//! Source: the superseded draft compatibility material in
 //! `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`, entry
-//! `Orna-1.1.0/Orna-1.1.0.md`, section "Binary descriptors" (clauses
-//! ORNA-OGB-004 full verification and ORNA-OGB-005 range reads). The byte
-//! layouts follow that text and the draft reference model
-//! `Orna-1.1.0/tools/blob_model.py` (`metadata`, `node`, `verify`).
+//! `Orna-1.1.0/Orna-1.1.0.md`, section "Binary descriptors" (draft
+//! ORNA-OGB-004 full verification and draft ORNA-OGB-005 range reads). The
+//! draft IDs are superseded: the final spec reuses ORNA-OGB-001..009 for other
+//! requirements. The authority for reading retained format-2 bytes is the final
+//! clause ORNA-ROW-013 (versioned readers retained) and ORNA-UPGRADE-002
+//! (format-1/2 commits readable under their original decoders). The byte
+//! layouts follow the draft text and the draft model `tools/blob_model.py`.
 //!
 //! This module never writes, never fetches over the network and never resolves
 //! `.orna/blobs/` itself. The caller supplies an [`OgbObjects`] view of the Git
 //! object database. A missing object is reported as [`OgbError::Missing`],
 //! which is distinct from structural or integrity failures.
+//!
+//! Not wired into any repository read path yet. ORNA-ROW-013 and ORNA-UPGRADE-002
+//! are not met until a reader consumes this module.
 
 // `sha2` 0.11 implements `digest` 0.11 while `sha1` 0.10 implements `digest`
 // 0.10; name each trait through its own crate so both hashers resolve.
@@ -38,6 +44,12 @@ pub struct OgbTreeEntry {
 }
 
 /// Read-only view of the Git object database needed for verification.
+///
+/// Contract: the caller supplies a verified object store. Implementations return
+/// the object stored under the requested OID, or `None` when it is absent. This
+/// module does not re-hash Git objects: it trusts the store's bytes and checks
+/// only the OGB-1 structure and the recorded chunk digests, lengths and content
+/// commitment. A store that returns unverified bytes voids the guarantee.
 pub trait OgbObjects {
     /// Entries of the tree with this OID, or `None` if the object is absent.
     fn tree(&self, oid: &[u8]) -> Option<Vec<OgbTreeEntry>>;
@@ -74,7 +86,8 @@ pub struct OgbVerified {
     pub total_length: u64,
 }
 
-/// Verifies every node and recomputes the raw-content SHA-256 (ORNA-OGB-004).
+/// Verifies every node and recomputes the raw-content SHA-256 (draft ORNA-OGB-004,
+/// superseded ID; authority ORNA-ROW-013 / ORNA-UPGRADE-002).
 ///
 /// `root_entries` are the entries of the content-root tree, which must contain
 /// exactly `meta` and `data`.
@@ -394,7 +407,7 @@ fn read_argument(bytes: &[u8], pos: &mut usize, info: u8) -> Result<u64, OgbErro
 
 /// Git object id of `data` of the given kind (SHA-1 repository).
 pub fn git_sha1_oid(kind: &str, data: &[u8]) -> Vec<u8> {
-    let mut hasher = sha1::Sha1::new();
+    let mut hasher = Sha1::new();
     hasher.update(format!("{kind} {}\0", data.len()).as_bytes());
     hasher.update(data);
     hasher.finalize().to_vec()
@@ -483,7 +496,7 @@ mod tests {
     }
 
     /// Builds the one-chunk root described by the zip vector "abc" and returns
-    /// `(store, root_entries)`. Descriptor bytes follow ORNA-OGB-004 layout.
+    /// `(store, root_entries)`. Descriptor bytes follow draft ORNA-OGB-004 layout.
     fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
         let mut store = MemStore::default();
         let digest: [u8; 32] = Sha256::digest(b"abc").into();
@@ -596,6 +609,263 @@ mod tests {
         assert_eq!(
             verify_ogb_root(&store, &root).unwrap_err(),
             OgbError::Malformed("node height range")
+        );
+    }
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        Sha256::digest(data).into()
+    }
+
+    /// Encodes `[1, height, total, [[stop, oid, digest|null], ...]]`.
+    fn index_bytes(
+        height: u64,
+        total: u64,
+        children: &[(u64, Vec<u8>, Option<[u8; 32]>)],
+    ) -> Vec<u8> {
+        let mut out = vec![0x84, 0x01];
+        cbor_head(0, height, &mut out);
+        cbor_head(0, total, &mut out);
+        cbor_head(4, children.len() as u64, &mut out);
+        for (stop, oid, digest) in children {
+            out.push(0x83);
+            cbor_head(0, *stop, &mut out);
+            cbor_bytes(oid, &mut out);
+            match digest {
+                Some(d) => cbor_bytes(d, &mut out),
+                None => out.push(0xf6),
+            }
+        }
+        out
+    }
+
+    fn meta_bytes(digest: &[u8], total: u64, data_oid: &[u8]) -> Vec<u8> {
+        let mut meta = vec![0x84, 0x01];
+        cbor_bytes(digest, &mut meta);
+        cbor_head(0, total, &mut meta);
+        cbor_bytes(data_oid, &mut meta);
+        meta
+    }
+
+    /// Stores `index` beside `data_entries` in the data tree and returns the
+    /// content-root entries.
+    fn put_root(
+        store: &mut MemStore,
+        mut data_entries: Vec<OgbTreeEntry>,
+        index: &[u8],
+        digest: [u8; 32],
+        total: u64,
+    ) -> Vec<OgbTreeEntry> {
+        let index_oid = store.put_blob(index);
+        data_entries.push(entry("index", MODE_BLOB, &index_oid));
+        let data_oid = store.put_tree(data_entries);
+        let meta_oid = store.put_blob(&meta_bytes(&digest, total, &data_oid));
+        vec![
+            entry("data", MODE_TREE, &data_oid),
+            entry("meta", MODE_BLOB, &meta_oid),
+        ]
+    }
+
+    /// Height-0 node holding one chunk. Returns the node tree OID.
+    fn leaf_tree(store: &mut MemStore, chunk: &[u8]) -> Vec<u8> {
+        let chunk_oid = store.put_blob(chunk);
+        let len = chunk.len() as u64;
+        let index = index_bytes(0, len, &[(len, chunk_oid.clone(), Some(sha256(chunk)))]);
+        let index_oid = store.put_blob(&index);
+        store.put_tree(vec![
+            entry("000", MODE_BLOB, &chunk_oid),
+            entry("index", MODE_BLOB, &index_oid),
+        ])
+    }
+
+    #[test]
+    fn verifies_height_one_node_by_recursing_into_leaf() {
+        let mut store = MemStore::default();
+        let leaf = leaf_tree(&mut store, b"abc");
+        let root_index = index_bytes(1, 3, &[(3, leaf.clone(), None)]);
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_TREE, &leaf)],
+            &root_index,
+            sha256(b"abc"),
+            3,
+        );
+        assert_eq!(verify_ogb_root(&store, &root).unwrap().total_length, 3);
+
+        // Tampering with the leaf's chunk is caught only by descending into it.
+        store
+            .objects
+            .insert(git_sha1_oid("blob", b"abc"), Obj::Blob(b"abd".to_vec()));
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Integrity("chunk digest"))
+        );
+    }
+
+    #[test]
+    fn rejects_meta_digest_mismatch() {
+        let mut store = MemStore::default();
+        let chunk = store.put_blob(b"abc");
+        let index = index_bytes(0, 3, &[(3, chunk.clone(), Some(sha256(b"abc")))]);
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_BLOB, &chunk)],
+            &index,
+            [0u8; 32],
+            3,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Integrity("whole-content digest"))
+        );
+    }
+
+    #[test]
+    fn rejects_meta_length_mismatch() {
+        let mut store = MemStore::default();
+        let chunk = store.put_blob(b"abc");
+        let index = index_bytes(0, 3, &[(3, chunk.clone(), Some(sha256(b"abc")))]);
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_BLOB, &chunk)],
+            &index,
+            sha256(b"abc"),
+            4,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("child length"))
+        );
+    }
+
+    #[test]
+    fn rejects_interval_not_strictly_increasing() {
+        let mut store = MemStore::default();
+        let ab = store.put_blob(b"ab");
+        let c = store.put_blob(b"c");
+        let index = index_bytes(
+            0,
+            2,
+            &[
+                (2, ab.clone(), Some(sha256(b"ab"))),
+                (1, c.clone(), Some(sha256(b"c"))),
+            ],
+        );
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_BLOB, &ab), entry("001", MODE_BLOB, &c)],
+            &index,
+            sha256(b"abc"),
+            2,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("entry interval range"))
+        );
+    }
+
+    #[test]
+    fn rejects_entries_that_do_not_cover_declared_total() {
+        let mut store = MemStore::default();
+        let a = store.put_blob(b"a");
+        let bc = store.put_blob(b"bc");
+        // Entries reach offset 3 but the node declares 4: a gap at the end.
+        let index = index_bytes(
+            0,
+            4,
+            &[
+                (1, a.clone(), Some(sha256(b"a"))),
+                (3, bc.clone(), Some(sha256(b"bc"))),
+            ],
+        );
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_BLOB, &a), entry("001", MODE_BLOB, &bc)],
+            &index,
+            sha256(b"abca"),
+            4,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("node total"))
+        );
+    }
+
+    #[test]
+    fn rejects_fanout_above_256() {
+        let mut store = MemStore::default();
+        let children: Vec<(u64, Vec<u8>, Option<[u8; 32]>)> =
+            (1..=257u64).map(|stop| (stop, vec![0u8; 20], None)).collect();
+        let index = index_bytes(0, 257, &children);
+        let root = put_root(&mut store, vec![], &index, sha256(b""), 257);
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("node fanout"))
+        );
+    }
+
+    #[test]
+    fn accepts_empty_content_root_in_canonical_form() {
+        let mut store = MemStore::default();
+        let index = index_bytes(0, 0, &[]);
+        let root = put_root(&mut store, vec![], &index, sha256(b""), 0);
+        let verified = verify_ogb_root(&store, &root).unwrap();
+        assert_eq!(verified.total_length, 0);
+        assert_eq!(
+            hex(&verified.content_sha256),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn rejects_non_canonical_empty_descriptor() {
+        // Empty content must be height 0 with total 0; any other empty node is not.
+        for (height, total) in [(1u64, 0u64), (0, 3)] {
+            let mut store = MemStore::default();
+            let index = index_bytes(height, total, &[]);
+            let root = put_root(&mut store, vec![], &index, sha256(b""), total);
+            assert_eq!(
+                verify_ogb_root(&store, &root),
+                Err(OgbError::Malformed("node fanout")),
+                "height {height} total {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_wrong_child_mode() {
+        // A height-0 child must be a blob; a tree entry in that position is wrong.
+        let mut store = MemStore::default();
+        let chunk = store.put_blob(b"abc");
+        let index = index_bytes(0, 3, &[(3, chunk.clone(), Some(sha256(b"abc")))]);
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_TREE, &chunk)],
+            &index,
+            sha256(b"abc"),
+            3,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("entry target"))
+        );
+    }
+
+    #[test]
+    fn rejects_child_length_disagreeing_with_parent_interval() {
+        let mut store = MemStore::default();
+        // The subtree holds 2 bytes but the parent interval assigns 3.
+        let leaf = leaf_tree(&mut store, b"ab");
+        let root_index = index_bytes(1, 3, &[(3, leaf.clone(), None)]);
+        let root = put_root(
+            &mut store,
+            vec![entry("000", MODE_TREE, &leaf)],
+            &root_index,
+            sha256(b"abc"),
+            3,
+        );
+        assert_eq!(
+            verify_ogb_root(&store, &root),
+            Err(OgbError::Malformed("child length"))
         );
     }
 }
