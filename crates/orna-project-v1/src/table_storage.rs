@@ -59,15 +59,84 @@ impl CommittedTable {
     }
 }
 
+/// Bounds one committed read: the rows one table may hold, and the key and
+/// stored-tuple bytes of every row the read admits across all tables.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommittedReadLimits {
+    /// Most rows one table may hold.
+    pub max_rows_per_table: usize,
+    /// Most key and stored-tuple bytes across every table of the read.
+    pub max_bytes: usize,
+}
+
+/// Why a committed read stopped before returning every table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommittedReadError {
+    /// The committed storage violates the descriptor or row contract.
+    Storage(TableStorageError),
+    /// The read reached a row past its limits. `rows_seen` counts the rows of
+    /// the table that reached the limit, including the refused row. That row is
+    /// never retained, and no later row of any table is read.
+    Limit { rows_seen: usize },
+}
+
+impl From<TableStorageError> for CommittedReadError {
+    fn from(error: TableStorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+/// Admits committed rows one at a time against [`CommittedReadLimits`].
+#[derive(Debug)]
+struct CommittedReadBudget {
+    limits: CommittedReadLimits,
+    bytes: usize,
+}
+
+impl CommittedReadBudget {
+    fn new(limits: CommittedReadLimits) -> Self {
+        Self { limits, bytes: 0 }
+    }
+
+    /// Checks that the next row of a table already holding `table_rows` admitted rows
+    /// is within the per-table row limit. Runs before that row's tuple is decoded.
+    fn check_row_slot(&self, table_rows: usize) -> Result<(), CommittedReadError> {
+        let rows_seen = table_rows.saturating_add(1);
+        if rows_seen > self.limits.max_rows_per_table {
+            return Err(CommittedReadError::Limit { rows_seen });
+        }
+        Ok(())
+    }
+
+    /// Admits the key and stored-tuple bytes of a row whose slot was checked. The
+    /// row is of a table already holding `table_rows` admitted rows.
+    fn admit_row_bytes(
+        &mut self,
+        table_rows: usize,
+        row_bytes: usize,
+    ) -> Result<(), CommittedReadError> {
+        let rows_seen = table_rows.saturating_add(1);
+        let bytes = self.bytes.saturating_add(row_bytes);
+        if bytes > self.limits.max_bytes {
+            return Err(CommittedReadError::Limit { rows_seen });
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+}
+
 /// Reads every table's committed rows at `commit`, keyed in the runtime keyspace.
+/// The read stops at the first row past `limits`, before that row is retained.
 pub fn committed_tables(
     repository: &Repository,
     format_context: &RepositoryFormatContext,
     commit: &GitCommitRef,
     tables: &BTreeMap<String, TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
-) -> Result<BTreeMap<String, CommittedTable>, TableStorageError> {
+    limits: CommittedReadLimits,
+) -> Result<BTreeMap<String, CommittedTable>, CommittedReadError> {
     let mut result = BTreeMap::new();
+    let mut budget = CommittedReadBudget::new(limits);
     for (table_name, table_schema) in tables {
         let object_id = table_ids
             .get(table_name)
@@ -99,6 +168,15 @@ pub fn committed_tables(
             }
             let next_lower = page.last().map(|row| row.key().clone());
             for row in page.into_iter().skip(usize::from(lower.is_some())) {
+                let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
+                let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
+                let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
+                // Reject a key whose shape does not match the primary key declaration.
+                key_values(admission.keys.len(), key_value.raw())?;
+                let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
+                // The row slot is checked before the stored tuple is decoded, so the row
+                // past the per-table row limit is never decoded or retained.
+                budget.check_row_slot(committed.len())?;
                 // The committed descriptor validates the whole stored tuple,
                 // Blob references included, so the tuple is kept as stored.
                 let decoded = graph
@@ -111,19 +189,14 @@ pub fn committed_tables(
                         .zip(&storage_order)
                         .any(|(field, name)| field_names.get(field.field_id()) != Some(name))
                 {
-                    return Err(TableStorageError);
+                    return Err(TableStorageError.into());
                 }
-                let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
-                let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
-                let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
-                // Reject a key whose shape does not match the primary key declaration.
-                key_values(admission.keys.len(), key_value.raw())?;
-                let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
-                if committed
-                    .insert(runtime_key, decoded.canonical_fields().to_vec())
-                    .is_some()
-                {
-                    return Err(TableStorageError);
+                let value = decoded.canonical_fields();
+                // The byte bound needs the stored tuple's size, so it is admitted once
+                // decoded and before the row is retained.
+                budget.admit_row_bytes(committed.len(), runtime_key.len() + value.len())?;
+                if committed.insert(runtime_key, value.to_vec()).is_some() {
+                    return Err(TableStorageError.into());
                 }
             }
             if next_lower == lower {
@@ -148,22 +221,36 @@ pub fn evaluator_rows(
     table: &CommittedTable,
     schema: &TableSchema,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
+    evaluator_rows_from_stored(schema, &table.storage_order, &table.rows)
+}
+
+/// Converts runtime `(key, stored tuple)` rows of one table into evaluator
+/// records, ordered by evaluator key. `storage_order` names the stored fields
+/// every tuple lists in order. Each present Blob field reads as its
+/// [`blob_placeholder`]. This is the single stored-to-evaluator conversion: a
+/// merged activation snapshot (committed base plus live tail) is converted
+/// through it once, at the application boundary.
+pub fn evaluator_rows_from_stored(
+    schema: &TableSchema,
+    storage_order: &[String],
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
     let (key_names, text_primary_key) = evaluator_keying(schema)?;
-    let mut rows = BTreeMap::new();
-    for (runtime_key, storage_row) in &table.rows {
-        let storage_row = portable_storage_row(storage_row, &table.storage_order, schema)?;
+    let mut evaluator = BTreeMap::new();
+    for (runtime_key, storage_row) in rows {
+        let storage_row = portable_storage_row(storage_row, storage_order, schema)?;
         let (key_bytes, record) = evaluator_row_with_keying(
             &key_names,
             text_primary_key,
             runtime_key,
             &storage_row,
-            &table.storage_order,
+            storage_order,
         )?;
-        if rows.insert(key_bytes, record).is_some() {
+        if evaluator.insert(key_bytes, record).is_some() {
             return Err(TableStorageError);
         }
     }
-    Ok(rows.into_iter().collect())
+    Ok(evaluator.into_iter().collect())
 }
 
 /// The key-field names and text-key flag that evaluator records of `schema` use.
@@ -234,6 +321,34 @@ fn present_blob<'a>(ty: &Type, value: &'a Raw) -> Result<Option<&'a Raw>, TableS
         [Raw::Int(state), present] if *state == BigInt::from(1) => Ok(Some(present)),
         _ => Err(TableStorageError),
     }
+}
+
+/// Whether any stored tuple of `rows` holds a present Blob reference. Such a
+/// reference has no portable evaluator value (see [`blob_placeholder`]), so a
+/// caller that serves a read to a client refuses it instead of exposing the
+/// placeholder as data.
+pub fn stored_rows_hold_blob(
+    schema: &TableSchema,
+    storage_order: &[String],
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> Result<bool, TableStorageError> {
+    for (_, storage_row) in rows {
+        let Raw::Array(values) =
+            decode_canonical_storage_value(storage_row).map_err(|_| TableStorageError)?
+        else {
+            return Err(TableStorageError);
+        };
+        if values.len() != storage_order.len() {
+            return Err(TableStorageError);
+        }
+        for (value, name) in values.iter().zip(storage_order) {
+            let ty = schema.fields.get(name).ok_or(TableStorageError)?;
+            if holds_blob(ty) && present_blob(ty, value)?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// One stored tuple in portable form: each present Blob reference becomes its
@@ -710,6 +825,35 @@ mod tests {
         assert_eq!(
             restore_stored_blobs(&plain, &titles, &schema, None).expect("plain"),
             plain
+        );
+    }
+
+    #[test]
+    fn read_budget_refuses_the_row_past_the_table_limit() {
+        let budget = CommittedReadBudget::new(CommittedReadLimits {
+            max_rows_per_table: 2,
+            max_bytes: usize::MAX,
+        });
+        assert_eq!(budget.check_row_slot(0), Ok(()));
+        assert_eq!(budget.check_row_slot(1), Ok(()));
+        assert_eq!(
+            budget.check_row_slot(2),
+            Err(CommittedReadError::Limit { rows_seen: 3 })
+        );
+    }
+
+    #[test]
+    fn read_budget_refuses_the_row_past_the_byte_limit_across_tables() {
+        let mut budget = CommittedReadBudget::new(CommittedReadLimits {
+            max_rows_per_table: 10,
+            max_bytes: 5,
+        });
+        // Two tables share one byte budget: 3 bytes in the first, 2 in the second.
+        assert_eq!(budget.admit_row_bytes(0, 3), Ok(()));
+        assert_eq!(budget.admit_row_bytes(0, 2), Ok(()));
+        assert_eq!(
+            budget.admit_row_bytes(1, 1),
+            Err(CommittedReadError::Limit { rows_seen: 2 })
         );
     }
 }
