@@ -1,6 +1,6 @@
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
-    StepBudget, invoke_named_with_effects,
+    StepBudget, evaluate_expression_with_effects, invoke_named_with_effects,
 };
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{Expr, LambdaParameter, LiteralKind, Pattern, SyntaxSpan};
@@ -183,4 +183,111 @@ fn filtered_window_observes_source_order() {
     let windows = relation_stage(filtered, "window", vec![integer(2)]);
     let result = invoke(relation_stage(windows, "first", Vec::new()), &mut effects);
     assert_eq!(result, first_window(&[4, 3]));
+}
+
+/// Admitted committed table rows: the table's name, piped into a relation
+/// operation, reads that table's rows in key order through the same paged
+/// scan that `sys.*` sources use.
+struct TableRows {
+    table: &'static str,
+    rows: Vec<CanonicalValue>,
+}
+
+impl EffectHandler for TableRows {
+    fn handle(
+        &mut self,
+        _: &Expr,
+        _: &[CanonicalValue],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        (name == self.table).then(|| name.to_owned())
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        assert_eq!(source, self.table);
+        budget.debit(1)?;
+        let start = after.map_or(0, |cursor| usize::from(cursor[0]));
+        let end = (start + limit.max(1)).min(self.rows.len());
+        let next = (end < self.rows.len()).then(|| vec![end as u8]);
+        Ok(Some(RelationPage {
+            rows: self.rows[start..end].to_vec(),
+            next,
+        }))
+    }
+}
+
+fn table_rows(values: &[i64]) -> TableRows {
+    TableRows {
+        table: "Note",
+        rows: rows(values),
+    }
+}
+
+fn int_result(value: i64) -> CanonicalValue {
+    CanonicalValue::new(Raw::Int(value.into())).unwrap()
+}
+
+/// ORNA-REL-001: a committed table name piped into `count()` reads every row of that table.
+#[test]
+fn committed_table_name_counts_its_rows() {
+    let mut effects = table_rows(&[3, 1, 2]);
+    let result = evaluate_expression_with_effects(
+        "Note | count()",
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap_or_else(|error| panic!("table count failed: {}", error.code()));
+    assert_eq!(result, int_result(3));
+}
+
+/// ORNA-REL-001: an empty committed table yields an empty relation, not an error.
+#[test]
+fn empty_committed_table_counts_zero() {
+    let mut effects = table_rows(&[]);
+    let result = evaluate_expression_with_effects(
+        "Note | count()",
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap_or_else(|error| panic!("empty table count failed: {}", error.code()));
+    assert_eq!(result, int_result(0));
+}
+
+/// ORNA-REL-001 with ORNA-ORDER-001: a table pipeline filters the committed rows in order.
+#[test]
+fn committed_table_name_filters_its_rows() {
+    let mut effects = table_rows(&[3, 1, 2]);
+    let result = evaluate_expression_with_effects(
+        "Note | filter(row => row > 1) | count()",
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .unwrap_or_else(|error| panic!("filtered table count failed: {}", error.code()));
+    assert_eq!(result, int_result(2));
+}
+
+/// Without an admitted table source, a bare name keeps its ordinary resolution and fails closed.
+#[test]
+fn unadmitted_name_in_relation_pipeline_fails_closed() {
+    let mut effects = table_rows(&[3, 1, 2]);
+    let error = evaluate_expression_with_effects(
+        "Other | count()",
+        &Environment::new(),
+        Limits::default(),
+        &mut effects,
+    )
+    .expect_err("an unadmitted name must not read a table");
+    assert_eq!(error.code(), "ORNA-EVAL-NAME");
 }
