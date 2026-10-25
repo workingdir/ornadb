@@ -133,7 +133,8 @@ fn imported_helper_call_keeps_exact_transitive_table_dependencies() {
             .expect("imported helper export")
             .effects,
         EffectSummary {
-            effects: BTreeSet::from(["database read".to_owned()]),
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         }
     );

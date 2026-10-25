@@ -1,12 +1,12 @@
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_foundation_v1::CanonicalValue;
 use orna_semantic_v1::{Catalogue, StandardDependencyProfile};
-use orna_value_v1::Raw;
-use orna_standard::{
+use orna_standard_sources::{
     REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_OPTION_PATH_V1,
     REFERENCE_STANDARD_PRELUDE_EXPORTS_V1, REFERENCE_STANDARD_PRELUDE_PATH_V1,
     REFERENCE_STANDARD_TEXT_PATH_V1, reference_standard_sources_v1,
 };
+use orna_value_v1::Raw;
 
 fn bool_value(value: bool) -> CanonicalValue {
     CanonicalValue::new(Raw::Bool(value)).unwrap()
@@ -15,6 +15,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn prelude_sources() -> Vec<(String, String)> {
     let wanted = [
         REFERENCE_STANDARD_COLLECTION_PATH_V1,
+        "std/list.orna",
         REFERENCE_STANDARD_OPTION_PATH_V1,
         REFERENCE_STANDARD_PRELUDE_PATH_V1,
         REFERENCE_STANDARD_TEXT_PATH_V1,
@@ -65,6 +66,18 @@ fn curated_prelude_helpers_compute_versioned_collection_text_and_option_values()
             .unwrap_or_else(|error| panic!("prelude contract {contract:?}: {}", error.code()));
         assert_eq!(result, Some(bool_value(true)), "contract: {contract}");
     }
+}
+
+/// ORNA-IMPORT-003 and ORNA-IMPORT-005 bind `use std.prelude as _;` only in the
+/// importing lexical scope. Its `count` must not rebind the bare `count` inside
+/// `std.list`, which would recurse `std.list.length -> count -> list.length`.
+#[test]
+fn prelude_import_does_not_rebind_bare_names_inside_std_modules() {
+    let mut session = pinned_prelude_session();
+    assert_eq!(session.submit("use std.prelude as _;"), Ok(None));
+    assert_eq!(session.submit("use std.list as list;"), Ok(None));
+    assert_eq!(session.submit("list.length([3, 1, 3]) == 3"), Ok(Some(bool_value(true))));
+    assert_eq!(session.submit("count([3, 1, 3]) == 3"), Ok(Some(bool_value(true))));
 }
 
 #[test]

@@ -46,8 +46,6 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GIT_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
 const SESSION_LEASE_MS: u64 = MAX_SESSION_LEASE;
-const SERVE_MODULE_PATH: &str = "main.orna";
-const SERVE_ENTRY: &str = "serve";
 /// Wall-clock bound for one request line and its headers. A peer that
 /// trickles bytes cannot hold a connection thread past it.
 const REQUEST_HEAD_TIMEOUT: StdDuration = StdDuration::from_secs(15);
@@ -66,6 +64,8 @@ const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
 /// exit before it reports orderly termination. A cancelled worker finishes
 /// its in-flight step, sends a Close frame and exits.
 const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+/// Longest the accept loop waits for a refused connection's request head.
+const REFUSAL_HEAD_TIMEOUT: StdDuration = StdDuration::from_millis(250);
 /// Default for [`ServeOptions::max_connections`].
 const MAX_CONNECTIONS: usize = 64;
 
@@ -456,21 +456,7 @@ impl Response {
 }
 
 pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<(), Diagnostic> {
-    let root = local_project_path(endpoint)?;
-    let repository = Repository::discover(&root).map_err(|_| {
-        Diagnostic::target(
-            "E2100",
-            "local Git worktree could not be discovered",
-            "run `serve` inside an Orna Git worktree or provide a local project path",
-        )
-    })?;
-
-    // Project loading parses the reachable source modules only. In
-    // particular, serving a clone never invokes its root `main()`; functions
-    // run only after an explicit query or live Eval request reaches a route.
-    let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
-    let (identity, _) = runtime_identity(&repository)?;
+    let clone = open_served_clone(endpoint)?;
     let listener = LiveTransport::bind_default_listener(port).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -480,11 +466,8 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
     })?;
     let address = listener.status().address;
     let state = new_serve_state(
-        repository.worktree().to_path_buf(),
-        identity,
+        clone,
         address,
-        catalogue,
-        Some(project),
         ServeOptions {
             allow_push,
             ..ServeOptions::default()
@@ -514,14 +497,82 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
     })
 }
 
-fn new_serve_state(
+/// The clone one `orna serve` process hosts.
+struct ServedClone {
     root: PathBuf,
     identity: RuntimeIdentity,
-    listener_address: SocketAddr,
     catalogue: orna_semantic_v1::Catalogue,
     project: Option<orna_project_v1::LoadedProject>,
+    /// The clone's durable runtime. The live host owns it, so each live
+    /// request is durably admitted and an Eval's writes commit together with
+    /// its terminal outcome (30-protocol REQUEST-1).
+    runtime: RuntimeState,
+}
+
+/// Resolves the clone at `endpoint` before the listener binds.
+fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
+    let root = local_project_path(endpoint)?;
+    let repository = Repository::discover(root).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree could not be discovered",
+            "run `serve` inside an Orna Git worktree or provide a local project path",
+        )
+    })?;
+    // Project loading parses the reachable source modules only. In
+    // particular, serving a clone never invokes its root `main()`; functions
+    // run only after an explicit query or live Eval request reaches a route.
+    let project = load_project(endpoint)?;
+    let catalogue = semantic_catalogue(&project)?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    // The served runtime uses this process's owner. A later process takes the
+    // lease over with a bumped epoch once it holds the runtime owner lock, so a
+    // killed predecessor's token is fenced. Test
+    // `served_runtime_holds_the_process_owner_lease` pins the holder's lease.
+    let owner_id = invocation_owner_id();
+    let executor = current_thread_executor().map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "the clone's runtime state could not be opened",
+            "check the local runtime state, then retry `serve`",
+        )
+    })?;
+    let runtime = executor
+        .block_on(RuntimeState::open_with_owner_id(
+            &repository,
+            identity,
+            initial_digest,
+            owner_id,
+        ))
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2200",
+                "the clone's runtime state could not be opened",
+                "check the local runtime state, then retry `serve`",
+                format!("runtime error: {error:?}"),
+            )
+        })?;
+    Ok(ServedClone {
+        root: repository.worktree().to_path_buf(),
+        identity,
+        catalogue,
+        project: Some(project),
+        runtime,
+    })
+}
+
+fn new_serve_state(
+    clone: ServedClone,
+    listener_address: SocketAddr,
     options: ServeOptions,
 ) -> Result<ServeState, Diagnostic> {
+    let ServedClone {
+        root,
+        identity,
+        catalogue,
+        project,
+        runtime,
+    } = clone;
     let loopback = LoopbackAuthority {
         port: listener_address.port(),
     };
@@ -533,7 +584,7 @@ fn new_serve_state(
         )
     })?;
     let boundary = SessionBoundary::new(OriginPolicy::new(origins, []), options.session_lease_ms);
-    let host = LiveHost::new(
+    let host = LiveHost::with_runtime_state_and_owner(
         orna_live_v1::Limits::default(),
         boundary,
         Serving::new(orna_serving_v1::Limits::default()).map_err(|_| {
@@ -543,6 +594,10 @@ fn new_serve_state(
                 "retry `serve`; the local serving state is unavailable",
             )
         })?,
+        runtime,
+        // The served runtime was opened with this same process owner (see
+        // `open_served_clone`), so the live host's `acquire_lease` re-acquires it.
+        invocation_owner_id(),
     )
     .map_err(|_| {
         Diagnostic::target(
@@ -551,7 +606,13 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
-    let transport_limits = TransportLimits::default();
+    // The listener is plaintext HTTP on loopback, the explicitly trusted
+    // transport 30-protocol:5 permits. `Secure` is reserved for TLS
+    // (30-protocol:15), so the session cookie omits it here.
+    let transport_limits = TransportLimits {
+        tls: false,
+        ..TransportLimits::default()
+    };
     let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -564,12 +625,13 @@ fn new_serve_state(
         .map_or(StdSnapshotPin::Unpinned, sys_host::std_snapshot_pin);
     let sys_host_context =
         sys_host::sys_host_context(&root, identity, RuntimeMode::Serve, std_snapshot);
+    // Every Eval is one input to its session's REPL (30-protocol); the host
+    // selects no application module for Eval admission.
     let mut application = ApplicationLiveAdapter::new(
         ApplicationAuthority::new(catalogue, Limits::default())
             .with_sys_host_context(sys_host_context),
     )
-    .with_runtime_identity(identity.database_id, identity.repository_id)
-    .with_module(SERVE_MODULE_PATH, SERVE_ENTRY);
+    .with_runtime_identity(identity.database_id, identity.repository_id);
     if let Some(project) = project {
         application = application.with_loaded_project(project);
     }
@@ -596,6 +658,7 @@ fn new_serve_state(
 
 fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result<()> {
     start_session_sweep(state)?;
+    let refusals = Arc::new(AtomicUsize::new(0));
     for accepted in listener.incoming() {
         let stream = match accepted {
             Ok(stream) => stream,
@@ -608,7 +671,7 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
             Err(error) => return Err(error),
         };
         let Some(slot) = ConnectionSlot::claim(state, &stream) else {
-            refuse_connection(stream);
+            refuse_off_loop(stream, &refusals);
             continue;
         };
         // A failed spawn drops the closure, which releases the slot and
@@ -621,6 +684,83 @@ fn serve_listener(listener: &TcpListener, state: &Arc<ServeState>) -> io::Result
             });
     }
     Ok(())
+}
+
+/// Refusals answered at once. Each waits up to [`REFUSAL_HEAD_TIMEOUT`] for
+/// its request head on a thread of its own; beyond this many, the connection
+/// is answered from the accept loop by [`refuse_saturated`] instead.
+const MAX_REFUSALS_IN_FLIGHT: usize = 16;
+
+/// Bound on each wait the accept loop makes while answering a saturated
+/// refusal: first for the request line to arrive, then for the canned 503 to
+/// be written. One saturated refusal therefore holds the accept loop for at
+/// most twice this long.
+const SATURATED_REFUSAL_WAIT: StdDuration = StdDuration::from_millis(5);
+
+/// Hands a connection beyond the cap to [`refuse_connection`] on its own
+/// thread, so the accept loop never waits on a silent peer.
+fn refuse_off_loop(stream: TcpStream, in_flight: &Arc<AtomicUsize>) {
+    let claimed = in_flight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        (active < MAX_REFUSALS_IN_FLIGHT).then_some(active + 1)
+    });
+    if claimed.is_err() {
+        refuse_saturated(stream);
+        return;
+    }
+    let worker = Arc::clone(in_flight);
+    let spawned = std::thread::Builder::new()
+        .name("orna-serve-refusal".into())
+        .spawn(move || {
+            refuse_connection(stream);
+            worker.fetch_sub(1, Ordering::AcqRel);
+        });
+    if spawned.is_err() {
+        in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Answers a connection that arrives while every refusal thread is busy,
+/// from the accept loop, without a head read. The request line is only
+/// peeked, so the route shape can be chosen while the bytes stay unread, and
+/// both the peek and the write are bounded by [`SATURATED_REFUSAL_WAIT`]. A
+/// peer that sends nothing in time gets the generic shape.
+fn refuse_saturated(mut stream: TcpStream) {
+    let orna_route = peek_is_orna_route(&stream, Instant::now() + SATURATED_REFUSAL_WAIT);
+    let response = if orna_route {
+        live_error_response(503, "live.unavailable", "request rejected")
+    } else {
+        unavailable_response()
+    };
+    let head = response_head(&response);
+    let _ = write_before(
+        &mut stream,
+        &[&head, &response.body],
+        Instant::now() + SATURATED_REFUSAL_WAIT,
+    );
+    let _ = stream.shutdown(Shutdown::Write);
+}
+
+/// Peeks at the start of a connection's request line until it can classify
+/// the route or `deadline` passes. Bytes are never consumed.
+fn peek_is_orna_route(stream: &TcpStream, deadline: Instant) -> bool {
+    // The longest `/orna/` method prefix, `DELETE /orna/`, is 13 bytes.
+    const CLASSIFY_BYTES: usize = 13;
+    let mut probe = [0_u8; CLASSIFY_BYTES];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return false;
+        }
+        match stream.peek(&mut probe) {
+            Ok(read) if read >= CLASSIFY_BYTES || probe[..read].contains(&b'\n') => {
+                return is_orna_request_line(&probe[..read]);
+            }
+            // Nothing, or only part of the line so far: wait briefly for more.
+            Ok(0) => return false,
+            Ok(_) => std::thread::sleep(StdDuration::from_micros(200)),
+            Err(_) => return false,
+        }
+    }
 }
 
 /// How long the accept loop pauses after a transient accept failure before
@@ -684,17 +824,28 @@ impl Drop for ConnectionSlot {
 }
 
 /// Answers a connection beyond [`ServeOptions::max_connections`] from the
-/// accept loop itself: a 503 written without waiting, which fits in the new
-/// socket's empty send buffer, then the end of the connection. Its request
-/// is never read, so the peer cannot hold up the accept loop.
-fn refuse_connection(mut stream: TcpStream) {
-    let response = unavailable_response();
-    let mut bytes = response_head(&response);
-    bytes.extend_from_slice(&response.body);
-    if stream.set_nonblocking(true).is_ok() {
-        let _ = stream.write_all(&bytes);
-    }
-    let _ = stream.shutdown(Shutdown::Write);
+/// accept loop itself, with a 503 in the shape its route expects (30-protocol,
+/// Creation/resume errors: `{ "code", "message" }` on `/orna/`). The request
+/// head is read first, bounded by [`REFUSAL_HEAD_TIMEOUT`], on the refusal's
+/// own thread (see [`refuse_off_loop`]), so a silent peer cannot hold up the
+/// accept loop.
+fn refuse_connection(stream: TcpStream) {
+    let mut reader = BufReader::new(stream);
+    let mut orna_route = false;
+    // Whatever the head read yields, the route is known from its request line
+    // when that line arrived; an unreadable head gets the generic shape.
+    let _ = read_request_head(
+        &mut reader,
+        Instant::now() + REFUSAL_HEAD_TIMEOUT,
+        &mut orna_route,
+    );
+    let response = if orna_route {
+        live_error_response(503, "live.unavailable", "request rejected")
+    } else {
+        unavailable_response()
+    };
+    let _ = write_response(reader.get_mut(), response, TransferBudget::default());
+    let _ = reader.get_mut().shutdown(Shutdown::Write);
 }
 
 /// Maps a live WebSocket failure to the RFC 6455 close code the socket is
@@ -1762,7 +1913,7 @@ fn run_git_http_backend(
         .parent()
         .ok_or_else(|| io::Error::other("repository parent is unavailable"))?;
     let mut command = Command::new("git");
-    scrub_host_git_environment(&mut command);
+    clear_cgi_environment(&mut command);
     command
         .arg("http-backend")
         .current_dir(root)
@@ -1818,40 +1969,17 @@ fn run_git_http_backend(
     parse_cgi_response(&cgi_output)
 }
 
-fn scrub_host_git_environment(command: &mut Command) {
-    for variable in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_GLOBAL",
-        "GIT_CONFIG_NOSYSTEM",
-        "GIT_CONFIG",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_IMPLICIT_WORK_TREE",
-        "GIT_PREFIX",
-        "GIT_NAMESPACE",
-        "GIT_REPLACE_REF_BASE",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_GRAFT_FILE",
-        "GIT_SHALLOW_FILE",
-        "GIT_PROTOCOL",
-    ] {
-        command.env_remove(variable);
-    }
-    for (variable, _) in std::env::vars_os() {
-        if variable.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
-            || variable
-                .as_encoded_bytes()
-                .starts_with(b"GIT_CONFIG_VALUE_")
-        {
-            command.env_remove(variable);
+/// The CGI child inherits only this allow-list: PATH to run git, HOME and
+/// TMPDIR for git's own state, and locale. Server tokens, proxy settings and
+/// ambient GIT_* routing or config variables never reach it. Git locates its
+/// exec path itself (compiled-in or RUNTIME_PREFIX), so GIT_EXEC_PATH is not
+/// forwarded; XDG_CONFIG_HOME is not forwarded, so only ~/.gitconfig applies.
+/// Requires git >= 2.30 (`commit_optional` relies on `rev-parse --end-of-options`).
+fn clear_cgi_environment(command: &mut Command) {
+    command.env_clear();
+    for name in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
         }
     }
 }
@@ -2321,7 +2449,6 @@ fn unavailable_response() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orna_live_v1::LiveApplication;
     use std::process::Command;
 
     #[test]
@@ -2406,7 +2533,6 @@ mod tests {
     }
 
     const SERVE_FIXTURE: &str = include_str!("../tests/fixtures/serve-no-autoload.orna");
-    const SERVE_ENTRY_FIXTURE: &str = include_str!("../tests/fixtures/serve-entry.orna");
 
     fn git_succeeds(directory: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -2418,64 +2544,6 @@ mod tests {
             output.status.success(),
             "Git command failed: {}",
             String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn selected_serve_entry_runs_through_the_live_evaluator_and_returns_a_typed_result() {
-        let mut state = new_serve_state(
-            PathBuf::new(),
-            RuntimeIdentity {
-                database_id: [1; 16],
-                repository_id: [2; 16],
-            },
-            "127.0.0.1:9000".parse().expect("loopback address"),
-            orna_semantic_v1::Catalogue::authoritative_core(),
-            None,
-            ServeOptions::default(),
-        )
-        .expect("serve state");
-        let request = [4; 16];
-        let fingerprint = [5; 32];
-        let message = Message::Eval {
-            source: SERVE_ENTRY_FIXTURE.to_owned(),
-            database: orna_protocol_v1::DatabaseContext {
-                database: [1; 16],
-                snapshot: None,
-            },
-            presentation: PresentationContext {
-                locale: "en".into(),
-                timezone: None,
-                width: None,
-                theme: "terminal/default".into(),
-                supported_kinds: vec!["text".into(), "group".into()],
-            },
-            fingerprint,
-        };
-
-        let response = state
-            .application
-            .get_mut()
-            .expect("live application")
-            .eval([3; 16], request, &message)
-            .expect("selected serve source evaluates");
-        assert_eq!(response.request, Some(request));
-        assert_eq!(response.watch, None);
-        let Message::Result {
-            status,
-            value,
-            fingerprint: result_fingerprint,
-            diagnostic,
-        } = response.message
-        else {
-            panic!("Run returns a typed Result message");
-        };
-        assert_eq!(status, orna_protocol_v1::ResultStatus::Success);
-        assert_eq!(result_fingerprint, fingerprint);
-        assert_eq!(diagnostic, None);
-        assert_eq!(
-            value.expect("typed Run result").raw(),
-            &orna_foundation_v1::OvbRaw::Int(42.into())
         );
     }
 
@@ -2934,11 +3002,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.listener().accept().expect("accepted request");
             let state = new_serve_state(
-                root,
-                identity,
+                test_clone(&root, identity),
                 status.address,
-                orna_semantic_v1::Catalogue::authoritative_core(),
-                None,
                 ServeOptions::default(),
             )
             .expect("serve host");
@@ -3309,8 +3374,18 @@ mod tests {
 
         let second = create_session(address);
         let mut second_socket = open_websocket(address, &second);
-        assert_serve_entry_result(&eval_over_socket(&mut second_socket, &second, [41; 16]));
-        assert_serve_entry_result(&eval_over_socket(&mut first_socket, &first, [42; 16]));
+        assert_expression_result(&eval_over_socket(
+            &mut second_socket,
+            &second,
+            [41; 16],
+            EXPRESSION,
+        ));
+        assert_expression_result(&eval_over_socket(
+            &mut first_socket,
+            &first,
+            [42; 16],
+            EXPRESSION,
+        ));
     }
 
     /// 30-protocol §Session creation and ownership, A13-live-serving-01: a
@@ -3421,14 +3496,19 @@ mod tests {
 
         let busy = state.application.lock().expect("live application");
         let waiting = std::thread::spawn(move || {
-            let result = eval_over_socket(&mut socket, &session, [51; 16]);
+            let result = eval_over_socket(&mut socket, &session, [51; 16], EXPRESSION);
             (socket, session, result)
         });
         std::thread::sleep(keepalive.idle_timeout + StdDuration::from_secs(1));
         drop(busy);
         let (mut socket, session, result) = waiting.join().expect("Eval client");
-        assert_serve_entry_result(&result);
-        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [52; 16]));
+        assert_expression_result(&result);
+        assert_expression_result(&eval_over_socket(
+            &mut socket,
+            &session,
+            [52; 16],
+            EXPRESSION,
+        ));
     }
 
     /// 30-protocol §Session creation and ownership, A13-live-serving-15:
@@ -3449,7 +3529,12 @@ mod tests {
         let session = create_session(address);
         let mut socket = open_websocket(address, &session);
         // The result also shows that the attachment has been committed.
-        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [61; 16]));
+        assert_expression_result(&eval_over_socket(
+            &mut socket,
+            &session,
+            [61; 16],
+            EXPRESSION,
+        ));
 
         let deleted = delete_session(address, &session);
         assert_eq!(deleted.status, 204, "{}", deleted.body);
@@ -3475,7 +3560,12 @@ mod tests {
         let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
         let session = create_session(address);
         let mut socket = open_websocket(address, &session);
-        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [81; 16]));
+        assert_expression_result(&eval_over_socket(
+            &mut socket,
+            &session,
+            [81; 16],
+            EXPRESSION,
+        ));
         send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
         let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
         assert_eq!(opcode, 8);
@@ -3510,7 +3600,12 @@ mod tests {
         );
         let session = create_session(address);
         let mut socket = open_websocket(address, &session);
-        assert_serve_entry_result(&eval_over_socket(&mut socket, &session, [71; 16]));
+        assert_expression_result(&eval_over_socket(
+            &mut socket,
+            &session,
+            [71; 16],
+            EXPRESSION,
+        ));
         // Closing the socket detaches it, starting the reconnection lease.
         send_frame(&mut socket, 8, &1000_u16.to_be_bytes());
         let (opcode, _) = read_frame(&mut socket).expect("close acknowledgement");
@@ -3583,6 +3678,150 @@ mod tests {
             );
             std::thread::sleep(StdDuration::from_millis(20));
         }
+    }
+
+    /// 30-protocol:15: the listener is plaintext HTTP, so the session cookie
+    /// must not carry `Secure`, which a browser would not return over http.
+    #[test]
+    fn session_cookie_is_not_secure_over_plain_http() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=cookie"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let reply = create_session_as(
+            address,
+            &address.to_string(),
+            Some(&format!("http://{address}")),
+        );
+        assert_eq!(reply.status, 201, "{}", reply.body);
+        let cookie = reply
+            .head
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("set-cookie:"))
+            .expect("session cookie");
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(!cookie.contains("Secure"), "{cookie}");
+    }
+
+    /// 30-protocol:21: a connection refused by the cap on a `/orna/` route is
+    /// answered in the protocol's `{ "code", "message" }` shape.
+    #[test]
+    fn over_cap_refusal_on_orna_routes_uses_the_protocol_error_shape() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=refusal"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        // The open socket holds the only slot for as long as it stays attached.
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert_eq!(
+            refused.body,
+            r#"{"code":"live.unavailable","message":"request rejected"}"#
+        );
+    }
+
+    /// A silent peer refused over the cap must not delay the next refusal:
+    /// the accept loop answers the second peer without waiting out the first
+    /// peer's head timeout.
+    #[test]
+    fn silent_refused_peer_does_not_delay_the_next_refusal() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=silent"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+        // Sends nothing, so its refusal runs until REFUSAL_HEAD_TIMEOUT.
+        let _silent = std::net::TcpStream::connect(address).expect("silent peer");
+
+        let started = Instant::now();
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert!(
+            started.elapsed() < REFUSAL_HEAD_TIMEOUT,
+            "a silent peer delayed the next refusal"
+        );
+    }
+
+    /// 30-protocol:21: once every refusal thread is busy, a connection over
+    /// the cap is still answered from the accept loop. A `/orna/` route gets
+    /// the protocol error shape, and a generic route gets the generic 503,
+    /// rather than a silent close.
+    #[test]
+    fn saturated_refusal_still_answers_with_the_route_shape() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=saturated"],
+        );
+        let address = start_live_server(
+            directory.path(),
+            TEST_IDENTITY,
+            ServeOptions {
+                max_connections: 1,
+                ..ServeOptions::default()
+            },
+        );
+        let session = create_session(address);
+        let _socket = open_websocket(address, &session);
+        // Silent peers fill every refusal thread; each holds its thread until
+        // REFUSAL_HEAD_TIMEOUT. They are accepted in connect order, so the
+        // probes below arrive after the pool is full.
+        let _silent: Vec<std::net::TcpStream> = (0..MAX_REFUSALS_IN_FLIGHT)
+            .map(|_| std::net::TcpStream::connect(address).expect("silent peer"))
+            .collect();
+
+        let refused = exchange(
+            address,
+            &format!(
+                "GET /orna/live/{} HTTP/1.1\r\nHost: {address}\r\n\r\n",
+                session.id
+            ),
+        );
+        assert_eq!(refused.status, 503);
+        assert_eq!(
+            refused.body,
+            r#"{"code":"live.unavailable","message":"request rejected"}"#
+        );
+
+        let generic = exchange(address, &format!("GET / HTTP/1.1\r\nHost: {address}\r\n\r\n"));
+        assert_eq!(generic.status, 503);
+        assert_eq!(generic.body, r#"{"error":"temporarily_unavailable"}"#);
     }
 
     /// ORNA-WIRE-005: a request body must arrive within one transfer budget
@@ -3727,11 +3966,269 @@ mod tests {
         );
     }
 
+    /// ORNA-EVAL-006 and the 30-protocol message registry ("A result for
+    /// success carries the complete typed value, including Unit"),
+    /// A13-live-serving-03: a REPL declaration over `orna serve` is answered
+    /// with typed Unit, and its binding persists for the session. Before, the
+    /// declaration's result was a bare null that could not be encoded, so the
+    /// client lost its answer while the server kept the binding.
+    #[test]
+    fn repl_declarations_over_serve_return_unit_and_persist() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=declarations"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [91; 16], "let x = 41;"),
+            &CanonicalValue::unit(),
+        );
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [92; 16], "x + 1"),
+            &int_value(42),
+        );
+    }
+
+    /// ORNA-EVAL-006, ORNA-APP-010 and 30-protocol ("An eval source is
+    /// exactly one REPL input"), A14-04: console input that declares
+    /// `fn serve` is an ordinary REPL declaration. Before, `orna serve`
+    /// admitted any Eval declaring a function named `serve` as a one-shot
+    /// module and ran it, so the declaration answered with the function's
+    /// result and was never retained by the session.
+    #[test]
+    fn console_fn_serve_is_an_ordinary_declaration() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=console-serve"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [93; 16], "fn serve(): Int = 1;"),
+            &CanonicalValue::unit(),
+        );
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [94; 16], "serve()"),
+            &int_value(1),
+        );
+    }
+
+    /// 30-protocol message registry, type 2 ("Host replies with the latest
+    /// full snapshot"; "explicit resync receives a snapshot with its
+    /// originating request ID"), ORNA-LIVE-004, A13-live-serving-08: after
+    /// the watched value changes, an explicit resync is answered with the
+    /// complete current tree at the next revision. Before, it was answered
+    /// with a request-less delta against a base the resyncing client had lost.
+    #[test]
+    fn resync_after_a_value_change_returns_a_snapshot_with_its_request_id() {
+        let directory = tempfile::tempdir().expect("temporary clone");
+        git_succeeds(
+            directory.path(),
+            &["init", "--quiet", "--initial-branch=resync"],
+        );
+        let address = start_live_server(directory.path(), TEST_IDENTITY, ServeOptions::default());
+        let session = create_session(address);
+        let mut socket = open_websocket(address, &session);
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [95; 16], "let x = 41;"),
+            &CanonicalValue::unit(),
+        );
+        let watched = watch_over_socket(&mut socket, &session, [96; 16], "x + 1");
+        assert_eq!(watched.request, Some([96; 16]));
+        let watch = watched.watch.expect("a watch snapshot carries its handle");
+        let Message::Snapshot {
+            revision: 0,
+            present,
+            ..
+        } = watched.message
+        else {
+            panic!("a new watch starts with a revision-zero snapshot");
+        };
+        assert_eq!(
+            present,
+            orna_protocol_v1::PresentNode::from_value(int_value(42)).expect("watched tree")
+        );
+
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [97; 16], "let x = 1;"),
+            &CanonicalValue::unit(),
+        );
+        let refreshed = resync_over_socket(&mut socket, &session, [98; 16], watch);
+        assert_eq!(
+            refreshed.request,
+            Some([98; 16]),
+            "the snapshot names its resync"
+        );
+        assert_eq!(refreshed.watch, Some(watch));
+        let Message::Snapshot {
+            revision, present, ..
+        } = refreshed.message
+        else {
+            panic!("an explicit resync is answered with a full snapshot");
+        };
+        assert_eq!(revision, 1, "the changed tree advances the watch revision");
+        assert_eq!(
+            present,
+            orna_protocol_v1::PresentNode::from_value(int_value(2)).expect("refreshed tree")
+        );
+    }
+
+    /// G-4: the served runtime is opened under this process's owner, the same
+    /// owner `orna run`, the REPL and mounts use in this process. It holds the
+    /// worktree's runtime owner lock and the writer lease for that owner at
+    /// epoch 1. Re-acquisition is idempotent, and a different owner is refused
+    /// even through the served runtime that holds the lock.
+    #[test]
+    fn served_runtime_holds_the_process_owner_lease() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        orna_repository_v1::initialize_repository(directory.path()).expect("orna init");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "pub table Note(id: Int) { text: Str, }\n",
+        )
+        .expect("project source");
+        let endpoint = Endpoint::Path(
+            directory
+                .path()
+                .to_str()
+                .expect("UTF-8 project path")
+                .to_owned(),
+        );
+        let clone = open_served_clone(&endpoint).expect("`orna serve` resolves the clone");
+        let owner = invocation_owner_id();
+        let executor = current_thread_executor().expect("test executor");
+        let lease = executor
+            .block_on(clone.runtime.acquire_lease(owner))
+            .expect("the repository owner acquires the served lease");
+        assert_eq!(lease.owner_id, owner);
+        assert_eq!(lease.epoch, 1);
+        assert!(clone.runtime.holds_runtime_owner_lock());
+        assert_eq!(
+            executor
+                .block_on(clone.runtime.acquire_lease(owner))
+                .expect("the holder re-acquires its own lease"),
+            lease
+        );
+        assert!(matches!(
+            executor.block_on(clone.runtime.acquire_lease([7; 16])),
+            Err(orna_runtime_v1::RuntimeError::LeaseHeld)
+        ));
+        assert_eq!(
+            executor
+                .block_on(clone.runtime.current_lease())
+                .expect("read the served lease"),
+            Some(lease)
+        );
+    }
+
+    /// ORNA-EVAL-003, ORNA-EVAL-008, ORNA-PROTO-004 and 30-protocol REQUEST-1
+    /// (A13-live-serving-04): `orna serve` hosts the clone's durable runtime.
+    /// An Eval that inserts a row into a project table commits it once,
+    /// together with its terminal outcome, and resending the same request ID
+    /// returns that recorded outcome without writing again. Before, the live
+    /// host had no runtime state and refused every mutating Eval.
+    #[test]
+    fn served_eval_insert_commits_once_and_replays_its_recorded_outcome() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        orna_repository_v1::initialize_repository(directory.path()).expect("orna init");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "pub table Note(id: Int) { text: Str, }\n",
+        )
+        .expect("project source");
+        let endpoint = Endpoint::Path(
+            directory
+                .path()
+                .to_str()
+                .expect("UTF-8 project path")
+                .to_owned(),
+        );
+        let clone = open_served_clone(&endpoint).expect("`orna serve` resolves the clone");
+        let database = clone.identity.database_id;
+        let (address, _state) = serve_clone(clone, ServeOptions::default());
+        let session = create_session_in(address, database);
+        let mut socket = open_websocket(address, &session);
+        let insert = r#"main.Note.insert({ id: 1, text: "served" })"#;
+        let row = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(1.into())),
+            (OvbRaw::Text("text".into()), OvbRaw::Text("served".into())),
+        ]))
+        .expect("canonical row");
+
+        let committed = eval_over_socket(&mut socket, &session, [99; 16], insert);
+        assert_success_value(&committed, &row);
+        let rows = committed_rows(directory.path(), "Note");
+        assert_eq!(rows.len(), 1, "the insert commits exactly one row");
+        assert_eq!(
+            CanonicalValue::decode(&rows[0].1).expect("committed row value"),
+            row
+        );
+
+        let replayed = eval_over_socket(&mut socket, &session, [99; 16], insert);
+        assert_eq!(
+            replayed, committed,
+            "the same request ID returns its recorded outcome"
+        );
+        assert_eq!(
+            committed_rows(directory.path(), "Note"),
+            rows,
+            "the replay does not write again"
+        );
+    }
+
+    /// The committed rows of `table`, read through a second handle on the
+    /// clone's runtime state, as another local command would read them.
+    fn committed_rows(root: &Path, table: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let repository = Repository::discover(root).expect("served clone");
+        let (identity, initial_digest) =
+            runtime_identity(&repository).expect("clone runtime identity");
+        current_thread_executor()
+            .expect("runtime executor")
+            .block_on(async {
+                RuntimeState::open(&repository, identity, initial_digest)
+                    .await
+                    .expect("reopen the clone runtime")
+                    .committed_table_rows(table)
+                    .await
+                    .expect("committed rows")
+            })
+    }
+
     const LIVE_TEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
     const TEST_IDENTITY: RuntimeIdentity = RuntimeIdentity {
         database_id: [31; 16],
         repository_id: [32; 16],
     };
+    /// Initial runtime digest of a test clone served under a fixed identity.
+    const TEST_INITIAL_DIGEST: [u8; 32] = [33; 32];
+    /// A pure console expression, answered by [`assert_expression_result`].
+    const EXPRESSION: &str = "40 + 2";
+
+    /// The Git worktree at `root` as `orna serve` hosts it, under a fixed
+    /// identity, with the core catalogue and no loaded project.
+    fn test_clone(root: &Path, identity: RuntimeIdentity) -> ServedClone {
+        let repository = Repository::discover(root).expect("served Git worktree");
+        let runtime = current_thread_executor()
+            .expect("runtime executor")
+            .block_on(RuntimeState::open(
+                &repository,
+                identity,
+                TEST_INITIAL_DIGEST,
+            ))
+            .expect("clone runtime state");
+        ServedClone {
+            root: root.to_path_buf(),
+            identity,
+            catalogue: orna_semantic_v1::Catalogue::authoritative_core(),
+            project: None,
+            runtime,
+        }
+    }
 
     /// Starts the production accept loop on its own thread, exactly as
     /// `orna serve` runs it. The thread lives until the test process exits.
@@ -3750,19 +4247,16 @@ mod tests {
         identity: RuntimeIdentity,
         options: ServeOptions,
     ) -> (SocketAddr, Arc<ServeState>) {
+        serve_clone(test_clone(root, identity), options)
+    }
+
+    /// Serves `clone` from the production accept loop on its own thread and
+    /// returns its address and the state the listener shares with its
+    /// connection threads.
+    fn serve_clone(clone: ServedClone, options: ServeOptions) -> (SocketAddr, Arc<ServeState>) {
         let listener = LiveTransport::bind_default_listener(0).expect("loopback listener");
         let address = listener.status().address;
-        let state = Arc::new(
-            new_serve_state(
-                root.to_path_buf(),
-                identity,
-                address,
-                orna_semantic_v1::Catalogue::authoritative_core(),
-                None,
-                options,
-            )
-            .expect("serve host"),
-        );
+        let state = Arc::new(new_serve_state(clone, address, options).expect("serve host"));
         let shared = Arc::clone(&state);
         std::thread::spawn(move || serve_listener(listener.listener(), &shared));
         (address, state)
@@ -3770,6 +4264,7 @@ mod tests {
 
     struct Reply {
         status: u16,
+        head: String,
         body: String,
     }
 
@@ -3794,6 +4289,7 @@ mod tests {
             .expect("response status");
         Reply {
             status,
+            head: head.to_owned(),
             body: body.to_owned(),
         }
     }
@@ -3801,6 +4297,7 @@ mod tests {
     struct LiveSession {
         id: String,
         token: String,
+        database: [u8; 16],
     }
 
     fn post_json(
@@ -3823,6 +4320,15 @@ mod tests {
     }
 
     fn create_session_as(address: SocketAddr, host: &str, origin: Option<&str>) -> Reply {
+        create_database_session_as(address, host, origin, TEST_IDENTITY.database_id)
+    }
+
+    fn create_database_session_as(
+        address: SocketAddr,
+        host: &str,
+        origin: Option<&str>,
+        database: [u8; 16],
+    ) -> Reply {
         post_json(
             address,
             host,
@@ -3830,7 +4336,7 @@ mod tests {
             "/orna/session",
             &format!(
                 r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
-                format_uuid(TEST_IDENTITY.database_id)
+                format_uuid(database)
             ),
         )
     }
@@ -3843,12 +4349,18 @@ mod tests {
                 .as_str()
                 .expect("resume token")
                 .to_owned(),
+            database: uuid_bytes(body["database"].as_str().expect("session database")),
         }
     }
 
     fn create_session(address: SocketAddr) -> LiveSession {
+        create_session_in(address, TEST_IDENTITY.database_id)
+    }
+
+    fn create_session_in(address: SocketAddr, database: [u8; 16]) -> LiveSession {
         let host = address.to_string();
-        let reply = create_session_as(address, &host, Some(&format!("http://{host}")));
+        let reply =
+            create_database_session_as(address, &host, Some(&format!("http://{host}")), database);
         assert_eq!(reply.status, 201, "{}", reply.body);
         live_session(&reply)
     }
@@ -4023,32 +4535,15 @@ mod tests {
         bytes
     }
 
-    fn eval_over_socket(
+    /// Sends one client request over `stream` and returns the host's answer.
+    /// An Eval carries its request fingerprint, as a conforming client sends
+    /// it; other requests need not.
+    fn request_over_socket(
         stream: &mut TcpStream,
         session: &LiveSession,
-        request: [u8; 16],
+        mut envelope: Envelope,
     ) -> Envelope {
         let limits = ProtocolLimits::default();
-        let mut envelope = Envelope {
-            request: Some(request),
-            watch: None,
-            message: Message::Eval {
-                source: SERVE_ENTRY_FIXTURE.to_owned(),
-                database: orna_protocol_v1::DatabaseContext {
-                    database: TEST_IDENTITY.database_id,
-                    snapshot: None,
-                },
-                presentation: PresentationContext {
-                    locale: "en".into(),
-                    timezone: None,
-                    width: None,
-                    theme: "terminal/default".into(),
-                    supported_kinds: vec!["text".into(), "group".into()],
-                },
-                fingerprint: [0; 32],
-            },
-            extensions: BTreeMap::new(),
-        };
         let fingerprint = orna_protocol_v1::canonical_request_fingerprint(
             uuid_bytes(&session.id),
             &envelope,
@@ -4061,28 +4556,159 @@ mod tests {
         {
             *sent = fingerprint;
         }
-        send_frame(stream, 2, &envelope.encode(limits).expect("canonical Eval"));
+        send_frame(
+            stream,
+            2,
+            &envelope.encode(limits).expect("canonical request"),
+        );
         loop {
-            let (opcode, payload) =
-                read_frame(stream).expect("Eval result before the client timeout");
+            let (opcode, payload) = read_frame(stream).expect("answer before the client timeout");
             // A conforming client answers keepalive pings while it waits.
             if opcode == 9 {
                 send_frame(stream, 10, &payload);
                 continue;
             }
-            assert_eq!(opcode, 2, "the Eval result is one binary message");
-            return Envelope::decode(&payload, limits).expect("canonical Eval result");
+            assert_eq!(
+                opcode, 2,
+                "the answer is one binary message, not opcode {opcode} with payload {payload:?}"
+            );
+            return Envelope::decode(&payload, limits).expect("canonical answer");
         }
     }
 
-    fn assert_serve_entry_result(response: &Envelope) {
-        let Message::Result { status, value, .. } = &response.message else {
-            panic!("Eval answers with a Result");
+    fn session_database(session: &LiveSession) -> orna_protocol_v1::DatabaseContext {
+        orna_protocol_v1::DatabaseContext {
+            database: session.database,
+            snapshot: None,
+        }
+    }
+
+    fn terminal_presentation() -> PresentationContext {
+        PresentationContext {
+            locale: "en".into(),
+            timezone: None,
+            width: None,
+            theme: "terminal/default".into(),
+            supported_kinds: vec!["text".into(), "group".into()],
+        }
+    }
+
+    fn eval_over_socket(
+        stream: &mut TcpStream,
+        session: &LiveSession,
+        request: [u8; 16],
+        source: &str,
+    ) -> Envelope {
+        request_over_socket(
+            stream,
+            session,
+            Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Eval {
+                    source: source.to_owned(),
+                    database: session_database(session),
+                    presentation: terminal_presentation(),
+                    fingerprint: [0; 32],
+                },
+                extensions: BTreeMap::new(),
+            },
+        )
+    }
+
+    fn watch_over_socket(
+        stream: &mut TcpStream,
+        session: &LiveSession,
+        request: [u8; 16],
+        source: &str,
+    ) -> Envelope {
+        request_over_socket(
+            stream,
+            session,
+            Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Watch {
+                    source: source.to_owned(),
+                    database: session_database(session),
+                    presentation: terminal_presentation(),
+                    refresh_floor: None,
+                },
+                extensions: BTreeMap::new(),
+            },
+        )
+    }
+
+    fn resync_over_socket(
+        stream: &mut TcpStream,
+        session: &LiveSession,
+        request: [u8; 16],
+        watch: [u8; 16],
+    ) -> Envelope {
+        request_over_socket(
+            stream,
+            session,
+            Envelope {
+                request: Some(request),
+                watch: Some(watch),
+                message: Message::Resync,
+                extensions: BTreeMap::new(),
+            },
+        )
+    }
+
+    fn int_value(value: i64) -> CanonicalValue {
+        CanonicalValue::new(OvbRaw::Int(value.into())).expect("canonical integer")
+    }
+
+    /// Asserts that `response` is a success result carrying `expected`.
+    fn assert_success_value(response: &Envelope, expected: &CanonicalValue) {
+        let Message::Result {
+            status,
+            value,
+            diagnostic,
+            ..
+        } = &response.message
+        else {
+            panic!("Eval answers with a Result, not {response:?}");
         };
-        assert_eq!(*status, orna_protocol_v1::ResultStatus::Success);
         assert_eq!(
-            value.as_ref().expect("typed Run result").raw(),
-            &orna_foundation_v1::OvbRaw::Int(42.into())
+            *status,
+            orna_protocol_v1::ResultStatus::Success,
+            "{diagnostic:?}"
         );
+        assert_eq!(value.as_ref(), Some(expected));
+    }
+
+    fn assert_expression_result(response: &Envelope) {
+        assert_success_value(response, &int_value(42));
+    }
+
+    #[test]
+    fn cgi_environment_drops_git_proxy_and_token_variables() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("GIT_DIR", "/should/not/leak");
+        command.env("GIT_CONFIG_GLOBAL", "/should/not/leak");
+        command.env("HTTPS_PROXY", "http://should-not-leak.invalid");
+        command.env("ORNA_SERVER_TOKEN", "should-not-leak");
+        command.env("XDG_CONFIG_HOME", "/should/not/leak");
+        clear_cgi_environment(&mut command);
+        let output = command.output().expect("env runs");
+        assert!(output.status.success());
+        let names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect();
+        for name in &names {
+            assert!(
+                ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"].contains(&name.as_str()),
+                "CGI child inherited unexpected variable {name}"
+            );
+        }
+        for name in ["PATH", "HOME", "TMPDIR"] {
+            if std::env::var_os(name).is_some() {
+                assert!(names.iter().any(|kept| kept == name), "{name} was dropped");
+            }
+        }
     }
 }

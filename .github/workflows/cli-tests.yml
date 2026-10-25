@@ -30,6 +30,9 @@ jobs:
   cli-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # FUSE tests must fail, not skip, on every step of this job.
+    env:
+      ORNA_REQUIRE_FUSE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -51,8 +54,6 @@ jobs:
       # publication_crash_matrix needs the crash-barriers feature. Its job below runs it with
       # that feature, so this step skips it and names that job (--covered-by).
       - name: Test the orna-cli-v1 integration suite
-        env:
-          ORNA_REQUIRE_FUSE: "1"
         run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --covered-by test:publication_crash_matrix=publication-crash-matrix
 
   repository-v1-lib-tests:

@@ -836,6 +836,11 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         .await
         .expect("seed durable pending mutation");
 
+    // The seeding writer has exited before the CLI starts. A live in-process
+    // runtime still holds the worktree owner lock, and ORNA-TURSO-004/005
+    // require a concurrent `orna run` to fail rather than share that writer.
+    drop(state);
+
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
@@ -852,6 +857,194 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         "run stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_run_refuses_a_concurrent_writer_while_another_runtime_holds_the_lease() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/private-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let _lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+
+    // ORNA-TURSO-004 permits at most one owning writer, and ORNA-TURSO-005
+    // requires a second `orna run` to coordinate or fail while it is live.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        !refused.status.success(),
+        "concurrent run unexpectedly succeeded: {:?}",
+        refused.stdout
+    );
+    assert!(refused.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("error[E2200]"),
+        "stderr: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    drop(state);
+
+    let released = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(
+        released.status.success(),
+        "run stderr: {}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    assert_eq!(released.stdout, b"invocation completed\n");
+    assert!(released.stderr.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_run_debug_detail_names_the_held_runtime_writer_and_plain_output_does_not() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/private-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let _lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+
+    // The lease holder is this test process; the refused `orna run` processes
+    // are separate. `RuntimeError::LeaseHeld` has no public code, so its
+    // `--debug` detail carries the display text (ORNA-UX-004).
+    let plain = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!plain.status.success(), "plain run unexpectedly succeeded");
+    let plain_stderr = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        plain_stderr.contains("error[E2200]"),
+        "stderr: {plain_stderr}"
+    );
+    assert!(
+        !plain_stderr.contains("runtime failure:"),
+        "plain stderr disclosed a debug detail: {plain_stderr}"
+    );
+
+    let debug = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!debug.status.success(), "debug run unexpectedly succeeded");
+    assert!(debug.stdout.is_empty());
+    let debug_stderr = String::from_utf8_lossy(&debug.stderr);
+    assert!(
+        debug_stderr.contains("error[E2200]"),
+        "stderr: {debug_stderr}"
+    );
+    assert!(
+        debug_stderr.contains("runtime failure: runtime writer is held"),
+        "stderr: {debug_stderr}"
+    );
+
+    drop(state);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn binary_invoke_routes_single_module_std_import_needing_publication_metadata_through_authority() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub fn answer(): Bool {\n    let rows = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1;\n    assert rows == 1;\n    true\n}\n",
+        )],
+    );
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
+        .expect("CLI check");
+    assert!(
+        check.status.success(),
+        "check stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let context = state.begin_activation().await.expect("capture activation");
+    let lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+    let payload = b"fixture".to_vec();
+    let mutation = Mutation {
+        id: [10; 16],
+        digest: Sha256::digest(&payload).into(),
+        payload,
+    };
+    state
+        .commit_activation(
+            lease,
+            &context,
+            &[mutation],
+            Sha256::digest(b"std authority routing proof").into(),
+            &NoFault,
+        )
+        .await
+        .expect("seed durable pending mutation");
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
 }
@@ -1181,6 +1374,10 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             && integer(row, "quantity") == 4
     }));
 
+    // The previous writer has exited; release its owner lock so this run is a
+    // fresh process taking over a departed lease (ORNA-TASK-003).
+    drop(state);
+
     let duplicate = invoke(directory.path(), "run", "seed");
     assert!(!duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("error[E2200]"));
@@ -1207,6 +1404,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
             .len(),
         2
     );
+
+    // Release the duplicate-check writer so the next run is a fresh process.
+    drop(duplicate_state);
 
     let exercise = invoke(directory.path(), "run", "exercise");
     assert!(
@@ -1512,6 +1712,18 @@ async fn core_transactions_and_assertions_work_without_std() {
 }
 
 fn captured_standard_project() -> (tempfile::TempDir, String) {
+    captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", include_str!("fixtures/captured-standard-parent.orna"))],
+    )
+}
+
+/// Pins `stdlib/std` to a snapshot holding the standard root plus `standard`, and
+/// commits the project root holding `project` beside the pinned gitlink.
+fn captured_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
     let directory = tempfile::tempdir().expect("project");
     let module_path = directory.path().join("stdlib/std");
     std::fs::create_dir_all(&module_path).expect("standard module path");
@@ -1521,19 +1733,15 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
         include_str!("fixtures/captured-standard-main.orna"),
     )
     .expect("standard database root");
-    std::fs::write(
-        module_path.join("math.orna"),
-        include_str!("fixtures/captured-standard-math.orna"),
-    )
-    .expect("standard source module");
+    for &(name, source) in standard {
+        std::fs::write(module_path.join(name), source).expect("standard source module");
+    }
     commit_directory(&module_path, "standard module snapshot");
     let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
 
-    std::fs::write(
-        directory.path().join("main.orna"),
-        include_str!("fixtures/captured-standard-parent.orna"),
-    )
-    .expect("importing project root");
+    for &(name, source) in project {
+        std::fs::write(directory.path().join(name), source).expect("importing project source");
+    }
     std::fs::write(
         directory.path().join(".gitmodules"),
         "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://github.com/workingdir/ornadb-std.git\n",
@@ -1542,7 +1750,9 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
     initialize_project(directory.path());
     git_output_at(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
     git_output_at(directory.path(), &["config", "user.name", "kierandrewett"]);
-    git_output_at(directory.path(), &["add", "main.orna", ".gitmodules", ".orna"]);
+    let mut arguments = vec!["add", ".gitmodules", ".orna"];
+    arguments.extend(project.iter().map(|&(name, _)| name));
+    git_output_at(directory.path(), &arguments);
     let link = format!("160000,{module_commit},stdlib/std");
     git_output_at(
         directory.path(),
@@ -1550,6 +1760,15 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
     );
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
     (directory, module_commit)
+}
+
+/// The pinned `std.list` closure: `list` imports `collection`, and `math` is the standard root's dependency.
+fn pinned_list_closure() -> [(&'static str, &'static str); 3] {
+    [
+        ("collection.orna", include_str!("fixtures/captured-standard-collection.orna")),
+        ("list.orna", include_str!("fixtures/captured-standard-list.orna")),
+        ("math.orna", include_str!("fixtures/captured-standard-math.orna")),
+    ]
 }
 
 #[test]
@@ -1592,6 +1811,137 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
     assert_eq!(run.stdout, b"invocation completed\n");
     assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_production_catalogue() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[
+            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
+            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+        ],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned standard closure");
+    let catalogue = project
+        .production_catalogue()
+        .expect("production catalogue from the pinned standard profile");
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    assert!(analysis.is_ok(), "analysis through production catalogue failed");
+    let core_only = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &orna_semantic_v1::Catalogue::authoritative_core(),
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    assert!(
+        !core_only.is_ok(),
+        "core-only catalogue must not resolve the pinned standard closure"
+    );
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+    assert!(check.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
+    let (directory, _module_commit) = captured_standard_project();
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_evaluates_a_multi_module_project_importing_the_pinned_standard_collection() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[
+            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
+            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+        ],
+    );
+
+    let output = invoke(directory.path(), "invoke", "seed");
+
+    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_invoke_rejects_a_negative_take_count_from_the_pinned_standard_list() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_list_closure(),
+        &[("main.orna", include_str!("fixtures/captured-standard-negative-take-main.orna"))],
+    );
+
+    let output = invoke(directory.path(), "invoke", "seed");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("error["));
+}
+
+#[test]
+fn binary_invoke_refuses_a_standard_glob_import_with_its_import_code() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math.*;\npub fn answer(): Int = increment(41);\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[ORNA-S010-IMPORT]"), "stderr: {stderr}");
+}
+
+#[test]
+fn binary_invoke_refuses_a_standard_module_alias_import_with_its_import_code() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math as m;\npub fn answer(): Int = increment(41);\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[E2101]"), "stderr: {stderr}");
+}
+
+#[test]
+fn binary_invoke_rejects_a_braced_standard_name_missing_from_the_pinned_module() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[("main.orna", "use std.math.{no_such_function};\npub fn answer(): Int = 1;\n")],
+    );
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.is_empty(), "missing braced name must be diagnosed");
 }
 
 #[test]

@@ -3257,14 +3257,21 @@ mod tests {
         test_git(root, &["add", "--all"]);
         test_git(root, &["commit", "--quiet", "-m", "format3 Blob fixture"]);
 
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        // The chunk entry carries the chunk's SHA-256; the kind-6 node and the
+        // rows domain carry the format-3 schema identity.
+        let chunk_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest: [u8; 32] = Sha256::new()
+            .chain_update(b"orna.schema.v3\0")
+            .chain_update(&schema_bytes)
+            .finalize()
+            .into();
         let chunk_oid = test_git_object(root, "blob", &schema_bytes);
         let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
         append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         byte_index.extend_from_slice(&[0x81, 0x83]);
         append_fixture_cbor_head(&mut byte_index, 0, schema_bytes.len());
         append_fixture_cbor_bytes(&mut byte_index, &fixture_oid_bytes(&chunk_oid));
-        append_fixture_cbor_bytes(&mut byte_index, &schema_digest);
+        append_fixture_cbor_bytes(&mut byte_index, &chunk_digest);
         let byte_index_oid = test_native_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
         let mut schema = vec![0x85, 0x01, 0x06];

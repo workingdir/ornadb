@@ -5,7 +5,7 @@ fn admitted_session(
     profile_name: &str,
     include_module: impl Fn(&str) -> bool,
 ) -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| include_module(path))
         .collect::<Vec<_>>();

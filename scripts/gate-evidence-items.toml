@@ -28,7 +28,6 @@ expected = [
   "workspace-sys",
   "workspace-conformance",
   "workspace-rest",
-  "gate-c-million-rows",
   "gate-d-crash-matrix",
   "lint-fmt",
   "lint-clippy",
@@ -167,10 +166,12 @@ id = "C1"
 title = "Ten and one million rows use ORP-1"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 "]
-limitations = ["The row graph comes from a test-side ORP-1 encoder, not the production writer (ornadb-5il1.6, ornadb-5il1.129)."]
+limitations = [
+  "The row graph comes from a test-side ORP-1 encoder, not the production writer (ornadb-5il1.6, ornadb-5il1.129).",
+  "C1-C4 select the ten-row test only: the one-million-row case runs in gate-c-scale.yml (PR 9344, bead ornadb-5il1.373), which this workflow does not read (ornadb-5il1.6).",
+]
 
 [[item]]
 gate = "C"
@@ -178,7 +179,6 @@ id = "C2"
 title = "Indexed point and range queries, missing keys, unindexed scan and concurrent writes in cold and warm partial clones"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 limitations = [
   "The concurrent writes compute the row index on two threads; nothing commits and no ref CAS race occurs (ornadb-mmsa.13).",
@@ -190,7 +190,6 @@ id = "C3"
 title = "Report root and tree traffic, payload traffic, latency, allocations and indices"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 "]
 limitations = ["The counters measure the test-side ORP-1 fixture, not graphs written by the production writer (ornadb-5il1.6)."]
@@ -201,7 +200,6 @@ id = "C4"
 title = "Prepend, delete, rekey and large-row cases measure index churn separately from media reuse"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
-  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [

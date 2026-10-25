@@ -5,8 +5,8 @@ name: Nightly gates
 # "Evidence record per gate"):
 # - `cargo test --workspace --no-fail-fast`, split into five runners by package
 #   for disk and time. The five shards together cover every workspace package.
-# - Gate C at one million rows (ORNA_ORP1_MILLION_ROWS=1) and the Gate D crash
-#   matrix (feature crash-barriers). Gate B's 10 GiB import runs in the cli shard.
+# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import runs in the cli shard.
+#   Gate C at one million rows runs in gate-c-scale.yml (PR 9344), not here.
 # - cargo fmt and Clippy, which do not pass on main yet.
 # Every job writes an evidence record with scripts/gate_evidence.py: commit,
 # command, host and tool versions, inputs, exit status, per-test outcomes and
@@ -145,43 +145,6 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
-  gate-c-million-rows:
-    needs: revision
-    runs-on: ubuntu-latest
-    timeout-minutes: 350
-    steps:
-      - name: Check out the tested revision
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.revision.outputs.sha }}
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.95.0
-
-      - name: Run the one-million-row ORP-1 case
-        env:
-          # crates/orna-repository-v1/tests/row_store_scale.rs skips the case unless this is set.
-          ORNA_ORP1_MILLION_ROWS: "1"
-        run: >-
-          python3 scripts/gate_evidence.py run
-          --record gate-c-million-rows
-          --title "Gate C: ORP-1 row store at one million rows"
-          --out "$RUNNER_TEMP/gate-evidence"
-          --timeout-minutes 330
-          --input-env ORNA_ORP1_MILLION_ROWS
-          -- cargo test --locked -p orna-repository-v1 --test row_store_scale
-          orp1_row_store_one_million_rows -- --exact
-
-      - name: Upload the evidence record and log
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: evidence-gate-c-million-rows
-          path: ${{ runner.temp }}/gate-evidence
-          if-no-files-found: error
-
   gate-d-crash-matrix:
     needs: revision
     runs-on: ubuntu-latest
@@ -256,7 +219,7 @@ jobs:
           if-no-files-found: error
 
   evidence:
-    needs: [revision, workspace, gate-c-million-rows, gate-d-crash-matrix, lint]
+    needs: [revision, workspace, gate-d-crash-matrix, lint]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,59 @@
+use std.collection;
+use std.query;
+
+pub fn transformed(rows: [Int]): [Int] =
+    rows
+    | filter(predicate => predicate % 2 == 0)
+    | map(transform => transform + 10)
+    | sort_by(key => -key)
+    | take(count: 2);
+
+pub fn joined(rows: [Int]): [Int] =
+    union(distinct(rows), drop(rows, 1));
+use std.query as query_ops;
+use std.text as text_ops;
+
+pub fn duplicated(rows: [Int]): [Int] =
+    flat_map(rows, value => [value, value]);
+
+pub fn first_value(rows: [Int]): Int? = first(rows);
+pub fn only_value(rows: [Int]): Int = one(rows);
+pub fn total(rows: [Int]): Int = sum(rows);
+pub fn lowest(rows: [Int]): Int? = min(rows);
+pub fn highest(rows: [Int]): Int? = max(rows);
+pub fn row_count(rows: [Int]): Int = count(rows);
+pub fn all_positive(rows: [Int]): Bool = every(rows, value => value > 0);
+pub fn has_zero(rows: [Int]): Bool = exists(rows, value => value == 0);
+
+pub table Note(id: Int) { value: Int, }
+
+pub fn relation_pipeline() =
+    Note
+    | filter(predicate => predicate.value > 0)
+    | map(transform => transform.value)
+    | count();
+
+pub fn relation_direct() = count(filter(Note, row => row.value > 0));
+pub fn relation_first() = first(Note);
+pub fn relation_one() = one(Note, row => row.value > 0);
+pub fn relation_every() = every(Note, row => row.value > 0);
+pub fn relation_exists() = exists(Note, row => row.value > 0);
+pub fn relation_distinct_count() = count(distinct(Note));
+pub fn relation_slice_count() =
+    count(union(take(Note, 2), drop(Note, 1)));
+pub fn relation_sum() =
+    sum(Note | map(row => row.value));
+
+pub fn aliased_map(rows: [Int]): [[Int]] = query_ops.chunk(rows, 2);
+pub fn aliased_relation_count() = count(Note | filter(row => row.value > 0));
+
+pub fn trimmed(value: Str): Str = text_ops.trim(value);
+pub fn split_text(value: Str): [Str] = text_ops.split(value, ",");
+pub fn joined_text(values: [Str]): Str = text_ops.join(values, ",");
+pub fn starts(value: Str): Bool = text_ops.starts_with(value, "a");
+pub fn ends(value: Str): Bool = text_ops.ends_with(value, "z");
+pub fn contains_text(value: Str): Bool = text_ops.contains(value, "middle");
+pub fn replaced(value: Str): Str = text_ops.replace(value, "aa", "b");
+pub fn normalized(value: Str): Str = text_ops.normalise(value, "NFC");
+pub fn lowercased(value: Str): Str = text_ops.lower(value);
+pub fn uppercased(value: Str): Str = text_ops.upper(value);
