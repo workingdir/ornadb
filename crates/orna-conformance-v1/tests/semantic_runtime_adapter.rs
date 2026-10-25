@@ -1021,6 +1021,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
         .commit_table_activation(lease, snapshot.context(), &[mutation], [87; 32], &NoFault)
         .await
         .expect("seed unrelated Loan row");
+    drop(state);
 
     let outcome = evaluator
         .execute_project_stream(
