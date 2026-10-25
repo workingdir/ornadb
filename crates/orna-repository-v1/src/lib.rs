@@ -31,6 +31,10 @@ mod blob_store;
 mod crash_barrier;
 mod compact;
 pub mod complete_copy;
+pub mod format2_orr;
+pub mod format2_rov;
+pub mod format2_ogb;
+pub mod format2_read;
 mod init;
 pub mod migration_copy;
 mod mount;
@@ -2577,6 +2581,56 @@ impl Repository {
         self.commit_optional("HEAD^{commit}")
     }
 
+    /// The content of the single index entry for `path`, or `None` when the
+    /// path is not in the index. A conflicted path (several stages) is an error.
+    pub fn index_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"]).arg(path);
+        let output = self.run(command)?.stdout;
+        let records = output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => {
+                let header = record
+                    .split(|byte| *byte == b'\t')
+                    .next()
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = header
+                    .split(|byte| *byte == b' ')
+                    .nth(1)
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+                Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+            }
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// The content of `path` in `HEAD`, or `None` when `HEAD` has no such path
+    /// or the repository has no commit yet.
+    pub fn head_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        if self.head()?.is_none() {
+            return Ok(None);
+        }
+        let output = self.git_bytes(["ls-tree", "-z", "HEAD", "--", path])?;
+        let Some(record) = output.split(|byte| *byte == 0).find(|record| !record.is_empty()) else {
+            return Ok(None);
+        };
+        let header = record
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = header
+            .split(|byte| *byte == b' ')
+            .nth(2)
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+    }
+
     /// Lists the newest commits reachable from `HEAD`, newest first.
     ///
     /// The count and output size are bounded before Git output is accumulated.
@@ -3258,6 +3312,9 @@ impl Repository {
                 candidate,
                 true,
             )?;
+            // Gate D boundary: the store worktree has been rewritten but the
+            // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
+            crate::publication_crash_barrier("store-worktree");
             self.configure_store_tree_skip_worktree(&candidate_index)?;
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
@@ -3589,6 +3646,17 @@ impl Repository {
             let skipped = skipped_paths.contains(relative);
             let is_payload = Self::is_store_payload_blob_path(relative);
             if unchanged && !skipped && !is_payload {
+                // Node metadata is not rewritten here, but an edit to it is still an external change
+                // and must be refused rather than left in place (ORNA-PUB-010).
+                let path = ManagedPath::new(relative)?;
+                let (target, _) = self.store_reconciliation_paths(&path, candidate)?;
+                if let Some(current) = self.read_managed_file(&target)? {
+                    let object = new_object.ok_or(RepositoryError::GitOperationFailed)?;
+                    let next = self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?;
+                    if current != next {
+                        return Err(RepositoryError::ManagedContentConflict);
+                    }
+                }
                 continue;
             }
 
@@ -3611,18 +3679,15 @@ impl Repository {
             // clearing those bits so reconciliation does not invent deletions.
             if unchanged {
                 let displaced = self.read_managed_file(&quarantine)?;
+                let next = new_object
+                    .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                    .transpose()?
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                if current.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
                 if current.is_none() || displaced.is_some() {
-                    let next = new_object
-                        .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
-                        .transpose()?
-                        .ok_or(RepositoryError::GitOperationFailed)?;
-                    if displaced
-                        .as_deref()
-                        .is_some_and(|bytes| bytes != next.as_slice())
-                        || current
-                            .as_deref()
-                            .is_some_and(|bytes| bytes != next.as_slice())
-                    {
+                    if displaced.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
                         return Err(RepositoryError::ManagedContentConflict);
                     }
                     if install {
@@ -4790,6 +4855,10 @@ impl Repository {
             }
             return Err(error);
         }
+        // Gate D boundary: the ref CAS has succeeded but the RefAdvanced
+        // journal stage is not yet durable. Recovery sees a Prepared journal
+        // whose HEAD already names the candidate (ORNA-PUB-009, ORNA-PUB-005).
+        crate::publication_crash_barrier("ref-cas-pre-journal");
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
@@ -4810,6 +4879,9 @@ impl Repository {
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
+        // Gate D boundary: every managed entry has been materialised but the
+        // WorktreeReconciled stage is not yet recorded (ORNA-PUB-016).
+        crate::publication_crash_barrier("worktree");
 
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
         self.write_publication_journal_locked(journal)?;
@@ -4943,8 +5015,10 @@ impl Repository {
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
             }
+            let mut store_verified = false;
             if journal.stage() == PublicationJournalStage::RefAdvanced {
                 self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                store_verified = true;
                 let current = IndexGeneration {
                     head: self.head()?,
                     tree: self.index_tree_from_file(&index)?,
@@ -4981,6 +5055,12 @@ impl Repository {
                 self.write_publication_journal_locked(&journal)?;
             }
             if journal.stage() == PublicationJournalStage::IndexReconciled {
+                // The store worktree was reconciled before IndexReconciled. An edit to a store path made since
+                // then differs from the recorded candidate state and must be preserved as a conflict, not
+                // overwritten by materialisation (recovery table row 6; ORNA-PUB-010).
+                if !store_verified {
+                    self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                }
                 self.recover_publication_worktree_locked(&mut journal)?;
             }
             drop(git_lock);
@@ -7878,6 +7958,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command
     }
 
@@ -8179,6 +8260,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, directory);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -10032,6 +10114,36 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
+/// Stops Git's repository discovery at the parent of a repository root so a
+/// corrupt root `.git` cannot fall through to an enclosing repository. Only a
+/// directory that carries its own `.git` entry is a root; a plain subdirectory
+/// of a worktree (for example `.orna/` or `nested/`) must still discover the
+/// enclosing repository, so it is left unbound. The path is canonicalized first
+/// so a symlinked root binds to the directory it really resolves to; a relative
+/// path cannot yield an empty or relative ceiling.
+pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
+    let resolved = canonical_or_absolute(worktree);
+    if resolved.join(".git").exists() {
+        bind_git_ceiling_above(command, &resolved);
+    }
+}
+
+/// Stops Git's discovery at the parent of `directory` unconditionally. Use this
+/// where the caller requires `directory` itself to be a repository root: a plain
+/// subdirectory then yields no repository instead of its enclosing one.
+pub(crate) fn bind_git_ceiling_above(command: &mut Command, directory: &std::path::Path) {
+    let resolved = canonical_or_absolute(directory);
+    if let Some(parent) = resolved.parent() {
+        command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+}
+
+fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Prevent inherited Git routing from selecting a repository, worktree, or
 /// index other than the explicitly supplied command directory.
 pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
@@ -10594,6 +10706,87 @@ mod tests {
         assert_eq!(recovered.logical_rekeys(), &[event]);
     }
 
+    /// Builds `parent/healthy` as a real repository and `parent/healthy/child`
+    /// with a corrupt `HEAD`, so discovery from `child` must not reach `healthy`.
+    #[cfg(unix)]
+    pub(crate) fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
+        let healthy = root.join("healthy");
+        fs::create_dir_all(&healthy).unwrap();
+        let init = Command::new("git")
+            .current_dir(&healthy)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let child = healthy.join("child");
+        fs::create_dir_all(child.join(".git")).unwrap();
+        fs::write(child.join(".git").join("HEAD"), b"garbage\n").unwrap();
+        child
+    }
+
+    /// Runs `rev-parse HEAD` in `directory` under the production discovery bind.
+    #[cfg(unix)]
+    fn head_probe_succeeds_bound(directory: &Path) -> bool {
+        let mut command = Command::new("git");
+        command.current_dir(directory).args(["rev-parse", "HEAD"]);
+        super::scrub_git_routing_environment(&mut command);
+        super::bind_git_discovery_to_worktree(&mut command, directory);
+        command
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_symlinked_worktree_does_not_fall_through_to_real_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        let healthy = child.parent().unwrap();
+        let init = Command::new("git")
+            .current_dir(healthy)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "healthy",
+            ])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let plain = root.path().join("x");
+        fs::create_dir_all(&plain).unwrap();
+        let link = plain.join("L");
+        std::os::unix::fs::symlink(&child, &link).unwrap();
+        assert!(!head_probe_succeeds_bound(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_relative_path_to_corrupt_child_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let _child = corrupt_child_under_healthy_parent(root.path());
+        let previous = env::current_dir().unwrap();
+        env::set_current_dir(root.path()).unwrap();
+        let relative = Path::new("healthy").join("child");
+        let ok = head_probe_succeeds_bound(&relative);
+        env::set_current_dir(previous).unwrap();
+        assert!(!ok, "relative corrupt child must not adopt healthy parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_at_corrupt_root_under_healthy_parent_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        assert!(super::Repository::git_at(&child, ["rev-parse", "HEAD"]).is_err());
+    }
+
     /// Replaces one length-prefixed string in an encoded journal with another,
     /// keeping the surrounding wire format valid.
     pub(crate) fn splice_length_prefixed(
@@ -10697,6 +10890,53 @@ mod tests {
         // A corrupt HEAD makes git exit 128. The object may still exist, so
         // the answer is an error, never "absent" (which would skip the pin).
         fs::write(root.path().join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    /// A child repository nested inside a parent repository must not let a
+    /// corrupt child HEAD fall through to the parent. Git would then report the
+    /// child's pinned object as missing, and the publication pin check would
+    /// skip the pin (ORNA-PUB-006). The probe must fail closed instead.
+    #[test]
+    fn publication_probe_does_not_fall_through_a_corrupt_child_head() {
+        let parent = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(parent.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let child = parent.path().join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&child)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&child).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&child)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(repository.publication_object_present(&present).unwrap());
+
+        fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
         assert!(matches!(
             repository.publication_object_present(&present),
             Err(RepositoryError::GitOperationFailed)
@@ -12782,6 +13022,34 @@ mod tests {
         assert_eq!(repository.head().unwrap(), head_before);
     }
 
+    /// ORNA-PUB-010: an unchanged `.orna/store/data` node leaf that was edited in the worktree
+    /// is an external change and must refuse the reconcile rather than be left in place.
+    #[test]
+    fn reconcile_refuses_edited_unchanged_store_data_leaf() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"committed\n").unwrap();
+        git(root.path(), &["add", ".orna/store/data"]);
+        git(root.path(), &["commit", "-m", "base"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let expected = repository.index_generation().unwrap();
+        let candidate = super::PrivateCommit {
+            tree: expected.tree().unwrap().clone(),
+            commit: expected.head().unwrap().clone(),
+        };
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(root.path().join(".orna/store/data")).unwrap(), b"edited\n");
+    }
+
      #[test]
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
@@ -12821,5 +13089,79 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+}
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::bind_git_discovery_to_worktree;
+    use std::process::Command;
+
+    #[test]
+    fn discovery_bind_makes_a_relative_ceiling_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &child);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discovery_bind_leaves_a_plain_subdirectory_free_to_discover_its_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join(".orna");
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &plain);
+        assert!(
+            command
+                .get_envs()
+                .all(|(name, _)| name != "GIT_CEILING_DIRECTORIES")
+        );
+    }
+
+    /// A relative worktree path must still bind to an absolute ceiling. The root
+    /// is created inside the process directory so its path can be given relative.
+    #[test]
+    fn discovery_bind_absolutizes_a_relative_worktree_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::Builder::new().tempdir_in(&cwd).unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let relative = std::path::PathBuf::from(root.path().file_name().unwrap());
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &relative);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, cwd.canonicalize().unwrap());
+    }
+
+    /// The unconditional ceiling binds a plain directory's parent, with no `.git`.
+    #[test]
+    fn unconditional_ceiling_binds_a_plain_directory_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let mut command = Command::new("git");
+        super::bind_git_ceiling_above(&mut command, &plain);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
     }
 }

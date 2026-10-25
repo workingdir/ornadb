@@ -5,6 +5,184 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+
+### Fixed
+- Runtime `reserve_request` now refuses a secondary handle that does not own the worktree lock with `LeaseHeld` before inserting a row (ORNA-TURSO-005, ornadb-f69b). Test setup that reserved through a secondary handle now reserves through the host's owner-bound runtime, or releases the owner handle first.
+- Secondary runtime handles (another live runtime holds the worktree owner lock) are refused with `LeaseHeld` by the writer-lease entry points `begin_observed_request` (with admission), `acquire_lease`, `current_lease`, `takeover_lease`, `recover_abandoned`, and by every owner-fenced write: the central owner check (`require_current_owner`, used by `require_owner` and `require_recovery_owner`), the legacy request transition (`transition_request`: start, complete, cancel) and `register_stream_observation` (ORNA-TURSO-005, ornadb-3c2s). A secondary can no longer read, take over or reclaim the writer lease, nor commit an owner-fenced write, so a second local writer must coordinate with the owner or fail. Tests that relied on a second handle performing this setup now use the owner handle, a handle outside the owner lock for compare-and-swap races, or a real secondary for `LeaseHeld` assertions. Publication-intent writers (`bind_compact_publication` and its receipt and completion transactions) are not yet lease-fenced and remain a tracked residual.
+- One-shot `invoke` and `run` over committed tables (ornadb-03ol) now convert the merged activation snapshot (committed base plus the CWD tail) to evaluator records through the single stored-to-evaluator conversion `orna_project_v1::evaluator_rows_from_stored`, keyed by table name and ordered by storage order. Committed rows are no longer converted separately from the tail. A live-row test (`invoke_reads_every_scalar_field_type_of_a_committed_row`) reads Int, Str, Bool, Float and Decimal fields back from a committed row.
+
+### Breaking / API
+- `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
+- `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
+- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so bound-registry evaluations no longer declare `None`; `declared_effects` takes that boolean. The REPL declaration is now truthful. REPL table inputs reserve and start their request row in the runtime ledger before evaluation, so an external effect dispatched during evaluation is covered by a durable Running row. An input that stages and then fails during evaluation with no external binding run has its row cancelled. A failure after evaluation, including stage failures, is reported as UNCERTAIN and leaves the row Running, because `ActivationEffectReport` is always `ExternalPossible` (`ENVIRONMENT_READS_ARE_EXTERNAL`); the cancel branch for those is unreachable until that constant changes. A failed commit also leaves the row Running until fenced recovery settles it. A parse-, type-, or pure-failed input stages before reserve, so it records no request row and no terminal diagnostic (ornadb-od61). A panic between reservation and settlement leaves the row Running, which is the same state as a crash.
+- `ControlledEffectToken` is a proof a declaration was made, not a verification; trust rests on callers declaring truthfully.
+- `commit_table_request_activation` gains a final `effects: ActivationEffectReport` argument; callers must pass a report built with `ActivationEffectReport::declare`.
+- `StagedTableActivation::from_source` gains a final `effects: ActivationEffectReport` argument; callers must pass a declared report.
+- `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
+
+### Added
+- Format-2 Blob read API (not yet reachable from a production row read path): `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record or a ROV-2 CBOR reference (authority `ORNA-ROW-013`, `ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. Content per call is capped at 8 MiB (`ORNA-BLOB-011`); the effective limit is the smaller of the caller's limit and that cap. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. The ORR-2, ROV-2 and OGB-1 clause IDs in the code are superseded draft IDs, not final-spec clauses. Loose-row and compact-v2 physical row decoders are not part of this change. `ornadb-nne7` remains open.
+- Row-map resume paging (ORNA-ROW-002): a resume cursor skips exactly the keys at or below it under the shared `Int`/`UInt` rank, is intersected with the range's lower bound, and is refused at or above the upper bound. Composite (tuple) predicate scans page every row in key order across page boundaries; a 300-row composite fixture is checked key by key by the native graph and CLI e2e tests.
+- `orna serve` reads tables (ornadb-03ol, ORNA-SERVE-003 / ORNA-TXN-005): each `GET /` re-reads this clone's committed `HEAD` `main.orna`, binds its tables to their committed identities, and overlays the committed rows with the CWD generation captured for that one activation. A `HEAD` commit is visible to the next request, and a durable CWD row is served; the partial writes of an activation that is not committed are not. Errors are `serve.entry_unavailable` (no readable `HEAD` entry, including an unborn `HEAD`), `serve.table_identity_unavailable`, `serve.mixed_table_identity` (bound and unbound tables together), `serve.table_read_unsupported`, `serve.table_rows_unavailable`, `serve.table_read_limit` (per-table or total committed read exceeds the source/collection caps), `serve.evaluation_failed`, and `serve.write_refused` (a `serve` that stages a table write is refused and nothing is committed). Trust: `serve` table data is reachable by any client of the listener. The default bind is loopback (ORNA-SERVE-004/005); a non-loopback bind exposes the tables. Known cost: each request opens a runtime handle and reloads the committed rows (`ornadb-n4m5`).
+- `orna serve` committed table reads share one bound with `run` and the REPL: a table may hold at most the evaluator collection limit of rows, and the rows' key and stored bytes across the read may not exceed the project source byte limit. A read past either bound refuses with `serve.table_read_limit` (`run`/REPL: `E2200`). A committed row holding a Blob is refused with `serve.table_read_unsupported` rather than serving its placeholder.
+- REPL request-row ordering proof (ornadb-5xrk): `orna-application-v1` gains a `test-support` feature that exposes a dispatch observer on the REPL transaction handler. A regression test records the running request-row count at the first `sys.blob.capture_file` dispatch and asserts the row is already reserved (REQUEST-1, Orna-1.1.0 30-protocol.md:104). The observer is absent unless the feature is enabled.
+
+### Changed
+- Test-expectation migration (ornadb-0im9): bare root intrinsic names (`sort_by`, `every`, `sum`, `min`, `max`, ...) resolve without a standard profile (09-standard-library L7), so the five finite-list tests that expected them unresolved now assert `is_ok`; their qualified `std.collection` assertions remain unresolved without a profile. Added signature regression table `root_intrinsic_calls_are_checked_against_their_signatures` (arity, argument types, callback arity/return; bad calls report `ORNA-S021-TYPE`). Known-red entries for those tests are removed.
+
+### Fixes
+- REPL results carrying a format-3 Blob (`ROV3`) now present its payload-free summary (`type`, `length`, `sha256`, `suffix`, `media_type`) at the REPL canonical boundary. Blob capture followed by an insert no longer fails with `ORNA-EVAL-VALUE` and then `ORNA-REPL-EFFECT-UNCERTAIN` (tracked by ornadb-rg5g). The descriptor OID and payload bytes do not cross the boundary. The summary is a metadata Map, not a Blob: `$_` after such a line holds that Map, so `sys.blob.media_type($_)` or `sys.blob.annotate($_, ...)` on the next line is a type error.
+- An uncertain REPL outcome, where external effects may already have happened, keeps `ORNA-REPL-EFFECT-UNCERTAIN` as its code and names the evaluator cause in the located detail instead of dropping it.
+- Known limitation: carrying the live context result through `$_` (preserving `ORNA-BLOB-008` held-context behaviour) is not in this change; it is tracked as P2 follow-up `ornadb-ssrk`. Until it lands, `$_` after a Blob result is the payload-free Map described above. `SOV3` `ContextualBlob` values still fail canonical validation at the REPL boundary.
+- Known limitation: `ROV3_OVERFLOW_TAG` (60113) blob references are refused fail-closed by the evaluator (test `overflow_reference_is_refused_by_the_evaluator`). No end-to-end test proves that a REPL capture produces this shape.
+- Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)
+  for tuple-typed fields, where it previously failed with `ORNA-CONFORMANCE-ROW-TYPE`.
+  Stale conformance and application test expectations were migrated to
+  the current specification: semantic-adapter and valid-fixture diagnostics, money and
+  multiple-root codes (`E5003`/`E9102`), the computed-field committed-row schema digest
+  (`orna.schema.v3` domain, store-format-3 section 5), primary-key patch `E3002`, txn key and
+  decimal pins, the partial-mutation rollback entry, and `ORNA-ASSERT-021`/`030` catalogue
+  resolution. The `sys.SnapshotRef` semantic-adapter assertions are restored to the specification
+  `Named` result. That pair (`sys_snapshot_string_as_pinned_read`,
+  `sys_database_cwd_as_snapshot_ref_read`) stays red until `ornadb-hzt6` lands and is registered in
+  the conformance known-red gate of PR 9369 (merge order: PR 9370 first). The valid-fixture gaps
+  are tracked product gaps in `KNOWN_PRODUCT_GAPS` (`valid_fixtures.rs`), not known-red: each entry
+  records today's product diagnostics and its bead, and the test fails when product output changes
+  in either direction. Tracked product gaps: `jnf1` (failure-natural-key, stream-admin-repl,
+  finite-stream), `7owc` (table-key-default field access), `qx8l` (owner type-mismatch emits `E2001`
+  before `A091-004`), `yu0h` (unparenthesised pipeline lambda). `6aqk` (implicit
+  conversion chain reports `ORNA-S012-UNRESOLVED` instead of `ORNA091-E-CONVERSION-CHAIN`) is an
+  open product gap and is excluded from the closed-pass list.
+- REPL table inserts now run through the runtime request ledger: the request row is reserved and started before evaluation with a request-scoped fingerprint, and the commit records a terminal outcome. A failure after an external sys binding was dispatched, including an evaluation failure that follows a write, finishes the REPL query as failed with `ORNA-REPL-EFFECT-UNCERTAIN`, because external effects may already have happened; the request row stays Running and is settled only by fenced takeover recovery, and the input is never replayed. An evaluation failure before any external binding keeps its evaluator code and cancels the reserved row. A failure before the request starts leaves its row Reserved, and recovery does not settle that row (ornadb-buat). A staged input with no table mutations completes its row with a read outcome.
+- The controlled-transaction marker is now written only for activations whose
+  effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
+  only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
+  `ControlledEffectToken`; `ExternalPossible` (the `ActivationWork::new` default)
+  records external-effect uncertainty instead. A
+  faulted `ExternalPossible` activation is not reported as rollback-proven
+  (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
+- Conformance v1 test gate: `scripts/check-conformance-known-red.sh` (workflow `conformance-v1-tests.yml`) runs every `orna-conformance-v1` test target. Five product-gap tests are listed in `scripts/conformance-known-red.txt` against beads `ornadb-ptqm`, `ornadb-8rfu` and `ornadb-hzt6`; each must still fail with its expected message. The row admission tuple arm now accepts canonical tagged tuple fields (ORNA-CONFORMANCE-ROW-TYPE no longer fires for `Raw::Tag(60015, Array)`). The stale cross-table and durable-consumer conformance expectations were migrated to the spec clauses they cite (ornadb-3ybj part B).
+- Conformance gate coverage: `scripts/check-conformance-known-red.sh` now also runs the `orna-conformance` bin's unit tests (`--bin orna-conformance`, the `cfg(test)` tests in `src/main.rs`), and fails closed when one test name appears in more than one target. Changes to its cap and allowlist need owner review; the repository has no CODEOWNERS file.
+- A project that imports `std` and whose source text contains `sys.Storage` or
+  `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
+  authority route (`orna invoke`). The gate is a substring match on the admitted source
+  text (`requires_publication_metadata`); a project that imports std but does not contain
+  either name keeps its previous path, unchanged. The authority admits the captured
+  standard dependency's function bodies, so a standard function is callable from the
+  importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
+  Glob imports (`use std.<module>.*`) bind every public function of the module
+  (ORNA-IMPORT-003). `use std.<module> as _` binds only the names the module records in its
+  prelude. A module alias (`use std.<module> as <name>`, or a bare `use std.<module>;`
+  bound to a name) is refused at admission with `UnsupportedImport` ("qualified std module
+  alias not supported on this route"). A standard body calls its own module helpers, never a
+  user function of the same name.
+
+- Git probes that decide publication admission, blob verification, and
+  migration index pins now stop repository discovery at the probed directory's
+  parent only when that directory carries its own `.git` entry. A nested
+  repository with a corrupt `HEAD` fails closed instead of reading an enclosing
+  repository. Migration Git commands always stop discovery at their directory's
+  parent, so a plain subdirectory cannot reach an enclosing repository's refs or
+  index. A plain subdirectory of another repository is no longer adopted as a
+  dependency checkout (`DependencyUnavailable`); `is_repository` is now a plain
+  `.git` existence check and makes no Git call. Exporting from a subdirectory of
+  a worktree and porcelain status again discover the enclosing repository
+  (ornadb-6vxj).
+- `orna query` with a predicate now reads the whole `--from`/`--until` range in
+  ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
+  `--from`/`--until` accept `int:N` (on an `Int` key), `uint:N` (on a `UInt` key)
+  and `text:KEY` (on a `Str` key), and `--key` tries integer spellings as integer
+  keys after text and bytes. `orna history KEY` shares that spelling resolution,
+  so an integer spelling also names the integer row there.
+  A predicate scan pages the whole `--from`/`--until` range by an exclusive resume
+  cursor (the last key seen), so it needs no successor of a key and works for every
+  primary-key type, composite (multi-component) keys included; a page that ends at
+  the greatest key of a type, including `u64::MAX`, continues rather than being
+  refused. A bound whose spelling does not match a single `Int`, `UInt` or `Str`
+  primary key is refused naming the valid spelling (`bytes:HEX` on a `Str` key is
+  refused; use `text:KEY`) instead of answering empty. Any `--from`/`--until` bound
+  on a composite key is refused, naming bead ornadb-5il1.461, because a
+  single-component bound has no spelling over the tuple. `Bool`, `Decimal`, `Uuid`,
+  `Date`, `Instant`, enum and table-ref keys are not addressable by `--from`,
+  `--until` or `--key`; those spellings are refused naming bead ornadb-5il1.461 and
+  this change does not implement them.
+  The `--format json` output of `orna query` with a predicate reports `rows` as
+  the number of committed rows read in the bounded range, and `blobs` as the
+  number of listings after the predicate; `plan.candidates` counts Blob-field
+  coordinates before the predicate and `plan.matched` counts those that passed.
+  Refusal and `orna history` error titles now carry their detail text
+  (`key_error` and `history_error`), so the human renderer shows the valid
+  spelling or bead named in the title; the title wording of those refusals changed.
+- `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one superseded-draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`; superseded draft ID ORNA-OGB-008) with shortest-form, width and 2^63-1 bounds. Its inline golden vectors were hand-copied from the draft archive and compared manually; the archive comparison test runs only when `ORNA_DRAFT_ZIP` is set (it prints SKIPPED otherwise, and fails when `ORNA_REQUIRE_DRAFT_ZIP=1`). Read-only; consumed only by `read_format2_rov_blob`, not by a production row read path. Final-spec authority for reading retained bytes is ORNA-ROW-013 and ORNA-UPGRADE-001/002.
+- `orna-repository-v1::format2_orr::decode_orr2_blob_field` decodes one superseded-draft format-2 ORR-2 Blob field value (superseded draft ID ORNA-OGB-007): an exact `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }` record (no empty or trailing fields) or a legacy inline padded-Base64 string. Read-only; consumed only by `read_format2_orr_blob`, not by a production row read path; does not resolve `.orna/blobs` or produce an OVB-1 Blob.
+- `orna-repository-v1::format2_ogb::verify_ogb_root` and `read_ogb_root` read-only verify a superseded-draft OGB-1 descriptor/index/chunk tree (superseded draft IDs ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. The caller supplies a verified object store; Git object IDs are not re-hashed. Missing objects are reported distinctly from corruption. `read_ogb_root` refuses content above 8 MiB per call (`ORNA-BLOB-011`). Consumed only by the Blob-field read API; no writer is activated.
+- The language server's semantic rename keeps a table or field's object identity.
+  Owner-visible behaviour: on save, the editor writes to the git index. The index
+  entry for `main.orna` is replaced with the whole saved file (not only the renamed
+  hunk), and the identity inventory and `.orna/store` are staged too, but only when
+  the `main.orna` index entry still equals HEAD's or the text the edit started from.
+  Otherwise nothing is staged and the warning asks for manual staging, so partial
+  `git add -p` work is never overwritten. Nothing is committed; `orna commit` then
+  keeps the identity, like `orna mv`. A field rename is not staged: it is refused with
+  the warning `ORNA-LSP-RENAME-001` ("schema evolution is not admitted") until schema
+  evolution is implemented (ORNA-EVOL-002). An identity that cannot be carried leaves
+  the rename applied and shows a warning with code `ORNA-LSP-RENAME-001` and the remedy
+  `orna mv` (`ornadb-5il1.414`). A rename applied to the buffer but not saved before
+  the document closes or reopens is reported as "the rename was not saved". Concurrent
+  inventory changes are guarded by the staged-store `StaleIndex` check. An outer
+  coordination lock was not added because the install path takes the same lock
+  non-blockingly: a re-entrant attempt fails with `RepositoryBusy`, so the install
+  would fail rather than deadlock.
+- Publication recovery re-verifies `.orna/store` payloads at the `IndexReconciled` stage before worktree materialisation, so a managed store edit made inside the `index` kill window is retained (E2300) and HEAD is not rewound. `publication_crash_matrix` gains a later-tail leg at every kill boundary (`prepared` included) and a managed-store kill-window leg (ornadb-5il1.406, ornadb-5il1.407).
+- `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
+  `Content-Security-Policy` (`default-src 'none'`, inline styles only,
+  `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` (ORNA-APP-012,
+  ORNA-APP-013). Oversize bodies on non-`/orna` routes answer 413 instead of
+  400, and the Origin/Host refusal now runs before the size check (bead
+  ornadb-5il1.387).
+- `orna mount status --json` now reports `writable`, `read_only`, `unresolved_drafts`
+  (each `{path, detail}`), and `draft_error`. The record of a `--cwd` mount now
+  stores `read_only false`, matching the FUSE session that was already writable;
+  the record and status previously reported it read-only. Records written by this
+  build carry a `read_only` value that older binaries reject as invalid (RecordInvalid).
+  The `--read-only` flag from profiles/vfs-1.md:20 is not implemented; every `--cwd`
+  mount is writable.
+- `orna publish` gains four crash barriers behind the `crash-barriers` test
+  feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
+  `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
+  barrier and asserts, after `orna publish` recovery: HEAD equals the base at the
+  pre-CAS barriers (`ref-cas-pre-journal`, `store-worktree`) and equals the
+  journaled candidate at the post-CAS barriers (`worktree`, `runtime-complete`)
+  while the journal is present; the recovered candidate is checked to be parented
+  on the captured HEAD only at the pre-CAS barriers; exactly one publication commit
+  exists; a second publish is a no-op; staged and unstaged user work, pins, the
+  runtime tail, the writer lease and locks are preserved or released; and
+  `git fsck` passes. Managed-worktree and index reconciliation checks run only for
+  non-store paths, and format-3 candidates have none, so they are vacuous here.
+  No production behaviour changes.
+- A complete-copy export of a workspace with a legacy format-1/2 snapshot now
+  admits that snapshot by its recorded format record, and an offline restore
+  re-admits each member (Gate F, `ACCEPTANCE.md:63-68`,
+  `24-git-history.md:19`). Format-3 members still require their schema and
+  store roots. Earlier builds refused every non-format-3 snapshot as a complete
+  copy. The migrated-member leg (`migrate copy` publication) remains open under
+  ornadb-5il1.192, and a gitlink whose dependency repository is absent is still
+  refused.
+- Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
+  legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
+  ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
+  ORNA-REPO-CONTEXT-003 (unknown format) because the gate reclassified the
+  mixed snapshot (ORNA-META-001, ORNA-META-002; Gate A).
+- `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
+  errno as every other refused mutation there (profiles/vfs-1.md errno table;
+  41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
+  which is not in the errno table. The `EXDEV` once considered for cross-directory
+  rename is not in the reference spec, so it is not used; that rename keeps `EPERM`.
+- One-shot `orna invoke` reads committed table rows at `HEAD`, binding each table to its committed identity (`10-execution.md`). A table-reading entry requires a committed project; without one it fails with `table reads need a committed project`. A mutating one-shot `invoke` fails closed with `table mutations`. `sys.rt.info` and `sys.Storage` are available inside table-reading entries. A one-shot read completes while another process holds the runtime owner lock, as a secondary participant. REPL expressions over committed table rows (for example `main.music | count()`) read the committed rows at `HEAD`.
+- Known limit: a one-shot `orna invoke` in a multi-module project that declares a table fails closed with `E2200` (`table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run`). This wording is a spec-silent choice of this build. Any table-declaring module is refused, reached or not; the committed-table route admits a single module only. Extending one-shot reads to multi-module projects is tracked as follow-up work. Before this entry, the same projects were refused by the bounded evaluator with the generic `one-shot invocation requires an executable function-only project`; the outcome is unchanged, only the diagnostic is named.
+- Known limit: a committed table read pages its relation scan with an ordinal cursor recomputed per page, so each page costs O(N log N) and a full scan with a one-row page size is O(N^2 log N). Carrying a keyed cursor is tracked as follow-up work.
+- Known limit: a successful one-shot `orna invoke` prints only `invocation completed` and does not print the returned value. No one-shot invoke clause was located in the reference source (`reference/Orna-1.1.0/source/*.md`), so this output route is spec-silent in this build.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
@@ -13,6 +191,27 @@ been published.
   handle does not re-admit a refusal that a later accepted save resolved.
   Earlier builds did not attempt acceptance at close and did not keep unsynced
   drafts on release.
+- A FUSE write-intent open of a Blob projection (any write access mode, or
+  `O_TRUNC`) now fails at open with `EPERM` and leaves the blob unchanged. It
+  used to succeed or be ignored, and the later write failed with `EBADF`
+  (profiles/vfs-1.md:104-106). Tools that write a Blob in place, such as `cp`
+  onto `content.mp3` or an editor with `backupcopy=yes`, now see the error at
+  open.
+- The errno rule for the live writable mount is now uniform: every refused
+  mutation there returns `EPERM` (41-vfs.md:103-105; profiles/vfs-1.md:139).
+  This covers Blob write-open, Blob unlink and same-row rename, create in a
+  table directory or in a row with a non-blob name, unlink of a row's
+  `data.orna`, rename with flags, rename to a name other than the row's
+  `data.orna` or Blob field, rename of a non-temporary node, and rename across
+  rows. A cross-row rename is `EPERM`, not `EXDEV`: `EXDEV` would make `mv` and
+  `cp` fall back to copy-then-unlink, which writes the bytes into the other row
+  before the refused source unlink leaves the original behind. `EROFS` is
+  reserved for the kernel read-only historical mount (`mount --at`), which never
+  reaches these handlers. Rename with flags, rename of a row's `data.orna`, and
+  path-truncate of a Blob are covered by `live_mount_structural_refusals_are_eperm`.
+  Rename with flags uses `EPERM` where rename(2) would use `EINVAL`; `EPERM`
+  follows the unsupported-mutation rule (41-vfs.md:103-105). Zero-length and
+  sparse-hole Blob coverage remains open.
 - A malformed format-3 native graph now reports a typed `GraphMalformed` cause
   under `ORNA-REPO-CONTEXT-017` when loaded through `load_row_map` for shape
   faults such as overlapping child ranges, broken counts, over-wide fanout, and

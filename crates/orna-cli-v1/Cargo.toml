@@ -52,6 +52,7 @@ required-features = ["crash-barriers"]
 bytes = "1.11.1"
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
+orna-application-v1 = { path = "../orna-application-v1", features = ["test-support"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"

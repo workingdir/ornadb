@@ -2,7 +2,7 @@
 use std::{
     fs::File,
     ops::{Deref, DerefMut},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output},
     thread,
     time::{Duration, Instant},
@@ -105,6 +105,7 @@ async fn commit_capture(
     let commit = state.commit_table_request_activation(
         writer, request, fingerprint, &context, &[mutation], [24; 32],
         TerminalOutcome::new(vec![25]).unwrap(), &NoFault,
+        orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
     ).await.unwrap();
     assert_eq!(commit.request.state, RequestState::Completed);
     drop(source_bindings);
@@ -638,7 +639,22 @@ fn coordinated_gc_and_repack(repository: &Repository, root: &Path) {
 // index-install parks after the reconciled index is installed but before
 // its IndexReconciled journal stage is durable (ORNA-PUB-007).
 async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) {
-    for boundary in ["index-lock", "capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
+    for boundary in [
+        "index-lock",
+        "capture",
+        "row",
+        "candidate",
+        "prepared",
+        "ref-cas-pre-journal",
+        "ref-cas",
+        "store-worktree",
+        "index-install",
+        "index",
+        "worktree",
+        "ref-index",
+        "runtime-complete",
+        "tail",
+    ] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
@@ -679,7 +695,29 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let pre_journal = repository.read_publication_journal().unwrap().is_some();
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
-        assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        let journal_expected = matches!(
+            boundary,
+            "prepared"
+                | "ref-cas-pre-journal"
+                | "ref-cas"
+                | "store-worktree"
+                | "index-install"
+                | "index"
+                | "worktree"
+                | "ref-index"
+                | "runtime-complete"
+        );
+        assert!(pre_journal == journal_expected, "unexpected journal state at {boundary}");
+        // Recovery table rows (22-publication.md:63-72). Before the ref CAS, HEAD is still the base and
+        // the batch is pending. After the CAS, HEAD already names the candidate the killed publisher
+        // journaled (or, after journal removal, the candidate it completed).
+        let pre_head = head(&repository);
+        let pre_ref_cas = matches!(boundary, "index-lock" | "capture" | "row" | "candidate" | "prepared");
+        if pre_ref_cas {
+            assert_eq!(pre_head, base.as_str(), "ref moved before the ref CAS at {boundary}");
+        } else if let Some(journal) = repository.read_publication_journal().unwrap() {
+            assert_eq!(pre_head, journal.new_head().as_str(), "journal candidate differs from HEAD at {boundary}");
+        }
         // Before the Prepared journal, every publication pin an attempt holds must be its own base
         // index tree or its own candidate commit (parent = base head). Anything else is foreign.
         if matches!(boundary, "index-lock" | "capture" | "row" | "candidate") {
@@ -702,6 +740,29 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let resumed = cli(root, &["--debug", "publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
+        if pre_ref_cas {
+            let parent_spec = format!("{once}^");
+            let parent = String::from_utf8_lossy(&git_output(root, &["rev-parse", "--verify", parent_spec.as_str()], None)).trim().to_owned();
+            assert_eq!(parent, base.as_str(), "recovered candidate is not parented on the captured HEAD at {boundary}");
+        } else {
+            assert_eq!(once, pre_head, "recovery moved HEAD off the candidate the killed publisher advanced to at {boundary}");
+        }
+        // Managed paths of the published commit must match the candidate after recovery: the worktree
+        // bytes equal the committed bytes and the ordinary index equals HEAD (recovery table rows 2-3,
+        // ORNA-PUB-011/016). Store paths are skip-worktree by design and are excluded.
+        let range_spec = format!("{}..{}", base.as_str(), once);
+        let changed = String::from_utf8_lossy(&git_output(root, &["diff-tree", "--no-commit-id", "--name-only", "-r", base.as_str(), once.as_str()], None)).into_owned();
+        let managed: Vec<&str> = changed.lines().filter(|path| !path.starts_with(".orna/store")).collect();
+        // Format 3 publishes rows only under `.orna/store` (ORNA-REPO-004), so the managed-worktree loop
+        // is empty for these fixtures. Assert that precondition explicitly rather than pass vacuously.
+        assert!(changed.lines().all(|path| path.starts_with(".orna/store")), "candidate changed a non-store path at {boundary}: {changed}");
+        for path in managed {
+            let object_spec = format!("{once}:{path}");
+            let committed = git_output(root, &["show", object_spec.as_str()], None);
+            assert_eq!(std::fs::read(root.join(path)).unwrap(), committed, "worktree bytes differ from candidate for {path} at {boundary}");
+            let staged = git_output(root, &["diff", "--cached", "--name-only", once.as_str(), "--", path], None);
+            assert!(staged.is_empty(), "index differs from HEAD for {path} at {boundary}");
+        }
         assert_ne!(once, base.as_str(), "candidate not retained after {boundary}");
         assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
         assert!(
@@ -726,6 +787,8 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        let commit_count = String::from_utf8_lossy(&git_output(root, &["rev-list", "--count", range_spec.as_str()], None)).trim().to_owned();
+        assert_eq!(commit_count, "1", "publication did not produce exactly one commit at {boundary}");
         assert!(publication_pin_refs(root).is_empty(), "publication pins remain after second publish at {boundary}");
         // Lock and lease-release evidence only. This block does NOT prove Gate D P5 ("no abandoned
         // owner retains write permission"): no token is rejected here, and the publisher never held
@@ -837,6 +900,335 @@ async fn cli_publication_reopens_after_external_edit_in_kill_window() {
     );
     assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
 }
+
+/// Reads the published image bytes from the committed row map (format 3).
+fn published_payload(repository: &Repository, relation_id: [u8; 16]) -> Vec<u8> {
+    let format = repository.open_format_context().unwrap();
+    let row_map = format.load_row_map(relation_id).unwrap();
+    let graph = format.open_native_graph(&row_map).unwrap();
+    let scope = graph.open_read_scope().unwrap();
+    let rows = graph
+        .range_rows(&orna_repository_v1::KeyRange::new(None, None, 16).unwrap(), &scope)
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the image key remains one row");
+    let descriptor = rows[0]
+        .value()
+        .dependencies()
+        .iter()
+        .find(|dependency| dependency.kind() == orna_repository_v1::NativeObjectKind::Tree)
+        .expect("published image retains its blob descriptor")
+        .oid()
+        .to_owned();
+    let blob = graph.read_stored_blob_value(&rows[0], &descriptor, &scope).unwrap();
+    let reference = blob.reference();
+    graph
+        .read_blob_range(reference, 0..reference.content_identity().length(), &scope)
+        .unwrap()
+        .bytes()
+        .to_vec()
+}
+
+/// W76 S5 / ORNA-PUB-007/008/016: a later mutation captured after the SIGKILL at every
+/// boundary stays pending. Recovery publishes only the frozen range where a journal exists,
+/// and the later tail is published by the next publish, never folded into the frozen batch.
+#[tokio::test]
+async fn publication_later_tail_is_retained_at_every_kill_boundary() {
+    const JOURNALED: [&str; 7] = [
+        "ref-cas",
+        "store-worktree",
+        "index-install",
+        "index",
+        "worktree",
+        "ref-index",
+        "runtime-complete",
+    ];
+    for boundary in [
+        "index-lock",
+        "capture",
+        "row",
+        "candidate",
+        "prepared",
+        "ref-cas-pre-journal",
+        "ref-cas",
+        "store-worktree",
+        "index-install",
+        "index",
+        "worktree",
+        "ref-index",
+        "runtime-complete",
+        "tail",
+    ] {
+        let (directory, source, repository, state, source_commit, relation_id, format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+        let base = repository.head().unwrap().unwrap();
+        let initial_payload = std::fs::read(source.path().join("pixel.png")).unwrap();
+        let tail_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel2.png")).unwrap();
+        assert_ne!(initial_payload, tail_payload, "the later fixture has different image bytes");
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        // The later mutation lands inside the kill window, before any recovery runs.
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel2.png"), source.path().join("pixel.png")).unwrap();
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let (identity_for_lease, _) = cli_runtime_identity(&repository);
+        let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+        let writer = state.acquire_lease(identity_for_lease.repository_id).await.unwrap();
+        let capability = repository.capture_capability(relation_id).unwrap();
+        let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+        filesystem.allow_root(source.path()).unwrap();
+        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+            .with_filesystem_provider(filesystem)
+            .with_repository_capture_capability(capability);
+        let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
+        let expression = REIMPORT_FIXTURE.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
+        commit_capture(
+            &repository,
+            &source_commit,
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            source.path(),
+            false,
+            [43; 16],
+            RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
+            relation_id,
+            &format_context,
+        )
+        .await;
+        drop(bindings);
+        drop(state);
+
+        if JOURNALED.contains(&boundary) {
+            let recovered = RuntimeState::open(&repository, identity, digest).await.unwrap();
+            assert!(repository.read_publication_journal().unwrap().is_some(), "journal missing before recovery at {boundary}");
+            RuntimePublicationCoordinator::recover(&repository, &recovered)
+                .await
+                .unwrap_or_else(|error| panic!("frozen recovery at {boundary}: {error:?}"));
+            assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after frozen recovery at {boundary}");
+            assert_eq!(published_payload(&repository, relation_id), initial_payload, "frozen range not recovered at {boundary}");
+            assert!(recovered.pending_count().await.unwrap() > 0, "later tail consumed by frozen recovery at {boundary}");
+            drop(recovered);
+        }
+
+        let resumed = cli(root, &["--debug", "publish"]);
+        assert!(
+            resumed.status.success(),
+            "later tail publish at {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(base.as_str() != head(&repository), "no publication after {boundary}");
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
+        assert_eq!(published_payload(&repository, relation_id), tail_payload, "later tail not published after {boundary}");
+        let (identity, digest) = cli_runtime_identity(&repository);
+        let reopened = RuntimeState::open(&repository, identity, digest).await.unwrap();
+        assert_eq!(reopened.pending_count().await.unwrap(), 0, "pending tail remains after {boundary}");
+        drop(reopened);
+        let second = cli(root, &["publish"]);
+        assert!(second.status.success(), "repeat publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
+        assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"), "republish after {boundary}");
+    }
+}
+
+/// W76 S6 / ORNA-PUB-005/010: a user edit to a managed `.orna/store/data` path made inside the
+/// kill window is detected by recovery (E2300), the edited bytes are retained, HEAD is not
+/// rewound, and restoring the bytes lets recovery complete.
+#[tokio::test]
+async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
+    for boundary in ["ref-cas", "index-install", "index"] {
+        let (directory, _source, repository, state, _source_commit, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+        let base = repository.head().unwrap().unwrap();
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), boundary);
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        let store_path = root.join(".orna/store/data");
+        let original = std::fs::read(&store_path).expect("store data exists after kill");
+        assert!(!original.is_empty(), "store data has bytes to edit");
+        let mut edited = original.clone();
+        edited[0] ^= 0x01;
+        std::fs::write(&store_path, &edited).unwrap();
+        let pre_head = head(&repository);
+
+        let rejected = cli(root, &["--debug", "publish"]);
+        assert!(!rejected.status.success(), "recovery accepted a managed edit at {boundary}");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("E2300"), "managed edit at {boundary} not reported as E2300: {stderr}");
+        assert_eq!(head(&repository), pre_head, "HEAD moved by rejected recovery at {boundary}");
+        assert_eq!(std::fs::read(&store_path).unwrap(), edited, "managed edit lost at {boundary}");
+
+        std::fs::write(&store_path, &original).unwrap();
+        let resumed = cli(root, &["--debug", "publish"]);
+        assert!(
+            resumed.status.success(),
+            "recovery after restoring managed bytes at {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert_ne!(head(&repository), base.as_str(), "candidate not retained after restore at {boundary}");
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after restore at {boundary}");
+    }
+}
+
+
+/// Collects the managed store payload leaves (every regular file except `data`) below `dir`.
+fn store_payload_leaves(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            store_payload_leaves(&path, out);
+        } else if path.file_name().and_then(|name| name.to_str()) != Some("data") {
+            out.push(path);
+        }
+    }
+}
+
+/// W196 (a) / ORNA-PUB-010: an external edit to a managed store payload leaf made inside the
+/// kill window is refused as E2300, the edited bytes are retained, and HEAD is not rewound.
+#[tokio::test]
+async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound() {
+    let mut exercised = 0;
+    for boundary in ["ref-cas", "index-install", "index"] {
+        let (directory, _source, repository, state, _source_commit, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        let mut payloads = Vec::new();
+        store_payload_leaves(&root.join(".orna/store"), &mut payloads);
+        let Some(payload) = payloads.into_iter().next() else {
+            continue;
+        };
+        exercised += 1;
+        let original = std::fs::read(&payload).unwrap();
+        assert!(!original.is_empty(), "payload leaf has bytes to edit at {boundary}");
+        let mut edited = original.clone();
+        edited[0] ^= 0x01;
+        std::fs::write(&payload, &edited).unwrap();
+        let pre_head = head(&repository);
+
+        let rejected = cli(root, &["--debug", "publish"]);
+        assert!(!rejected.status.success(), "recovery accepted a payload edit at {boundary}");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("E2300"), "payload edit at {boundary} not reported as E2300: {stderr}");
+        assert_eq!(head(&repository), pre_head, "HEAD moved by rejected recovery at {boundary}");
+        assert_eq!(std::fs::read(&payload).unwrap(), edited, "payload edit lost at {boundary}");
+    }
+    assert!(exercised > 0, "no boundary left a managed store payload leaf to edit");
+}
+
+/// W196 (b) / E2300 remedy: the discard sequence printed by MANAGED_EDIT_HELP, run literally on
+/// a skip-worktree store payload leaf (edit, refusal, `git checkout -- <path>`, retry), restores
+/// the committed bytes and lets `orna publish` complete.
+#[tokio::test]
+async fn managed_store_discard_remedy_restores_payload_and_publishes() {
+    let mut exercised = 0;
+    for boundary in ["ref-cas", "index-install", "index"] {
+        let (directory, _source, repository, state, _source_commit, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        let payload = root.join(".orna/store/data");
+        exercised += 1;
+        let relative = payload.strip_prefix(root).unwrap().to_str().unwrap().to_owned();
+        let committed = git_output(root, &["show", &format!("HEAD:{relative}")], None);
+        let original = std::fs::read(&payload).unwrap();
+        let mut edited = original.clone();
+        edited[0] ^= 0x01;
+        std::fs::write(&payload, &edited).unwrap();
+        let pre_head = head(&repository);
+
+        let rejected = cli(root, &["--debug", "publish"]);
+        assert!(!rejected.status.success(), "recovery accepted a payload edit at {boundary}");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("E2300"), "payload edit at {boundary} not reported as E2300: {stderr}");
+        assert_eq!(head(&repository), pre_head, "HEAD moved by rejected recovery at {boundary}");
+
+        let restore = format!("git show HEAD:{relative} > {relative}");
+        let status = Command::new("sh").arg("-c").arg(&restore).current_dir(root).status().unwrap();
+        assert!(status.success(), "`{restore}` failed at {boundary}");
+        assert_eq!(
+            std::fs::read(&payload).unwrap(),
+            committed,
+            "`{restore}` did not restore committed bytes at {boundary}"
+        );
+        let resumed = cli(root, &["--debug", "publish"]);
+        assert!(
+            resumed.status.success(),
+            "publish after discard at {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after discard at {boundary}");
+    }
+    assert!(exercised > 0, "no boundary left a managed store payload leaf to discard");
+}
+
 
 /// W14-01 / ORNA-PUB-016: a `commit` killed after the Orna index lock is taken
 /// must not strand Git's index lock. The next commit reclaims the dead lock,

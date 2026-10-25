@@ -2065,11 +2065,12 @@ fn orp1_malformed_graphs_report_specific_diagnostics() {
 }
 
 #[test]
+#[ignore = "requires ORNA_ORP1_MILLION_ROWS=1 and --ignored; a run without the variable must fail, not pass"]
 fn orp1_row_store_one_million_rows() {
-    if std::env::var_os(MILLION_ROWS_ENV).is_none() {
-        eprintln!("ORP-1 one-million-row case skipped: set {MILLION_ROWS_ENV}=1 to run");
-        return;
-    }
+    assert!(
+        std::env::var_os(MILLION_ROWS_ENV).is_some(),
+        "ORP-1 one-million-row case needs {MILLION_ROWS_ENV}=1; refusing to report a skipped run as passed"
+    );
     let million = timed("build_fixture", SCALE_ROWS, || {
         build_fixture(SCALE_ROWS, Fault::None)
     });
