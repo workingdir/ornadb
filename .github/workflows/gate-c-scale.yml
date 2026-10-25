@@ -1,0 +1,169 @@
+name: Gate C scale
+
+# Gate C (implementation/ACCEPTANCE.md, "Gate C — indexed rows at scale"): ten and
+# one million rows use ORP-1; indexed point/range queries, missing keys, unindexed
+# scan and concurrent writes in cold and warm partial clones.
+#
+# Two jobs, both driven by the row_store_scale harness in orna-repository-v1:
+#
+# - gate-c-bounded (pull requests, pushes to main, dispatch): the non-ignored
+#   10-row and malformed-graph targets. The one-million-row target is excluded by
+#   name here; it is never allowed to pass as a silent no-op.
+# - gate-c-million (nightly schedule and dispatch): the one-million-row target with
+#   ORNA_ORP1_MILLION_ROWS set, so the harness actually builds and queries 1M rows.
+#
+# Fail-honest rules, enforced by every job:
+# - a job fails when the harness reports zero passed tests (a skipped, filtered or
+#   ignored harness must never be reported as success);
+# - each job writes an evidence record JSON (commit, command, toolchain, timings,
+#   test counts, exit status, log hash) and uploads it even when the test fails.
+#   The `state` field is one of: passed, failed, not-executed.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Nightly, 03:17 UTC.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+concurrency:
+  group: gate-c-scale-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate-c-bounded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the bounded Gate C targets and write the evidence record
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p gate-c-evidence
+          command='cargo test --locked -p orna-repository-v1 --test row_store_scale -- --nocapture --skip orp1_row_store_one_million_rows'
+          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          start_s=$SECONDS
+          set +e
+          $command 2>&1 | tee gate-c-evidence/bounded.log
+          exit_code=${PIPESTATUS[0]}
+          set -e
+          elapsed=$((SECONDS - start_s))
+          # Sum the passed counts across every "test result:" line. Zero passed
+          # (or no result line at all) means the harness did not really run.
+          passed=$(grep -E '^test result:' gate-c-evidence/bounded.log | sed -E 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/' | awk '{s+=$1} END {print s+0}')
+          failed=$(grep -E '^test result:' gate-c-evidence/bounded.log | sed -E 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/' | awk '{s+=$1} END {print s+0}')
+          if [ "$exit_code" -eq 0 ] && [ "$passed" -gt 0 ]; then state=passed; else state=failed; fi
+          if [ "$passed" -eq 0 ]; then state=not-executed; fi
+          jq -n \
+            --arg schema "orna-gate-c-evidence/1" \
+            --arg gate "C" \
+            --arg job "gate-c-bounded" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg command "$command" \
+            --arg rustc "$(rustc --version)" \
+            --arg started "$started" \
+            --arg elapsed "$elapsed" \
+            --arg exit_code "$exit_code" \
+            --arg passed "$passed" \
+            --arg failed "$failed" \
+            --arg state "$state" \
+            --arg log_sha256 "$(sha256sum gate-c-evidence/bounded.log | cut -d' ' -f1)" \
+            --arg objects "not-reported: the harness prints phase timings to stderr only" \
+            '{schema:$schema, gate:$gate, job:$job, commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$rustc, started_utc:$started, elapsed_seconds:($elapsed|tonumber), exit_code:($exit_code|tonumber), tests_passed:($passed|tonumber), tests_failed:($failed|tonumber), state:$state, objects_read_written:$objects, log_sha256:$log_sha256}' \
+            > gate-c-evidence/evidence.json
+          cat gate-c-evidence/evidence.json
+          test "$state" = passed
+
+      - name: Upload the evidence record
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-c-bounded-evidence-${{ github.run_id }}
+          path: gate-c-evidence/
+          if-no-files-found: warn
+
+  gate-c-million:
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the one-million-row Gate C target and write the evidence record
+        shell: bash
+        env:
+          ORNA_ORP1_MILLION_ROWS: "1"
+        run: |
+          set -o pipefail
+          mkdir -p gate-c-evidence
+          command='cargo test --locked -p orna-repository-v1 --test row_store_scale -- --nocapture --exact orp1_row_store_one_million_rows'
+          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          start_s=$SECONDS
+          set +e
+          $command 2>&1 | tee gate-c-evidence/million.log
+          exit_code=${PIPESTATUS[0]}
+          set -e
+          elapsed=$((SECONDS - start_s))
+          passed=$(grep -E '^test result:' gate-c-evidence/million.log | sed -E 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/' | awk '{s+=$1} END {print s+0}')
+          failed=$(grep -E '^test result:' gate-c-evidence/million.log | sed -E 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/' | awk '{s+=$1} END {print s+0}')
+          if [ "$exit_code" -eq 0 ] && [ "$passed" -gt 0 ]; then state=passed; else state=failed; fi
+          if [ "$passed" -eq 0 ]; then state=not-executed; fi
+          jq -n \
+            --arg schema "orna-gate-c-evidence/1" \
+            --arg gate "C" \
+            --arg job "gate-c-million" \
+            --arg rows "1000000" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg command "$command" \
+            --arg rustc "$(rustc --version)" \
+            --arg started "$started" \
+            --arg elapsed "$elapsed" \
+            --arg exit_code "$exit_code" \
+            --arg passed "$passed" \
+            --arg failed "$failed" \
+            --arg state "$state" \
+            --arg log_sha256 "$(sha256sum gate-c-evidence/million.log | cut -d' ' -f1)" \
+            --arg objects "not-reported: the harness prints phase timings to stderr only" \
+            '{schema:$schema, gate:$gate, job:$job, rows:($rows|tonumber), commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$rustc, started_utc:$started, elapsed_seconds:($elapsed|tonumber), exit_code:($exit_code|tonumber), tests_passed:($passed|tonumber), tests_failed:($failed|tonumber), state:$state, objects_read_written:$objects, log_sha256:$log_sha256}' \
+            > gate-c-evidence/evidence.json
+          cat gate-c-evidence/evidence.json
+          test "$state" = passed
+
+      - name: Upload the evidence record
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-c-million-evidence-${{ github.run_id }}
+          path: gate-c-evidence/
+          if-no-files-found: warn
