@@ -5,6 +5,17 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Git probes that decide publication admission, blob verification, and
+  migration index pins now stop repository discovery at the probed directory's
+  parent only when that directory carries its own `.git` entry. A nested
+  repository with a corrupt `HEAD` fails closed instead of reading an enclosing
+  repository. Migration Git commands always stop discovery at their directory's
+  parent, so a plain subdirectory cannot reach an enclosing repository's refs or
+  index. A plain subdirectory of another repository is no longer adopted as a
+  dependency checkout (`DependencyUnavailable`); `is_repository` is now a plain
+  `.git` existence check and makes no Git call. Exporting from a subdirectory of
+  a worktree and porcelain status again discover the enclosing repository
+  (ornadb-6vxj).
 - `orna query` with a predicate now reads the whole `--from`/`--until` range in
   ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
   `--from`/`--until` accept `int:N` (on an `Int` key), `uint:N` (on a `UInt` key)
