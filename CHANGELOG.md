@@ -10,6 +10,11 @@ been published.
   ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
   ORNA-REPO-CONTEXT-003 (unknown format) because the gate reclassified the
   mixed snapshot (ORNA-META-001, ORNA-META-002; Gate A).
+- `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
+  errno as every other refused mutation there (profiles/vfs-1.md errno table;
+  41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
+  which is not in the errno table. The `EXDEV` once considered for cross-directory
+  rename is not in the reference spec, so it is not used; that rename keeps `EPERM`.
 - One-shot `orna invoke` reads committed table rows at `HEAD`, binding each table to its committed identity (`10-execution.md`). A table-reading entry requires a committed project; without one it fails with `table reads need a committed project`. A mutating one-shot `invoke` fails closed with `table mutations`. `sys.rt.info` and `sys.Storage` are available inside table-reading entries. A one-shot read completes while another process holds the runtime owner lock, as a secondary participant. REPL expressions over committed table rows (for example `main.music | count()`) read the committed rows at `HEAD`.
 - Known limit: a one-shot `orna invoke` in a multi-module project that declares a table fails closed with `E2200` (`table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run`). This wording is a spec-silent choice of this build. Any table-declaring module is refused, reached or not; the committed-table route admits a single module only. Extending one-shot reads to multi-module projects is tracked as follow-up work. Before this entry, the same projects were refused by the bounded evaluator with the generic `one-shot invocation requires an executable function-only project`; the outcome is unchanged, only the diagnostic is named.
 - Known limit: a committed table read pages its relation scan with an ordinal cursor recomputed per page, so each page costs O(N log N) and a full scan with a one-row page size is O(N^2 log N). Carrying a keyed cursor is tracked as follow-up work.
