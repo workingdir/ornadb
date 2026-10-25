@@ -3220,6 +3220,8 @@ enum Value {
     ContextualBlob(ContextValue),
     Date(String),
     Uuid([u8; 16]),
+    /// A nominal `Digest` (tag 60025): the raw-content SHA-256 commitment.
+    Digest([u8; 32]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
     Reference(CanonicalValue),
     /// A stored table reference (tag 60021): database identity, table and key.
@@ -3711,6 +3713,13 @@ impl Value {
             Self::ContextualBlob(value) => value.raw().clone(),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
+            Self::Digest(value) => Raw::Tag(
+                60025,
+                Box::new(Raw::Array(vec![
+                    Raw::Text("sha256".to_owned()),
+                    Raw::Bytes(value.to_vec()),
+                ])),
+            ),
             Self::Reference(value) => value.raw().clone(),
             Self::TableReference(value) => value.raw().clone(),
             Self::Instant {
@@ -3895,6 +3904,22 @@ impl Value {
                     .try_into()
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Ok(Self::Uuid(bytes))
+            }
+            Raw::Tag(60025, boxed) => {
+                let Raw::Array(items) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let [Raw::Text(algorithm), Raw::Bytes(bytes)] = items.as_slice() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if algorithm.as_str() != "sha256" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let bytes = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Self::Digest(bytes))
             }
             Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
             Raw::Tag(60021, _) => Ok(Self::TableReference(value.clone())),
@@ -8253,6 +8278,7 @@ impl Context<'_, '_> {
                         .collect::<Vec<_>>(),
                 ))),
                 crate::sys_bindings::BlobReadValue::Unit => Ok(Value::Unit),
+                crate::sys_bindings::BlobReadValue::Digest(value) => Ok(Value::Digest(value)),
             };
         }
         if crate::sys_bindings::is_blob_reflection_operation(operation) {
@@ -13546,6 +13572,7 @@ fn write_json_value(
         | Value::ContextualBlob(_)
         | Value::Date(_)
         | Value::Uuid(_)
+        | Value::Digest(_)
         | Value::Reference(_)
         | Value::TableReference(_)
         | Value::Instant { .. }
@@ -13679,6 +13706,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
+        Value::Digest(value) => encode_orna_string(&format_digest_hex(value)),
         Value::TableReference(value) => encode_orna_string(&orna_value_v1::base64_encode(
             &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
         )),
@@ -13769,6 +13797,11 @@ fn format_uuid_bytes(bytes: &[u8; 16]) -> String {
         write!(output, "{byte:02x}").expect("String writes succeed");
     }
     output
+}
+
+/// Renders a Digest as lowercase 64-hex; it is never an implicit string value.
+fn format_digest_hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn money_amount(value: &Value) -> Result<DecimalValue, EvaluationError> {
