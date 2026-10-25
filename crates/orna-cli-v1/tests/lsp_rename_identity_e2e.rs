@@ -550,3 +550,18 @@ fn commit_refusal(root: &Path) -> String {
     );
     transcript(&committed)
 }
+
+#[test]
+fn lsp_rename_stages_main_orna_when_the_index_matches_head() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+
+    // A clean index (entry equal to HEAD) is safe to replace with the saved text.
+    let (renamed, _shown) = rename_through_lsp(&root, MUSIC_SOURCE, 10, "Archive");
+    assert_eq!(git(&root, &["show", ":main.orna"]), renamed);
+    assert_eq!(
+        staged_identities(&root).id(ObjectKind::Table, "Archive"),
+        head_identities(&root).id(ObjectKind::Table, "Music")
+    );
+}
