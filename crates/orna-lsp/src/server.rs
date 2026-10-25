@@ -2646,7 +2646,7 @@ mod persisted_object_rename_tests {
             .expect("a merge in progress never fails the plain rename edit");
         // The index cannot be read mid-merge, which is a typed error: the plain
         // edit still returns, and the client is told the identity was not carried.
-        assert_one_rename_warning(&messages, "object identity was not carried");
+        assert_one_rename_warning(&messages, "RepositoryBusy");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         assert_eq!(
             edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
