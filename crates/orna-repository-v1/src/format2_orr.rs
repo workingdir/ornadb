@@ -1,13 +1,15 @@
 //! Repository-format-2 ORR-2 Blob field decode (read-only, descriptive).
 //!
-//! Source: draft compatibility material `reference/Orna-1.1.0/compatibility/
-//! previous-1.1.0-draft.zip`, entry `Orna-1.1.0/Orna-1.1.0.md`, section
-//! "Repository row profile ORR-2" (clauses ORNA-OGB-007, lines 4922-4946).
+//! Source: the superseded draft compatibility material `reference/Orna-1.1.0/
+//! compatibility/previous-1.1.0-draft.zip`, entry `Orna-1.1.0/Orna-1.1.0.md`,
+//! section "Repository row profile ORR-2" (draft ORNA-OGB-007, lines 4922-4946;
+//! superseded ID). Authority for reading retained bytes: ORNA-ROW-013 and
+//! ORNA-UPGRADE-002.
 //!
 //! In a Blob-typed slot the ORR-2 decoder admits exactly two spellings:
 //! - a storage record `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }`
 //!   that names a content root under `.orna/blobs/<2>/<62>/`; and
-//! - a legacy inline padded-Base64 string (OGB-007).
+//! - a legacy inline padded-Base64 string (draft ORNA-OGB-007).
 //!
 //! This module only decodes one field value. It does not resolve the root, does
 //! not hydrate payloads, and does not produce an OVB-1 Blob value. A record in a
@@ -25,7 +27,7 @@ pub struct Orr2BlobRef {
 /// One decoded ORR-2 Blob field value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Orr2BlobField {
-    /// Legacy inline padded-Base64 payload (ORNA-OGB-007).
+    /// Legacy inline padded-Base64 payload (draft ORNA-OGB-007).
     Inline(Vec<u8>),
     /// External storage record resolved through `.orna/blobs/`.
     Reference(Orr2BlobRef),
@@ -74,9 +76,12 @@ fn parse_record(text: &str) -> Result<Orr2BlobRef, Orr2DecodeError> {
 
     let mut digest: Option<[u8; 32]> = None;
     let mut length: Option<u64> = None;
-    let mut fields = inner.split(',').map(str::trim).filter(|f| !f.is_empty());
+    let mut fields = inner.split(',').map(str::trim);
     let mut count = 0usize;
     for field in &mut fields {
+        if field.is_empty() {
+            return Err(Orr2DecodeError::MalformedRecord("empty field"));
+        }
         count += 1;
         let (name, value) = field
             .split_once(':')
@@ -161,7 +166,7 @@ mod tests {
     use super::*;
 
     // The spelling and digest come from the draft example row in
-    // `Orna-1.1.0/Orna-1.1.0.md` (ORR-2 example, lines 4934-4944). That digest
+    // `Orna-1.1.0/Orna-1.1.0.md` (draft ORR-2 example, lines 4934-4944). That digest
     // is illustrative only; the test checks parsing, not content.
     const EXAMPLE_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -211,6 +216,8 @@ mod tests {
             format!("{{ blob: \"sha256:{}\", length: 1 }}", &d[..63]),
             format!("{{ blob: \"sha1:{d}\", length: 1 }}"),
             format!("{{ blob: \"sha256:{d}\", length: 9223372036854775808 }}"),
+            format!("{{ blob: \"sha256:{d}\", length: 1, }}"),
+            format!("{{ blob: \"sha256:{d}\", , length: 1 }}"),
         ] {
             assert!(decode_orr2_blob_field(&bad).is_err(), "accepted {bad}");
         }

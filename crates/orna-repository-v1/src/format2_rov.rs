@@ -1,18 +1,19 @@
 //! Repository-format-2 ROV-2 storage value decode (read-only, descriptive).
 //!
-//! Sole authority for this codec is the draft compatibility material in
+//! Source: the superseded draft compatibility material in
 //! `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`, entry
 //! `Orna-1.1.0/Orna-1.1.0.md`, section "Repository value profile ROV-2 and
-//! semantic substitution SOV-2" (clause ORNA-OGB-008). Format-2 is not an
-//! active 1.1.0 final requirement; this module only decodes the storage
-//! reference value so that retained format-2 bytes can be inspected. It never
-//! writes, never resolves the reference against `.orna/blobs/`, and never
-//! produces an OVB-1 Blob value.
+//! semantic substitution SOV-2" (draft ORNA-OGB-008, superseded ID). Authority
+//! for retained reference bytes is the final ORNA-ROW-013 and ORNA-UPGRADE-002.
+//! Format-2 is not an active 1.1.0 final requirement; this module only decodes
+//! the storage reference value so that retained format-2 bytes can be inspected.
+//! It never writes, never resolves the reference against `.orna/blobs/`, and
+//! never produces an OVB-1 Blob value.
 //!
 //! The wire form is CBOR tag 60100 around `[content_sha256_bytes32,
 //! total_length_uint]`, using the deterministic shortest-form integer subset.
 
-/// CBOR tag used only by ROV-2 storage references (OGB-008). Tag 60100 is
+/// CBOR tag used only by ROV-2 storage references (draft ORNA-OGB-008). Tag 60100 is
 /// forbidden in OVB-1 and portable text.
 pub const ROV2_TAG: u64 = 60100;
 
@@ -256,12 +257,15 @@ mod tests {
     // value must equal its `stored_reference_cbor` and `length` in the archive's
     // `Orna-1.1.0/tests/blob-vectors.json`. The archive lives outside the
     // checkout, so its location comes from `ORNA_DRAFT_ZIP` (set it to
-    // `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`). Skipped
-    // with a note when unset, unreadable, or `unzip` is unavailable.
+    // `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`). When it is
+    // unset or unreadable the test prints a SKIPPED line and returns, unless
+    // `ORNA_REQUIRE_DRAFT_ZIP=1` is set (evidence mode), which makes it fail.
     #[test]
     fn inline_golden_vectors_match_draft_zip_when_readable() {
+        let require = std::env::var_os("ORNA_REQUIRE_DRAFT_ZIP").is_some_and(|v| v == "1");
         let Some(zip) = std::env::var_os("ORNA_DRAFT_ZIP") else {
-            eprintln!("skipping: ORNA_DRAFT_ZIP not set");
+            assert!(!require, "ORNA_REQUIRE_DRAFT_ZIP=1 but ORNA_DRAFT_ZIP is unset");
+            eprintln!("SKIPPED draft golden comparison: ORNA_DRAFT_ZIP not set");
             return;
         };
         let output = match std::process::Command::new("unzip")
@@ -272,7 +276,8 @@ mod tests {
         {
             Ok(output) if output.status.success() => output,
             _ => {
-                eprintln!("skipping: draft zip not readable at {zip:?}");
+                assert!(!require, "ORNA_REQUIRE_DRAFT_ZIP=1 but draft zip unreadable: {zip:?}");
+                eprintln!("SKIPPED draft golden comparison: draft zip not readable at {zip:?}");
                 return;
             }
         };
