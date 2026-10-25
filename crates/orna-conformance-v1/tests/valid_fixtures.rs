@@ -115,30 +115,38 @@ fn diagnostics(diagnostics: &[orna_foundation_v1::Diagnostic]) -> String {
         .join(" | ")
 }
 
+// Manifest-valid fixtures that the product currently rejects. The manifest says each fixture is
+// valid (must pass). Each entry records the diagnostics the product emits today and names the bead
+// that tracks the product bug. The entries are NOT expected outcomes: the test fails when the
+// observed diagnostics change in any direction, so an entry must be updated or removed when the
+// product changes.
+const KNOWN_PRODUCT_GAPS: &[(&str, &str, &[&str])] = &[
+    // conformance-manifest.json:362
+    ("failure-natural-key", "ornadb-jnf1", &[
+        "ORNA-S021-TYPE: relation query callback must be read-only",
+        "ORNA-S021-TYPE: static types are incompatible",
+        "ORNA-S021-TYPE: static types are incompatible",
+    ]),
+    // conformance-manifest.json:819
+    ("stream-admin-repl", "ornadb-jnf1", &[
+        "ORNA-S021-TYPE: relation query callback must be read-only",
+        "ORNA-S021-TYPE: static types are incompatible",
+    ]),
+    // conformance-manifest.json:374
+    ("finite-stream", "ornadb-jnf1", &[
+        "E2002: missing required field `name`",
+    ]),
+    // conformance-manifest.json:951
+    ("table-key-default", "ornadb-7owc", &[
+        "ORNA-S021-TYPE: field access requires a record",
+    ]),
+];
+
 fn expected_semantic_failure(name: &str) -> Option<&'static [&'static str]> {
-    match name {
-        // ornadb-jnf1: the manifest lists this fixture as valid; these are the current product
-        // diagnostics pinned until that product question is resolved.
-        "failure-natural-key" => Some(&[
-            "ORNA-S021-TYPE: relation query callback must be read-only",
-            "ORNA-S021-TYPE: static types are incompatible",
-            "ORNA-S021-TYPE: static types are incompatible",
-        ]),
-        // ornadb-jnf1: as above for stream-admin-repl.
-        "stream-admin-repl" => Some(&[
-            "ORNA-S021-TYPE: relation query callback must be read-only",
-            "ORNA-S021-TYPE: static types are incompatible",
-        ]),
-        // Missing required record field is the spec's E2002 (tests/expected-diagnostics/missing-required-field.orna.json).
-        "finite-stream" => Some(&[
-            "E2002: missing required field `name`",
-        ]),
-        // ornadb-7owc: field access on a spec-valid record is rejected by the product (open product gap).
-        "table-key-default" => Some(&[
-            "ORNA-S021-TYPE: field access requires a record",
-        ]),
-        _ => None,
-    }
+    KNOWN_PRODUCT_GAPS
+        .iter()
+        .find(|(gap, _, _)| *gap == name)
+        .map(|(_, _, diagnostics)| *diagnostics)
 }
 
 // Executable positive compile-path witnesses include the enum/case, function, generic protocol,

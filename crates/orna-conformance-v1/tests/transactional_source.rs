@@ -2872,7 +2872,9 @@ fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
         "#,
     ));
 
-    // Spec tests/expected-diagnostics/wrong-field-type.orna.json: primary_diagnostic E2001 (field type mismatch).
+    // E2001 for a non-Decimal literal in a Decimal field is mapped BY ANALOGY to the spec's
+    // tests/expected-diagnostics/wrong-field-type.orna.json (primary_diagnostic E2001, field type
+    // mismatch). No Decimal-specific spec fixture was found.
     assert!(
         matches!(
             &outcome,
