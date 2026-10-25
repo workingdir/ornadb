@@ -112,6 +112,11 @@ fn assert_success(output: &Output, step: &str) {
 /// `source`, then the source staged with Git and committed with
 /// `orna commit`. Returns the root and the relation the commit admitted.
 fn committed_database(directory: &TempDir, source: &str) -> (PathBuf, String) {
+    committed_table(directory, source, "Note")
+}
+
+/// [`committed_database`] for the table named `table`.
+fn committed_table(directory: &TempDir, source: &str, table: &str) -> (PathBuf, String) {
     let root = directory.path().join("notes");
     let init = orna(
         directory.path(),
@@ -130,8 +135,8 @@ fn committed_database(directory: &TempDir, source: &str) -> (PathBuf, String) {
     assert_success(&committed, "orna commit");
     let relation = String::from_utf8_lossy(&committed.stdout)
         .lines()
-        .find_map(|line| line.strip_prefix("admitted table Note as relation "))
-        .expect("orna commit admits the Note table")
+        .find_map(|line| line.strip_prefix(&format!("admitted table {table} as relation ")))
+        .expect("orna commit admits the named table")
         .trim()
         .to_owned();
     (root, relation)
@@ -406,4 +411,336 @@ fn growing_a_row_rewrites_its_page_and_at_most_the_neighbour_it_shifts() {
         "a grown row rewrites its page and at most one neighbour: {rewritten} new, {removed} removed"
     );
     assert_eq!(table_row_count(&root, &relation), 600);
+}
+
+/// A table whose single primary-key component is `Int` is keyed by the
+/// integer the committed descriptor declares (store-format-3 section 5). A
+/// `--key` spelling is parsed as `Int`, so a row past the first page of 256 is
+/// found by its integer spelling, and a non-integer spelling is refused rather
+/// than read as text or bytes.
+#[test]
+fn an_int_keyed_table_is_queried_by_its_declared_integer_key() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    // A point lookup of a committed row exits 0; an absent row exits non-zero
+    // with "Row is not committed", so exit status alone proves the row is found.
+    let found = orna(
+        &root,
+        &["query", &relation, "--key", "299", "--format", "json"],
+    );
+    assert_success(&found, "orna query --key 299");
+    let refused = orna(
+        &root,
+        &["query", &relation, "--key", "tick", "--format", "json"],
+    );
+    assert!(
+        !refused.status.success(),
+        "a non-integer spelling is refused for an Int key:\n{}",
+        transcript(&refused)
+    );
+    assert!(
+        transcript(&refused).contains("Int"),
+        "the refusal names the declared Int type:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// Point, range and missing-key queries over a published `Int`-keyed table of
+/// 300 rows. The point read finds a row past the first page of 256, `--from`
+/// and `--until` take half-open `int:` bounds, and an absent key exits non-zero
+/// with "Row is not committed".
+#[test]
+fn an_int_keyed_store_answers_point_range_and_missing_key_queries() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    let point = json(
+        &orna(
+            &root,
+            &["query", &relation, "--key", "299", "--format", "json"],
+        ),
+        "orna query --key 299",
+    );
+    assert_eq!(point["rows"], 1, "{point}");
+
+    let range = json(
+        &orna(
+            &root,
+            &[
+                "query", &relation, "--from", "int:250", "--until", "int:260", "--format", "json",
+            ],
+        ),
+        "orna query --from int:250 --until int:260",
+    );
+    assert_eq!(range["rows"], 10, "{range}");
+
+    let missing = orna(
+        &root,
+        &["query", &relation, "--key", "9999", "--format", "json"],
+    );
+    assert!(
+        !missing.status.success() && transcript(&missing).contains("Row is not committed"),
+        "an absent Int key is reported as not committed:\n{}",
+        transcript(&missing)
+    );
+}
+
+/// A table whose primary key has two components has no single typed key
+/// spelling, yet a predicate scan over it pages the rows in tuple order, so
+/// every row is evaluated across page boundaries.
+#[test]
+fn a_composite_key_predicate_scan_pages_every_row() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Stock(location: Str, sku: Str) { quantity: Int, content: Blob, }\n",
+        "Stock",
+    );
+    let media_root = format!("{:?}", root.to_string_lossy().as_ref());
+    // The REPL admits one effectful request per invocation, so each blob-bearing
+    // row is its own single-unit input: capture, annotate, insert, publish.
+    // Rows 200..300 are annotated text/plain and match the predicate; rows
+    // 0..200 are not. The matches therefore start before the 256-row page
+    // boundary and continue past it.
+    for index in 0..300 {
+        let name = format!("tone{index:03}.txt");
+        let mime = if index >= 200 { "text/plain" } else { "application/octet-stream" };
+        std::fs::write(root.join(&name), vec![b'r'; 64]).expect("write the captured file");
+        let input = format!(
+            r#"let raw = sys.blob.capture_file({media_root}, "{name}", 4096);
+let content = sys.blob.annotate(raw, "{mime}");
+main.Stock.insert({{ location: "north", sku: "widget {index:03}", quantity: {index}, content: content }})"#
+        );
+        assert_success(&orna_repl(&root, &input), "REPL composite insert");
+        publish(&root, &format!("Add stock row {index:03}"));
+    }
+
+    // All 300 rows are scanned in ordered pages of 256. Exactly the 100 rows
+    // from index 200 match, so the listing is not truncated and must report
+    // every matching key once, in key order, across the 256-row boundary.
+    let scanned = json(
+        &orna(
+            &root,
+            &["query", relation.as_str(), "--kind", "text/plain", "--limit", "256", "--format", "json"],
+        ),
+        "orna query composite predicate scan",
+    );
+    assert_eq!(scanned["rows"], 300, "{scanned}");
+    assert_eq!(scanned["plan"]["candidates"], 300, "{scanned}");
+    assert_eq!(scanned["plan"]["matched"], 100, "{scanned}");
+    assert_eq!(scanned["blobs"], 100, "{scanned}");
+    let listed: Vec<String> = scanned["listings"]
+        .as_array()
+        .expect("the listing is an array")
+        .iter()
+        .map(|entry| entry["key"].as_str().expect("a rendered key").to_owned())
+        .collect();
+    let expected: Vec<String> = (200..300)
+        .map(|index| format!("north,widget {index:03}"))
+        .collect();
+    assert_eq!(listed, expected, "every matching key, once, in key order");
+}
+
+/// A bound whose spelling does not match the table's `Int` primary key is
+/// refused with the valid spelling, never answered empty.
+#[test]
+fn a_bound_of_the_wrong_key_type_is_refused_naming_the_valid_spelling() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Tick.insert({ id: 5, body: "five" })"#),
+        "REPL integer insert",
+    );
+    publish(&root, "Add one tick");
+
+    let refused = orna(&root, &["query", relation.as_str(), "--from", "text:a", "--format", "json"]);
+    assert!(
+        !refused.status.success() && transcript(&refused).contains("int:N"),
+        "a text bound on an Int key is refused naming int:N:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// A predicate scan over more than one page of 256 rows reads every row
+/// through the bounded-range pages, so all 300 rows are evaluated and listed.
+#[test]
+fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    let scanned = json(
+        &orna(
+            &root,
+            &["query", &relation, "--from", "int:0", "--kind", "text/plain", "--format", "json"],
+        ),
+        "orna query --from int:0 --kind text/plain",
+    );
+    assert_eq!(scanned["rows"], 300, "{scanned}");
+    // The rows are text-only, so no field is a Blob and the annotation plan
+    // has no coordinates to evaluate: candidates and matched are both zero.
+    assert_eq!(scanned["plan"]["candidates"], 0, "{scanned}");
+    assert_eq!(scanned["plan"]["matched"], 0, "{scanned}");
+    assert_eq!(scanned["blobs"], 0, "{scanned}");
+}
+
+/// `orna history` resolves an integer-looking key with the spelling that
+/// `orna query --key` uses. The row lookup runs first, so the committed
+/// `Int`-keyed row `7` is found and the walk is reached. A text-only row has
+/// no descriptor tree, so the walk then refuses with `DescriptorNotInRow`;
+/// that exact error proves the lookup resolved the row. A Blob-bearing row
+/// would yield revisions instead, which this fixture does not build.
+#[test]
+fn history_resolves_an_integer_looking_key_past_the_row_lookup() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Tick.insert({ id: 7, body: "seven" })"#),
+        "REPL integer insert",
+    );
+    publish(&root, "Add tick seven");
+
+    let history = orna(&root, &["history", relation.as_str(), "7", "--format", "json"]);
+    let stderr = transcript(&history);
+    assert!(
+        !history.status.success() && stderr.contains("DescriptorNotInRow"),
+        "the integer spelling resolves to the row, then the walk reports DescriptorNotInRow:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Row is not committed"),
+        "the integer spelling must not report the row as uncommitted:\n{stderr}"
+    );
+}
+
+/// Any `--from`/`--until` bound on a composite key is refused, whatever its
+/// spelling, because a bound of one component has no order over the pair.
+#[test]
+fn a_bound_on_a_composite_key_is_refused_for_every_spelling() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n",
+        "Stock",
+    );
+    assert_success(
+        &orna_repl(
+            &root,
+            r#"main.Stock.insert({ location: "north", sku: "widget", quantity: 3 })"#,
+        ),
+        "REPL composite insert",
+    );
+    publish(&root, "Add one stock row");
+
+    for bound in ["text:north", "int:1", "uint:1", "bytes:0102"] {
+        let refused = orna(&root, &["query", relation.as_str(), "--from", bound, "--format", "json"]);
+        assert!(
+            !refused.status.success()
+                && transcript(&refused).contains("composite primary key")
+                && transcript(&refused).contains("ornadb-5il1.461"),
+            "a {bound} bound on a composite key is refused with the remedy:\n{}",
+            transcript(&refused)
+        );
+    }
+}
+
+/// A `Str` primary key is spelled `text:KEY` in a bound; `bytes:HEX` is
+/// refused naming the valid spelling, never answered empty.
+#[test]
+fn a_bytes_bound_on_a_str_key_is_refused_naming_text() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Note(id: Str) { body: Str, }\n",
+        "Note",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Note.insert({ id: "alpha", body: "a" })"#),
+        "REPL text insert",
+    );
+    publish(&root, "Add one note");
+
+    let refused = orna(&root, &["query", relation.as_str(), "--from", "bytes:61", "--format", "json"]);
+    assert!(
+        !refused.status.success() && transcript(&refused).contains("text:KEY"),
+        "a bytes bound on a Str key is refused naming text:KEY:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// A `Bool` primary key is not addressable by a bound or `--key`; both are
+/// refused with the bead that tracks it. A predicate scan over it still pages
+/// every row.
+#[test]
+fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Flag(on: Bool) { body: Str, }\n",
+        "Flag",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Flag.insert({ on: true, body: "yes" })"#),
+        "REPL bool insert",
+    );
+    publish(&root, "Add one flag");
+
+    let scanned = json(
+        &orna(
+            &root,
+            &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
+        ),
+        "orna query Bool predicate scan",
+    );
+    assert_eq!(scanned["rows"], 1, "{scanned}");
+
+    let bounded = orna(&root, &["query", relation.as_str(), "--from", "text:true", "--format", "json"]);
+    assert!(
+        !bounded.status.success() && transcript(&bounded).contains("ornadb-5il1.461"),
+        "a bound on a Bool key is refused naming ornadb-5il1.461:\n{}",
+        transcript(&bounded)
+    );
+    let keyed = orna(&root, &["query", relation.as_str(), "--key", "text:true", "--format", "json"]);
+    assert!(
+        !keyed.status.success() && transcript(&keyed).contains("ornadb-5il1.461"),
+        "a --key lookup on a Bool key is refused naming ornadb-5il1.461:\n{}",
+        transcript(&keyed)
+    );
 }

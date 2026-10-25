@@ -105,6 +105,11 @@ impl ObjectHeader {
     pub(crate) const fn kind(&self) -> ObjectKind {
         self.kind
     }
+
+    /// The object's size in bytes, as `info` reported it.
+    pub(crate) const fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// A tree entry mode after Git's own canonicalisation of recorded modes.
@@ -165,6 +170,9 @@ pub(crate) struct ObjectReader {
     worktree: PathBuf,
     algorithm: OnceLock<GitHashAlgorithm>,
     session: Mutex<Option<Session>>,
+    /// Processes this reader has started, for tests that count spawns.
+    #[cfg(test)]
+    starts: std::sync::atomic::AtomicUsize,
 }
 
 impl fmt::Debug for ObjectReader {
@@ -181,6 +189,8 @@ impl ObjectReader {
             worktree,
             algorithm: OnceLock::new(),
             session: Mutex::new(None),
+            #[cfg(test)]
+            starts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -193,6 +203,7 @@ impl ObjectReader {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
@@ -234,6 +245,30 @@ impl ObjectReader {
                 return Err(RepositoryError::GitOperationFailed);
             }
             if session.request("contents", oid, algorithm)? != Some(header) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let mut bytes = vec![0; size];
+            session
+                .output()?
+                .read_exact(&mut bytes)
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            session.finish_contents()?;
+            Ok(bytes)
+        })
+    }
+
+    /// Reads the complete bytes of an object whose header `info` has just
+    /// reported. The caller admits the header's kind and size first; the
+    /// bytes are read through the same shared process, one exchange.
+    pub(crate) fn read_exact(
+        &self,
+        oid: &str,
+        header: &ObjectHeader,
+        algorithm: GitHashAlgorithm,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let size = usize::try_from(header.size).map_err(|_| RepositoryError::GitOperationFailed)?;
+        self.with_session(|session| {
+            if session.request("contents", oid, algorithm)? != Some(header.clone()) {
                 return Err(RepositoryError::GitOperationFailed);
             }
             let mut bytes = vec![0; size];
@@ -450,6 +485,9 @@ impl ObjectReader {
         let mut slot = self.lock_session();
         if slot.is_none() {
             *slot = Some(Session::start(&self.worktree)?);
+            #[cfg(test)]
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let Some(session) = slot.as_mut() else {
             return Err(RepositoryError::GitOperationFailed);
@@ -483,6 +521,12 @@ impl ObjectReader {
             .as_ref()
             .map(|session| session.child.id())
     }
+
+    /// How many cat-file processes this reader has started.
+    #[cfg(test)]
+    pub(crate) fn process_starts(&self) -> usize {
+        self.starts.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// One running `git cat-file --batch-command` process.
@@ -497,6 +541,7 @@ impl Session {
         let mut command = Command::new("git");
         command.current_dir(worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, worktree);
         // Set after scrubbing, which removes inherited replace-object settings.
         command
             .env("GIT_NO_LAZY_FETCH", "1")
@@ -882,6 +927,170 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_object_walk_starts_exactly_one_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]);
+        assert_eq!(objects.process_starts(), 0, "no read has started a process");
+        for _ in 0..8 {
+            objects
+                .info(&tree)
+                .expect("read the tree")
+                .expect("the tree exists");
+            objects
+                .tree_entries(&tree)
+                .expect("list the tree");
+        }
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "a multi-object walk reuses one cat-file process"
+        );
+    }
+
+    /// Blob reads, which the walk uses for every chunk, must also share the one
+    /// process; a walk that only lists trees would not prove that.
+    #[test]
+    fn a_multi_object_walk_reads_blobs_through_the_same_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        for _ in 0..8 {
+            assert_eq!(
+                objects.read_blob(&blob, 1024).expect("read the blob"),
+                b"pub fn main() {}\n"
+            );
+            let header = objects
+                .info(&blob)
+                .expect("info the blob")
+                .expect("the blob exists");
+            assert_eq!(
+                objects
+                    .read_exact(&blob, &header, algorithm)
+                    .expect("read the blob exactly"),
+                b"pub fn main() {}\n"
+            );
+        }
+        assert_eq!(objects.process_starts(), 1, "blob reads reuse one process");
+    }
+
+    /// A reader process that died is discarded rather than left in use: the
+    /// read reports an error instead of hanging on a closed pipe, and the next
+    /// read starts a fresh process.
+    #[test]
+    fn a_dead_reader_process_is_discarded_and_the_next_read_restarts_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("first read"),
+            b"pub fn main() {}\n"
+        );
+        let pid = objects.process_id().expect("a live reader process");
+        let killed = Command::new("sh")
+            .args(["-c", &format!("kill -9 {pid}")])
+            .status()
+            .expect("send SIGKILL");
+        assert!(killed.success());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_blob(&blob, 1024).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a read on a dead reader returns instead of hanging");
+            assert!(failed, "a dead reader cannot serve a read");
+        });
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
+    /// A caller header that disagrees with git's header is refused before any
+    /// bytes are read, and the reader is restarted so it stays in step.
+    #[test]
+    fn a_header_that_disagrees_with_git_is_refused_and_the_reader_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = objects
+            .info(&blob)
+            .expect("info the blob")
+            .expect("the blob exists");
+        let mut wrong: super::ObjectHeader = header.clone();
+        wrong.size += 1;
+        assert!(objects.read_exact(&blob, &wrong, algorithm).is_err());
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
+    /// A git process that dies after writing part of an object leaves the
+    /// reader short of the declared size. The read reports the failure without
+    /// hanging on the closed pipe, the broken process is discarded, and the
+    /// next read starts a fresh one.
+    #[test]
+    fn a_truncated_object_stream_discards_the_session_and_the_next_read_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = super::ObjectHeader {
+            oid: blob.clone(),
+            kind: ObjectKind::Blob,
+            size: 20,
+        };
+        // The stub answers the `contents` request with a 20-byte header, writes
+        // 5 bytes, and exits: the stream ends mid-object.
+        let script = format!(r#"read line; printf '{blob} blob 20\n'; printf short; exit 0"#);
+        let mut child = Command::new("sh")
+            .args(["-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the stub reader");
+        let input = child.stdin.take().expect("stub stdin");
+        let output = std::io::BufReader::new(child.stdout.take().expect("stub stdout"));
+        *objects.lock_session() = Some(super::Session {
+            child,
+            input: Some(input),
+            output: Some(output),
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_exact(&blob, &header, algorithm).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a truncated read returns instead of hanging");
+            assert!(failed, "a truncated object cannot be read exactly");
+        });
+        assert!(
+            objects.process_id().is_none(),
+            "the truncated process was discarded"
+        );
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "the next read started a fresh process"
+        );
+    }
+
+    #[test]
     fn a_failed_read_restarts_the_reader_without_desynchronising_it() {
         let (directory, repository) = repository();
         let objects = repository.objects();
@@ -1215,5 +1424,30 @@ mod tests {
             objects.check_expansion("0123456789abcdef0123456789abcdef01234567", ""),
             Err(RepositoryError::GitOperationFailed)
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod corrupt_root_tests {
+    use super::*;
+
+    #[test]
+    fn object_reader_algorithm_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        assert!(ObjectReader::new(child).algorithm().is_err());
+    }
+
+    #[test]
+    fn object_reader_session_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        let fails_closed = match Session::start(&child) {
+            Err(_) => true,
+            Ok(mut session) => session
+                .request("info", "HEAD", GitHashAlgorithm::Sha1)
+                .is_err(),
+        };
+        assert!(fails_closed);
     }
 }

@@ -5,10 +5,10 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -52,6 +52,81 @@ impl Drop for MountedProcess {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             let _ = self.child.kill();
         }
+        let _ = self.child.wait();
+    }
+}
+
+/// A dirty handle on a mounted document, held by a helper process rather than
+/// the test process. A fork from the test process while a handle is open copies
+/// its descriptor, and the copy's close during exec issues a FUSE FLUSH that
+/// EDIT-1 step 5 may accept. Keeping the handle out of the test process means
+/// other tests' forks cannot trigger that flush.
+struct DirtyDocument {
+    child: Child,
+    replies: BufReader<ChildStdout>,
+}
+
+const DIRTY_DOCUMENT_HELPER: &str = r#"import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC)
+data = sys.argv[2].encode()
+try:
+    while data:
+        data = data[os.write(fd, data):]
+    print("ready", flush=True)
+except OSError as error:
+    print("err%d" % error.errno, flush=True)
+for line in sys.stdin:
+    if line.strip() == "fsync":
+        try:
+            os.fsync(fd)
+            print("ok", flush=True)
+        except OSError as error:
+            print("err%d" % error.errno, flush=True)
+"#;
+
+impl DirtyDocument {
+    /// Opens `path` for writing with truncation in a helper process and writes
+    /// `body` through that handle.
+    fn open_and_write(path: &Path, body: &str) -> Self {
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(DIRTY_DOCUMENT_HELPER)
+            .arg(path)
+            .arg(body)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 starts the dirty document helper");
+        let mut replies = BufReader::new(child.stdout.take().expect("helper stdout"));
+        let mut reply = String::new();
+        replies
+            .read_line(&mut reply)
+            .expect("dirty document helper reply");
+        assert_eq!(
+            reply.trim_end(),
+            "ready",
+            "dirty document helper could not write {}",
+            path.display()
+        );
+        Self { child, replies }
+    }
+
+    /// `fsync`s the handle through the helper, as `File::sync_all` would.
+    fn sync_all(&mut self) {
+        let stdin = self.child.stdin.as_mut().expect("helper stdin");
+        writeln!(stdin, "fsync").expect("send fsync to dirty document helper");
+        let mut reply = String::new();
+        self.replies
+            .read_line(&mut reply)
+            .expect("dirty document fsync reply");
+        assert_eq!(reply.trim_end(), "ok", "dirty document fsync failed");
+    }
+}
+
+impl Drop for DirtyDocument {
+    fn drop(&mut self) {
+        // EOF ends the helper loop; its exit closes the handle as `drop(File)` would.
+        drop(self.child.stdin.take());
         let _ = self.child.wait();
     }
 }
@@ -167,6 +242,23 @@ fn fuse_test_available() -> bool {
             false
         }
     }
+}
+
+/// Whether python3, which runs the dirty document helper, is available. Its
+/// tests skip with a note when it is missing, and fail under `ORNA_REQUIRE_FUSE=1`.
+fn dirty_document_helper_available() -> bool {
+    let available = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            !fuse_test_required(),
+            "ORNA_REQUIRE_FUSE=1 requires python3 for the dirty document helper"
+        );
+        eprintln!("SKIP: python3 is unavailable for the dirty document helper");
+    }
+    available
 }
 
 fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
@@ -796,36 +888,44 @@ impl MountedMusicRow {
             .expect("run edit --row against mounted absolute row directory")
     }
 
-    /// Commits `source_row` over `Music/london` as a writer outside this mount.
-    async fn replace_row_as_other_writer(&self, source_row: &str) {
+    /// Commits `source_row` over `Music/london` through `orna edit`. The live
+    /// mount owner executes that edit (ORNA-TURSO-005: other local writers
+    /// coordinate with the owner or fail), so HEAD and the row advance without
+    /// the mount's captured baseline following them.
+    fn replace_row_through_owner(&self, source_row: &str) {
+        let editor = self.scripts.path().join("owner-routed-edit");
+        std::fs::write(
+            &editor,
+            format!("#!/bin/sh\nprintf '%s\\n' '{source_row}' > \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+            .arg("--db")
+            .arg(self.repository_directory.path())
+            .args(["edit", "Music/london/data.orna"])
+            .env("EDITOR", &editor)
+            .output()
+            .expect("run orna edit through the mount owner");
+        assert_saved(&output, "owner-routed other-writer edit");
+    }
+
+    /// A writer outside the mount that takes the writer lease directly is
+    /// refused while the mount owns it (ORNA-TURSO-005).
+    async fn assert_direct_writer_refused(&self) {
         let state = RuntimeState::open(&self.repository, self.runtime_identity, self.digest)
             .await
             .unwrap();
-        let writer = state
+        let Err(refusal) = state
             .acquire_lease(self.runtime_identity.repository_id)
             .await
-            .unwrap();
-        let head = self.repository.head().unwrap().unwrap();
-        let format_context =
-            format3::format3_context_for_snapshot(&self.repository, head.as_str());
-        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
-        media_commit::commit_source_captures_for_table(
-            &self.repository,
-            &state,
-            writer,
-            &mut bindings,
-            self.relation_id,
-            &format_context,
-            "Music",
-            &[media_commit::SourceCaptureRow {
-                key: "london",
-                blob_fields: &[],
-                source_row,
-                ordinal: 0x9a,
-                insert_only: false,
-            }],
-        )
-        .await;
+        else {
+            panic!("a direct foreign lease must be refused while the mount owns the writer");
+        };
+        assert!(
+            matches!(refusal, orna_runtime_v1::RuntimeError::LeaseHeld),
+            "a direct foreign lease is refused as LeaseHeld: {refusal:?}"
+        );
     }
 
     /// The `Music/london` row bytes the store holds now. Call after `unmount`.
@@ -898,7 +998,8 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
         return;
     };
     assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
-    row.replace_row_as_other_writer("{ title: \"other\", }\n").await;
+    row.assert_direct_writer_refused().await;
+    row.replace_row_through_owner("{ title: \"other\", }");
     let repository = row.repository_directory.path().to_path_buf();
     std::fs::write(repository.join("notes.txt"), "advance HEAD\n").unwrap();
     format3::git(&repository, &["add", "notes.txt"]);
@@ -924,6 +1025,64 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
     );
     row.unmount();
     assert_title(&row.stored_row().await, "other");
+}
+
+#[tokio::test]
+/// ORNA-VFS-008/009/024: a dirty handle whose baseline the owner's `orna edit`
+/// advanced is stale. Its close flush is refused and retained as a draft that
+/// blocks unmount, the mount shows the owner's accepted row, and a save against
+/// that row resolves the draft.
+async fn cwd_mount_close_flush_after_owner_routed_edit_is_stale() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let document = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"stale close\", }\n",
+    );
+    row.replace_row_through_owner("{ title: \"other\", }");
+    drop(document);
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount after the stale close");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted the stale candidate: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna")
+            && diagnostic.contains("sys.vfs.stale_edit"),
+        "unmount names the retained stale draft and its cause: {diagnostic}"
+    );
+    let shown = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        shown.contains("other") && !shown.contains("stale close"),
+        "the mount shows the owner's accepted row, not the stale candidate: {shown}"
+    );
+
+    let mut resolving = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"after refresh\", }\n",
+    );
+    resolving.sync_all();
+    drop(resolving);
+    row.unmount();
+    assert_title(&row.stored_row().await, "after refresh");
 }
 
 #[tokio::test]
@@ -1470,6 +1629,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
+    let stderr_log = std::fs::File::create(mount_parent.path().join("mount-stderr.log")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
@@ -1478,8 +1638,8 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .expect("start mount --cwd");
     let mut mounted = MountedProcess {
@@ -1507,10 +1667,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = mounted.child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
+        let stderr = std::fs::read_to_string(mount_parent.path().join("mount-stderr.log")).unwrap_or_default();
         panic!("mount process exits cleanly after SIGTERM ({status}): {stderr}");
     }
 
@@ -1631,6 +1788,102 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
 #[tokio::test]
 /// ORNA-VFS-024: unmount refuses an unresolved draft and succeeds after fsync accepts it.
 async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x92,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    let mut document = DirtyDocument::open_and_write(&data_path, "{ title: \"after\", }\n");
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run dirty-state unmount");
+    assert!(!refused.status.success(), "dirty mount unmount was accepted");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain"),
+        "unmount refusal did not explain draft recovery: {diagnostic}"
+    );
+    assert!(mountinfo_contains(&mountpoint));
+    assert_eq!(repository.mount_status().unwrap().len(), 1);
+
+    document.sync_all();
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+#[tokio::test]
+/// ORNA-VFS-024: unmount refuses a dirty draft whose candidate is schema-invalid, and succeeds after a corrected candidate is synced.
+async fn cwd_mount_refuses_unmount_with_invalid_dirty_draft_and_allows_clean_unmount() {
     if !fuse_test_available() {
         return;
     }
@@ -1697,7 +1950,9 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         .truncate(true)
         .open(&data_path)
         .unwrap();
-    document.write_all(b"{ title: \"after\", }\n").unwrap();
+    // A schema-invalid candidate stays unsynced in this open handle. The handle is
+    // dirty, so unmount is refused before any sync accepts the candidate (ORNA-VFS-024).
+    document.write_all(b"{ title: 123, }\n").unwrap();
     let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
@@ -1720,6 +1975,11 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     assert!(mountinfo_contains(&mountpoint));
     assert_eq!(repository.mount_status().unwrap().len(), 1);
 
+    // Replace the refused candidate with a valid row and sync it: the accepted
+    // sync clears the unresolved draft, so unmount can succeed.
+    document.set_len(0).unwrap();
+    document.seek(SeekFrom::Start(0)).unwrap();
+    document.write_all(b"{ title: \"after\", }\n").unwrap();
     document.sync_all().unwrap();
     drop(document);
     run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);

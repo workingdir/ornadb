@@ -164,7 +164,7 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
         .iter()
         .map(|module| (module.logical_path.as_str(), module.source.as_str()))
         .collect::<BTreeMap<_, _>>();
-    let Some(catalogue) = standard_catalogue(&loaded) else {
+    let Some(catalogue) = check_catalogue(&loaded) else {
         for (logical_path, source) in &sources {
             let tree = parse_module(source).value;
             let mapper = PositionMapper::new(source);
@@ -214,15 +214,11 @@ pub(crate) fn check(project: &Project, open: &[OpenModule<'_>]) -> ProjectCheck 
 
 /// The catalogue `orna check` uses, or `None` when the project imports a
 /// standard module that no captured standard dependency provides.
-fn standard_catalogue(loaded: &LoadedProject) -> Option<Catalogue> {
-    let catalogue = Catalogue::authoritative_core();
-    if loaded.standard_modules().is_empty() {
-        return Some(catalogue);
+fn check_catalogue(loaded: &LoadedProject) -> Option<Catalogue> {
+    if loaded.has_uncaptured_standard_imports() {
+        return None;
     }
-    let profile = loaded.standard_profile()?;
-    catalogue
-        .with_standard_sources(profile, loaded.standard_sources().iter().cloned())
-        .ok()
+    loaded.production_catalogue().ok()
 }
 
 /// Spans of the module paths of `use std...` declarations.

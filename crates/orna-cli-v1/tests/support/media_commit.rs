@@ -170,6 +170,7 @@ async fn commit_capture_inner(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -353,6 +354,7 @@ pub async fn commit_source_captures_for_table(
             [ordinal.wrapping_add(4); 32],
             TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
