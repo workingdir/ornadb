@@ -41,7 +41,12 @@ impl ServeApp {
             project.modules()[index].source.clone(),
             SERVE_ENTRY,
         ) {
-            Ok(admitted) => Ok(Some(Self { authority, admitted })),
+            Ok(admitted) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
+                authority,
+                admitted,
+            })),
+            // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
+            Ok(_) => Ok(None),
             Err(ApplicationError::MissingEntry(_)) => Ok(None),
             Err(error) => Err(Diagnostic::target_with_detail(
                 "E2101",
@@ -74,11 +79,15 @@ impl ServeApp {
                 br#"{"error":"serve.write_refused"}"#.to_vec(),
             );
         }
-        Response::new(
+        let mut response = Response::new(
             200,
             "text/plain; charset=utf-8",
             crate::repl::inspect(staged.value()).into_bytes(),
-        )
+        );
+        response
+            .headers
+            .push(("X-Content-Type-Options".to_owned(), "nosniff".to_owned()));
+        response
     }
 }
 
@@ -92,16 +101,35 @@ pub(super) fn serving_entry_route(
     if request.path != "/" {
         return None;
     }
-    if request.method != "GET" {
+    if request.method != "GET" && request.method != "HEAD" {
         return Some(Response::new(
             405,
             "application/json",
             br#"{"error":"method_not_allowed"}"#.to_vec(),
         ));
     }
+    // RFC 9110 9.3.2: HEAD answers exactly as GET but sends no content.
+    let head = request.method == "HEAD";
     Some(match app.lock() {
-        Ok(app) => app.respond(),
+        Ok(app) => {
+            let mut response = app.respond();
+            if head {
+                response.body.clear();
+            }
+            response
+        }
         Err(_) => unavailable_response(),
+    })
+}
+
+/// True when `source` declares `serve` as a `pub fn` (the only serving entry).
+fn serve_is_public(source: &str) -> bool {
+    orna_syntax_v1::parse_module(source).value.items.iter().any(|item| {
+        matches!(item.visibility, orna_syntax_v1::Visibility::Public { .. })
+            && matches!(
+                &item.declaration,
+                orna_syntax_v1::Declaration::Function { signature, .. } if signature.name == SERVE_ENTRY
+            )
     })
 }
 
