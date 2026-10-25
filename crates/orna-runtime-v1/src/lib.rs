@@ -5497,6 +5497,7 @@ impl RuntimeState {
         writer: Option<WriterLease>,
         registration: StreamObservationRegistration,
     ) -> Result<StreamObservation, RuntimeError> {
+        self.require_lease_authority()?;
         validate_observation_text(&registration.producer)?;
         if let Some(consumer) = &registration.consumer {
             validate_observation_text(consumer)?;
@@ -13511,6 +13512,7 @@ impl RuntimeState {
         next: RequestState,
         terminal_outcome: Option<TerminalOutcome>,
     ) -> Result<RequestStatus, RuntimeError> {
+        self.require_lease_authority()?;
         validate_request_identity(identity)?;
         debug_assert_eq!(next.is_terminal(), terminal_outcome.is_some());
         let tx = self
@@ -15012,6 +15014,7 @@ impl RuntimeState {
         tx: &Connection,
         lease: WriterLease,
     ) -> Result<(), RuntimeError> {
+        self.require_lease_authority()?;
         let mut rows = tx
             .query(
                 "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
@@ -50010,6 +50013,36 @@ mod tests {
                 .state,
             RequestState::Reserved
         );
+    }
+
+    #[tokio::test]
+    async fn stale_owner_completion_is_fenced_after_cross_connection_takeover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let abandoned = state.acquire_lease(id(176)).await.unwrap();
+        let (identity, fingerprint, _) =
+            begin_continuable_request(&state, abandoned, 177, 178, 179).await;
+        let successor = open_unmanaged_state(&repo).await;
+        let replacement = successor.takeover_lease(abandoned, id(180)).await.unwrap();
+
+        assert_eq!(
+            state
+                .complete_observed_request_with_owner(identity, fingerprint, abandoned, outcome(181))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        let recovered = successor
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(abandoned),
+                replacement,
+                outcome(182),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(state.current_lease().await.unwrap(), Some(replacement));
     }
 
     #[tokio::test]
