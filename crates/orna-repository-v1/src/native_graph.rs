@@ -170,6 +170,7 @@ impl PrivateRefCleanupOwner {
             .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        crate::bind_git_discovery_to_worktree(&mut command, self.repository.worktree());
         command
     }
 
@@ -321,6 +322,7 @@ pub struct NativeGraphContext {
     schema_digest: [u8; 32],
     row_snapshot: crate::row_store::RowMapSnapshot,
     cancelled: Arc<AtomicBool>,
+    node_cache: std::sync::Mutex<NodeCache>,
 }
 
 /// One schema-ordered field identity and its payload-free Blob projection.
@@ -650,6 +652,7 @@ impl NativeGraphContext {
             schema_digest,
             row_snapshot,
             cancelled: Arc::new(AtomicBool::new(false)),
+            node_cache: std::sync::Mutex::new(NodeCache::default()),
         };
         context.validate_sealed_schema_node()?;
         Ok(context)
@@ -1022,6 +1025,7 @@ impl NativeGraphContext {
                 None,
                 None,
                 range.lower_inclusive(),
+                range.resume_after(),
                 range.upper_exclusive(),
                 range.limit(),
                 &mut entries,
@@ -1077,6 +1081,7 @@ impl NativeGraphContext {
             None,
             None,
             range.lower_inclusive(),
+            range.resume_after(),
             range.upper_exclusive(),
             range.limit(),
             &mut entries,
@@ -1425,6 +1430,7 @@ impl NativeGraphContext {
             None,
             None,
             None,
+            None,
             limit,
             &mut raw,
         )?;
@@ -1524,6 +1530,7 @@ impl NativeGraphContext {
                 None,
                 None,
                 range.lower_inclusive(),
+                range.resume_after(),
                 range.upper_exclusive(),
                 range.limit(),
                 &mut entries,
@@ -3629,6 +3636,15 @@ impl NativeGraphContext {
         Ok(height)
     }
 
+    /// How many reads this context has answered from its node cache.
+    #[cfg(test)]
+    pub(crate) fn node_cache_hits(&self) -> usize {
+        self.node_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hits
+    }
+
     fn read_git_object(
         &self,
         kind: NativeObjectKind,
@@ -3639,81 +3655,44 @@ impl NativeGraphContext {
     ) -> Result<Vec<u8>, GraphError> {
         scope.check_cancelled()?;
         objects.visit(oid)?;
-        let actual_kind = self.git_object_kind(oid)?;
-        if actual_kind != kind {
-            return Err(GraphError::WrongObjectKind {
-                expected: kind,
-                actual: actual_kind,
-            });
-        }
-        let hex = oid.to_hex();
-        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
-        let size = std::str::from_utf8(&size_output)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| GraphError::GitObjectMalformed)?;
-        if size > maximum {
-            return Err(
-                if kind == NativeObjectKind::Blob
-                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
-                {
-                    GraphError::ChunkTooLarge(size)
-                } else {
-                    GraphError::NodeDataTooLarge(usize::try_from(size).unwrap_or(usize::MAX))
-                },
-            );
-        }
-        if maximum != crate::blob_store::GEAR_MAXIMUM as u64 {
-            objects.record_metadata(size)?;
-        }
-        let kind_name = match kind {
-            NativeObjectKind::Tree => "tree",
-            NativeObjectKind::Blob => "blob",
+        let admit = |size: u64| {
+            if size > maximum {
+                return Err(
+                    if kind == NativeObjectKind::Blob
+                        && maximum == crate::blob_store::GEAR_MAXIMUM as u64
+                    {
+                        GraphError::ChunkTooLarge(size)
+                    } else {
+                        GraphError::NodeDataTooLarge(usize::try_from(size).unwrap_or(usize::MAX))
+                    },
+                );
+            }
+            if maximum != crate::blob_store::GEAR_MAXIMUM as u64 {
+                objects.record_metadata(size)?;
+            }
+            Ok(())
         };
-        let mut child = self
-            .git_command()
-            .args(["cat-file", kind_name, &hex])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let mut data = Vec::with_capacity(size as usize);
-        let mut stdout = child.stdout.take().ok_or(GraphError::GitCommandFailed)?;
-        let read_result = stdout
-            .by_ref()
-            .take(maximum.saturating_add(1))
-            .read_to_end(&mut data);
-        drop(stdout);
-        read_result.map_err(|_| GraphError::GitCommandFailed)?;
-        if data.len() as u64 > maximum {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(
-                if kind == NativeObjectKind::Blob
-                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
-                {
-                    GraphError::ChunkTooLarge(data.len() as u64)
-                } else {
-                    GraphError::NodeDataTooLarge(data.len())
-                },
-            );
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(absent_object_error(&self.repository, &hex));
-        }
-        if data.len() as u64 != size {
-            return Err(GraphError::GitObjectMalformed);
-        }
-        let hashed = self.git_hash_object(kind_name, &data)?;
+        let cached = self
+            .node_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(kind, oid);
+        let data = match cached {
+            Some(data) => {
+                admit(data.len() as u64)?;
+                data.as_ref().clone()
+            }
+            None => {
+                let data =
+                    read_checked_object(&self.repository, self.algorithm, kind, oid, admit)?;
+                self.node_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(kind, oid, data.clone());
+                data
+            }
+        };
         scope.check_cancelled()?;
-        if hashed != *oid {
-            return Err(GraphError::GitObjectHashMismatch);
-        }
         Ok(data)
     }
 
@@ -3740,38 +3719,6 @@ impl NativeGraphContext {
             });
         }
         Ok(output.stdout)
-    }
-
-    /// The single object id a `cat-file` invocation asks Git about, when the
-    /// call is a `cat-file` one that names exactly one object. `-t`, `-s` and
-    /// the kind readers (`blob`, `tree`, ...) all take the object id last, so
-    /// the final argument is it; the batch forms read object ids from stdin and
-    /// name none here.
-    fn git_hash_object(&self, kind: &str, bytes: &[u8]) -> Result<NativeOid, GraphError> {
-        let mut child = self
-            .git_command()
-            .args(["hash-object", "-t", kind, "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        child
-            .stdin
-            .take()
-            .ok_or(GraphError::GitCommandFailed)?
-            .write_all(bytes)
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
-        let hex = std::str::from_utf8(&output.stdout)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim();
-        NativeOid::from_hex(self.algorithm, hex)
     }
 
     pub(crate) fn write_capture_object(
@@ -6234,7 +6181,10 @@ impl NodeData {
                 check_domain(domain)?;
                 check_height(*height)?;
                 check_count(entries.len())?;
-                check_branch_fence_order(domain, entries)?;
+                check_branch_fence_order(domain, entries).map_err(|error| match error {
+                    GraphError::OverlappingChildRange => GraphError::NonCanonicalData,
+                    other => other,
+                })?;
                 array(&mut output, 5);
                 uint(&mut output, 1);
                 uint(&mut output, 2);
@@ -6368,6 +6318,12 @@ impl NodeData {
             return Err(GraphError::NonCanonicalData);
         }
         let data = decode_node(value, algorithm)?;
+        if let NodeData::OrderedBranch {
+            domain, entries, ..
+        } = &data
+        {
+            check_branch_fence_order(domain, entries)?;
+        }
         if data.encode_canonical()?.as_slice() != bytes {
             return Err(GraphError::NonCanonicalData);
         }
@@ -6710,15 +6666,22 @@ impl PinnedNativeGraphReader {
         let root_node = self.read_native_node(root)?;
         match root_node {
             NodeData::OrderedLeaf { domain, entries } => {
-                if domain != expected_domain || entries.len() as u64 != expected_count {
+                if domain != expected_domain {
+                    return Err(GraphError::InvalidDomain);
+                }
+                if entries.len() as u64 != expected_count {
                     return Err(GraphError::InvalidCount(entries.len()));
                 }
             }
             NodeData::OrderedBranch {
                 domain, entries, ..
             } => {
-                if domain != expected_domain || entries.len() == 1 {
+                if domain != expected_domain {
                     return Err(GraphError::InvalidDomain);
+                }
+                check_branch_fence_order(&domain, &entries)?;
+                if entries.len() == 1 {
+                    return Err(GraphError::UncollapsedRoot);
                 }
                 let count = entries.iter().try_fold(0u64, |sum, entry| {
                     sum.checked_add(entry.row_count)
@@ -6814,55 +6777,27 @@ impl PinnedNativeGraphReader {
                 actual: oid.as_bytes().len(),
             });
         }
-        let hex = oid.to_hex();
-        let kind_output = self.git_output(&["cat-file", "-t", &hex])?;
-        let actual_kind = match kind_output.as_slice() {
-            b"tree\n" => NativeObjectKind::Tree,
-            b"blob\n" => NativeObjectKind::Blob,
-            _ => return Err(GraphError::UnsupportedGitObjectType),
-        };
-        if actual_kind != kind {
-            return Err(GraphError::WrongObjectKind {
-                expected: kind,
-                actual: actual_kind,
-            });
-        }
-        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
-        let size = std::str::from_utf8(&size_output)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| GraphError::GitObjectMalformed)?;
-        if size > maximum {
-            return Err(GraphError::NodeDataTooLarge(
-                usize::try_from(size).unwrap_or(usize::MAX),
-            ));
-        }
-        if self.seen.insert(oid.clone()) {
-            if self.seen.len() as u64 > MAX_FULL_VERIFY_OBJECTS {
-                return Err(GraphError::InventoryQuotaExceeded);
+        let seen = &mut self.seen;
+        let metadata_bytes = &mut self.metadata_bytes;
+        read_checked_object(&self.repository, self.algorithm, kind, oid, |size| {
+            if size > maximum {
+                return Err(GraphError::NodeDataTooLarge(
+                    usize::try_from(size).unwrap_or(usize::MAX),
+                ));
             }
-            self.metadata_bytes = self
-                .metadata_bytes
-                .checked_add(size)
-                .ok_or(GraphError::MetadataQuotaExceeded)?;
-            if self.metadata_bytes > MAX_FULL_METADATA_BYTES {
-                return Err(GraphError::MetadataQuotaExceeded);
+            if seen.insert(oid.clone()) {
+                if seen.len() as u64 > MAX_FULL_VERIFY_OBJECTS {
+                    return Err(GraphError::InventoryQuotaExceeded);
+                }
+                *metadata_bytes = metadata_bytes
+                    .checked_add(size)
+                    .ok_or(GraphError::MetadataQuotaExceeded)?;
+                if *metadata_bytes > MAX_FULL_METADATA_BYTES {
+                    return Err(GraphError::MetadataQuotaExceeded);
+                }
             }
-        }
-        let type_name = match kind {
-            NativeObjectKind::Tree => "tree",
-            NativeObjectKind::Blob => "blob",
-        };
-        let output = self.git_output(&["cat-file", type_name, &hex])?;
-        if output.len() as u64 != size {
-            return Err(GraphError::GitObjectMalformed);
-        }
-        let hash = self.hash_object(type_name, &output)?;
-        if hash != *oid {
-            return Err(GraphError::GitObjectHashMismatch);
-        }
-        Ok(output)
+            Ok(())
+        })
     }
 
 
@@ -6989,62 +6924,6 @@ impl PinnedNativeGraphReader {
         Ok((total, height))
     }
 
-    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
-        let output = self
-            .git_command()
-            .args(args)
-            .output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(match cat_file_object_id(args) {
-                Some(object_id) => absent_object_error(&self.repository, object_id),
-                None => GraphError::GitCommandFailed,
-            });
-        }
-        Ok(output.stdout)
-    }
-
-    fn hash_object(&self, kind: &str, data: &[u8]) -> Result<NativeObjectId, GraphError> {
-        let mut child = self
-            .git_command()
-            .args(["hash-object", "-t", kind, "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        child
-            .stdin
-            .take()
-            .ok_or(GraphError::GitCommandFailed)?
-            .write_all(data)
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
-        let hex = std::str::from_utf8(&output.stdout)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim();
-        NativeObjectId::from_hex(self.algorithm, hex)
-    }
-
-    fn git_command(&self) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(self.repository.worktree())
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-        command
-    }
 }
 
 fn find_ordered_entry_with(
@@ -7526,6 +7405,7 @@ fn validate_ordered_root_node(
             if domain != expected_domain || entries.len() < 2 {
                 return Err(GraphError::InvalidDomain);
             }
+            check_branch_fence_order(domain, entries)?;
             let count = entries.iter().try_fold(0u64, |sum, entry| {
                 sum.checked_add(entry.row_count)
                     .filter(|count| *count <= MAX_SIGNED_LENGTH)
@@ -7713,6 +7593,7 @@ fn collect_ordered_range_with(
     expected_height: Option<u8>,
     lower_exclusive: Option<&crate::row_store::TypedKey>,
     lower_inclusive: Option<&crate::row_store::TypedKey>,
+    resume_after: Option<&crate::row_store::TypedKey>,
     upper_exclusive: Option<&crate::row_store::TypedKey>,
     limit: usize,
     output: &mut Vec<OrderedLeafEntry>,
@@ -7735,6 +7616,9 @@ fn collect_ordered_range_with(
                     return Err(GraphError::NonCanonicalData);
                 }
                 previous = Some(key.clone());
+                if resume_after.is_some_and(|after| key <= *after) {
+                    continue;
+                }
                 if lower_inclusive.is_some_and(|lower| key < *lower) {
                     continue;
                 }
@@ -7785,7 +7669,11 @@ fn collect_ordered_range_with(
                 // range does descend into is fully validated below. A bounded
                 // range therefore reads the pages that overlap its interval
                 // rather than the whole index.
-                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower);
+                // A resume cursor skips a child whose fence is at or below it,
+                // for the same reason a lower bound does: no key it holds can
+                // order after the cursor.
+                let within_lower = lower_inclusive.is_none_or(|lower| fence >= *lower)
+                    && resume_after.is_none_or(|after| fence > *after);
                 let mut past_upper = false;
                 if within_lower {
                     let child = read_node(&entry.child)?;
@@ -7815,6 +7703,7 @@ fn collect_ordered_range_with(
                             Some(height - 1),
                             previous_fence.as_ref(),
                             lower_inclusive,
+                            resume_after,
                             upper_exclusive,
                             limit,
                             output,
@@ -8016,6 +7905,117 @@ mod persisted_orp_tests {
             },
         );
         (schema_oid, schema_digest)
+    }
+
+    /// A repeated walk down the schema node path is answered from the node
+    /// cache: the second walk returns the same descriptor and records a hit
+    /// for every node it reads, with no further repository reads needed.
+    #[test]
+    fn a_repeated_path_walk_hits_the_node_cache() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("schema scope");
+        let first = graph
+            .read_schema_descriptor(&scope)
+            .expect("the issued graph verified its schema node");
+        let hits_before = graph.node_cache_hits();
+        let second = graph
+            .read_schema_descriptor(&scope)
+            .expect("a repeated walk reads the cached schema node");
+        assert_eq!(
+            first.encode().expect("canonical descriptor bytes"),
+            second.encode().expect("canonical descriptor bytes")
+        );
+        assert!(
+            graph.node_cache_hits() > hits_before,
+            "the repeated walk must be answered from the node cache"
+        );
+    }
+
+    /// A cache hit is admitted exactly like a miss. Both charge the blob's
+    /// metadata to the same quota, so a repeated read cannot pass a budget that
+    /// its first read exhausted.
+    #[test]
+    fn a_cache_hit_is_charged_metadata_like_a_miss() {
+        let (directory, graph) = capture_test_context();
+        let content = b"quota charged on hit and miss\n";
+        let hex = write_blob_for_digest_test(directory.path(), content);
+        let oid = NativeOid::from_hex(graph.algorithm, &hex).expect("object id");
+        let scope = graph.open_read_scope().expect("read scope");
+        let size = content.len() as u64;
+        let objects_used = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metadata_used = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // The quota admits exactly one read's metadata, shared by both reads.
+        let mut first = ObjectBudget::new(
+            16,
+            16,
+            Arc::clone(&objects_used),
+            size,
+            Arc::clone(&metadata_used),
+        );
+        assert_eq!(
+            graph
+                .read_git_object(NativeObjectKind::Blob, &oid, 1024, &scope, &mut first)
+                .expect("the miss is admitted"),
+            content
+        );
+        let hits_before = graph.node_cache_hits();
+        let mut second = ObjectBudget::new(16, 16, objects_used, size, metadata_used);
+        assert!(matches!(
+            graph.read_git_object(NativeObjectKind::Blob, &oid, 1024, &scope, &mut second),
+            Err(GraphError::MetadataQuotaExceeded)
+        ));
+        assert!(
+            graph.node_cache_hits() > hits_before,
+            "the second read must be the cache hit that is charged"
+        );
+    }
+
+    /// A loose object whose bytes were replaced by another object's still
+    /// decodes, so the digest check is the only guard before the caller sees
+    /// the bytes. The batch path must refuse them.
+    #[test]
+    fn a_batch_read_whose_bytes_miss_the_requested_digest_fails_closed() {
+        let (directory, _graph) = capture_test_context();
+        let root = directory.path();
+        let requested = write_blob_for_digest_test(root, b"aaaa\n");
+        let other = write_blob_for_digest_test(root, b"bbbb\n");
+        let loose = |hex: &str| root.join(".git/objects").join(&hex[..2]).join(&hex[2..]);
+        std::fs::remove_file(loose(&requested)).expect("remove the loose object");
+        std::fs::copy(loose(&other), loose(&requested)).expect("swap in the other object");
+        let repository = crate::Repository::discover(root).expect("open repository");
+        let requested = NativeOid::from_hex(GitHashAlgorithm::Sha1, &requested).expect("object id");
+        assert!(matches!(
+            read_checked_object(
+                &repository,
+                GitHashAlgorithm::Sha1,
+                NativeObjectKind::Blob,
+                &requested,
+                |_| Ok(()),
+            ),
+            Err(GraphError::GitObjectHashMismatch)
+        ));
+    }
+
+    /// Writes one blob with git and returns its object id as hex.
+    fn write_blob_for_digest_test(root: &std::path::Path, content: &[u8]) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(content)
+            .expect("write blob");
+        String::from_utf8(child.wait_with_output().expect("hash-object").stdout)
+            .expect("utf-8 object id")
+            .trim()
+            .to_owned()
     }
 
     fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
@@ -11365,14 +11365,16 @@ mod persisted_orp_tests {
             "reclamation must stay inside the killed owner's pin namespace"
         );
     }
-    #[test]
-    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
-        let (_directory, mut graph) = capture_test_context();
+
+    /// Publishes `keys` as a multi-page row map under the relation's primary
+    /// root, so range reads run through this graph's production read path.
+    fn publish_row_map(graph: &mut NativeGraphContext, keys: impl IntoIterator<Item = TypedKey>) {
         let seed_scope = graph.open_read_scope().expect("owner seed scope");
         let seed_value = vec![0x80];
-        let mutations: Vec<_> = (0..700)
-            .map(|index| RowIndexMutation::Insert {
-                key: TypedKey::Text(format!("row-{index:04}")),
+        let mutations: Vec<_> = keys
+            .into_iter()
+            .map(|key| RowIndexMutation::Insert {
+                key,
                 fields: seed_value.clone(),
             })
             .collect();
@@ -11399,7 +11401,129 @@ mod persisted_orp_tests {
         )
         .expect("load seeded format-3 row map");
         graph.store_root = seeded_store_root;
-        drop(seed_scope);
+    }
+
+    /// A composite key pages in key order through the production row map:
+    /// 300 tuple rows cross the 256-row page boundary and each is returned
+    /// exactly once. A resume cursor on the first, a middle, the last or an
+    /// absent key skips exactly the sorted suffix, and a cursor at or above
+    /// the upper bound is refused.
+    #[test]
+    fn composite_keys_page_through_the_native_row_map_in_order() {
+        let (_directory, mut graph) = capture_test_context();
+        let keys: Vec<TypedKey> = (0..300)
+            .map(|index| {
+                TypedKey::Tuple(vec![
+                    TypedKey::Text("north".to_owned()),
+                    TypedKey::Text(format!("sku-{index:03}")),
+                ])
+            })
+            .collect();
+        publish_row_map(&mut graph, keys.clone());
+        let scope = graph.open_read_scope().expect("composite query scope");
+        let read = |range: &crate::row_store::KeyRange| -> Vec<TypedKey> {
+            graph
+                .range_rows(range, &scope)
+                .expect("read one row-map page")
+                .into_iter()
+                .map(|row| row.key().clone())
+                .collect()
+        };
+
+        let mut paged = Vec::new();
+        let mut cursor: Option<TypedKey> = None;
+        loop {
+            let base = crate::row_store::KeyRange::new(None, None, 256).expect("valid page");
+            let range = match cursor.take() {
+                Some(after) => base.with_resume_after(after).expect("cursor inside the map"),
+                None => base,
+            };
+            let page = read(&range);
+            let short = page.len() < 256;
+            cursor = page.last().cloned();
+            paged.extend(page);
+            if short {
+                break;
+            }
+        }
+        assert_eq!(paged, keys, "every composite key once, in key order");
+
+        let resumed = |after: &TypedKey| {
+            let range = crate::row_store::KeyRange::new(None, None, 256)
+                .expect("valid page")
+                .with_resume_after(after.clone())
+                .expect("cursor inside the map");
+            read(&range)
+        };
+        assert_eq!(resumed(&keys[0]), keys[1..257].to_vec(), "first key");
+        assert_eq!(resumed(&keys[150]), keys[151..300].to_vec(), "middle key");
+        let absent = TypedKey::Tuple(vec![
+            TypedKey::Text("north".to_owned()),
+            TypedKey::Text("sku-150x".to_owned()),
+        ]);
+        assert_eq!(resumed(&absent), keys[151..300].to_vec(), "absent key");
+        assert!(resumed(&keys[299]).is_empty(), "last key");
+
+        let bounded = crate::row_store::KeyRange::new(None, Some(keys[200].clone()), 256)
+            .expect("valid bounded page");
+        assert!(
+            bounded.clone().with_resume_after(keys[200].clone()).is_err(),
+            "a cursor at the upper bound is refused"
+        );
+        let inside = bounded
+            .with_resume_after(keys[150].clone())
+            .expect("cursor below the upper bound");
+        assert_eq!(read(&inside), keys[151..200].to_vec(), "bounded middle");
+    }
+
+    /// A resume cursor is a full composite key, so it orders by its first
+    /// component before its second. A cursor whose first component sorts
+    /// below every row skips none of them, and one whose first component
+    /// sorts above every row skips all of them.
+    #[test]
+    fn composite_resume_cursor_orders_by_first_component_first() {
+        let (_directory, mut graph) = capture_test_context();
+        let keys: Vec<TypedKey> = (0..3)
+            .map(|index| {
+                TypedKey::Tuple(vec![
+                    TypedKey::Text("north".to_owned()),
+                    TypedKey::Text(format!("sku-{index:03}")),
+                ])
+            })
+            .collect();
+        publish_row_map(&mut graph, keys.clone());
+        let scope = graph.open_read_scope().expect("composite query scope");
+        let resumed = |after: TypedKey| -> Vec<TypedKey> {
+            let range = crate::row_store::KeyRange::new(None, None, 256)
+                .expect("valid page")
+                .with_resume_after(after)
+                .expect("cursor inside the map");
+            graph
+                .range_rows(&range, &scope)
+                .expect("read one row-map page")
+                .into_iter()
+                .map(|row| row.key().clone())
+                .collect()
+        };
+        let first_below = TypedKey::Tuple(vec![
+            TypedKey::Text("alpha".to_owned()),
+            TypedKey::Text("zzz".to_owned()),
+        ]);
+        assert_eq!(resumed(first_below), keys, "a first component below every row skips none");
+        let first_above = TypedKey::Tuple(vec![
+            TypedKey::Text("south".to_owned()),
+            TypedKey::Text("aaa".to_owned()),
+        ]);
+        assert!(resumed(first_above).is_empty(), "a first component above every row skips all");
+    }
+
+    #[test]
+    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
+        let (_directory, mut graph) = capture_test_context();
+        publish_row_map(
+            &mut graph,
+            (0..700).map(|index| TypedKey::Text(format!("row-{index:04}"))),
+        );
 
         let bounded_scope = graph.open_read_scope().expect("bounded query scope");
         let bounded_range = crate::row_store::KeyRange::new(
@@ -13434,6 +13558,11 @@ pub enum GraphError {
     InvalidLength(u64),
     InvalidCount(usize),
     InvalidDomain,
+    /// Adjacent branch entries have non-increasing inclusive fences, so their
+    /// child ranges overlap (store-format-3 section 2).
+    OverlappingChildRange,
+    /// A root branch with exactly one child; the canonical form collapses it.
+    UncollapsedRoot,
     InvalidDigestLength,
     InvalidEmptyBlob,
     SourceTreeLimit,
@@ -13517,6 +13646,8 @@ impl fmt::Display for GraphError {
             Self::InvalidLength(length) => write!(f, "length {length} exceeds the signed bound"),
             Self::InvalidCount(count) => write!(f, "invalid count {count}"),
             Self::InvalidDomain => f.write_str("invalid ORP domain"),
+            Self::OverlappingChildRange => f.write_str("branch child ranges overlap"),
+            Self::UncollapsedRoot => f.write_str("root branch has one child and must collapse"),
             Self::InvalidDigestLength => f.write_str("digest is not 32 bytes"),
             Self::InvalidEmptyBlob => f.write_str("empty Blob descriptor has a byte root"),
             Self::InvalidByteIndex => f.write_str("invalid byte-index spans"),
@@ -13646,6 +13777,219 @@ fn observed_object_availability(
         Ok(crate::GitObjectState::Unavailable) => ObjectAvailability::Unavailable,
         Ok(crate::GitObjectState::Malformed) | Err(_) => ObjectAvailability::Unknown,
     }
+}
+
+/// Largest total of decoded bytes one graph context keeps in its node cache.
+const NODE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Largest number of objects one graph context keeps in its node cache.
+const NODE_CACHE_MAX_ENTRIES: usize = 512;
+
+/// A bounded least-recently-used cache of decoded Git trees and blobs for one
+/// graph context. Entries are content-addressed, so they never go stale. Every
+/// read still passes the caller's admission check before its bytes are
+/// returned, so the cache changes where bytes come from, never what is
+/// admitted.
+#[derive(Debug, Default)]
+struct NodeCache {
+    entries: HashMap<(NativeObjectKind, NativeOid), (u64, Arc<Vec<u8>>)>,
+    recency: BTreeMap<u64, (NativeObjectKind, NativeOid)>,
+    bytes: usize,
+    clock: u64,
+    #[cfg(test)]
+    hits: usize,
+}
+
+impl NodeCache {
+    fn get(&mut self, kind: NativeObjectKind, oid: &NativeOid) -> Option<Arc<Vec<u8>>> {
+        let key = (kind, oid.clone());
+        let (tick, data) = self.entries.get_mut(&key)?;
+        self.recency.remove(tick);
+        self.clock += 1;
+        *tick = self.clock;
+        self.recency.insert(self.clock, key);
+        #[cfg(test)]
+        {
+            self.hits += 1;
+        }
+        Some(Arc::clone(data))
+    }
+
+    fn insert(&mut self, kind: NativeObjectKind, oid: &NativeOid, data: Vec<u8>) {
+        if data.len() > NODE_CACHE_MAX_BYTES {
+            return;
+        }
+        let key = (kind, oid.clone());
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        self.clock += 1;
+        self.bytes += data.len();
+        self.recency.insert(self.clock, key.clone());
+        self.entries.insert(key, (self.clock, Arc::new(data)));
+        while self.entries.len() > NODE_CACHE_MAX_ENTRIES || self.bytes > NODE_CACHE_MAX_BYTES {
+            let Some((_, oldest)) = self.recency.pop_first() else {
+                break;
+            };
+            if let Some((_, evicted)) = self.entries.remove(&oldest) {
+                self.bytes -= evicted.len();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod node_cache_tests {
+    use super::{
+        GitHashAlgorithm, NODE_CACHE_MAX_BYTES, NODE_CACHE_MAX_ENTRIES, NativeObjectKind,
+        NativeOid, NodeCache,
+    };
+
+    fn sha1(bytes: [u8; 20]) -> NativeOid {
+        NativeOid::new(GitHashAlgorithm::Sha1, bytes).expect("a 20-byte SHA-1 id")
+    }
+
+    fn oid(byte: u8) -> NativeOid {
+        sha1([byte; 20])
+    }
+
+    /// Builds the id whose 20 bytes are the big-endian index repeated.
+    fn indexed(index: u32) -> NativeOid {
+        let word = index.to_be_bytes();
+        let mut bytes = [0u8; 20];
+        for chunk in bytes.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&word);
+        }
+        sha1(bytes)
+    }
+
+    #[test]
+    fn a_repeated_read_is_a_hit_and_returns_the_same_bytes() {
+        let mut cache = NodeCache::default();
+        cache.insert(NativeObjectKind::Blob, &oid(1), b"payload".to_vec());
+        assert_eq!(cache.hits, 0);
+        let first = cache.get(NativeObjectKind::Blob, &oid(1)).expect("cached");
+        let second = cache.get(NativeObjectKind::Blob, &oid(1)).expect("cached");
+        assert_eq!(first.as_slice(), b"payload");
+        assert_eq!(second.as_slice(), b"payload");
+        assert_eq!(cache.hits, 2);
+    }
+
+    #[test]
+    fn kind_is_part_of_the_key() {
+        let mut cache = NodeCache::default();
+        cache.insert(NativeObjectKind::Blob, &oid(2), b"x".to_vec());
+        assert!(cache.get(NativeObjectKind::Tree, &oid(2)).is_none());
+    }
+
+    #[test]
+    fn the_entry_cap_evicts_the_least_recently_used_object() {
+        let mut cache = NodeCache::default();
+        for index in 0..NODE_CACHE_MAX_ENTRIES as u32 {
+            cache.insert(NativeObjectKind::Blob, &indexed(index), vec![1]);
+        }
+        // Touch the oldest so the next-oldest becomes the eviction victim.
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(0)).is_some());
+        cache.insert(NativeObjectKind::Blob, &indexed(u32::MAX), vec![1]);
+        assert_eq!(cache.entries.len(), NODE_CACHE_MAX_ENTRIES);
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(1)).is_none());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(0)).is_some());
+    }
+
+    #[test]
+    fn the_byte_cap_evicts_least_recent_entries_until_the_bytes_fit() {
+        let mut cache = NodeCache::default();
+        let half = NODE_CACHE_MAX_BYTES / 2;
+        cache.insert(NativeObjectKind::Blob, &indexed(1), vec![0; half]);
+        cache.insert(NativeObjectKind::Blob, &indexed(2), vec![0; half]);
+        assert_eq!(cache.bytes, NODE_CACHE_MAX_BYTES);
+        cache.insert(NativeObjectKind::Blob, &indexed(3), vec![0; half]);
+        assert!(cache.bytes <= NODE_CACHE_MAX_BYTES);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(1)).is_none());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(2)).is_some());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(3)).is_some());
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_byte_cap_is_never_cached() {
+        let mut cache = NodeCache::default();
+        cache.insert(
+            NativeObjectKind::Blob,
+            &indexed(1),
+            vec![0; NODE_CACHE_MAX_BYTES + 1],
+        );
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.bytes, 0);
+    }
+}
+
+/// Reads one tree or blob through the repository's shared batch reader and
+/// checks its bytes against `oid`. The header's kind and size are admitted by
+/// `admit` before any byte is read; the digest is computed in-process, so an
+/// object costs no process spawn of its own (ORNA-ROW-009).
+fn read_checked_object(
+    repository: &crate::Repository,
+    algorithm: GitHashAlgorithm,
+    kind: NativeObjectKind,
+    oid: &NativeOid,
+    admit: impl FnOnce(u64) -> Result<(), GraphError>,
+) -> Result<Vec<u8>, GraphError> {
+    let hex = oid.to_hex();
+    let header = repository
+        .objects()
+        .info(&hex)
+        .map_err(|_| GraphError::GitCommandFailed)?
+        .ok_or_else(|| absent_object_error(repository, &hex))?;
+    let actual_kind = match header.kind() {
+        crate::object_reader::ObjectKind::Blob => NativeObjectKind::Blob,
+        crate::object_reader::ObjectKind::Tree => NativeObjectKind::Tree,
+        _ => return Err(GraphError::UnsupportedGitObjectType),
+    };
+    if actual_kind != kind {
+        return Err(GraphError::WrongObjectKind {
+            expected: kind,
+            actual: actual_kind,
+        });
+    }
+    admit(header.size())?;
+    let data = repository
+        .objects()
+        .read_exact(&hex, &header, algorithm)
+        .map_err(|_| GraphError::GitCommandFailed)?;
+    if git_object_id(algorithm, kind, &data)? != *oid {
+        return Err(GraphError::GitObjectHashMismatch);
+    }
+    Ok(data)
+}
+
+/// The Git object id of `data` as a `kind` object: the digest of the
+/// `<type> <size>\0` header followed by the bytes.
+fn git_object_id(
+    algorithm: GitHashAlgorithm,
+    kind: NativeObjectKind,
+    data: &[u8],
+) -> Result<NativeOid, GraphError> {
+    let name = match kind {
+        NativeObjectKind::Tree => "tree",
+        NativeObjectKind::Blob => "blob",
+    };
+    let header = format!("{name} {}\0", data.len());
+    let digest = match algorithm {
+        GitHashAlgorithm::Sha1 => {
+            use sha1::Digest as _;
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(header.as_bytes());
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+        GitHashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(header.as_bytes());
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+    };
+    NativeOid::new(algorithm, digest)
 }
 
 /// The error for one object id this repository cannot read locally. A partial
@@ -13860,7 +14204,7 @@ fn check_branch_fence_order(
             return Err(GraphError::InvalidDomain);
         }
         if previous.as_ref().is_some_and(|previous| previous >= &fence) {
-            return Err(GraphError::NonCanonicalData);
+            return Err(GraphError::OverlappingChildRange);
         }
         previous = Some(fence);
     }

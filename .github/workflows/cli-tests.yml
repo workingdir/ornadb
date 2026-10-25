@@ -29,6 +29,9 @@ concurrency:
 jobs:
   cli-tests:
     runs-on: ubuntu-latest
+    # FUSE tests must fail, not skip, on every step of this job.
+    env:
+      ORNA_REQUIRE_FUSE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -46,8 +49,6 @@ jobs:
       # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
       # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
       - name: Test the orna-cli-v1 integration suite
-        env:
-          ORNA_REQUIRE_FUSE: "1"
         run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata
 
       - name: Test the publication crash-barrier matrix
@@ -57,11 +58,11 @@ jobs:
       - name: Test the orna-project-v1 project loader
         run: cargo test --locked -p orna-project-v1 --test project_loader -- --nocapture
 
-      # Owner-lease and crash-recovery tests. Fencing is NOT yet enforced in production
-      # (W76 F1; beads .127/.220): owner_fence_gate_d fences by test-body takeover and asserts
-      # same-owner reacquire at epoch 1, which a production fix will change. durable_crash_recovery
-      # re-executes the test binary through /bin/sh and ulimit, so it is Linux-only (ubuntu-latest).
-      - name: Test owner-lease and durable crash recovery (production fence not yet enforced)
+      # Owner-lease and crash-recovery tests. Lease acquisition fences a writer whose runtime
+      # owner lock was released (a killed process) and recovers its Running requests in the
+      # same transaction; a live owner keeps LeaseHeld. durable_crash_recovery re-executes the
+      # test binary through /bin/sh and ulimit, so it is Linux-only (ubuntu-latest).
+      - name: Test owner-lease fencing and durable crash recovery
         run: cargo test --locked -p orna-runtime-v1 --test owner_fence_gate_d --test durable_crash_recovery -- --nocapture
 
       # Gate D: recovery of an uncertain external effect never fabricates a proven rollback.
@@ -97,4 +98,4 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
           RUST_TEST_THREADS: 2
-        run: cargo test --locked -p orna-repository-v1 --lib --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-repository-v1 --lib --test req_publication_cas --test git_repository --no-fail-fast -- --nocapture
