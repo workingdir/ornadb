@@ -78,7 +78,7 @@ fn ordinary_update_cannot_replace_a_primary_key() {
     assert!(
         matches!(
             &outcome,
-            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "E3002"
         ),
         "primary-key patch must be rejected during source admission: {outcome:?}"
     );

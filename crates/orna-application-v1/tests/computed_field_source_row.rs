@@ -108,7 +108,14 @@ fn committed_fixture(table: &str) -> CommittedFixture {
         .expect("a table with a computed field has a schema node");
     let relation_id = *schema.table_object_id();
     let schema_source = schema.descriptor().encode().unwrap();
-    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    // The byte index names its chunk by the plain SHA-256 of the chunk; the
+    // schema identity is `orna.schema.v3` over the descriptor (store-format-3 section 5).
+    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let schema_digest: [u8; 32] = Sha256::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_source)
+        .finalize()
+        .into();
 
     let chunk_oid = git_object(&root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
@@ -116,7 +123,7 @@ fn committed_fixture(table: &str) -> CommittedFixture {
     byte_index.extend_from_slice(&[0x81, 0x83]);
     cbor_head(&mut byte_index, 0, schema_source.len());
     cbor_bytes(&mut byte_index, &oid_bytes(&chunk_oid));
-    cbor_bytes(&mut byte_index, &schema_digest);
+    cbor_bytes(&mut byte_index, &chunk_digest);
     let byte_index_oid = native_node(&root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
     let mut schema_node = vec![0x85, 0x01, 0x06];
