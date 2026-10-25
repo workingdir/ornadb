@@ -10,6 +10,7 @@ crates/orna-cli-v1/tests/independent_extractor_cli.rs.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -18,6 +19,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 import zlib
@@ -588,6 +590,23 @@ class CommandLineTests(unittest.TestCase):
     def test_extract_raises_for_a_non_repository(self) -> None:
         with self.assertRaisesRegex(ExtractionError, "is not a Git repository root"):
             extract(self.root, "HEAD", self.root / "out", {})
+
+
+class IndependenceTests(unittest.TestCase):
+    """The extractor must stay outside every orna crate: stdlib imports only."""
+
+    def test_the_extractor_imports_only_the_standard_library(self) -> None:
+        tree = ast.parse((REPO_ROOT / "scripts/orna_extract.py").read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                self.assertEqual(node.level, 0, "the extractor has no relative imports")
+                imported.add((node.module or "").split(".")[0])
+        non_stdlib = sorted(name for name in imported if name not in sys.stdlib_module_names)
+        self.assertEqual(non_stdlib, [], "the extractor depends on non-stdlib modules")
+        self.assertFalse(any(name.startswith("orna") for name in imported), "the extractor depends on an orna crate")
 
 
 if __name__ == "__main__":
