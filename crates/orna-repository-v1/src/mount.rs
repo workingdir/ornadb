@@ -1048,3 +1048,35 @@ impl Repository {
         Ok(status)
     }
 }
+
+#[cfg(test)]
+mod record_parse_tests {
+    use super::MountRecord;
+
+    fn record_text(read_only: &str) -> String {
+        format!(
+            "orna-mount-view 2\nmountpoint /mnt/library\nselector HEAD\nsnapshot {}\nview {}\nowner {}\npin {}\nformat 3\nlegacy false\nread_only {read_only}\n",
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(16),
+            "44".repeat(20),
+        )
+    }
+
+    #[test]
+    fn read_only_false_parses_as_writable() {
+        let record = MountRecord::parse(record_text("false").as_bytes()).unwrap();
+        assert!(record.writable);
+    }
+
+    #[test]
+    fn read_only_true_parses_as_read_only() {
+        let record = MountRecord::parse(record_text("true").as_bytes()).unwrap();
+        assert!(!record.writable);
+    }
+
+    #[test]
+    fn read_only_other_value_is_rejected() {
+        assert!(MountRecord::parse(record_text("yes").as_bytes()).is_err());
+    }
+}
