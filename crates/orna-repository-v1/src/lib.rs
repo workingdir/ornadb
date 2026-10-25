@@ -12808,6 +12808,34 @@ mod tests {
         assert_eq!(repository.head().unwrap(), head_before);
     }
 
+    /// ORNA-PUB-010: an unchanged `.orna/store/data` node leaf that was edited in the worktree
+    /// is an external change and must refuse the reconcile rather than be left in place.
+    #[test]
+    fn reconcile_refuses_edited_unchanged_store_data_leaf() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"committed\n").unwrap();
+        git(root.path(), &["add", ".orna/store/data"]);
+        git(root.path(), &["commit", "-m", "base"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let expected = repository.index_generation().unwrap();
+        let candidate = super::PrivateCommit {
+            tree: expected.tree().unwrap().clone(),
+            commit: expected.head().unwrap().clone(),
+        };
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(root.path().join(".orna/store/data")).unwrap(), b"edited\n");
+    }
+
      #[test]
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
