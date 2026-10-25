@@ -20,6 +20,7 @@ been published.
 
 ### Added
 - Format-2 Blob read API (not yet reachable from a production row read path): `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record or a ROV-2 CBOR reference (authority `ORNA-ROW-013`, `ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. Content per call is capped at 8 MiB (`ORNA-BLOB-011`); the effective limit is the smaller of the caller's limit and that cap. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. The ORR-2, ROV-2 and OGB-1 clause IDs in the code are superseded draft IDs, not final-spec clauses. Loose-row and compact-v2 physical row decoders are not part of this change. `ornadb-nne7` remains open.
+- Row-map resume paging (ORNA-ROW-002): a resume cursor skips exactly the keys at or below it under the shared `Int`/`UInt` rank, is intersected with the range's lower bound, and is refused at or above the upper bound. Composite (tuple) predicate scans page every row in key order across page boundaries; a 300-row composite fixture is checked key by key by the native graph and CLI e2e tests.
 
 ### Changed
 - Test-expectation migration (ornadb-0im9): bare root intrinsic names (`sort_by`, `every`, `sum`, `min`, `max`, ...) resolve without a standard profile (09-standard-library L7), so the five finite-list tests that expected them unresolved now assert `is_ok`; their qualified `std.collection` assertions remain unresolved without a profile. Added signature regression table `root_intrinsic_calls_are_checked_against_their_signatures` (arity, argument types, callback arity/return; bad calls report `ORNA-S021-TYPE`). Known-red entries for those tests are removed.
@@ -84,20 +85,18 @@ been published.
   and `text:KEY` (on a `Str` key), and `--key` tries integer spellings as integer
   keys after text and bytes. `orna history KEY` shares that spelling resolution,
   so an integer spelling also names the integer row there.
-  A predicate scan is paged for `Int`, `UInt` and `Str` primary keys. A predicate
-  scan over any other key type (Bool, Decimal, Uuid, Date, Instant, enum, table
-  ref) is refused up front with the flags to drop, and a page that ends at the
-  greatest unsigned key is refused rather than truncated. A predicate scan over a
-  composite (multi-component) primary key is refused, naming bead ornadb-5il1.461
-  (tuple key paging) as the remedy. Any `--from`/`--until` bound on a composite
-  key is refused, naming the same bead, because a single-component bound has no
-  defined order over the tuple. A bound whose spelling does not match a single
-  `Int`, `UInt` or `Str` primary key is refused naming the valid spelling
-  (`bytes:HEX` on a `Str` key is refused; use `text:KEY`) instead of answering
-  empty. `Bool` keys are not addressable by `--from`, `--until` or `--key`; both
-  are refused naming bead ornadb-5il1.461, and this change does not implement
-  them. `--key` on a key type it cannot spell (Decimal, Uuid, Date, Instant,
-  enum, table ref) is refused as not addressable yet (bead ornadb-5il1.461).
+  A predicate scan pages the whole `--from`/`--until` range by an exclusive resume
+  cursor (the last key seen), so it needs no successor of a key and works for every
+  primary-key type, composite (multi-component) keys included; a page that ends at
+  the greatest key of a type, including `u64::MAX`, continues rather than being
+  refused. A bound whose spelling does not match a single `Int`, `UInt` or `Str`
+  primary key is refused naming the valid spelling (`bytes:HEX` on a `Str` key is
+  refused; use `text:KEY`) instead of answering empty. Any `--from`/`--until` bound
+  on a composite key is refused, naming bead ornadb-5il1.461, because a
+  single-component bound has no spelling over the tuple. `Bool`, `Decimal`, `Uuid`,
+  `Date`, `Instant`, enum and table-ref keys are not addressable by `--from`,
+  `--until` or `--key`; those spellings are refused naming bead ornadb-5il1.461 and
+  this change does not implement them.
   The `--format json` output of `orna query` with a predicate reports `rows` as
   the number of committed rows read in the bounded range, and `blobs` as the
   number of listings after the predicate; `plan.candidates` counts Blob-field
