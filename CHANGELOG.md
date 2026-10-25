@@ -5,6 +5,19 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna publish` gains four crash barriers behind the `crash-barriers` test
+  feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
+  `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
+  barrier and asserts, after `orna publish` recovery: HEAD equals the base at the
+  pre-CAS barriers (`ref-cas-pre-journal`, `store-worktree`) and equals the
+  journaled candidate at the post-CAS barriers (`worktree`, `runtime-complete`)
+  while the journal is present; the recovered candidate is checked to be parented
+  on the captured HEAD only at the pre-CAS barriers; exactly one publication commit
+  exists; a second publish is a no-op; staged and unstaged user work, pins, the
+  runtime tail, the writer lease and locks are preserved or released; and
+  `git fsck` passes. Managed-worktree and index reconciliation checks run only for
+  non-store paths, and format-3 candidates have none, so they are vacuous here.
+  No production behaviour changes.
 - A complete-copy export of a workspace with a legacy format-1/2 snapshot now
   admits that snapshot by its recorded format record, and an offline restore
   re-admits each member (Gate F, `ACCEPTANCE.md:63-68`,
