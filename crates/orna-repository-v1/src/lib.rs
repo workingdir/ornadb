@@ -10639,7 +10639,7 @@ mod tests {
     /// Builds `parent/healthy` as a real repository and `parent/healthy/child`
     /// with a corrupt `HEAD`, so discovery from `child` must not reach `healthy`.
     #[cfg(unix)]
-    fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
+    pub(crate) fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
         let healthy = root.join("healthy");
         fs::create_dir_all(&healthy).unwrap();
         let init = Command::new("git")
@@ -10690,6 +10690,14 @@ mod tests {
         let ok = head_probe_succeeds_bound(&relative);
         env::set_current_dir(previous).unwrap();
         assert!(!ok, "relative corrupt child must not adopt healthy parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_at_corrupt_root_under_healthy_parent_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        assert!(super::Repository::git_at(&child, ["rev-parse", "HEAD"]).is_err());
     }
 
     /// Replaces one length-prefixed string in an encoded journal with another,
