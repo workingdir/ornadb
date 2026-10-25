@@ -22092,11 +22092,19 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
 #[test]
 fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let (root, repository) = durable_repository();
-    // The host takes the worktree owner lock, so its delete creates the writer
-    // lease. The reserving and late-admission runtime is a Secondary handle
-    // that cannot take the lease (ORNA-TURSO-005).
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
-    let runtime = open_durable_state(&repository);
+    // The initial request is reserved by a handle that holds the worktree owner
+    // lock [106] before the host takes it. The late-admission runtime is a
+    // Secondary handle that cannot take the lease (ORNA-TURSO-005).
+    let owner_runtime = block_on(RuntimeState::open_with_owner_id(
+        &repository,
+        RuntimeIdentity {
+            database_id: [6; 16],
+            repository_id: [7; 16],
+        },
+        [8; 32],
+        [106; 16],
+    ))
+    .unwrap();
     let initial = RequestIdentity {
         session_id: [1; 16],
         request_id: [102; 16],
@@ -22107,7 +22115,10 @@ fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     };
     let initial_fingerprint = [104; 32];
     let late_fingerprint = [105; 32];
-    block_on(runtime.reserve_request(initial, initial_fingerprint)).unwrap();
+    block_on(owner_runtime.reserve_request(initial, initial_fingerprint)).unwrap();
+    drop(owner_runtime);
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
+    let runtime = open_durable_state(&repository);
 
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
