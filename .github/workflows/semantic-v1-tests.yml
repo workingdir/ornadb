@@ -36,10 +36,7 @@ jobs:
       # both fail this job.
       # The list may only shrink. Raising SEMANTIC_KNOWN_RED_MAX requires owner
       # approval stated in the PR description.
-      # SEMANTIC_KNOWN_RED_MAX is 40: owner-approved (Main, 2026-10-25) for ornadb-0im9:
-      # 5 root-intrinsic bad-argument gaps; shrinks when 0im9 lands; any other raise
-      # needs owner approval stated in the PR description.
       - name: Check semantic v1 tests against the known-red list
         env:
-          SEMANTIC_KNOWN_RED_MAX: "40"
+          SEMANTIC_KNOWN_RED_MAX: "35"
         run: scripts/check-semantic-known-red.sh
