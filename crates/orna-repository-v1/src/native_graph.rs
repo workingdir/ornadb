@@ -321,6 +321,7 @@ pub struct NativeGraphContext {
     schema_digest: [u8; 32],
     row_snapshot: crate::row_store::RowMapSnapshot,
     cancelled: Arc<AtomicBool>,
+    node_cache: std::sync::Mutex<NodeCache>,
 }
 
 /// One schema-ordered field identity and its payload-free Blob projection.
@@ -650,6 +651,7 @@ impl NativeGraphContext {
             schema_digest,
             row_snapshot,
             cancelled: Arc::new(AtomicBool::new(false)),
+            node_cache: std::sync::Mutex::new(NodeCache::default()),
         };
         context.validate_sealed_schema_node()?;
         Ok(context)
@@ -3639,7 +3641,7 @@ impl NativeGraphContext {
     ) -> Result<Vec<u8>, GraphError> {
         scope.check_cancelled()?;
         objects.visit(oid)?;
-        let data = read_checked_object(&self.repository, self.algorithm, kind, oid, |size| {
+        let admit = |size: u64| {
             if size > maximum {
                 return Err(
                     if kind == NativeObjectKind::Blob
@@ -3655,7 +3657,27 @@ impl NativeGraphContext {
                 objects.record_metadata(size)?;
             }
             Ok(())
-        })?;
+        };
+        let cached = self
+            .node_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(kind, oid);
+        let data = match cached {
+            Some(data) => {
+                admit(data.len() as u64)?;
+                data.as_ref().clone()
+            }
+            None => {
+                let data =
+                    read_checked_object(&self.repository, self.algorithm, kind, oid, admit)?;
+                self.node_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(kind, oid, data.clone());
+                data
+            }
+        };
         scope.check_cancelled()?;
         Ok(data)
     }
@@ -13495,6 +13517,120 @@ fn observed_object_availability(
         Ok(crate::GitObjectState::Promised) => ObjectAvailability::Promised,
         Ok(crate::GitObjectState::Unavailable) => ObjectAvailability::Unavailable,
         Ok(crate::GitObjectState::Malformed) | Err(_) => ObjectAvailability::Unknown,
+    }
+}
+
+/// Largest total of decoded bytes one graph context keeps in its node cache.
+const NODE_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Largest number of objects one graph context keeps in its node cache.
+const NODE_CACHE_MAX_ENTRIES: usize = 512;
+
+/// A bounded least-recently-used cache of decoded Git trees and blobs for one
+/// graph context. Entries are content-addressed, so they never go stale. Every
+/// read still passes the caller's admission check before its bytes are
+/// returned, so the cache changes where bytes come from, never what is
+/// admitted.
+#[derive(Debug, Default)]
+struct NodeCache {
+    entries: HashMap<(NativeObjectKind, NativeOid), (u64, Arc<Vec<u8>>)>,
+    recency: BTreeMap<u64, (NativeObjectKind, NativeOid)>,
+    bytes: usize,
+    clock: u64,
+    #[cfg(test)]
+    hits: usize,
+}
+
+impl NodeCache {
+    fn get(&mut self, kind: NativeObjectKind, oid: &NativeOid) -> Option<Arc<Vec<u8>>> {
+        let key = (kind, oid.clone());
+        let (tick, data) = self.entries.get_mut(&key)?;
+        self.recency.remove(tick);
+        self.clock += 1;
+        *tick = self.clock;
+        self.recency.insert(self.clock, key);
+        #[cfg(test)]
+        {
+            self.hits += 1;
+        }
+        Some(Arc::clone(data))
+    }
+
+    fn insert(&mut self, kind: NativeObjectKind, oid: &NativeOid, data: Vec<u8>) {
+        if data.len() > NODE_CACHE_MAX_BYTES {
+            return;
+        }
+        let key = (kind, oid.clone());
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        self.clock += 1;
+        self.bytes += data.len();
+        self.recency.insert(self.clock, key.clone());
+        self.entries.insert(key, (self.clock, Arc::new(data)));
+        while self.entries.len() > NODE_CACHE_MAX_ENTRIES || self.bytes > NODE_CACHE_MAX_BYTES {
+            let Some((_, oldest)) = self.recency.pop_first() else {
+                break;
+            };
+            if let Some((_, evicted)) = self.entries.remove(&oldest) {
+                self.bytes -= evicted.len();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod node_cache_tests {
+    use super::{GitHashAlgorithm, NODE_CACHE_MAX_ENTRIES, NativeObjectKind, NativeOid, NodeCache};
+
+    fn sha1(bytes: [u8; 20]) -> NativeOid {
+        NativeOid::new(GitHashAlgorithm::Sha1, bytes).expect("a 20-byte SHA-1 id")
+    }
+
+    fn oid(byte: u8) -> NativeOid {
+        sha1([byte; 20])
+    }
+
+    /// Builds the id whose 20 bytes are the big-endian index repeated.
+    fn indexed(index: u32) -> NativeOid {
+        let word = index.to_be_bytes();
+        let mut bytes = [0u8; 20];
+        for chunk in bytes.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&word);
+        }
+        sha1(bytes)
+    }
+
+    #[test]
+    fn a_repeated_read_is_a_hit_and_returns_the_same_bytes() {
+        let mut cache = NodeCache::default();
+        cache.insert(NativeObjectKind::Blob, &oid(1), b"payload".to_vec());
+        assert_eq!(cache.hits, 0);
+        let first = cache.get(NativeObjectKind::Blob, &oid(1)).expect("cached");
+        let second = cache.get(NativeObjectKind::Blob, &oid(1)).expect("cached");
+        assert_eq!(first.as_slice(), b"payload");
+        assert_eq!(second.as_slice(), b"payload");
+        assert_eq!(cache.hits, 2);
+    }
+
+    #[test]
+    fn kind_is_part_of_the_key() {
+        let mut cache = NodeCache::default();
+        cache.insert(NativeObjectKind::Blob, &oid(2), b"x".to_vec());
+        assert!(cache.get(NativeObjectKind::Tree, &oid(2)).is_none());
+    }
+
+    #[test]
+    fn the_entry_cap_evicts_the_least_recently_used_object() {
+        let mut cache = NodeCache::default();
+        for index in 0..NODE_CACHE_MAX_ENTRIES as u32 {
+            cache.insert(NativeObjectKind::Blob, &indexed(index), vec![1]);
+        }
+        // Touch the oldest so the next-oldest becomes the eviction victim.
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(0)).is_some());
+        cache.insert(NativeObjectKind::Blob, &indexed(u32::MAX), vec![1]);
+        assert_eq!(cache.entries.len(), NODE_CACHE_MAX_ENTRIES);
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(1)).is_none());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(0)).is_some());
     }
 }
 
