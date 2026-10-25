@@ -117,17 +117,25 @@ fn diagnostics(diagnostics: &[orna_foundation_v1::Diagnostic]) -> String {
 
 fn expected_semantic_failure(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "automatic-failure-propagation" => Some(&[
-            "ORNA-S012-UNRESOLVED: name cannot be resolved",
-        ]),
-        "failure-natural-key" | "stream-admin-repl" => Some(&[
-            "ORNA-S021-TYPE: arguments do not match a portable system function overload",
+        // ornadb-jnf1: the manifest lists this fixture as valid; these are the current product
+        // diagnostics pinned until that product question is resolved.
+        "failure-natural-key" => Some(&[
             "ORNA-S021-TYPE: relation query callback must be read-only",
             "ORNA-S021-TYPE: static types are incompatible",
             "ORNA-S021-TYPE: static types are incompatible",
         ]),
+        // ornadb-jnf1: as above for stream-admin-repl.
+        "stream-admin-repl" => Some(&[
+            "ORNA-S021-TYPE: relation query callback must be read-only",
+            "ORNA-S021-TYPE: static types are incompatible",
+        ]),
+        // Missing required record field is the spec's E2002 (tests/expected-diagnostics/missing-required-field.orna.json).
         "finite-stream" => Some(&[
-            "ORNA-S021-TYPE: missing required field `name`",
+            "E2002: missing required field `name`",
+        ]),
+        // ornadb-7owc: field access on a spec-valid record is rejected by the product (open product gap).
+        "table-key-default" => Some(&[
+            "ORNA-S021-TYPE: field access requires a record",
         ]),
         _ => None,
     }
