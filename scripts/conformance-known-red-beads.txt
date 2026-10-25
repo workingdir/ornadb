@@ -2,4 +2,3 @@
 # Adding a new bead id here is a reviewed change; the gate rejects any other id.
 ornadb-ptqm
 ornadb-8rfu
-ornadb-hzt6

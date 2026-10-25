@@ -2704,6 +2704,15 @@ fn analyze_recording_origins(
     if let Some(record) = &unlinked_system_members {
         report_unlinked_system_members(record, &mut result.diagnostics);
     }
+    // Public exports carry the spec type `sys.SnapshotRef`. The selector
+    // identity behind `SnapshotRefContext` is internal pin tracking: symbols
+    // keep it for checkpoint merges and historical callables, and it is erased
+    // only at this export boundary.
+    for module in result.modules.values_mut() {
+        for symbol in module.exports.values_mut() {
+            symbol.ty = public_snapshot_type(&symbol.ty);
+        }
+    }
     result
         .diagnostics
         .sort_by(|a, b| a.code().cmp(b.code()).then(a.message().cmp(b.message())));
@@ -20580,6 +20589,63 @@ fn is_contextual_snapshot_ref(ty: &Type) -> bool {
             if base == "sys.SnapshotRefContext"
                 && matches!(arguments.as_slice(), [Type::Named(selector)] if is_snapshot_selector_context(selector))
     )
+}
+
+/// Erases the internal selector identity of a `SnapshotRefContext` leaf to the
+/// spec type `sys.SnapshotRef`, recursing through every structural type so no
+/// refinement leaks into a public export. Selector identity stays in symbols.
+fn public_snapshot_type(ty: &Type) -> Type {
+    let public = |inner: &Type| Box::new(public_snapshot_type(inner));
+    match ty {
+        Type::Applied { base, .. } if base == "sys.SnapshotRefContext" => {
+            Type::Named("sys.SnapshotRef".into())
+        }
+        Type::Applied { base, arguments } => Type::Applied {
+            base: base.clone(),
+            arguments: arguments.iter().map(public_snapshot_type).collect(),
+        },
+        Type::List(element) => Type::List(public(element)),
+        Type::Range(element) => Type::Range(public(element)),
+        Type::Relation(element) => Type::Relation(public(element)),
+        Type::Stream(element) => Type::Stream(public(element)),
+        Type::Optional(element) => Type::Optional(public(element)),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), public_snapshot_type(field)))
+                .collect(),
+        ),
+        Type::Tuple(elements) => Type::Tuple(elements.iter().map(public_snapshot_type).collect()),
+        Type::Quantity {
+            numeric,
+            dimension_basis,
+            scale,
+            offset,
+            affine,
+        } => Type::Quantity {
+            numeric: public(numeric),
+            dimension_basis: dimension_basis.clone(),
+            scale: scale.clone(),
+            offset: offset.clone(),
+            affine: *affine,
+        },
+        Type::MoneyPerUnit { currency, unit } => Type::MoneyPerUnit {
+            currency: public(currency),
+            unit: public(unit),
+        },
+        Type::Function {
+            parameters,
+            parameter_names,
+            default_parameters,
+            result,
+        } => Type::Function {
+            parameters: parameters.iter().map(public_snapshot_type).collect(),
+            parameter_names: parameter_names.clone(),
+            default_parameters: default_parameters.clone(),
+            result: public(result),
+        },
+        other => other.clone(),
+    }
 }
 
 fn is_snapshot_ref_value(ty: &Type) -> bool {

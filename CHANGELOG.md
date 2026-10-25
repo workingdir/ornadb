@@ -27,9 +27,10 @@ been published.
   (`orna.schema.v3` domain, store-format-3 section 5), primary-key patch `E3002`, txn key and
   decimal pins, the partial-mutation rollback entry, and `ORNA-ASSERT-021`/`030` catalogue
   resolution. The `sys.SnapshotRef` semantic-adapter assertions are restored to the specification
-  `Named` result. That pair (`sys_snapshot_string_as_pinned_read`,
-  `sys_database_cwd_as_snapshot_ref_read`) stays red until `ornadb-hzt6` lands and is registered in
-  the conformance known-red gate of PR 9369 (merge order: PR 9370 first). The valid-fixture gaps
+  `Named` result. `sys.snapshot` and `sys.database.cwd` now export the public type `sys.SnapshotRef`
+  (ornadb-hzt6): the internal `sys.SnapshotRefContext` selector identity is kept for pin tracking and
+  erased only at the public export boundary, so the `sys_snapshot_string_as_pinned_read` and
+  `sys_database_cwd_as_snapshot_ref_read` semantic-adapter tests pass and leave the known-red gate. The valid-fixture gaps
   are tracked product gaps in `KNOWN_PRODUCT_GAPS` (`valid_fixtures.rs`), not known-red: each entry
   records today's product diagnostics and its bead, and the test fails when product output changes
   in either direction. Tracked product gaps: `jnf1` (failure-natural-key, stream-admin-repl,
@@ -45,7 +46,7 @@ been published.
   records external-effect uncertainty instead. A
   faulted `ExternalPossible` activation is not reported as rollback-proven
   (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
-- Conformance v1 test gate: `scripts/check-conformance-known-red.sh` (workflow `conformance-v1-tests.yml`) runs every `orna-conformance-v1` test target. Five product-gap tests are listed in `scripts/conformance-known-red.txt` against beads `ornadb-ptqm`, `ornadb-8rfu` and `ornadb-hzt6`; each must still fail with its expected message. The row admission tuple arm now accepts canonical tagged tuple fields (ORNA-CONFORMANCE-ROW-TYPE no longer fires for `Raw::Tag(60015, Array)`). The stale cross-table and durable-consumer conformance expectations were migrated to the spec clauses they cite (ornadb-3ybj part B).
+- Conformance v1 test gate: `scripts/check-conformance-known-red.sh` (workflow `conformance-v1-tests.yml`) runs every `orna-conformance-v1` test target. Three product-gap tests are listed in `scripts/conformance-known-red.txt` against beads `ornadb-ptqm` and `ornadb-8rfu`; each must still fail with its expected message. The row admission tuple arm now accepts canonical tagged tuple fields (ORNA-CONFORMANCE-ROW-TYPE no longer fires for `Raw::Tag(60015, Array)`). The stale cross-table and durable-consumer conformance expectations were migrated to the spec clauses they cite (ornadb-3ybj part B).
 - Conformance gate coverage: `scripts/check-conformance-known-red.sh` now also runs the `orna-conformance` bin's unit tests (`--bin orna-conformance`, the `cfg(test)` tests in `src/main.rs`), and fails closed when one test name appears in more than one target. Changes to its cap and allowlist need owner review; the repository has no CODEOWNERS file.
 - A project that imports `std` and whose source text contains `sys.Storage` or
   `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
