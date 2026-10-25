@@ -402,24 +402,66 @@ fn lsp_rename_field_stages_the_renamed_source_and_identity() {
     );
     assert_eq!(staged.id(ObjectKind::Field, "Music.title"), None);
 
-    // `orna commit` is not exercised here: a column rename changes the committed
-    // schema of `Music`, and the commit path refuses schema evolution (ORNA-EVOL-002
-    // is not implemented yet: "schema evolution is not admitted"). That refusal is
-    // independent of the language server and reproduces with a plain `git add`.
-    // The index holds the reviewed source and inventory; HEAD keeps `title`.
-    let committed = head_identities(&root);
+    // A column rename changes the committed schema of `Music`, and this build does
+    // not admit schema evolution (ORNA-EVOL-002 is not implemented), so `orna commit`
+    // refuses the staged field rename. The same refusal happens for a plain `git add`
+    // (see `plain_git_field_rename_commit_is_refused`). Nothing is committed and the
+    // staged source and inventory stay in the index.
+    let refused = commit_refusal(&root);
+    assert!(
+        refused.contains("schema evolution is not admitted"),
+        "refusal names schema evolution: {refused}"
+    );
     assert_eq!(
-        committed.id(ObjectKind::Field, "Music.title"),
+        head_identities(&root).id(ObjectKind::Field, "Music.title"),
         Some(&title_id)
     );
-    assert_eq!(committed.id(ObjectKind::Field, "Music.heading"), None);
     let cached = git(&root, &["diff", "--cached", "--name-only"]);
     assert!(
         cached.lines().any(|path| path == "main.orna"),
-        "main.orna is staged: {cached:?}"
+        "main.orna stays staged after the refusal: {cached:?}"
     );
     assert!(
         cached.lines().count() > 1,
-        "the identity inventory is staged beside it: {cached:?}"
+        "the identity inventory stays staged beside it: {cached:?}"
     );
+}
+
+#[test]
+fn plain_git_field_rename_commit_is_refused() {
+    // No language server: the same source change staged by plain Git is refused
+    // by `orna commit` with the same reason.
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    fs::write(
+        root.join("main.orna"),
+        "pub table Music(id: Str) { heading: Str, }\n",
+    )
+    .expect("write the renamed field");
+    git(&root, &["add", "main.orna"]);
+
+    let refused = commit_refusal(&root);
+    assert!(
+        refused.contains("schema evolution is not admitted"),
+        "refusal names schema evolution: {refused}"
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+}
+
+/// Runs `orna commit` on a staged field rename that must be refused and returns
+/// the transcript. The refusal detail prints only with `--debug`.
+fn commit_refusal(root: &Path) -> String {
+    let committed = orna(
+        root,
+        &["--debug", "commit", "-m", "Rename Music.title to heading"],
+    );
+    assert_eq!(
+        committed.status.code(),
+        Some(1),
+        "orna commit refuses the field rename\n{}",
+        transcript(&committed)
+    );
+    transcript(&committed)
 }
