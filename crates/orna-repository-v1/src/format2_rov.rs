@@ -254,21 +254,25 @@ mod tests {
 
     // When the draft compatibility archive is readable, every inline golden
     // value must equal its `stored_reference_cbor` and `length` in the archive's
-    // `Orna-1.1.0/tests/blob-vectors.json`. Skipped (with a note) when the
-    // archive or `unzip` is unavailable.
+    // `Orna-1.1.0/tests/blob-vectors.json`. The archive lives outside the
+    // checkout, so its location comes from `ORNA_DRAFT_ZIP` (set it to
+    // `reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip`). Skipped
+    // with a note when unset, unreadable, or `unzip` is unavailable.
     #[test]
     fn inline_golden_vectors_match_draft_zip_when_readable() {
-        let zip = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../reference/Orna-1.1.0/compatibility/previous-1.1.0-draft.zip"
-        );
+        let Some(zip) = std::env::var_os("ORNA_DRAFT_ZIP") else {
+            eprintln!("skipping: ORNA_DRAFT_ZIP not set");
+            return;
+        };
         let output = match std::process::Command::new("unzip")
-            .args(["-p", zip, "Orna-1.1.0/tests/blob-vectors.json"])
+            .arg("-p")
+            .arg(&zip)
+            .arg("Orna-1.1.0/tests/blob-vectors.json")
             .output()
         {
             Ok(output) if output.status.success() => output,
             _ => {
-                eprintln!("skipping: draft zip not readable at {zip}");
+                eprintln!("skipping: draft zip not readable at {zip:?}");
                 return;
             }
         };
