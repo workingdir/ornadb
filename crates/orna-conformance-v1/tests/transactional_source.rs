@@ -2872,6 +2872,7 @@ fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
         "#,
     ));
 
+    // Spec tests/expected-diagnostics/wrong-field-type.orna.json: primary_diagnostic E2001 (field type mismatch).
     assert!(
         matches!(
             &outcome,
