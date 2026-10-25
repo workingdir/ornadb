@@ -11633,9 +11633,12 @@ fn durable_runtime_rejects_a_retained_response_with_the_wrong_message_shape() {
 #[test]
 fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
     let (root, repository) = durable_repository();
-    let runtime = open_durable_state(&repository);
     let owner = [91; 16];
+    // The host takes the worktree owner lock, so it alone creates writer lease
+    // [91]. The competing terminal writer and the assertion handle are Secondary
+    // and may only re-acquire the lease their owner already holds (ORNA-TURSO-005).
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let runtime = open_durable_state(&repository);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -22089,6 +22092,10 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
 #[test]
 fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let (root, repository) = durable_repository();
+    // The host takes the worktree owner lock, so its delete creates the writer
+    // lease. The reserving and late-admission runtime is a Secondary handle
+    // that cannot take the lease (ORNA-TURSO-005).
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
     let runtime = open_durable_state(&repository);
     let initial = RequestIdentity {
         session_id: [1; 16],
@@ -22102,7 +22109,6 @@ fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let late_fingerprint = [105; 32];
     block_on(runtime.reserve_request(initial, initial_fingerprint)).unwrap();
 
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     let origin = origin();
@@ -22211,7 +22217,7 @@ fn application_admission_requires_an_explicit_delete_join_boundary() {
 }
 
 #[test]
-fn failed_durable_drain_never_reports_delete_success() {
+fn second_writer_is_refused_before_durable_drain_begins() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
     let identity = RequestIdentity {
@@ -22230,7 +22236,10 @@ fn failed_durable_drain_never_reports_delete_success() {
         capability,
     ))
     .unwrap();
-    drop(runtime);
+    // Runtime [97] stays alive as the owner of the worktree lock, so this
+    // second writer cannot take the lease. It fails with LeaseHeld before any
+    // drain begins (ORNA-TURSO-005). Takeover after a dead owner's lock release
+    // is exercised by the durable_host_after_takeover tests.
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), [98; 16]);
     let mut issuer = Issuer(1, None);
@@ -22269,6 +22278,7 @@ fn failed_durable_drain_never_reports_delete_success() {
         Some(status) if status.state == orna_runtime_v1::RequestState::Running
     ));
     drop(host);
+    drop(runtime);
     remove_test_repository(&root);
 }
 
