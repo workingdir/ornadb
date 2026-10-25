@@ -1196,12 +1196,16 @@ impl Repository {
     /// `.orna/format.orna` record that does not classify as a known format,
     /// whatever the cause (unknown number, string or overflowing integer,
     /// syntax-broken or open record, unreadable tree), the gate refuses with
-    /// [`FormatContextError::UnknownFormat`]. It falls through only when `HEAD`
-    /// is unborn or tracks no format record at all. Those cases are decided by
+    /// [`FormatContextError::UnknownFormat`]. A `HEAD` whose metadata mixes
+    /// layouts (a legacy record beside `.orna/store`, ORNA-META-001) is refused
+    /// with [`FormatContextError::MixedFormats`] (ORNA-REPO-CONTEXT-004), never
+    /// reclassified as unknown. It falls through only when `HEAD` is unborn or
+    /// tracks no format record at all. Those cases are decided by
     /// [`Self::require_writable_head_format`] and the metadata checks after it.
     pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
         match self.open_format_context() {
             Ok(_) => Ok(()),
+            Err(error @ FormatContextError::MixedFormats { .. }) => Err(error),
             Err(FormatContextError::UnknownFormat) => Err(FormatContextError::UnknownFormat),
             Err(_) => self.refuse_unclassifiable_head_records(),
         }
@@ -2179,6 +2183,59 @@ mod graph_bridge_tests {
             );
         }
     }
+
+    /// A legacy marker beside `.orna/store` is a mixed snapshot on every
+    /// admission path, with the same error code: the commit gate refuses the
+    /// staged tree before any commit object exists, a committed snapshot is
+    /// refused by the snapshot reader, and runtime admission refuses `HEAD`
+    /// (ORNA-META-001, ORNA-META-002; ORNA-REPO-CONTEXT-004).
+    #[test]
+    fn legacy_marker_beside_store_is_refused_on_every_admission_path() {
+        const FORMAT_ONE: &str =
+            include_str!("../tests/fixtures/format-context/format-1-ornadb-1.0.orna");
+        const FORMAT_TWO: &str =
+            include_str!("../tests/fixtures/format-context/format-2-draft-1.1.0.orna");
+        for record in [FORMAT_ONE, FORMAT_TWO] {
+            let directory = repository();
+            let root = directory.path();
+            fs::write(root.join(".orna/format.orna"), record).expect("write legacy marker");
+            git(root, &["add", "."]);
+            let repository = Repository::discover(root).expect("discover fixture");
+            let staged = repository
+                .index_generation()
+                .expect("read the index generation")
+                .tree()
+                .cloned()
+                .expect("the index names a tree");
+            let staged_error = repository
+                .validate_format3_index_tree(&staged)
+                .expect_err("the commit gate refuses the staged mixed tree");
+            assert!(
+                matches!(staged_error, FormatContextError::MixedFormats { .. }),
+                "{staged_error:?}"
+            );
+            assert_eq!(staged_error.code(), "ORNA-REPO-CONTEXT-004");
+
+            git(
+                root,
+                &["commit", "--quiet", "-m", "legacy marker beside store"],
+            );
+            let refused = repository
+                .open_format_context()
+                .expect_err("the snapshot reader refuses HEAD");
+            assert!(
+                matches!(refused, FormatContextError::MixedFormats { .. }),
+                "{refused:?}"
+            );
+            assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-004");
+            assert_eq!(
+                repository.require_known_head_format(),
+                Err(refused),
+                "runtime admission refuses HEAD as ORNA-REPO-CONTEXT-004"
+            );
+        }
+    }
+
     #[test]
     fn committed_table_bindings_pin_imported_source_repository_uuid_and_schema() {
         let relation_id = [0xa1; 16];
