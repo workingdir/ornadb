@@ -3639,81 +3639,24 @@ impl NativeGraphContext {
     ) -> Result<Vec<u8>, GraphError> {
         scope.check_cancelled()?;
         objects.visit(oid)?;
-        let actual_kind = self.git_object_kind(oid)?;
-        if actual_kind != kind {
-            return Err(GraphError::WrongObjectKind {
-                expected: kind,
-                actual: actual_kind,
-            });
-        }
-        let hex = oid.to_hex();
-        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
-        let size = std::str::from_utf8(&size_output)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| GraphError::GitObjectMalformed)?;
-        if size > maximum {
-            return Err(
-                if kind == NativeObjectKind::Blob
-                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
-                {
-                    GraphError::ChunkTooLarge(size)
-                } else {
-                    GraphError::NodeDataTooLarge(usize::try_from(size).unwrap_or(usize::MAX))
-                },
-            );
-        }
-        if maximum != crate::blob_store::GEAR_MAXIMUM as u64 {
-            objects.record_metadata(size)?;
-        }
-        let kind_name = match kind {
-            NativeObjectKind::Tree => "tree",
-            NativeObjectKind::Blob => "blob",
-        };
-        let mut child = self
-            .git_command()
-            .args(["cat-file", kind_name, &hex])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let mut data = Vec::with_capacity(size as usize);
-        let mut stdout = child.stdout.take().ok_or(GraphError::GitCommandFailed)?;
-        let read_result = stdout
-            .by_ref()
-            .take(maximum.saturating_add(1))
-            .read_to_end(&mut data);
-        drop(stdout);
-        read_result.map_err(|_| GraphError::GitCommandFailed)?;
-        if data.len() as u64 > maximum {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(
-                if kind == NativeObjectKind::Blob
-                    && maximum == crate::blob_store::GEAR_MAXIMUM as u64
-                {
-                    GraphError::ChunkTooLarge(data.len() as u64)
-                } else {
-                    GraphError::NodeDataTooLarge(data.len())
-                },
-            );
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(absent_object_error(&self.repository, &hex));
-        }
-        if data.len() as u64 != size {
-            return Err(GraphError::GitObjectMalformed);
-        }
-        let hashed = self.git_hash_object(kind_name, &data)?;
+        let data = read_checked_object(&self.repository, self.algorithm, kind, oid, |size| {
+            if size > maximum {
+                return Err(
+                    if kind == NativeObjectKind::Blob
+                        && maximum == crate::blob_store::GEAR_MAXIMUM as u64
+                    {
+                        GraphError::ChunkTooLarge(size)
+                    } else {
+                        GraphError::NodeDataTooLarge(usize::try_from(size).unwrap_or(usize::MAX))
+                    },
+                );
+            }
+            if maximum != crate::blob_store::GEAR_MAXIMUM as u64 {
+                objects.record_metadata(size)?;
+            }
+            Ok(())
+        })?;
         scope.check_cancelled()?;
-        if hashed != *oid {
-            return Err(GraphError::GitObjectHashMismatch);
-        }
         Ok(data)
     }
 
@@ -3740,38 +3683,6 @@ impl NativeGraphContext {
             });
         }
         Ok(output.stdout)
-    }
-
-    /// The single object id a `cat-file` invocation asks Git about, when the
-    /// call is a `cat-file` one that names exactly one object. `-t`, `-s` and
-    /// the kind readers (`blob`, `tree`, ...) all take the object id last, so
-    /// the final argument is it; the batch forms read object ids from stdin and
-    /// name none here.
-    fn git_hash_object(&self, kind: &str, bytes: &[u8]) -> Result<NativeOid, GraphError> {
-        let mut child = self
-            .git_command()
-            .args(["hash-object", "-t", kind, "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        child
-            .stdin
-            .take()
-            .ok_or(GraphError::GitCommandFailed)?
-            .write_all(bytes)
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
-        let hex = std::str::from_utf8(&output.stdout)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim();
-        NativeOid::from_hex(self.algorithm, hex)
     }
 
     pub(crate) fn write_capture_object(
@@ -6830,55 +6741,27 @@ impl PinnedNativeGraphReader {
                 actual: oid.as_bytes().len(),
             });
         }
-        let hex = oid.to_hex();
-        let kind_output = self.git_output(&["cat-file", "-t", &hex])?;
-        let actual_kind = match kind_output.as_slice() {
-            b"tree\n" => NativeObjectKind::Tree,
-            b"blob\n" => NativeObjectKind::Blob,
-            _ => return Err(GraphError::UnsupportedGitObjectType),
-        };
-        if actual_kind != kind {
-            return Err(GraphError::WrongObjectKind {
-                expected: kind,
-                actual: actual_kind,
-            });
-        }
-        let size_output = self.git_output(&["cat-file", "-s", &hex])?;
-        let size = std::str::from_utf8(&size_output)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| GraphError::GitObjectMalformed)?;
-        if size > maximum {
-            return Err(GraphError::NodeDataTooLarge(
-                usize::try_from(size).unwrap_or(usize::MAX),
-            ));
-        }
-        if self.seen.insert(oid.clone()) {
-            if self.seen.len() as u64 > MAX_FULL_VERIFY_OBJECTS {
-                return Err(GraphError::InventoryQuotaExceeded);
+        let seen = &mut self.seen;
+        let metadata_bytes = &mut self.metadata_bytes;
+        read_checked_object(&self.repository, self.algorithm, kind, oid, |size| {
+            if size > maximum {
+                return Err(GraphError::NodeDataTooLarge(
+                    usize::try_from(size).unwrap_or(usize::MAX),
+                ));
             }
-            self.metadata_bytes = self
-                .metadata_bytes
-                .checked_add(size)
-                .ok_or(GraphError::MetadataQuotaExceeded)?;
-            if self.metadata_bytes > MAX_FULL_METADATA_BYTES {
-                return Err(GraphError::MetadataQuotaExceeded);
+            if seen.insert(oid.clone()) {
+                if seen.len() as u64 > MAX_FULL_VERIFY_OBJECTS {
+                    return Err(GraphError::InventoryQuotaExceeded);
+                }
+                *metadata_bytes = metadata_bytes
+                    .checked_add(size)
+                    .ok_or(GraphError::MetadataQuotaExceeded)?;
+                if *metadata_bytes > MAX_FULL_METADATA_BYTES {
+                    return Err(GraphError::MetadataQuotaExceeded);
+                }
             }
-        }
-        let type_name = match kind {
-            NativeObjectKind::Tree => "tree",
-            NativeObjectKind::Blob => "blob",
-        };
-        let output = self.git_output(&["cat-file", type_name, &hex])?;
-        if output.len() as u64 != size {
-            return Err(GraphError::GitObjectMalformed);
-        }
-        let hash = self.hash_object(type_name, &output)?;
-        if hash != *oid {
-            return Err(GraphError::GitObjectHashMismatch);
-        }
-        Ok(output)
+            Ok(())
+        })
     }
 
 
@@ -7003,63 +6886,6 @@ impl PinnedNativeGraphReader {
             return Err(GraphError::InvalidByteIndex);
         }
         Ok((total, height))
-    }
-
-    fn git_output(&self, args: &[&str]) -> Result<Vec<u8>, GraphError> {
-        let output = self
-            .git_command()
-            .args(args)
-            .output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(match cat_file_object_id(args) {
-                Some(object_id) => absent_object_error(&self.repository, object_id),
-                None => GraphError::GitCommandFailed,
-            });
-        }
-        Ok(output.stdout)
-    }
-
-    fn hash_object(&self, kind: &str, data: &[u8]) -> Result<NativeObjectId, GraphError> {
-        let mut child = self
-            .git_command()
-            .args(["hash-object", "-t", kind, "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        child
-            .stdin
-            .take()
-            .ok_or(GraphError::GitCommandFailed)?
-            .write_all(data)
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| GraphError::GitCommandFailed)?;
-        if !output.status.success() {
-            return Err(GraphError::GitCommandFailed);
-        }
-        let hex = std::str::from_utf8(&output.stdout)
-            .map_err(|_| GraphError::GitObjectMalformed)?
-            .trim();
-        NativeObjectId::from_hex(self.algorithm, hex)
-    }
-
-    fn git_command(&self) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(self.repository.worktree())
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_OBJECT_DIRECTORY")
-            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
-        command
     }
 }
 
@@ -13670,6 +13496,75 @@ fn observed_object_availability(
         Ok(crate::GitObjectState::Unavailable) => ObjectAvailability::Unavailable,
         Ok(crate::GitObjectState::Malformed) | Err(_) => ObjectAvailability::Unknown,
     }
+}
+
+/// Reads one tree or blob through the repository's shared batch reader and
+/// checks its bytes against `oid`. The header's kind and size are admitted by
+/// `admit` before any byte is read; the digest is computed in-process, so an
+/// object costs no process spawn of its own (ORNA-ROW-009).
+fn read_checked_object(
+    repository: &crate::Repository,
+    algorithm: GitHashAlgorithm,
+    kind: NativeObjectKind,
+    oid: &NativeOid,
+    admit: impl FnOnce(u64) -> Result<(), GraphError>,
+) -> Result<Vec<u8>, GraphError> {
+    let hex = oid.to_hex();
+    let header = repository
+        .objects()
+        .info(&hex)
+        .map_err(|_| GraphError::GitCommandFailed)?
+        .ok_or_else(|| absent_object_error(repository, &hex))?;
+    let actual_kind = match header.kind() {
+        crate::object_reader::ObjectKind::Blob => NativeObjectKind::Blob,
+        crate::object_reader::ObjectKind::Tree => NativeObjectKind::Tree,
+        _ => return Err(GraphError::UnsupportedGitObjectType),
+    };
+    if actual_kind != kind {
+        return Err(GraphError::WrongObjectKind {
+            expected: kind,
+            actual: actual_kind,
+        });
+    }
+    admit(header.size())?;
+    let data = repository
+        .objects()
+        .read_exact(&hex, &header, algorithm)
+        .map_err(|_| GraphError::GitCommandFailed)?;
+    if git_object_id(algorithm, kind, &data)? != *oid {
+        return Err(GraphError::GitObjectHashMismatch);
+    }
+    Ok(data)
+}
+
+/// The Git object id of `data` as a `kind` object: the digest of the
+/// `<type> <size>\0` header followed by the bytes.
+fn git_object_id(
+    algorithm: GitHashAlgorithm,
+    kind: NativeObjectKind,
+    data: &[u8],
+) -> Result<NativeOid, GraphError> {
+    let name = match kind {
+        NativeObjectKind::Tree => "tree",
+        NativeObjectKind::Blob => "blob",
+    };
+    let header = format!("{name} {}\0", data.len());
+    let digest = match algorithm {
+        GitHashAlgorithm::Sha1 => {
+            use sha1::Digest as _;
+            let mut hasher = sha1::Sha1::new();
+            hasher.update(header.as_bytes());
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+        GitHashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            hasher.update(header.as_bytes());
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
+    };
+    NativeOid::new(algorithm, digest)
 }
 
 /// The error for one object id this repository cannot read locally. A partial

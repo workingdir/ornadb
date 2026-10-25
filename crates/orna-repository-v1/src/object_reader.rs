@@ -105,6 +105,11 @@ impl ObjectHeader {
     pub(crate) const fn kind(&self) -> ObjectKind {
         self.kind
     }
+
+    /// The object's size in bytes, as `info` reported it.
+    pub(crate) const fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// A tree entry mode after Git's own canonicalisation of recorded modes.
@@ -234,6 +239,30 @@ impl ObjectReader {
                 return Err(RepositoryError::GitOperationFailed);
             }
             if session.request("contents", oid, algorithm)? != Some(header) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let mut bytes = vec![0; size];
+            session
+                .output()?
+                .read_exact(&mut bytes)
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            session.finish_contents()?;
+            Ok(bytes)
+        })
+    }
+
+    /// Reads the complete bytes of an object whose header `info` has just
+    /// reported. The caller admits the header's kind and size first; the
+    /// bytes are read through the same shared process, one exchange.
+    pub(crate) fn read_exact(
+        &self,
+        oid: &str,
+        header: &ObjectHeader,
+        algorithm: GitHashAlgorithm,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let size = usize::try_from(header.size).map_err(|_| RepositoryError::GitOperationFailed)?;
+        self.with_session(|session| {
+            if session.request("contents", oid, algorithm)? != Some(header.clone()) {
                 return Err(RepositoryError::GitOperationFailed);
             }
             let mut bytes = vec![0; size];
