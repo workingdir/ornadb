@@ -16939,7 +16939,7 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     let unprofiled = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = sort_by(values, value => value);",
+            "fn bad(values: [Int]) = std.collection.sort_by(values, value => value);",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17285,7 +17285,7 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(rows: [Int]) = every(rows, value => true);",
+            "fn bad(rows: [Int]) = std.collection.every(rows, value => true);",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17389,7 +17389,7 @@ fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = sum(values);",
+            "fn bad(values: [Int]) = std.collection.sum(values);",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17494,7 +17494,7 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = min(values);",
+            "fn bad(values: [Int]) = std.collection.min(values);",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17660,7 +17660,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Float]) = sum(values);",
+            "fn bad(values: [Float]) = std.collection.sum(values);",
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17685,7 +17685,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let incompatible = analyze_with_catalogue(
         &[ModuleInput::new(
             "incompatible.orna",
-            "fn bad(values: [Float]) = sum(values);",
+            "fn bad(values: [Float]) = std.collection.sum(values);",
         )],
         &incompatible_catalogue,
     );
