@@ -19290,14 +19290,14 @@ mod blob_equality_tests {
         );
     }
 
-    fn rov3_blob_value(payload: &[u8]) -> Value {
+    fn rov3_context(payload: &[u8]) -> Format3Context {
         let database = [1; 16];
         let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
             std::sync::Arc::new(PayloadResolver {
                 payload: payload.to_vec(),
                 reads: std::sync::atomic::AtomicUsize::new(0),
             });
-        let context = Format3Context::from_persisted(
+        Format3Context::from_persisted(
             database,
             orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
             orna_value_v1::GitHash::Sha1,
@@ -19308,7 +19308,11 @@ mod blob_equality_tests {
             orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
             resolver,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn rov3_blob_value(payload: &[u8]) -> Value {
+        let context = rov3_context(payload);
         let reference = context
             .reference(
                 orna_value_v1::ContentIdentity::from_bytes(payload),
@@ -19348,13 +19352,27 @@ mod blob_equality_tests {
     #[test]
     fn repl_result_reports_rov3_blob_as_payload_free_summary() {
         let payload: &[u8] = b"payload";
-        let canonical = canonical_summary(rov3_blob_value(payload));
+        let source = rov3_blob_value(payload);
+        let Value::ContextualBlob(source_reference) = &source else {
+            panic!("a format-3 Blob value");
+        };
+        // The source reference carries the descriptor OID, so the absence
+        // check below is not vacuous.
+        assert!(
+            source_reference
+                .encode()
+                .unwrap()
+                .windows(20)
+                .any(|window| window == [7u8; 20])
+        );
+        let canonical = canonical_summary(source);
         assert_eq!(
             canonical,
             CanonicalValue::new(blob_summary_raw(payload)).unwrap()
         );
         let encoded = canonical.encode().unwrap();
         assert!(!encoded.windows(payload.len()).any(|window| window == payload));
+        assert!(!encoded.windows(20).any(|window| window == [7u8; 20]));
     }
 
     #[test]
@@ -19391,6 +19409,55 @@ mod blob_equality_tests {
             ]))
             .unwrap()
         );
+    }
+
+    /// The REPL summary is applied only at the REPL boundary. The global
+    /// canonical boundary still refuses a format-3 Blob reference.
+    #[test]
+    fn global_canonical_still_rejects_rov3_blob() {
+        match rov3_blob_value(b"payload").canonical() {
+            Err(error) => assert_eq!(error.code(), "ORNA-EVAL-VALUE"),
+            Ok(_) => panic!("Value::canonical must keep refusing a format-3 Blob"),
+        }
+    }
+
+    /// A row-store overflow reference (tag 60113) has no Value form. It is not
+    /// summarised at the REPL boundary; if one reaches the evaluator it is
+    /// refused, so no reference or payload crosses the boundary.
+    #[test]
+    fn overflow_reference_is_refused_by_the_evaluator() {
+        let format3 = rov3_context(b"payload");
+        let overflow = ContextValue::new_in_context(
+            &format3,
+            ValueFormat::Rov3,
+            Raw::Tag(
+                orna_value_v1::ROV3_OVERFLOW_TAG,
+                Box::new(Raw::Array(vec![Raw::Bytes(vec![7; 20])])),
+            ),
+        )
+        .unwrap();
+        let functions = Functions::new();
+        let mut context = Context {
+            limits: Limits::default(),
+            steps: 0,
+            calls: 0,
+            functions: &functions,
+            aliases: None,
+            session_functions: None,
+            repl_bindings: true,
+            restrict_function_names: true,
+            reject_unhandled_field_calls: true,
+            effects: None,
+            namespace: None,
+            transfer: None,
+            reuse: CallReuse::default(),
+            sys_host: None,
+            cancellation: None,
+        };
+        match Value::from_context_value(&overflow, &mut context, 0) {
+            Err(error) => assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED"),
+            Ok(_) => panic!("an overflow reference must not become a Value"),
+        }
     }
 }
 
