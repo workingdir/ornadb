@@ -105,6 +105,11 @@ async fn loading_and_semantic_admission_do_not_start_a_literal_stream() {
             .expect("load rows")
             .is_empty()
     );
+    // The repository owner lock is single-holder (ORNA-TURSO-004/005). While
+    // `state` holds it, `execute_source` opens a Secondary handle that cannot
+    // acquire a writer lease, so release the primary handle before dispatch
+    // and reopen it to inspect the committed effects.
+    drop(state);
 
     assert!(matches!(
         evaluator
@@ -112,6 +117,9 @@ async fn loading_and_semantic_admission_do_not_start_a_literal_stream() {
             .await,
         Ok(StageOutcome::Passed)
     ));
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("reopened runtime state");
     assert_eq!(
         state.latest_checkpoint().await.unwrap().unwrap().generation,
         2
