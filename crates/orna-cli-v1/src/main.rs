@@ -2194,6 +2194,25 @@ fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagno
     delivery
 }
 
+/// A multi-module project that declares a table cannot run one-shot: the bounded
+/// pure evaluator rejects any table declaration, and the committed-table route
+/// admits a single module only. Single-module projects never reach this check.
+fn multi_module_declares_tables(project: &orna_project_v1::LoadedProject) -> bool {
+    project.modules().len() != 1
+        && project.modules().iter().any(|module| {
+            orna_syntax_v1::parse_module(&module.source)
+                .value
+                .items
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.declaration,
+                        orna_syntax_v1::Declaration::Table { .. }
+                    )
+                })
+        })
+}
+
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
@@ -2303,6 +2322,13 @@ fn run_pure_invocation(
             "E2101",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run check again",
+        ));
+    }
+    if multi_module_declares_tables(&project) {
+        return Err(Diagnostic::target(
+            "E2200",
+            "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
+            "one-shot invocation admits table declarations only in single-module projects",
         ));
     }
 
