@@ -12558,9 +12558,9 @@ mod durable_tests {
             );
 
             assert!(
-                matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
+                matches!(&lowered.get("total").expect("total is lowered").body, Expr::Binary { op, .. } if op == "|"),
                 "{operation} shadow was lowered: {:?}",
-                lowered["total"].body
+                lowered.get("total").expect("total is lowered").body
             );
         }
     }
@@ -12607,9 +12607,9 @@ mod durable_tests {
                 "window_case",
             ] {
                 assert!(
-                    matches!(&lowered[name].body, Expr::Binary { op, .. } if op == "|"),
+                    matches!(&lowered.get(name).expect("case is lowered").body, Expr::Binary { op, .. } if op == "|"),
                     "{name} was specialized despite lexical shadowing: {:?}",
-                    lowered[name].body
+                    lowered.get(name).expect("case is lowered").body
                 );
             }
         }
