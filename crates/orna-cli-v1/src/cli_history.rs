@@ -1146,12 +1146,17 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
-    Diagnostic::target_with_detail(
+    // The human renderer shows the title and help but not `detail`, so the
+    // detail is carried in the title as well.
+    let detail = detail.into();
+    let mut diagnostic = Diagnostic::target_with_detail(
         "E2000",
         title,
         "run `orna history <relation-hex> <key>` inside an initialized repository",
-        detail.into(),
-    )
+        detail.clone(),
+    );
+    diagnostic.title = std::borrow::Cow::Owned(format!("{title}: {detail}"));
+    diagnostic
 }
 
 #[cfg(test)]
