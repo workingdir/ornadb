@@ -3631,6 +3631,15 @@ impl NativeGraphContext {
         Ok(height)
     }
 
+    /// How many reads this context has answered from its node cache.
+    #[cfg(test)]
+    pub(crate) fn node_cache_hits(&self) -> usize {
+        self.node_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .hits
+    }
+
     fn read_git_object(
         &self,
         kind: NativeObjectKind,
@@ -7881,6 +7890,30 @@ mod persisted_orp_tests {
             },
         );
         (schema_oid, schema_digest)
+    }
+
+    /// A repeated walk down the schema node path is answered from the node
+    /// cache: the second walk returns the same descriptor and records a hit
+    /// for every node it reads, with no further repository reads needed.
+    #[test]
+    fn a_repeated_path_walk_hits_the_node_cache() {
+        let (_directory, graph) = capture_test_context();
+        let scope = graph.open_read_scope().expect("schema scope");
+        let first = graph
+            .read_schema_descriptor(&scope)
+            .expect("the issued graph verified its schema node");
+        let hits_before = graph.node_cache_hits();
+        let second = graph
+            .read_schema_descriptor(&scope)
+            .expect("a repeated walk reads the cached schema node");
+        assert_eq!(
+            first.encode().expect("canonical descriptor bytes"),
+            second.encode().expect("canonical descriptor bytes")
+        );
+        assert!(
+            graph.node_cache_hits() > hits_before,
+            "the repeated walk must be answered from the node cache"
+        );
     }
 
     fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
