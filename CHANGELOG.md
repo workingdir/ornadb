@@ -5,6 +5,24 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+
+### Breaking / API
+- `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
+- `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
+- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so bound-registry evaluations no longer declare `None`; `declared_effects` takes that boolean. The REPL declaration is now truthful, but the REPL commit path does not yet persist declared effects to the request ledger and writes no controlled marker or rollback proof, so the REPL cannot produce `RollbackProven` today; routing REPL commits through the ledger is tracked by ornadb-rg5g.
+- `ControlledEffectToken` is a proof a declaration was made, not a verification; trust rests on callers declaring truthfully.
+- `commit_table_request_activation` gains a final `effects: ActivationEffectReport` argument; callers must pass a report built with `ActivationEffectReport::declare`.
+- `StagedTableActivation::from_source` gains a final `effects: ActivationEffectReport` argument; callers must pass a declared report.
+- `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
+
+### Fixes
+- The controlled-transaction marker is now written only for activations whose
+  effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
+  only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
+  `ControlledEffectToken`; `ExternalPossible` (the `ActivationWork::new` default)
+  records external-effect uncertainty instead. A
+  faulted `ExternalPossible` activation is not reported as rollback-proven
+  (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
 - A project that imports `std` and whose source text contains `sys.Storage` or
   `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
   authority route (`orna invoke`). The gate is a substring match on the admitted source
