@@ -15,6 +15,37 @@ pub struct ReplTransactionScope<'a> {
     pub format_context: &'a RepositoryFormatContext,
     pub runtime_context: &'a RuntimeActivationContext,
     pub request: RequestIdentity,
+    #[cfg(feature = "test-support")]
+    dispatch_observer: Option<&'a dyn Fn()>,
+}
+
+impl<'a> ReplTransactionScope<'a> {
+    /// Builds the scope for one trusted REPL input.
+    pub fn new(
+        project: &'a LoadedProject,
+        repository: &'a Repository,
+        format_context: &'a RepositoryFormatContext,
+        runtime_context: &'a RuntimeActivationContext,
+        request: RequestIdentity,
+    ) -> Self {
+        Self {
+            project,
+            repository,
+            format_context,
+            runtime_context,
+            request,
+            #[cfg(feature = "test-support")]
+            dispatch_observer: None,
+        }
+    }
+
+    /// Installs a test-only observer that runs before each sys binding is called.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_dispatch_observer(mut self, observer: &'a dyn Fn()) -> Self {
+        self.dispatch_observer = Some(observer);
+        self
+    }
 }
 
 /// Failure from one evaluated REPL submission. `external_effects_possible`
@@ -303,6 +334,19 @@ impl ReplTransactionEffectHandler<'_, '_> {
         }
     }
 
+    /// Runs the test-only dispatch observer, if one is installed, before a sys
+    /// binding is called. Without the `test-support` feature this does nothing.
+    fn observe_sys_dispatch(&self) {
+        #[cfg(feature = "test-support")]
+        {
+            if let Some(observer) = self.scope.dispatch_observer {
+                observer();
+            }
+        }
+        #[cfg(not(feature = "test-support"))]
+        let _ = self;
+    }
+
     fn handle_table_effect(
         &mut self,
         callee: &Expr,
@@ -512,6 +556,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.observe_sys_dispatch();
         let result = EffectHandler::handle(self.bindings, callee, arguments);
         self.record_dispatch(&result);
         if let Some(value) = result? {
@@ -526,6 +571,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.observe_sys_dispatch();
         let result = EffectHandler::handle_with_budget(
             self.bindings,
             callee,
@@ -546,6 +592,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.observe_sys_dispatch();
         let result = EffectHandler::handle_registered_with_budget(
             self.bindings,
             operation,
@@ -568,6 +615,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        self.observe_sys_dispatch();
         let result = EffectHandler::handle_registered_with_cancellation_and_budget(
             self.bindings,
             operation,
@@ -726,6 +774,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
+            self.observe_sys_dispatch();
             let result = Ovb2EffectHandler::handle(self.bindings, callee, arguments);
             self.record_dispatch(&result);
             return result;
@@ -751,6 +800,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
+            self.observe_sys_dispatch();
             let result = Ovb2EffectHandler::handle_with_budget(
                 self.bindings,
                 callee,
@@ -788,6 +838,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if operation == "sys.blob.capture_file" {
+            self.observe_sys_dispatch();
             let result = Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
                 self.bindings,
                 operation,
