@@ -5,6 +5,14 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+
+### Breaking / API
+- `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
+- `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
+- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so REPL and sys-host bindings no longer declare `None`; `declared_effects` takes that boolean.
+- `ControlledEffectToken` is a proof a declaration was made, not a verification; trust rests on callers declaring truthfully.
+
+### Fixes
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
   only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
