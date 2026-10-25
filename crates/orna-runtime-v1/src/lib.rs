@@ -2676,9 +2676,9 @@ enum WriterAuthority {
     /// recorded owner is never presumed departed.
     #[cfg(test)]
     Unmanaged,
-    /// Another live runtime holds the worktree's owner lock. This handle may
-    /// re-acquire a lease its own owner already holds, but it can neither
-    /// create the lease nor fence its holder.
+    /// Another live runtime holds the worktree's owner lock. This handle is a
+    /// secondary participant: it may neither read, acquire, create nor fence
+    /// the writer lease, nor admit requests under it (ORNA-TURSO-005).
     Secondary,
     /// This handle holds the worktree's runtime owner lock under `lock_id`.
     /// Every lease it creates, re-acquires or takes over is bound to that
@@ -4866,7 +4866,7 @@ impl RuntimeState {
             },
             // A second live runtime in the same worktree opens as a secondary
             // participant instead of refusing every verb that needs the
-            // runtime. It cannot create the writer lease or fence its holder,
+            // runtime. It cannot read, acquire, create or fence the writer lease,
             // and the reclamation of departed owners' pins stays with the
             // owner that holds the lock.
             Err(RepositoryError::RepositoryBusy) => WriterAuthority::Secondary,
@@ -5215,6 +5215,7 @@ impl RuntimeState {
         if owner.epoch == 0 {
             return Err(RuntimeError::InvalidIdentity);
         }
+        self.require_lease_authority()?;
         validate_observation_text(&registration.function)?;
         if let Some(source) = &registration.source_identity {
             validate_observation_text(source)?;
@@ -5310,6 +5311,7 @@ impl RuntimeState {
         validate_request_identity(registration.request)?;
         validate_id(registration.invocation_id)?;
         validate_writer_lease(owner)?;
+        self.require_lease_authority()?;
         validate_observation_text(&registration.function)?;
         if let Some(source) = &registration.source_identity {
             validate_observation_text(source)?;
@@ -5495,6 +5497,7 @@ impl RuntimeState {
         writer: Option<WriterLease>,
         registration: StreamObservationRegistration,
     ) -> Result<StreamObservation, RuntimeError> {
+        self.require_lease_authority()?;
         validate_observation_text(&registration.producer)?;
         if let Some(consumer) = &registration.consumer {
             validate_observation_text(consumer)?;
@@ -10486,9 +10489,12 @@ impl RuntimeState {
     /// (ORNA-TASK-003, REQUEST-1 step 5). The replacement is therefore
     /// admitted only after recovery. A different owner bound to this
     /// handle's own lock is live and is refused with `LeaseHeld`, as is every
-    /// different owner seen by a handle without the lock.
+    /// different owner seen by a handle without the lock. A secondary handle
+    /// refuses every lease operation, including its own owner's re-acquire
+    /// (ORNA-TURSO-005).
     pub async fn acquire_lease(&self, owner_id: [u8; 16]) -> Result<WriterLease, RuntimeError> {
         validate_id(owner_id)?;
+        self.require_lease_authority()?;
         let lock_id = self.writer_authority.lock_id();
         let tx = self
             .connection
@@ -10497,9 +10503,6 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         let lease = match bound_writer_lease_tx(&tx).await? {
             None => {
-                if matches!(self.writer_authority, WriterAuthority::Secondary) {
-                    return Err(RuntimeError::LeaseHeld);
-                }
                 tx.execute(
                     "INSERT INTO writer_lease (singleton, owner_id, epoch, lock_owner_id)
                      VALUES (1, ?1, 1, ?2)",
@@ -10543,12 +10546,15 @@ impl RuntimeState {
     }
 
     /// Reads the current writer lease without changing runtime state.
+    /// A secondary handle is refused with `LeaseHeld`: only the owner reads the
+    /// lease, so a second participant cannot obtain a bearer lease.
     ///
     /// This read does not establish that the owner is abandoned. The caller
     /// must supply that liveness proof to [`Self::takeover_lease`], whose
     /// owner-and-epoch compare-and-swap closes the race with a concurrent
     /// takeover.
     pub async fn current_lease(&self) -> Result<Option<WriterLease>, RuntimeError> {
+        self.require_lease_authority()?;
         let mut rows = self
             .connection
             .query(
@@ -10590,6 +10596,7 @@ impl RuntimeState {
     ) -> Result<WriterLease, RuntimeError> {
         validate_id(abandoned.owner_id)?;
         validate_id(replacement)?;
+        self.require_lease_authority()?;
         if abandoned.epoch == 0 {
             return Err(RuntimeError::InvalidIdentity);
         }
@@ -10871,6 +10878,7 @@ impl RuntimeState {
     ) -> Result<WriterLease, RuntimeError> {
         validate_id(abandoned)?;
         validate_id(replacement)?;
+        self.require_lease_authority()?;
         let expected = self.current_lease().await?;
         let Some(expected) = expected.filter(|lease| lease.owner_id == abandoned) else {
             return Err(RuntimeError::OwnerLost);
@@ -12520,9 +12528,7 @@ impl RuntimeState {
         // ORNA-TURSO-005: a handle that does not own the worktree lock must
         // coordinate with the owner or fail. A reservation is a durable write,
         // so a secondary handle is refused before it can insert a row.
-        if matches!(self.writer_authority, WriterAuthority::Secondary) {
-            return Err(RuntimeError::LeaseHeld);
-        }
+        self.require_lease_authority()?;
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -13506,6 +13512,7 @@ impl RuntimeState {
         next: RequestState,
         terminal_outcome: Option<TerminalOutcome>,
     ) -> Result<RequestStatus, RuntimeError> {
+        self.require_lease_authority()?;
         validate_request_identity(identity)?;
         debug_assert_eq!(next.is_terminal(), terminal_outcome.is_some());
         let tx = self
@@ -14930,6 +14937,16 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Refuses a secondary handle before it touches the writer lease. Only the
+    /// owner-lock holder coordinates lease transitions; any other local writer
+    /// fails rather than reopening the writable state (ORNA-TURSO-005).
+    fn require_lease_authority(&self) -> Result<(), RuntimeError> {
+        if matches!(self.writer_authority, WriterAuthority::Secondary) {
+            return Err(RuntimeError::LeaseHeld);
+        }
+        Ok(())
+    }
+
     async fn require_owner(&self, tx: &Connection, lease: WriterLease) -> Result<(), RuntimeError> {
         self.require_current_owner(tx, lease).await?;
         // A takeover with no durable Running request has nothing to recover.
@@ -14997,6 +15014,7 @@ impl RuntimeState {
         tx: &Connection,
         lease: WriterLease,
     ) -> Result<(), RuntimeError> {
+        self.require_lease_authority()?;
         let mut rows = tx
             .query(
                 "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
@@ -22406,6 +22424,27 @@ mod tests {
                 repository_id: id(2),
             },
             digest(3),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Opens a same-worktree handle outside the owner lock. Only for tests that
+    /// exercise the database compare-and-swap between handles; production
+    /// second local writers are secondary and fail closed (ORNA-TURSO-005).
+    async fn open_unmanaged_state(repo: &Repository) -> RuntimeState {
+        let identity = RuntimeIdentity {
+            database_id: id(1),
+            repository_id: id(2),
+        };
+        let graph_repository_id = current_graph_repository_id(repo, identity.database_id).unwrap();
+        RuntimeState::open_path_with_graph_repository_id(
+            &repo.runtime_paths().state_db(),
+            identity,
+            digest(3),
+            Some(graph_repository_id),
+            Some(repo.runtime_paths().compact_runtime_receipt_public_key()),
+            WriterAuthority::Unmanaged,
         )
         .await
         .unwrap()
@@ -36493,7 +36532,7 @@ mod tests {
             .expect("worker runtime");
         runtime.block_on(async move {
             let repository = Repository::discover(worktree).expect("worker repository");
-            let state = open_state(&repository).await;
+            let state = open_unmanaged_state(&repository).await;
             let writer = state.acquire_lease(id(4)).await.expect("worker writer");
             let capture = state.capture().await.expect("worker capture");
             state
@@ -48471,6 +48510,89 @@ mod tests {
         assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
     }
 
+    fn secondary_observed_registration(identity: RequestIdentity, invocation: u8) -> RunObservationRegistration {
+        RunObservationRegistration {
+            request: identity,
+            consumer_identity: stream_delivery("secondary", "admission").consumer,
+            function: "pkg.secondary".into(),
+            source_identity: None,
+            invocation_id: id(invocation),
+        }
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_begin_observed_requests_with_an_owner_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(170)).await.unwrap();
+        let identity = request(171, 172);
+        let fingerprint = digest(173);
+        assert_eq!(
+            secondary
+                .begin_observed_request(secondary_observed_registration(identity, 174), fingerprint, lease)
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+        let (_, capability) = owner
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        assert_eq!(
+            secondary
+                .begin_observed_request_with_admission(
+                    secondary_observed_registration(identity, 174),
+                    fingerprint,
+                    lease,
+                    capability.expect("owner-bound admission capability"),
+                )
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            owner
+                .request_status_for_identity(identity)
+                .await
+                .unwrap()
+                .map(|status| status.state),
+            Some(RequestState::Reserved)
+        );
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_take_over_or_recover_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(180)).await.unwrap();
+        assert_eq!(
+            secondary.takeover_lease(lease, id(181)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            secondary.recover_abandoned(id(180), id(181)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(owner.current_lease().await.unwrap(), Some(lease));
+    }
+
+    #[tokio::test]
+    async fn secondary_handle_cannot_read_or_reacquire_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let lease = owner.acquire_lease(id(190)).await.unwrap();
+        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.acquire_lease(id(190)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(owner.acquire_lease(id(190)).await.unwrap(), lease);
+    }
+
     #[tokio::test]
     async fn stale_capture_and_competing_owner_are_distinct() {
         let (_temp, repo) = repository();
@@ -49649,11 +49771,16 @@ mod tests {
             .await
             .unwrap();
 
-        let other = open_state(&repo).await;
+        let other = open_unmanaged_state(&repo).await;
         let replacement = other.takeover_lease(old, id(145)).await.unwrap();
+        let secondary = open_state(&repo).await;
+        assert_eq!(
+            secondary.reserve_request(request(146, 147), digest(148)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(
             other.reserve_request(request(146, 147), digest(148)).await,
-            Err(RuntimeError::LeaseHeld)
+            Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
             state.reserve_request(request(146, 147), digest(148)).await,
@@ -49796,8 +49923,8 @@ mod tests {
             .await
             .unwrap();
 
-        let first = open_state(&repo).await;
-        let second = open_state(&repo).await;
+        let first = open_unmanaged_state(&repo).await;
+        let second = open_unmanaged_state(&repo).await;
         let first_candidate = id(165);
         let second_candidate = id(166);
         let (first_takeover, second_takeover) = tokio::join!(
@@ -49828,9 +49955,14 @@ mod tests {
 
         assert_eq!(first.current_lease().await.unwrap(), Some(winner));
         assert_eq!(winner.epoch, abandoned.epoch + 1);
+        let secondary = open_state(&repo).await;
+        assert_eq!(
+            secondary.reserve_request(request(167, 168), digest(169)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(
             second.reserve_request(request(167, 168), digest(169)).await,
-            Err(RuntimeError::LeaseHeld)
+            Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
             state.reserve_request(request(167, 168), digest(169)).await,
@@ -49881,6 +50013,36 @@ mod tests {
                 .state,
             RequestState::Reserved
         );
+    }
+
+    #[tokio::test]
+    async fn stale_owner_completion_is_fenced_after_cross_connection_takeover() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let abandoned = state.acquire_lease(id(176)).await.unwrap();
+        let (identity, fingerprint, _) =
+            begin_continuable_request(&state, abandoned, 177, 178, 179).await;
+        let successor = open_unmanaged_state(&repo).await;
+        let replacement = successor.takeover_lease(abandoned, id(180)).await.unwrap();
+
+        assert_eq!(
+            state
+                .complete_observed_request_with_owner(identity, fingerprint, abandoned, outcome(181))
+                .await,
+            Err(RuntimeError::OwnerLost)
+        );
+        let recovered = successor
+            .recover_running_request(
+                identity,
+                fingerprint,
+                RequestOwner::from(abandoned),
+                replacement,
+                outcome(182),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(state.current_lease().await.unwrap(), Some(replacement));
     }
 
     #[tokio::test]
