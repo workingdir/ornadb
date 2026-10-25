@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::future::Future;
 
 use super::{
-    CatalogueAdmission, FaultInjector, RunningTableRequestContinuation, RuntimeError, RuntimeState,
-    RuntimeTableActivationSnapshot, RuntimeTableIdentity, TableMutation, TerminalOutcome,
-    WriterLease, validate_mutation_identities,
+    ActivationEffectReport, CatalogueAdmission, FaultInjector, RunningTableRequestContinuation,
+    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, TableMutation,
+    TerminalOutcome, WriterLease, validate_mutation_identities,
 };
 
 tokio::task_local! {
@@ -94,6 +94,7 @@ pub struct ActivationWork<T> {
     next_digest: [u8; 32],
     result: T,
     catalogue_admission: Option<CatalogueAdmission>,
+    effects: ActivationEffectReport,
 }
 
 impl<T> ActivationWork<T> {
@@ -104,6 +105,7 @@ impl<T> ActivationWork<T> {
             next_digest,
             result,
             catalogue_admission: None,
+            effects: ActivationEffectReport::ExternalPossible,
         }
     }
 
@@ -113,6 +115,16 @@ impl<T> ActivationWork<T> {
     /// writes and next capture, or none of them become visible.
     pub fn with_catalogue_admission(mut self, admission: CatalogueAdmission) -> Self {
         self.catalogue_admission = Some(admission);
+        self
+    }
+
+    /// Declares the effect report the commit boundary records for this work.
+    /// Callers declare the activation's effect set with
+    /// [`ActivationEffectReport::declare`]. Only a declaration of no external
+    /// effects yields the Orna-controlled token; every other activation keeps
+    /// the conservative `ExternalPossible` default from [`ActivationWork::new`].
+    pub fn with_effects(mut self, effects: ActivationEffectReport) -> Self {
+        self.effects = effects;
         self
     }
 
@@ -293,6 +305,7 @@ where
                 next_digest,
                 result,
                 catalogue_admission,
+                effects,
             } = work;
             // A resolved source catalogue must commit through the validated
             // catalogue request boundary, which checks its predecessor capture
@@ -314,6 +327,7 @@ where
                     next_digest,
                     outcome,
                     faults,
+                    effects,
                 )
                 .await
                 .map_err(ActivationError::Runtime)?;
@@ -359,6 +373,7 @@ where
         next_digest,
         result,
         catalogue_admission,
+        effects: _,
     } = work;
     validate_mutation_identities(&mutations, snapshot.table_object_ids())
         .map_err(ActivationError::Runtime)?;

@@ -57,9 +57,14 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        let declared = crate::declared_effects(EffectHandler::sys_host_context(&effects).is_some());
         let activation = effects
             .mutations
-            .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
+            .into_staged_activation(
+                value.clone().unwrap_or_else(CanonicalValue::unit),
+                None,
+                declared,
+            )?;
         let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)?;
         Ok((value, successor, activation))
     }
@@ -74,8 +79,14 @@ fn normalize_repl_mutations(
     committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
-    let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
-        activation.into_parts();
+    let (
+        value,
+        mutations,
+        snapshot_generation,
+        source_row_schemas,
+        protected_field_pins,
+        effects,
+    ) = activation.into_parts();
     // The stored tuple this activation has left at each key so far; `None`
     // marks a removed row, which then shadows the committed one.
     let mut written = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
@@ -146,6 +157,7 @@ fn normalize_repl_mutations(
         snapshot_generation,
         source_row_schemas,
         protected_field_pins,
+        effects,
     })
 }
 
