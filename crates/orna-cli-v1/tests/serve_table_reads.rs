@@ -20,6 +20,7 @@ const COUNT_SOURCE: &str =
     "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note | count();\n";
 const WRITE_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note.insert({ id: \"write\", body: \"refused\" });\n";
 const MIXED_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub table Other(id: Str) { body: Str, }\n\npub fn serve() = Note | count();\n";
+const SCHEMA_CHANGE_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub table Other(id: Str) { body: Str, }\n\npub fn serve() = (Note | count()) + 10;\n";
 const COUNT_PLUS_TEN_SOURCE: &str =
     "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = (Note | count()) + 10;\n";
 
@@ -220,6 +221,8 @@ fn committed_published_rows_are_counted_at_root() {
 fn serve_that_writes_a_table_is_refused_without_committing() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, WRITE_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
@@ -229,8 +232,8 @@ fn serve_that_writes_a_table_is_refused_without_committing() {
     let counted = orna_repl(&root, "main.Note | count()");
     assert_success(&counted, "REPL count");
     assert!(
-        transcript(&counted).contains("0 : Int"),
-        "the refused write leaves no committed or CWD row\n{}",
+        transcript(&counted).contains("1 : Int"),
+        "the refused write leaves the committed row unchanged\n{}",
         transcript(&counted)
     );
 }
@@ -266,7 +269,57 @@ fn head_commit_changes_are_visible_to_the_next_request() {
     git(&root, &["commit", "-m", "Add ten"]);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 200, "body: {body}");
-    assert_eq!(body.trim(), "11 : Int", "each request reads the current HEAD");
+    assert_eq!(
+        body.trim(),
+        "11 : Int",
+        "each request reads the current HEAD"
+    );
+}
+
+#[test]
+fn schema_changing_head_commit_is_admitted_at_the_next_request() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int");
+    // The commit adds a table and changes the served expression, so the next
+    // request must admit the committed main.orna and its identity manifest.
+    fs::write(root.join("main.orna"), SCHEMA_CHANGE_SOURCE).expect("write main.orna");
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    let committed = orna(&root, &["commit", "-m", "Add Other table"]);
+    assert_success(&committed, "orna commit");
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(
+        body.trim(),
+        "11 : Int",
+        "the schema-changing commit is served"
+    );
+}
+
+#[test]
+fn data_only_commit_is_visible_to_the_next_server() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    let (server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int");
+    // The serving process owns the runtime, so a REPL write cannot run while it
+    // is up. The data commit happens after it exits; the next server reads HEAD.
+    drop(server);
+    insert_note(&root, "two", "second");
+    publish(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "2 : Int", "the data-only commit is served");
 }
 
 #[test]
