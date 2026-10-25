@@ -4991,6 +4991,10 @@ impl Repository {
                 self.write_publication_journal_locked(&journal)?;
             }
             if journal.stage() == PublicationJournalStage::IndexReconciled {
+                // The store worktree was reconciled before IndexReconciled. An edit to a store path made since
+                // then differs from the recorded candidate state and must be preserved as a conflict, not
+                // overwritten by materialisation (recovery table row 6; ORNA-PUB-010).
+                self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
                 self.recover_publication_worktree_locked(&mut journal)?;
             }
             drop(git_lock);
