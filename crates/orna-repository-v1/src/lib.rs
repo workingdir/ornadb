@@ -2577,6 +2577,56 @@ impl Repository {
         self.commit_optional("HEAD^{commit}")
     }
 
+    /// The content of the single index entry for `path`, or `None` when the
+    /// path is not in the index. A conflicted path (several stages) is an error.
+    pub fn index_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"]).arg(path);
+        let output = self.run(command)?.stdout;
+        let records = output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => {
+                let header = record
+                    .split(|byte| *byte == b'\t')
+                    .next()
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = header
+                    .split(|byte| *byte == b' ')
+                    .nth(1)
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+                Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+            }
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// The content of `path` in `HEAD`, or `None` when `HEAD` has no such path
+    /// or the repository has no commit yet.
+    pub fn head_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        if self.head()?.is_none() {
+            return Ok(None);
+        }
+        let output = self.git_bytes(["ls-tree", "-z", "HEAD", "--", path])?;
+        let Some(record) = output.split(|byte| *byte == 0).find(|record| !record.is_empty()) else {
+            return Ok(None);
+        };
+        let header = record
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = header
+            .split(|byte| *byte == b' ')
+            .nth(2)
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+    }
+
     /// Lists the newest commits reachable from `HEAD`, newest first.
     ///
     /// The count and output size are bounded before Git output is accumulated.
@@ -3592,6 +3642,17 @@ impl Repository {
             let skipped = skipped_paths.contains(relative);
             let is_payload = Self::is_store_payload_blob_path(relative);
             if unchanged && !skipped && !is_payload {
+                // Node metadata is not rewritten here, but an edit to it is still an external change
+                // and must be refused rather than left in place (ORNA-PUB-010).
+                let path = ManagedPath::new(relative)?;
+                let (target, _) = self.store_reconciliation_paths(&path, candidate)?;
+                if let Some(current) = self.read_managed_file(&target)? {
+                    let object = new_object.ok_or(RepositoryError::GitOperationFailed)?;
+                    let next = self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?;
+                    if current != next {
+                        return Err(RepositoryError::ManagedContentConflict);
+                    }
+                }
                 continue;
             }
 
@@ -3614,18 +3675,15 @@ impl Repository {
             // clearing those bits so reconciliation does not invent deletions.
             if unchanged {
                 let displaced = self.read_managed_file(&quarantine)?;
+                let next = new_object
+                    .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                    .transpose()?
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                if current.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
                 if current.is_none() || displaced.is_some() {
-                    let next = new_object
-                        .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
-                        .transpose()?
-                        .ok_or(RepositoryError::GitOperationFailed)?;
-                    if displaced
-                        .as_deref()
-                        .is_some_and(|bytes| bytes != next.as_slice())
-                        || current
-                            .as_deref()
-                            .is_some_and(|bytes| bytes != next.as_slice())
-                    {
+                    if displaced.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
                         return Err(RepositoryError::ManagedContentConflict);
                     }
                     if install {
@@ -4953,8 +5011,10 @@ impl Repository {
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
             }
+            let mut store_verified = false;
             if journal.stage() == PublicationJournalStage::RefAdvanced {
                 self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                store_verified = true;
                 let current = IndexGeneration {
                     head: self.head()?,
                     tree: self.index_tree_from_file(&index)?,
@@ -4991,6 +5051,12 @@ impl Repository {
                 self.write_publication_journal_locked(&journal)?;
             }
             if journal.stage() == PublicationJournalStage::IndexReconciled {
+                // The store worktree was reconciled before IndexReconciled. An edit to a store path made since
+                // then differs from the recorded candidate state and must be preserved as a conflict, not
+                // overwritten by materialisation (recovery table row 6; ORNA-PUB-010).
+                if !store_verified {
+                    self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                }
                 self.recover_publication_worktree_locked(&mut journal)?;
             }
             drop(git_lock);
@@ -12790,6 +12856,34 @@ mod tests {
             Err(RepositoryError::StaleReviewedCandidate)
         ));
         assert_eq!(repository.head().unwrap(), head_before);
+    }
+
+    /// ORNA-PUB-010: an unchanged `.orna/store/data` node leaf that was edited in the worktree
+    /// is an external change and must refuse the reconcile rather than be left in place.
+    #[test]
+    fn reconcile_refuses_edited_unchanged_store_data_leaf() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"committed\n").unwrap();
+        git(root.path(), &["add", ".orna/store/data"]);
+        git(root.path(), &["commit", "-m", "base"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let expected = repository.index_generation().unwrap();
+        let candidate = super::PrivateCommit {
+            tree: expected.tree().unwrap().clone(),
+            commit: expected.head().unwrap().clone(),
+        };
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(root.path().join(".orna/store/data")).unwrap(), b"edited\n");
     }
 
      #[test]
