@@ -59,8 +59,9 @@ use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
-    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, StagedTableActivation, TableObjectId, TerminalOutcome, WriterLease,
+    RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
+    RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation,
+    TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2495,22 +2496,40 @@ fn unavailable_table_identity(detail: String) -> Diagnostic {
     )
 }
 
+/// Committed `HEAD` rows of every admitted table, pinned to the published
+/// generation they were read at. The rows are stored tuples in the runtime
+/// keyspace: the runtime merges them with the live tail, so they stay in the
+/// stored form. `storage_orders` names the stored fields each table's tuples
+/// list, which is what converts the merged rows to evaluator records.
+struct PinnedCommittedTables {
+    rows: PinnedCommittedRows,
+    storage_orders: BTreeMap<String, Vec<String>>,
+}
+
 /// Evaluates an admitted module over the activation at `state`: the snapshot
 /// holds the committed rows of every admitted table, and the staged result
 /// carries only the mutations this activation produced. `publication_rows`
 /// supplies the durable publication snapshot when the module scans `sys`
 /// relations.
+///
+/// This is the single merge point where stored tuples become evaluator records:
+/// the runtime merges the committed base with the live tail in stored form, and
+/// the admitted schemas then receive evaluator form only.
 fn evaluate_over_committed_tables(
     runtime: &tokio::runtime::Runtime,
     state: &RuntimeState,
     authority: &ApplicationAuthority,
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
-    committed: PinnedCommittedRows,
+    committed: PinnedCommittedTables,
     publication_rows: Option<RuntimePublicationMetadataRows>,
 ) -> Result<(RuntimeTableActivationSnapshot, StagedActivation), Diagnostic> {
+    let PinnedCommittedTables {
+        rows,
+        storage_orders,
+    } = committed;
     let snapshot = runtime
-        .block_on(state.begin_admitted_table_activation_over_committed(tables, committed))
+        .block_on(state.begin_admitted_table_activation_over_committed(tables, rows))
         .map_err(|_| {
             Diagnostic::target(
                 "E2200",
@@ -2518,11 +2537,13 @@ fn evaluate_over_committed_tables(
                 "retry the invocation after checking local runtime state",
             )
         })?;
+    let evaluator_rows = evaluator_snapshot_rows(&snapshot, admitted, &storage_orders)?;
     let staged = authority
-        .evaluate_staged_with_table_snapshot(
+        .evaluate_staged_with_table_snapshot_rows(
             admitted,
             &Environment::new(),
             &snapshot,
+            evaluator_rows,
             publication_rows,
         )
         .map_err(|error| {
@@ -2536,10 +2557,32 @@ fn evaluate_over_committed_tables(
     Ok((snapshot, staged))
 }
 
-/// Builds the committed rows of every admitted table at `commit`, pinned to
-/// the runtime's published generation. The rows are the evaluator form the
-/// admitted schemas expect (the conversion the REPL uses), so an invocation
-/// reads committed field values rather than raw stored tuples.
+/// Converts every admitted table's merged stored rows in `snapshot` to
+/// evaluator records, keyed by table name.
+fn evaluator_snapshot_rows(
+    snapshot: &RuntimeTableActivationSnapshot,
+    admitted: &AdmittedApplication,
+    storage_orders: &BTreeMap<String, Vec<String>>,
+) -> Result<RuntimeTableRows, Diagnostic> {
+    let mut rows = BTreeMap::new();
+    for (name, table) in admitted.table_schemas() {
+        let storage_order = storage_orders
+            .get(name)
+            .ok_or_else(committed_rows_read_error)?;
+        let stored = snapshot
+            .table_rows()
+            .get(name)
+            .map_or(&[][..], Vec::as_slice);
+        let table_rows =
+            orna_project_v1::evaluator_rows_from_stored(table.schema(), storage_order, stored)
+                .map_err(|_| committed_rows_read_error())?;
+        rows.insert(name.clone(), table_rows);
+    }
+    Ok(rows)
+}
+
+/// Reads the committed rows of every admitted table at `commit` and pins them
+/// to the runtime's published generation.
 fn committed_invocation_rows(
     repository: &orna_repository_v1::Repository,
     commit: &orna_repository_v1::GitCommitRef,
@@ -2547,17 +2590,64 @@ fn committed_invocation_rows(
     state: &RuntimeState,
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
-) -> Result<PinnedCommittedRows, Diagnostic> {
-    let read_error = || {
-        Diagnostic::target(
-            "E2200",
-            "committed table rows could not be read",
-            "retry the invocation after checking local runtime state",
-        )
-    };
+) -> Result<PinnedCommittedTables, Diagnostic> {
+    let (rows, storage_orders) = committed_rows_at(repository, commit, admitted, tables).map_err(
+        |error| match error {
+            CommittedRowsError::Limit => Diagnostic::target(
+                "E2200",
+                "committed table rows exceed the read bound",
+                "keep each table within the evaluator collection limit and the source byte limit",
+            ),
+            CommittedRowsError::Unavailable => committed_rows_read_error(),
+        },
+    )?;
+    pin_committed_tables(runtime, state, rows, storage_orders)
+        .map_err(|_| committed_rows_read_error())
+}
+
+/// Pins committed rows read at a commit to the runtime's published generation.
+fn pin_committed_tables(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    rows: RuntimeTableRows,
+    storage_orders: BTreeMap<String, Vec<String>>,
+) -> Result<PinnedCommittedTables, RuntimeError> {
+    let pin = runtime.block_on(state.published_pin())?;
+    Ok(PinnedCommittedTables {
+        rows: PinnedCommittedRows::new(pin, rows)?,
+        storage_orders,
+    })
+}
+
+fn committed_rows_read_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2200",
+        "committed table rows could not be read",
+        "retry the invocation after checking local runtime state",
+    )
+}
+
+/// Why the committed rows of the admitted tables could not be returned.
+enum CommittedRowsError {
+    /// The committed base could not be read or does not match the admitted schemas.
+    Unavailable,
+    /// The committed base holds more rows or bytes than the committed read bound allows.
+    Limit,
+}
+
+/// The stored tuples of every admitted table at `commit`, read from the
+/// committed format-3 base, with the stored field order each table lists.
+/// Shared by the one-shot invocation and `serve`. The read stops at the first
+/// row past `orna_application_v1::committed_read_limits`.
+fn committed_rows_at(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), CommittedRowsError> {
     let format = repository
         .open_pinned_format_context(commit.as_str())
-        .map_err(|_| read_error())?;
+        .map_err(|_| CommittedRowsError::Unavailable)?;
     let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
         .table_schemas()
         .iter()
@@ -2567,20 +2657,28 @@ fn committed_invocation_rows(
         .iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
         .collect();
-    let committed =
-        orna_project_v1::committed_tables(repository, &format, commit, &schemas, &table_ids)
-            .map_err(|_| read_error())?;
+    let mut committed = orna_project_v1::committed_tables(
+        repository,
+        &format,
+        commit,
+        &schemas,
+        &table_ids,
+        orna_application_v1::ApplicationAuthority::committed_read_limits(),
+    )
+    .map_err(|error| match error {
+        orna_project_v1::CommittedReadError::Limit { .. } => CommittedRowsError::Limit,
+        orna_project_v1::CommittedReadError::Storage(_) => CommittedRowsError::Unavailable,
+    })?;
     let mut rows = BTreeMap::new();
-    for (name, schema) in &schemas {
-        let table = committed.get(name).ok_or_else(read_error)?;
-        let table_rows =
-            orna_project_v1::evaluator_rows(table, schema).map_err(|_| read_error())?;
-        rows.insert(name.clone(), table_rows);
+    let mut storage_orders = BTreeMap::new();
+    for name in schemas.keys() {
+        let table = committed
+            .remove(name)
+            .ok_or(CommittedRowsError::Unavailable)?;
+        rows.insert(name.clone(), table.rows);
+        storage_orders.insert(name.clone(), table.storage_order);
     }
-    let pin = runtime
-        .block_on(state.published_pin())
-        .map_err(|_| read_error())?;
-    PinnedCommittedRows::new(pin, rows).map_err(|_| read_error())
+    Ok((rows, storage_orders))
 }
 
 /// One-shot `run` of a single admitted module that declares tables and reads
