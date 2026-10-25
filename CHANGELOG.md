@@ -13,6 +13,7 @@ been published.
 
 - Orna's private commits (the staged identity carrier, the publication candidate, and the captured index candidate) now set a fixed internal author and committer identity through the environment, so they no longer depend on the ambient `user.name`/`user.email`. A machine or CI runner without a git identity can build them (bead ornadb-36nj, merged PR 9358). Reviewed user commits are unchanged and still use the configured identity.
 - The `replacement_runtime_fences` embedded test (ORNA-TURSO-005/006) now expects `LeaseHeld` for the Secondary handle that does not own the worktree lock, and proves TURSO-006 fencing on the replacement owner, which refuses the stale owner's lease with `OwnerLost` (ornadb-olxr).
+- The `mv_restores_the_source_when_staging_the_inventory_fails` test checks that the source was rewritten and restored by comparing its change time, not its inode number. Inode numbers are reused on tmpfs, so the inode comparison failed on `/dev/shm` (ornadb-srco).
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
