@@ -1184,10 +1184,12 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
 const LEGACY_BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
 
 /// Gate F (ACCEPTANCE.md:63-68): a complete copy of a workspace that holds a
-/// legacy format-1 snapshot and a migrated format-3 snapshot exports both
-/// members, and each reconstructs offline with its recorded format intact.
+/// legacy format-1 snapshot and a format-3 snapshot exports both members, and
+/// each reconstructs offline with its recorded format intact. The format-3
+/// member is a fresh init; the migrated-member leg (`migrate copy` publication)
+/// is blocked on ornadb-5il1.192 and is not covered here.
 #[test]
-fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
+fn export_restores_a_legacy_and_a_format3_snapshot_offline() {
     let parent = TempDir::new().unwrap();
     let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
     let source = parent.path().join("source");
@@ -1214,8 +1216,10 @@ fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
         .trim()
         .to_owned();
 
-    // The migrated member is a format-3 snapshot whose objects are fetched into
-    // the same repository, so both snapshots live in one archive.
+    // The format-3 member is a fresh init whose objects are fetched into the
+    // same repository, so both snapshots live in one archive. It is not a
+    // migrated workspace: no CLI step publishes a migrate-copy candidate yet
+    // (ornadb-5il1.192).
     let (migrated_root, _format3, _relation_id) = empty_format3_repository();
     let migrated_commit = String::from_utf8(git_output(
         migrated_root.path(),
@@ -1306,16 +1310,10 @@ fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
     }
 }
 
-/// ORNA-GIT-007 (`24-git-history.md:19`): a full mirror of the superproject is
-/// not a complete submodule copy, so a snapshot whose pinned gitlink's
-/// dependency repository is unavailable must not export as offline-complete.
-/// The fixture HEAD pins `vendor/stdlib` with no `.gitmodules` origin and no
-/// dependency repository; its export is refused before any copy is written.
-#[test]
-fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
-    let parent = TempDir::new().unwrap();
+/// Clones the committed legacy fixture with its original remote removed.
+fn clone_legacy_fixture(parent: &Path) -> std::path::PathBuf {
     let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
-    let source = parent.path().join("source");
+    let source = parent.join("source");
     let cloned = Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .arg("clone")
@@ -1326,6 +1324,18 @@ fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
         .unwrap();
     assert!(cloned.status.success(), "clone legacy bundle");
     git(&source, &["remote", "remove", "origin"]);
+    source
+}
+
+/// ORNA-GIT-007 (`24-git-history.md:19`): a full mirror of the superproject is
+/// not a complete submodule copy, so a gitlink whose dependency cannot be
+/// accounted for must not export as offline-complete. The fixture HEAD pins
+/// `vendor/stdlib` with no `.gitmodules` origin; the export is refused with a
+/// typed missing-origin error before any archive is written.
+#[test]
+fn export_refuses_a_gitlink_without_a_recorded_origin() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_legacy_fixture(parent.path());
     let head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -1339,12 +1349,80 @@ fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
     assert_eq!(
         exported.status.code(),
         Some(1),
-        "a gitlink without an available dependency repository is refused: {}",
+        "a gitlink without a recorded origin is refused: {}",
         stderr(&exported)
     );
     assert!(
-        stderr(&exported).contains("pinned dependency"),
-        "the refusal names the dependency: {}",
+        stderr(&exported).contains("has no recorded origin"),
+        "the refusal names the missing origin: {}",
+        stderr(&exported)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
+}
+
+/// ORNA-GIT-007 again: with the origin recorded in `.gitmodules`, a gitlink
+/// whose dependency repository is absent from this copy is still unavailable,
+/// so the export is refused as unavailable rather than offline-complete.
+#[test]
+fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_legacy_fixture(parent.path());
+    // The legacy member before the stdlib gitlink: a format record and no
+    // gitlinks, so the new commit adds only the dependency pin under test.
+    let base = String::from_utf8(git_output(&source, &["rev-parse", "HEAD~1"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(&source, &["checkout", "--quiet", "--detach", &base]);
+    std::fs::write(
+        source.join(".gitmodules"),
+        "[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = https://example.invalid/dep.git\n",
+    )
+    .unwrap();
+    git(&source, &["add", ".gitmodules"]);
+    git(
+        &source,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{base},vendor/dep"),
+        ],
+    );
+    git(
+        &source,
+        &[
+            "-c",
+            "user.name=orna-fixture",
+            "-c",
+            "user.email=orna-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "pin dependency without a local repository",
+        ],
+    );
+    let head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &["export", archive.to_str().unwrap(), "--at", &head],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(1),
+        "a gitlink with no dependency repository is refused: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains("A pinned dependency is unavailable"),
+        "the refusal names the unavailable dependency: {}",
         stderr(&exported)
     );
     assert!(!archive.exists(), "no archive is written on refusal");
