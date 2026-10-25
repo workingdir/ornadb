@@ -1,5 +1,9 @@
 # Compiler diagnostics plan
 
+> **Legacy plan.** This plan targets the legacy `orna-core` diagnostics
+> surface. It is not the current plan for `orna-cli-v1`; the diagnostic codes
+> and presenters in `crates/orna-cli-v1` are authoritative.
+
 ## Goal
 
 Give Orna compiler failures the same practical quality as Rust, SQLite, Turso, PostgreSQL, and Cargo:

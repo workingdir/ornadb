@@ -24,7 +24,7 @@ use orna_repository_v1::publication_crash_barrier;
 
 use super::*;
 
-const USAGE: &str = "usage: orna publish [--message MESSAGE]";
+const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
 
 fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
@@ -36,8 +36,9 @@ fn publish_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     )
 }
 
-/// Parses the optional `--message` value. Every other argument is refused, so
-/// a misspelled flag never publishes under an unintended message.
+/// Parses the optional `--message` value. Every other argument is a usage error
+/// (E1002) that names the offending word, so a misspelled flag never publishes
+/// under an unintended message.
 fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
     let mut message = None;
     let mut words = arguments.iter().map(String::as_str);
@@ -46,27 +47,32 @@ fn parse_options(arguments: &[String]) -> Result<String, Diagnostic> {
             "--message" => {
                 let value = words
                     .next()
-                    .ok_or_else(|| publish_error("--message needs a value", USAGE))?;
-                if value.is_empty() {
-                    return Err(publish_error("--message needs a value", USAGE));
-                }
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| usage_error("`--message` needs a value".to_owned()))?;
                 message = Some(value.to_owned());
             }
             flag if flag.starts_with("--") => {
-                return Err(publish_error(
-                    "Unknown publish flag",
-                    format!("got {flag:?}; accepted: --message"),
-                ));
+                return Err(usage_error(format!("unknown publish flag `{flag}`")));
             }
             extra => {
-                return Err(publish_error(
-                    "Publish takes no positional arguments",
-                    format!("unexpected {extra:?}; {USAGE}"),
-                ));
+                return Err(usage_error(format!(
+                    "publish takes no positional arguments; got `{extra}`"
+                )));
             }
         }
     }
     Ok(message.unwrap_or_else(|| DEFAULT_MESSAGE.to_owned()))
+}
+
+fn usage_error(title: String) -> Diagnostic {
+    Diagnostic {
+        code: "E1002",
+        title: std::borrow::Cow::Owned(title),
+        help: USAGE_HELP,
+        exit: Exit::Usage,
+        detail: None,
+        body: None,
+    }
 }
 
 /// Refuses a format-1/2 `HEAD` before recovery, runtime access or any freeze,
@@ -120,6 +126,18 @@ fn validate_candidate_source_rows(
             },
         ));
     }
+    // "A table publication generation is bound to its captured root and
+    // schema" (PUB-3 step 4): `orna commit` admits a table's relation, and
+    // publication never creates one. A row whose table has no relation in the
+    // captured store stops here with that remedy.
+    let committed_relations = repository
+        .committed_store_relations(head)
+        .map_err(|error| {
+            publish_error(
+                "format-3 committed store could not be read",
+                format!("{error}; the pending range was preserved"),
+            )
+        })?;
     let mut mutation_ids = std::collections::BTreeSet::new();
     for mutation in mutations {
         if !mutation_ids.insert(mutation.id()) {
@@ -134,6 +152,18 @@ fn validate_candidate_source_rows(
                 "the frozen mutation did not retain its admitted TableObjectId; the pending range was preserved",
             )
         })?;
+        if !committed_relations.contains(&table_id.bytes()) {
+            return Err(Diagnostic::target_with_detail(
+                "E2300",
+                "source row table has no relation in the committed store",
+                "stage the table's source and run `orna commit -m MESSAGE` to admit it, then retry `orna publish`",
+                format!(
+                    "table {:?} has object id {} but the committed .orna/store has no relation for it; the pending range was preserved",
+                    mutation.table(),
+                    orna_repository_v1::Uuid::from_bytes(table_id.bytes()).simple(),
+                ),
+            ));
+        }
         let schema = loader
             .resolve_committed_source_table_schema(repository, head, table_id)
             .map_err(|error| {
@@ -372,7 +402,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // two invocations from sharing one frozen range (ORNA-PUB-006).
     let mut intent_id = [0_u8; 16];
     getrandom::fill(&mut intent_id)
-        .map_err(|_| publish_error("publication intent could not be created", USAGE))?;
+        .map_err(|_| publish_error("publication intent could not be created", USAGE_HELP))?;
 
     let commit = runtime.block_on(async {
         let freeze = state
@@ -444,6 +474,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         };
         coordinator
             .publish_with_stage_hook(&repository, |stage| match stage {
+                orna_repository_v1::PublicationJournalStage::Prepared => {
+                    publication_crash_barrier("prepared")
+                }
                 orna_repository_v1::PublicationJournalStage::RefAdvanced => {
                     publication_crash_barrier("ref-cas")
                 }
@@ -468,7 +501,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             .map_err(|error| {
                 publish_error("published snapshot could not be read", format!("{error:?}"))
             })?
-            .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE))?;
+            .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE_HELP))?;
         Ok(Some((commit.as_str().to_owned(), counts)))
     })?;
 
@@ -506,6 +539,10 @@ const LEGACY_READ_ONLY_HELP: &str = orna_repository_v1::LegacyWriteRefused::REME
 /// journalled, but nothing in this build activates it.
 const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
 
+/// Remedy for a managed-path edit that recovery refused (ORNA-PUB-010). The edit
+/// stays on disk; the user either admits it or discards it, then retries.
+const MANAGED_EDIT_HELP: &str = "the edited bytes are retained on disk and were not overwritten (copy them elsewhere if you need them); keeping edits to orna-managed store paths is not supported; to discard the edit, run `git show HEAD:<path> > <path>` (`git checkout -- <path>` does not restore a skip-worktree store path), then retry `orna publish`";
+
 /// ORNA-PUB-012: names the read-only legacy format, states that nothing was
 /// written, and gives the remedy that fits the worktree's migration state.
 fn legacy_read_only_refusal(
@@ -538,8 +575,13 @@ pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage
     let detail = match error {
         E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
         E::ManagedWorktreeConflict => {
-            "a managed path was edited after capture; keep or discard that edit, then retry"
-                .to_owned()
+            return Diagnostic::target_with_detail(
+                "E2300",
+                title,
+                MANAGED_EDIT_HELP,
+                "a managed path was edited after capture; the edit is retained on disk and HEAD was not changed"
+                    .to_owned(),
+            );
         }
         E::RecoveryIndexConflict => {
             "index and worktree match neither recorded state; resolve the conflict before retrying"
@@ -624,6 +666,51 @@ mod tests {
                 ("warehouse.Event".to_owned(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn managed_edit_refusal_names_the_discard_remedy_only() {
+        let diagnostic = describe_storage_failure(
+            "pending publication could not be recovered",
+            &orna_storage_v1::Error::ManagedWorktreeConflict,
+        );
+        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.help, MANAGED_EDIT_HELP);
+        assert!(diagnostic.help.contains("not supported"));
+        assert!(diagnostic.help.contains("`git show HEAD:<path> > <path>`"));
+        assert!(!diagnostic.help.contains("git add"));
+        assert!(!diagnostic.help.contains("orna commit"));
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.contains("the edit is retained on disk and HEAD was not changed")
+        }));
+    }
+
+    /// Runs the MANAGED_EDIT_HELP discard sequence literally against a skip-worktree
+    /// store payload in a real Git repository: discard must restore HEAD bytes.
+    #[test]
+    fn managed_edit_help_discard_sequence_restores_head_on_skip_worktree_store_path() {
+        use std::process::Command;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let run = |script: &str| {
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            status.status.success()
+        };
+        let path = ".orna/store/data";
+        assert!(run("git init -q . && git config user.email t@t && git config user.name t"));
+        std::fs::create_dir_all(root.join(".orna/store")).unwrap();
+        std::fs::write(root.join(path), b"committed\n").unwrap();
+        assert!(run("git add -A && git commit -q -m base"));
+        assert!(run(&format!("git update-index --skip-worktree {path}")));
+
+        std::fs::write(root.join(path), b"discard me\n").unwrap();
+        assert!(run(&format!("git show HEAD:{path} > {path}")));
+        assert_eq!(std::fs::read(root.join(path)).unwrap(), b"committed\n");
     }
 
     #[test]

@@ -1,0 +1,1407 @@
+{
+  "scope": "Bounded EBNF syntax probe, not an Orna compiler. ASCII lexical recognisers; strings opaque; no interpolation, Unicode-profile, type/effect checking or evaluator.",
+  "count": 175,
+  "agree": 175,
+  "results": [
+    {
+      "path": "examples/valid/affine-max.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/affine-mean.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/affine-unit.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/assignment-statement.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/associated-display.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/automatic-failure-propagation.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-vs-information.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/calendar-bucket.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/case-record-and-block-arms.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/case.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/coalesce-precedence.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/codec-json.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/codec-orna.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/computed-and-defaulted-fields.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/computed-field.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/control-flow.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/cross-table-assertion.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/currency-locale-format.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/currency.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/cwd-head.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/decimal-division.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/default-and-computed-fields.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/dependency-query.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/duration-format.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/effectful-expression.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/empty-record-lambda.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/enum.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/executable-assertion.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/explicit-rekey.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/failure-natural-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/finite-stream.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/formatting-does-not-serialize.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/function-block.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/function-default.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/function-expression.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/function-values-and-pipelines.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/generic-protocol.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/historical-program.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/historical-query.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/imports.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/inference-first.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/key-default-allocated-once.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/lambda-empty-record.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/lambda.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/live-page-fallback.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/minimal-root.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/money-rate.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/money-serialization.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/nested-lambda.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/nominal-type-nested-impl.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/numeric-literal-context.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/page.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/parallel-function-values.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/parallel-streams.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/parenthesized-lambda-stage.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/pipe-first-argument.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/pipeline-precedence.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/pipeline.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/presentation-watch.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/programmable-watch-expression.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/question-coalesce-parenthesized.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/ranges.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/record-pattern-shorthand.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/recovery-pipeline.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/refined-type-assertions.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/row-body.orna",
+      "entrypoint": "row_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/secret-reference.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/stream-admin-repl.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-checkpoint.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-definition-file.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-file-history.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-run-history.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-storage.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/sys-table-query.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-assertions.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-automatic-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-composite-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-explicit-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-key-default.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/table-reference.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/transactional-scope.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/transparent-alias.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/unbounded-stream.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/unit-cross-database.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/unit-postfix.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/units.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/affine-addition.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/affine-sum.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/ambiguous-consumer.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/assert-effectful-table.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/assert-empty.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches ';' in the current parser context, at line 1 col 22\n\npub fn bad() { assert; }\n                     ^\nExpected one of: \n\t* FALSE\n\t* LESSTHAN\n\t* __ANON_13\n\t* __ANON_6\n\t* LPAR\n\t* INSTANT\n\t* CASE\n\t* __ANON_5\n\t* IF\n\t* FLOAT\n\t* TRUE\n\t* __ANON_15\n\t* INT\n\t* MINUS\n\t* DATE\n\t* PLUS\n\t* FOR\n\t* __ANON_7\n\t* __ANON_8\n\t* IN\n\t* DECIMAL\n\t* SELF\n\t* __ANON_16\n\t* __ANON_14\n\t* LBRACE\n\t* BANG\n\t* UNDERSCORE\n\t* MORETHAN\n\t* LOOP\n\t* WHILE\n\t* LSQB\n\t* NULL\n\t* STRING\n\t* IDENTIFIER\n"
+    },
+    {
+      "path": "examples/invalid/assert-missing-semicolon.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '}' in the current parser context, at line 1 col 43\n\nb fn bad(value: Int) { assert value > 0 }\n                                        ^\nExpected one of: \n\t* SLASH\n\t* PLUS\n\t* STAR\n\t* SEMICOLON\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_13\n\t* LPAR\n\t* __ANON_9\n\t* __ANON_10\n\t* VBAR\n\t* MINUS\n\t* __ANON_14\n\t* CIRCUMFLEX\n\t* DOT\n\t* __ANON_12\n\t* PERCENT\n"
+    },
+    {
+      "path": "examples/invalid/assert-owner-type-mismatch.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/assignment-expression.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '=' in the current parser context, at line 3 col 16\n\n    let y = (x = 1);\n               ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* LPAR\n\t* __ANON_6\n\t* __ANON_10\n\t* VBAR\n\t* DOT\n\t* __ANON_5\n\t* PERCENT\n\t* COMMA\n\t* MINUS\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* __ANON_8\n\t* IN\n\t* __ANON_0\n\t* __ANON_14\n\t* __ANON_12\n\t* LBRACE\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* COLON\n\t* __ANON_9\n\t* RPAR\n"
+    },
+    {
+      "path": "examples/invalid/calendar-bucket-no-zone.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/comparison-chain.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches ';' in the current parser context, at line 1 col 47\n\n bad(a: Int, b: Int, c: Int) = a < b < c;\n                                        ^\nExpected one of: \n\t* STAR\n\t* MORETHAN\n\t* LESSTHAN\n\t* COMMA\n\t* DOT\n\t* QMARK\n\t* SLASH\n"
+    },
+    {
+      "path": "examples/invalid/computed-field-effect.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/computed-field-insert.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/computed-field-update.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/cross-database-write.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/currency-addition.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/currency-static-symbol.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/duplicate-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/effectful-display.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/float-key.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/float-money-implicit.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/implicit-conversion-chain.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/incompatible-dimensions.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/key-update.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-assert-else.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'e' in the current parser context, at line 1 col 45\n\nfn bad(amount: Int) { assert amount > 0 else InvalidAmount; }\n                                        ^\nExpected one of: \n\t* SLASH\n\t* PLUS\n\t* STAR\n\t* SEMICOLON\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_13\n\t* LPAR\n\t* __ANON_9\n\t* __ANON_10\n\t* VBAR\n\t* MINUS\n\t* __ANON_14\n\t* CIRCUMFLEX\n\t* DOT\n\t* __ANON_12\n\t* PERCENT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-owner-pipe.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-assert-pipe-bang.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '!' in the current parser context, at line 1 col 39\n\npub fn bad(amount: Int) { amount > 0 |! InvalidAmount; }\n                                      ^\nExpected one of: \n\t* FALSE\n\t* LPAR\n\t* INSTANT\n\t* CASE\n\t* FLOAT\n\t* IF\n\t* __ANON_15\n\t* TRUE\n\t* INT\n\t* DATE\n\t* FOR\n\t* DECIMAL\n\t* SELF\n\t* __ANON_16\n\t* LBRACE\n\t* LOOP\n\t* WHILE\n\t* LSQB\n\t* NULL\n\t* STRING\n\t* IDENTIFIER\n"
+    },
+    {
+      "path": "examples/invalid/legacy-assert-self-pipe.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-checkpoint-reset-method.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-colon-bound.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches ':' in the current parser context, at line 1 col 17\n\npub fn maximum<T: Order>(values: [T]): T? = values | las\n                ^\nExpected one of: \n\t* MORETHAN\n\t* COMMA\n\t* IMPL\n"
+    },
+    {
+      "path": "examples/invalid/legacy-constraints-block.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '{' in the current parser context, at line 1 col 51\n\nUser(id: Uuid) { name: Str, constraints { unique(name); } }\n                                        ^\nExpected one of: \n\t* COLON\n"
+    },
+    {
+      "path": "examples/invalid/legacy-currency-declaration.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'c' in the current parser context, at line 1 col 5\n\npub currency GBP { code: \"GBP\", symbol: \"\u00a3\",\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-empty-closure.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '|' in the current parser context, at line 1 col 17\n\npub fn task() = || mail.google.sync();\n                ^\nExpected one of: \n\t* FALSE\n\t* __ANON_13\n\t* LPAR\n\t* INSTANT\n\t* CASE\n\t* IF\n\t* FLOAT\n\t* __ANON_15\n\t* TRUE\n\t* INT\n\t* MINUS\n\t* DATE\n\t* PLUS\n\t* FOR\n\t* DECIMAL\n\t* SELF\n\t* __ANON_16\n\t* __ANON_14\n\t* LBRACE\n\t* BANG\n\t* UNDERSCORE\n\t* LOOP\n\t* WHILE\n\t* LSQB\n\t* NULL\n\t* STRING\n\t* IDENTIFIER\n"
+    },
+    {
+      "path": "examples/invalid/legacy-ensure.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 34\n\npub fn bad(amount: Int) { ensure amount > 0; }\n                                 ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* __ANON_6\n\t* LPAR\n\t* __ANON_10\n\t* __ANON_3\n\t* VBAR\n\t* DOT\n\t* __ANON_5\n\t* PERCENT\n\t* EQUAL\n\t* __ANON_4\n\t* __ANON_1\n\t* MINUS\n\t* SEMICOLON\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* RBRACE\n\t* __ANON_8\n\t* IN\n\t* __ANON_2\n\t* __ANON_0\n\t* __ANON_14\n\t* __ANON_12\n\t* LBRACE\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_9\n"
+    },
+    {
+      "path": "examples/invalid/legacy-fact.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'e' in the current parser context, at line 1 col 44\n\n table User(id: Uuid) { name: Str, fact every(user => user.name != \"\"); }\n                                        ^\nExpected one of: \n\t* COLON\n"
+    },
+    {
+      "path": "examples/invalid/legacy-failure-replay-method.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-failure-resolve-method.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-field-check.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'c' in the current parser context, at line 1 col 37\n\npub table User(id: Uuid) { age: Int check(age >= 0), }\n                                    ^\nExpected one of: \n\t* STAR\n\t* EQUAL\n\t* LESSTHAN\n\t* __ANON_0\n\t* COMMA\n\t* DOT\n\t* QMARK\n\t* SLASH\n"
+    },
+    {
+      "path": "examples/invalid/legacy-field-unique.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'u' in the current parser context, at line 1 col 42\n\nub table User(id: Uuid) { username: Str unique, }\n                                        ^\nExpected one of: \n\t* STAR\n\t* EQUAL\n\t* LESSTHAN\n\t* __ANON_0\n\t* COMMA\n\t* DOT\n\t* QMARK\n\t* SLASH\n"
+    },
+    {
+      "path": "examples/invalid/legacy-ingest.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'i' in the current parser context, at line 1 col 5\n\npub ingest google = google.mail() | into(Ema\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-log.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'l' in the current parser context, at line 1 col 5\n\npub log Reading { time: Instant }\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-match.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 's' in the current parser context, at line 2 col 11\n\n    match status { Status.ready => \"ready\" };\n          ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* __ANON_6\n\t* LPAR\n\t* __ANON_10\n\t* VBAR\n\t* DOT\n\t* __ANON_5\n\t* PERCENT\n\t* MINUS\n\t* SEMICOLON\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* __ANON_8\n\t* IN\n\t* __ANON_0\n\t* __ANON_14\n\t* __ANON_12\n\t* LBRACE\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_9\n"
+    },
+    {
+      "path": "examples/invalid/legacy-opaque.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'o' in the current parser context, at line 1 col 5\n\npub opaque EmailAddress = Str;\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-pipe-lambda.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '|' in the current parser context, at line 1 col 40\n\npub fn names(rows: [Str]) = rows | map(|name| name);\n                                       ^\nExpected one of: \n\t* PROTOCOL\n\t* AS\n\t* PUB\n\t* FALSE\n\t* __ANON_13\n\t* LPAR\n\t* INSTANT\n\t* CASE\n\t* UNIT\n\t* IF\n\t* FLOAT\n\t* AFFINE\n\t* TRUE\n\t* __ANON_15\n\t* IMPL\n\t* INT\n\t* OFFSET\n\t* MINUS\n\t* DIM\n\t* DATE\n\t* RETURN\n\t* PLUS\n\t* FOR\n\t* TABLE\n\t* BREAK\n\t* STRING\n\t* ASSERT\n\t* IN\n\t* DECIMAL\n\t* BASE\n\t* SELF\n\t* __ANON_16\n\t* __ANON_14\n\t* USE\n\t* LET\n\t* LBRACE\n\t* ENUM\n\t* ELSE\n\t* STATIC\n\t* BANG\n\t* UNDERSCORE\n\t* LOOP\n\t* WHILE\n\t* TYPE\n\t* LSQB\n\t* NULL\n\t* FN\n\t* RPAR\n\t* IDENTIFIER\n\t* CONTINUE\n"
+    },
+    {
+      "path": "examples/invalid/legacy-postfix-question.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '?' in the current parser context, at line 1 col 44\n\n fn bad(raw: Str): Message = decode(raw)?;\n                                        ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* LPAR\n\t* __ANON_6\n\t* __ANON_10\n\t* DOT\n\t* VBAR\n\t* __ANON_5\n\t* PERCENT\n\t* MINUS\n\t* SEMICOLON\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* __ANON_8\n\t* IN\n\t* __ANON_14\n\t* __ANON_12\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_9\n"
+    },
+    {
+      "path": "examples/invalid/legacy-refined-where.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'w' in the current parser context, at line 1 col 17\n\ntype Port = Int where self >= 1;\n                ^\nExpected one of: \n\t* STAR\n\t* LESSTHAN\n\t* DOT\n\t* QMARK\n\t* SEMICOLON\n\t* SLASH\n\t* LBRACE\n"
+    },
+    {
+      "path": "examples/invalid/legacy-result.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-return-arrow.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '-' in the current parser context, at line 1 col 23\n\npub fn square(x: Int) -> Int = x * x;\n                      ^\nExpected one of: \n\t* EQUAL\n\t* LBRACE\n\t* COLON\n"
+    },
+    {
+      "path": "examples/invalid/legacy-store.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 's' in the current parser context, at line 1 col 5\n\npub store daily = Reading | count();\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-stream-retry-method.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-stream-skip-method.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-sys-runtime.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-sys-storage-call.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-top-level-impl.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'i' in the current parser context, at line 1 col 5\n\npub impl Display for Contact { fn display(se\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/legacy-tryfrom.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/legacy-var.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'v' in the current parser context, at line 2 col 9\n\n    var value = 1;\n        ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* __ANON_6\n\t* LPAR\n\t* __ANON_10\n\t* __ANON_3\n\t* VBAR\n\t* DOT\n\t* __ANON_5\n\t* PERCENT\n\t* EQUAL\n\t* __ANON_4\n\t* __ANON_1\n\t* MINUS\n\t* SEMICOLON\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* RBRACE\n\t* __ANON_8\n\t* IN\n\t* __ANON_2\n\t* __ANON_0\n\t* __ANON_14\n\t* __ANON_12\n\t* LBRACE\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_9\n"
+    },
+    {
+      "path": "examples/invalid/legacy-view.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'v' in the current parser context, at line 1 col 5\n\npub view daily = Reading | count();\n    ^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* TABLE\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n"
+    },
+    {
+      "path": "examples/invalid/missing-required-field.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/module-single-table-assertion.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/module-zero-table-assertion.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/money-float.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/mutate-sys-commit.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/question-coalesce-adjacent.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '?' in the current parser context, at line 2 col 12\n\n    input???0;\n           ^\nExpected one of: \n\t* FALSE\n\t* __ANON_13\n\t* LPAR\n\t* INSTANT\n\t* CASE\n\t* IF\n\t* FLOAT\n\t* __ANON_15\n\t* TRUE\n\t* INT\n\t* MINUS\n\t* DATE\n\t* PLUS\n\t* FOR\n\t* DECIMAL\n\t* SELF\n\t* __ANON_16\n\t* __ANON_14\n\t* LBRACE\n\t* BANG\n\t* LOOP\n\t* WHILE\n\t* LSQB\n\t* NULL\n\t* STRING\n\t* IDENTIFIER\n"
+    },
+    {
+      "path": "examples/invalid/question-on-int.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '?' in the current parser context, at line 1 col 18\n\npub fn bad() = 42?;\n                 ^\nExpected one of: \n\t* LESSTHAN\n\t* __ANON_13\n\t* __ANON_6\n\t* LPAR\n\t* __ANON_10\n\t* VBAR\n\t* DOT\n\t* __ANON_5\n\t* PERCENT\n\t* MINUS\n\t* SEMICOLON\n\t* CIRCUMFLEX\n\t* PLUS\n\t* STAR\n\t* __ANON_7\n\t* __ANON_8\n\t* IN\n\t* __ANON_14\n\t* __ANON_12\n\t* SLASH\n\t* MORETHAN\n\t* __ANON_11\n\t* LSQB\n\t* __ANON_9\n"
+    },
+    {
+      "path": "examples/invalid/range-key-overlap-magic.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/record-punning.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '}' in the current parser context, at line 1 col 37\n\npub fn invalid_record(x: Int) = { x };\n                                    ^\nExpected one of: \n\t* COLON\n"
+    },
+    {
+      "path": "examples/invalid/rekey-auto-id.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/relation-equality.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/reserved-std.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/reserved-sys.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/row-declaration.orna",
+      "entrypoint": "row_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'p' in the current parser context, at line 1 col 1\n\npub table X { value: Int, }\n^\nExpected one of: \n\t* LBRACE\n"
+    },
+    {
+      "path": "examples/invalid/secret-display.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/static-protocol-function.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'f' in the current parser context, at line 1 col 32\n\npub protocol Currency { static fn code(): Str; }\n                               ^\nExpected one of: \n\t* IDENTIFIER\n"
+    },
+    {
+      "path": "examples/invalid/top-level-expression.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'h' in the current parser context, at line 1 col 1\n\nhttp.get(\"https://example.com\");\n^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* PUB\n\t* TABLE\n\t* ASSERT\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n\t* USE\n"
+    },
+    {
+      "path": "examples/invalid/top-level-on.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 'o' in the current parser context, at line 1 col 1\n\non google.mail() { mail => Email.insert(\n^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* PUB\n\t* TABLE\n\t* ASSERT\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n\t* USE\n"
+    },
+    {
+      "path": "examples/invalid/transaction-block.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches 't' in the current parser context, at line 1 col 1\n\ntransaction { Note.insert({ text: \"x\" })\n^\nExpected one of: \n\t* PROTOCOL\n\t* ENUM\n\t* PUB\n\t* TABLE\n\t* ASSERT\n\t* TYPE\n\t* FN\n\t* DIM\n\t* UNIT\n\t* USE\n"
+    },
+    {
+      "path": "examples/invalid/two-durable-sources.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/unknown-field.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/unparenthesized-lambda-stage.orna",
+      "entrypoint": "module_unit",
+      "expected": false,
+      "accepted": false,
+      "agrees": true,
+      "error": "No terminal matches '=' in the current parser context, at line 1 col 48\n\nnames(rows: [Contact]) = rows | contact => contact.name;\n                                        ^\nExpected one of: \n\t* MORETHAN\n\t* __ANON_7\n\t* __ANON_11\n\t* LESSTHAN\n\t* __ANON_8\n\t* IN\n\t* LSQB\n\t* __ANON_6\n\t* LPAR\n\t* __ANON_9\n\t* __ANON_5\n\t* __ANON_10\n\t* VBAR\n\t* SEMICOLON\n\t* DOT\n\t* __ANON_12\n\t* LBRACE\n"
+    },
+    {
+      "path": "examples/invalid/unsafe-row-key-repeat.orna",
+      "entrypoint": "row_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/invalid/wrong-field-type.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-column.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-range.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-writer.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-import.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/blob-nested.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/valid/reviewed-commit.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/final/main.orna",
+      "entrypoint": "module_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/final/data.orna",
+      "entrypoint": "row_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    },
+    {
+      "path": "examples/final/database.orna",
+      "entrypoint": "row_unit",
+      "expected": true,
+      "accepted": true,
+      "agrees": true,
+      "error": null
+    }
+  ]
+}

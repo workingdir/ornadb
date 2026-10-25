@@ -17,5 +17,6 @@ pub fn replay_mail_failure(
     sys.admin.replay_failure(
         failure.reference,
         expected_status: failure.status,
+        expected_version: failure.version,
     )
 }

@@ -6,3 +6,5 @@
 (comment) @comment
 (operator) @operator
 (punctuation) @punctuation
+(escape_sequence) @string.escape
+["{" "}" "." ":"] @punctuation

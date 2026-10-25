@@ -37,10 +37,18 @@ const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite
 /// scenario witness: the semantic adapter exposes analysis, not a compiled
 /// executable artifact, and the bounded evaluator reinterprets source.
 /// Such scenarios therefore remain explicit corpus skips.
-#[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
     transactional: TransactionalEvaluator,
+}
+
+impl Default for CompositeEvaluator {
+    fn default() -> Self {
+        Self {
+            bounded: BoundedEvaluator::default(),
+            transactional: TransactionalEvaluator::default().with_fixture_catalogue(),
+        }
+    }
 }
 
 impl RuntimeEvaluator for CompositeEvaluator {
@@ -439,7 +447,7 @@ fn transaction_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -507,7 +515,7 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
         let state = block_on(RuntimeState::open(&repository, identity, [44; 32])).ok()?;
         let matches = match scenario.id.as_str() {
             "TXN-001" => {
-                matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+                matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
                     && block_on(state.committed_table_rows("Note"))
                         .ok()?
                         .is_empty()
@@ -1517,7 +1525,7 @@ mod tests {
 
     fn report_with_scenario_status(status: EvidenceStatus) -> RunReport {
         RunReport {
-            specification_version: "1.0.0".into(),
+            specification_version: "1.1.0".into(),
             implementation_claim: ImplementationClaim {
                 implementation_id: "test".into(),
                 profile: "test".into(),
@@ -1685,11 +1693,16 @@ mod tests {
             StageOutcome::Passed
         ));
 
+        let declared = Corpus::load_default()
+            .expect("reference corpus loads")
+            .scenarios["count"]
+            .as_u64()
+            .expect("declared scenario count");
         let report = run_profile(
             Corpus::load_default().expect("reference corpus loads"),
             RunnerProfile::BoundedExpressionRuntime,
         );
-        assert_eq!(report.scenarios.len(), 144);
+        assert_eq!(report.scenarios.len() as u64, declared);
         assert!(
             report
                 .implementation_claim

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-empty-closure.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1012",
+  "message_contains": "`||` is logical OR, not an anonymous function",
+  "status": "expected-not-executed"
+}
