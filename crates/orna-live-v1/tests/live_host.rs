@@ -22217,7 +22217,7 @@ fn application_admission_requires_an_explicit_delete_join_boundary() {
 }
 
 #[test]
-fn failed_durable_drain_never_reports_delete_success() {
+fn second_writer_is_refused_before_durable_drain_begins() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
     let identity = RequestIdentity {
