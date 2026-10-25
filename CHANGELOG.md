@@ -5,6 +5,20 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A project that imports `std` and whose source text contains `sys.Storage` or
+  `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
+  authority route (`orna invoke`). The gate is a substring match on the admitted source
+  text (`requires_publication_metadata`); a project that imports std but does not contain
+  either name keeps its previous path, unchanged. The authority admits the captured
+  standard dependency's function bodies, so a standard function is callable from the
+  importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
+  Glob imports (`use std.<module>.*`) bind every public function of the module
+  (ORNA-IMPORT-003). `use std.<module> as _` binds only the names the module records in its
+  prelude. A module alias (`use std.<module> as <name>`, or a bare `use std.<module>;`
+  bound to a name) is refused at admission with `UnsupportedImport` ("qualified std module
+  alias not supported on this route"). A standard body calls its own module helpers, never a
+  user function of the same name.
+
 - Git probes that decide publication admission, blob verification, and
   migration index pins now stop repository discovery at the probed directory's
   parent only when that directory carries its own `.git` entry. A nested

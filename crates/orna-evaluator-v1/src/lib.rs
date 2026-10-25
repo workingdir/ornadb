@@ -767,12 +767,223 @@ pub struct PureFunction {
     pub environment: Environment,
 }
 
+/// Admitted standard-library functions, shared by every admission that uses the
+/// same pinned standard dependency. `functions` is keyed by qualified identity
+/// (`std.<module>.<name>`); `aliases` maps module-internal import keys
+/// (`std.<module>::<name>`) to qualified identities.
+#[derive(Debug, Default)]
+pub struct StandardLayer {
+    functions: BTreeMap<String, PureFunction>,
+    aliases: BTreeMap<String, String>,
+}
+
+impl StandardLayer {
+    /// Builds a shared standard layer from verified qualified functions and
+    /// module-internal import aliases.
+    #[must_use]
+    pub fn new(
+        functions: BTreeMap<String, PureFunction>,
+        aliases: BTreeMap<String, String>,
+    ) -> Self {
+        Self { functions, aliases }
+    }
+}
+
 /// Explicitly admitted named functions; no host or module lookup is performed.
-pub type Functions = BTreeMap<String, PureFunction>;
+///
+/// The table is layered: an optional `Arc`-shared standard layer, which is never
+/// copied per admission, and an owned local layer for the admitted module.
+/// Local bare-name import aliases resolve through [`Functions::alias`]. Local
+/// functions shadow standard functions of the same key.
+#[derive(Clone, Debug, Default)]
+pub struct Functions {
+    standard: Option<Arc<StandardLayer>>,
+    local: BTreeMap<String, PureFunction>,
+    local_aliases: BTreeMap<String, String>,
+}
+
+impl Functions {
+    /// Creates an empty table with no standard layer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a table that shares `standard` without copying its bodies.
+    #[must_use]
+    pub fn with_standard(standard: Arc<StandardLayer>) -> Self {
+        Self {
+            standard: Some(standard),
+            ..Self::default()
+        }
+    }
+
+    /// Inserts a local function, replacing any local function of the same key.
+    pub fn insert(&mut self, name: String, function: PureFunction) -> Option<PureFunction> {
+        self.local.insert(name, function)
+    }
+
+    /// Inserts a bare-name import alias for the admitted module. Callers must
+    /// insert user functions first and skip any alias that names one of them.
+    pub fn insert_alias(&mut self, alias: String, target: String) {
+        self.local_aliases.insert(alias, target);
+    }
+
+    /// Returns the target of a local bare-name alias or a standard module-internal
+    /// alias key.
+    #[must_use]
+    pub fn alias(&self, key: &str) -> Option<&str> {
+        self.local_aliases
+            .get(key)
+            .or_else(|| {
+                self.standard
+                    .as_deref()
+                    .and_then(|layer| layer.aliases.get(key))
+            })
+            .map(String::as_str)
+    }
+
+    /// Returns the function for a qualified or local name. Aliases are not
+    /// resolved here.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&PureFunction> {
+        self.local.get(name).or_else(|| {
+            self.standard
+                .as_deref()
+                .and_then(|layer| layer.functions.get(name))
+        })
+    }
+
+    /// Reports whether a local or standard function has `name`.
+    #[must_use]
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.get(name).is_some()
+    }
+
+    /// Returns the number of functions visible through this table.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.iter().count()
+    }
+
+    /// Returns the number of functions the admitted module owns. Shared standard
+    /// functions are excluded so they never consume a caller's activation budget.
+    #[must_use]
+    pub fn own_len(&self) -> usize {
+        self.local.len()
+    }
+
+    /// Reports whether no function is visible through this table.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Iterates every visible function. A local function shadows a standard
+    /// function with the same key.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &PureFunction)> {
+        let standard = self
+            .standard
+            .as_deref()
+            .into_iter()
+            .flat_map(|layer| layer.functions.iter())
+            .filter(|(name, _)| !self.local.contains_key(*name));
+        self.local.iter().chain(standard)
+    }
+
+    /// Iterates the names of every visible function.
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.iter().map(|(name, _)| name)
+    }
+
+    /// Iterates every visible function body.
+    pub fn values(&self) -> impl Iterator<Item = &PureFunction> {
+        self.iter().map(|(_, function)| function)
+    }
+
+    /// Returns the function a name denotes: an exact function key, or an import
+    /// alias (local or module-internal) whose target is a function. Entry points
+    /// and reachability walks accept either spelling.
+    #[must_use]
+    pub fn get_entry(&self, name: &str) -> Option<&PureFunction> {
+        self.get(name)
+            .or_else(|| self.alias(name).and_then(|target| self.get(target)))
+    }
+
+    /// Iterates every name that can denote a visible function: function keys
+    /// and alias keys, both local and standard.
+    pub fn visible_names(&self) -> impl Iterator<Item = &str> {
+        let standard_aliases = self
+            .standard
+            .as_deref()
+            .into_iter()
+            .flat_map(|layer| layer.aliases.keys());
+        self.keys()
+            .chain(self.local_aliases.keys())
+            .chain(standard_aliases)
+            .map(String::as_str)
+    }
+}
+
+impl<const N: usize> From<[(String, PureFunction); N]> for Functions {
+    fn from(entries: [(String, PureFunction); N]) -> Self {
+        Self {
+            local: entries.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+
+impl Functions {
+    /// Iterates the admitted module's own function bodies mutably. Shared
+    /// standard bodies are immutable and are never rewritten here.
+    pub fn local_iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut PureFunction)> {
+        self.local.iter_mut()
+    }
+
+    /// Merges `other`'s own functions and aliases into this table; a same-key
+    /// entry from `other` replaces this table's. A standard layer is adopted
+    /// when this table has none. A second, distinct standard layer is refused
+    /// before anything is merged, so a failed call leaves this table unchanged.
+    pub fn extend(&mut self, other: Functions) -> Result<(), StandardLayerConflict> {
+        if let (Some(layer), Some(other_layer)) = (&self.standard, &other.standard)
+            && !Arc::ptr_eq(layer, other_layer)
+        {
+            return Err(StandardLayerConflict);
+        }
+        self.local.extend(other.local);
+        self.local_aliases.extend(other.local_aliases);
+        if self.standard.is_none() {
+            self.standard = other.standard;
+        }
+        Ok(())
+    }
+}
+
+/// Two distinct standard layers cannot be merged into one function table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardLayerConflict;
+
+impl std::fmt::Display for StandardLayerConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("functions received a second, distinct standard layer")
+    }
+}
+
+impl std::error::Error for StandardLayerConflict {}
+
+impl FromIterator<(String, PureFunction)> for Functions {
+    fn from_iter<I: IntoIterator<Item = (String, PureFunction)>>(entries: I) -> Self {
+        Self {
+            local: entries.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
 
 /// Internal key for an import resolved relative to a captured module body.
 /// The separator cannot occur in a source-level Orna name.
-pub(crate) fn module_function_alias_key(namespace: &str, name: &str) -> String {
+pub fn module_function_alias_key(namespace: &str, name: &str) -> String {
     format!("{namespace}::{name}")
 }
 
@@ -1887,7 +2098,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         sys_host: None,
         cancellation,
     };
-    context.items(functions.len())?;
+    context.items(functions.own_len())?;
     let mut scope = Scope::from_environment(environment, &mut context)?;
     let value = context.evaluate(&parsed.value, &mut scope, 0)?;
     if context.transfer.is_some() {
@@ -2028,7 +2239,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
         cancellation: None,
     };
     let result = (|| {
-        context.items(functions.len())?;
+        context.items(functions.own_len())?;
         let mut scope =
             Scope::from_environment_with_nominals(environment, nominal_definitions, &mut context)?;
         let value = context.evaluate(expression, &mut scope, 0)?;
@@ -2162,8 +2373,8 @@ fn invoke_named_with_host(
         sys_host,
         cancellation: None,
     };
-    context.items(functions.len())?;
-    let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+    context.items(functions.own_len())?;
+    let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
     let captured = Scope::from_environment_with_nominals(
         &function.environment,
@@ -2278,8 +2489,8 @@ fn invoke_named_with_effects_and_reuse(
         sys_host: None,
     };
     let result = (|| {
-        context.items(functions.len())?;
-        let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+        context.items(functions.own_len())?;
+        let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
         let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
         let captured = Scope::from_environment_with_nominals(
             &function.environment,
@@ -2365,8 +2576,8 @@ pub fn invoke_named_with_context_effects(
             cancellation: None,
         };
         let result = (|| {
-            context.items(functions.len())?;
-            let function = functions.get(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+            context.items(functions.own_len())?;
+            let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
             let supplied = supplied_context_arguments(arguments, &mut context)?;
             let captured = Scope::from_environment(&function.environment, &mut context)?;
             invoke_pure(
@@ -4886,7 +5097,7 @@ impl Context<'_, '_> {
                 .get(text)
                 .cloned()
                 .or_else(|| {
-                    (!self.restrict_function_names && self.functions.contains_key(text)).then(
+                    (self.bare_user_names_visible() && self.functions.contains_key(text)).then(
                         || Value::Function {
                             name: text.clone(),
                             nominal_definitions: scope.3.clone(),
@@ -4894,10 +5105,9 @@ impl Context<'_, '_> {
                     )
                 })
                 .or_else(|| {
-                    self.aliases
-                        .and_then(|aliases| aliases.get(text))
-                        .filter(|name| self.functions.contains_key(*name))
-                        .cloned()
+                    self.alias_target(text)
+                        .filter(|name| self.functions.contains_key(name))
+                        .map(str::to_owned)
                         .map(|name| Value::Function {
                             name,
                             nominal_definitions: scope.3.clone(),
@@ -5648,8 +5858,7 @@ impl Context<'_, '_> {
             return None;
         }
         if self
-            .aliases
-            .and_then(|aliases| aliases.get(&path))
+            .alias_target(&path)
             .is_some_and(|name| self.functions.contains_key(name))
         {
             return None;
@@ -8821,6 +9030,30 @@ impl Context<'_, '_> {
             self.collection(name, values, depth)
         }
     }
+    /// Bare (unqualified) names resolve to top-level functions only outside named
+    /// standard modules. A standard body resolves its own module first and never
+    /// sees a user function through a bare name (ORNA-LIB-001 isolation).
+    fn bare_user_names_visible(&self) -> bool {
+        let in_standard = self
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
+        !self.restrict_function_names && !in_standard
+    }
+    /// Resolves an import alias key. The REPL's session aliases apply first. A
+    /// bare key is the admitted module's own import and is visible only outside
+    /// a named module, so a standard body never resolves a bare name through a
+    /// user alias. A module-internal key (`namespace::name`) resolves through the
+    /// shared standard layer.
+    fn alias_target(&self, key: &str) -> Option<&str> {
+        if let Some(target) = self.aliases.and_then(|aliases| aliases.get(key)) {
+            return Some(target.as_str());
+        }
+        if !key.contains("::") && self.namespace.is_some() {
+            return None;
+        }
+        self.functions.alias(key)
+    }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
         let name = function_name(expression)?;
         if let Some(root) = function_root_name(expression)
@@ -8839,10 +9072,10 @@ impl Context<'_, '_> {
                 return Some(name);
             }
             let module_alias = module_function_alias_key(namespace, &name);
-            if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&module_alias))
+            if let Some(alias) = self.alias_target(&module_alias)
                 && self.functions.contains_key(alias)
             {
-                return Some(alias.clone());
+                return Some(alias.to_owned());
             }
         }
         // Bare session aliases come from top-level REPL imports (ORNA-IMPORT-003,
@@ -8852,10 +9085,10 @@ impl Context<'_, '_> {
         // such as `count` inside `std.list` (which would recurse through the
         // prelude back into `std.list.length`).
         if self.namespace.is_none()
-            && let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))
+            && let Some(alias) = self.alias_target(&name)
             && self.functions.contains_key(alias)
         {
-            return Some(alias.clone());
+            return Some(alias.to_owned());
         }
         #[cfg(feature = "system-host-bindings")]
         if self.functions.contains_key(&name)
@@ -8871,7 +9104,7 @@ impl Context<'_, '_> {
         if name.starts_with("std.") && self.functions.contains_key(&name) {
             return Some(name);
         }
-        if !self.restrict_function_names && self.functions.contains_key(&name) {
+        if self.bare_user_names_visible() && self.functions.contains_key(&name) {
             return Some(name);
         }
         if name.contains('.') {
@@ -18988,5 +19221,51 @@ mod blob_equality_tests {
             )
             .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod standard_layer_merge_tests {
+    use super::{Functions, StandardLayer, StandardLayerConflict};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    fn layer(alias: &str) -> Arc<StandardLayer> {
+        Arc::new(StandardLayer::new(
+            BTreeMap::new(),
+            BTreeMap::from([(alias.to_owned(), alias.to_owned())]),
+        ))
+    }
+
+    #[test]
+    fn second_distinct_standard_layer_is_refused_without_mutating_the_table() {
+        let first = layer("first");
+        let mut target = Functions {
+            standard: Some(Arc::clone(&first)),
+            ..Functions::default()
+        };
+        let other = Functions {
+            standard: Some(layer("second")),
+            local_aliases: BTreeMap::from([("extra".to_owned(), "extra".to_owned())]),
+            ..Functions::default()
+        };
+        assert_eq!(target.extend(other), Err(StandardLayerConflict));
+        assert!(Arc::ptr_eq(target.standard.as_ref().unwrap(), &first));
+        assert!(!target.local_aliases.contains_key("extra"));
+    }
+
+    #[test]
+    fn the_same_shared_standard_layer_merges() {
+        let shared = layer("shared");
+        let mut target = Functions {
+            standard: Some(Arc::clone(&shared)),
+            ..Functions::default()
+        };
+        let other = Functions {
+            standard: Some(Arc::clone(&shared)),
+            local_aliases: BTreeMap::from([("extra".to_owned(), "extra".to_owned())]),
+            ..Functions::default()
+        };
+        assert_eq!(target.extend(other), Ok(()));
+        assert!(target.local_aliases.contains_key("extra"));
     }
 }

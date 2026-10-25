@@ -11,7 +11,7 @@ use orna_value_v1::Raw;
 const MEMO_MODULES: [&str; 3] = ["std/collection.orna", "std/map.orna", "std/memo.orna"];
 
 fn pinned_runtime() -> (Functions, NominalDefinitions) {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MEMO_MODULES.contains(&path.as_str()))
