@@ -1,7 +1,4 @@
-use orna_semantic_v1::{
-    Catalogue, DIAG_DURABLE_CONSUMER_SOURCE_ROOTS, DIAG_TYPE, ModuleInput, Type,
-    analyze_with_catalogue,
-};
+use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 use orna_stream_v1::{
     CheckpointPositionMerge, Component, Position, merge_checkpoint_position,
 };
@@ -26,7 +23,7 @@ fn position(token: &str) -> Position {
 fn durable_consumer_with_multiple_checkpointed_roots_gets_guidance() {
     let result = analyze(include_str!("fixtures/streams-pa0p-multiple-roots.orna"));
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS
+        diagnostic.code() == "E9102"
             && diagnostic.message().starts_with(
                 "a durable consumer function may own only one checkpointed source root",
             )
@@ -58,7 +55,7 @@ fn money_literal_is_typed_exactly_and_cross_currency_addition_is_rejected() {
         "fixtures/semantic/traceability-money-cross-currency-add.orna"
     ));
     assert!(mixed.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == "E5003"
             && diagnostic.message() == "cannot add different currencies without conversion"
     }), "unexpected diagnostics: {:?}", mixed.diagnostics);
 }
