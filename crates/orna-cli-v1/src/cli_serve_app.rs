@@ -9,8 +9,8 @@
 use super::*;
 use orna_application_v1::{AdmittedApplication, ApplicationAuthority, ApplicationError};
 use orna_evaluator_v1::{Environment, Limits};
-use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity};
-use std::sync::Arc;
+use orna_live_v1::RuntimeReader;
+use orna_runtime_v1::RuntimeTableIdentity;
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -23,7 +23,7 @@ pub(super) struct ServeApp {
     admitted: AdmittedApplication,
     /// The clone's durable runtime. `serve` reads stored rows through one
     /// activation snapshot of it; `None` refuses the request (never empty tables).
-    runtime: Option<Arc<RuntimeState>>,
+    runtime: Option<RuntimeReader>,
 }
 
 impl ServeApp {
@@ -64,7 +64,7 @@ impl ServeApp {
     }
 
     /// Installs the clone's durable runtime, the handle that table reads use.
-    pub(super) fn with_runtime(mut self, runtime: Option<Arc<RuntimeState>>) -> Self {
+    pub(super) fn with_runtime(mut self, runtime: Option<RuntimeReader>) -> Self {
         self.runtime = runtime;
         self
     }
@@ -98,15 +98,25 @@ impl ServeApp {
         let Ok(executor) = current_thread_executor() else {
             return evaluation_failed();
         };
-        // Tables with a committed identity are captured by that identity. A
-        // project whose tables have none (not yet published) is captured by
-        // name: every admitted table is then read from the live table state.
-        let captured = if self
+        // Either every admitted table has a committed identity (captured by
+        // identity) or none does (captured by name, before any publication).
+        // A mix fails closed: reading an identified table as empty would be a
+        // silent wrong answer.
+        let identified = self
             .admitted
             .table_schemas()
             .values()
-            .all(|table| table.object_id().is_some())
-        {
+            .filter(|table| table.object_id().is_some())
+            .count();
+        let total = self.admitted.table_schemas().len();
+        if identified != 0 && identified != total {
+            return Response::new(
+                500,
+                "application/json",
+                br#"{"error":"serve.mixed_table_identity"}"#.to_vec(),
+            );
+        }
+        let captured = if identified == total {
             match self.table_identities() {
                 Ok(identities) => {
                     executor.block_on(runtime.begin_admitted_table_activation(&identities))
@@ -140,21 +150,31 @@ impl ServeApp {
                 br#"{"error":"serve.write_refused"}"#.to_vec(),
             );
         }
-        let mut response = Response::new(
+        let response = Response::new(
             200,
             "text/plain; charset=utf-8",
             crate::repl::inspect(staged.value()).into_bytes(),
         );
-        response
-            .headers
-            .push(("X-Content-Type-Options".to_owned(), "nosniff".to_owned()));
         response
     }
 }
 
 /// Answers `/` through the serving entry when one is installed. Returns
 /// `None` for every other request, which the Git transport then handles.
+/// Every response this route produces (including 405 and 500) carries
+/// `X-Content-Type-Options: nosniff`.
 pub(super) fn serving_entry_route(
+    app: Option<&Mutex<ServeApp>>,
+    request: &Request,
+) -> Option<Response> {
+    let mut response = serving_entry_route_inner(app, request)?;
+    response
+        .headers
+        .push(("X-Content-Type-Options".to_owned(), "nosniff".to_owned()));
+    Some(response)
+}
+
+fn serving_entry_route_inner(
     app: Option<&Mutex<ServeApp>>,
     request: &Request,
 ) -> Option<Response> {
