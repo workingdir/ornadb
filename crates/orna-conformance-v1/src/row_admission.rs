@@ -386,15 +386,18 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
             _ => false,
         },
         Type::Tuple(types) => match (value, expression) {
-            (Raw::Array(values), Expr::Tuple { elements, .. })
-                if values.len() == types.len() && elements.len() == types.len() =>
-            {
-                values
-                    .iter()
-                    .zip(types)
-                    .zip(elements)
-                    .all(|((value, ty), expression)| matches_value(value, ty, expression))
-            }
+            (Raw::Tag(60015, tagged), Expr::Tuple { elements, .. }) => match tagged.as_ref() {
+                Raw::Array(values)
+                    if values.len() == types.len() && elements.len() == types.len() =>
+                {
+                    values
+                        .iter()
+                        .zip(types)
+                        .zip(elements)
+                        .all(|((value, ty), expression)| matches_value(value, ty, expression))
+                }
+                _ => false,
+            },
             _ => false,
         },
         Type::Record(types) => match (value, expression) {
@@ -466,5 +469,23 @@ mod stored_reference_tests {
         assert!(validate_stored_references(&reference([1; 16], [8; 16], Raw::Int(9.into())), &identity).is_err());
         assert!(validate_stored_references(&reference([2; 16], [8; 16], Raw::Int(7.into())), &identity).is_err());
         assert!(validate_stored_references(&reference([1; 16], [9; 16], Raw::Int(7.into())), &identity).is_err());
+    }
+
+    #[test]
+    fn tuple_field_admits_the_canonical_tagged_tuple_encoding() {
+        // Spec 29-formats: tuples are Tag(60015, Array) of ordered components.
+        let parsed = parse_row(r#"{ pair: (1, "a") }"#);
+        assert!(parsed.is_ok());
+        let Expr::Record { fields, .. } = &parsed.value else {
+            panic!("row body must parse as a record");
+        };
+        let ty = Type::Tuple(vec![Type::Int, Type::Text]);
+        let tagged = Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())])),
+        );
+        assert!(matches_value(&tagged, &ty, &fields[0].value));
+        let bare = Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]);
+        assert!(!matches_value(&bare, &ty, &fields[0].value));
     }
 }
