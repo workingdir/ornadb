@@ -15,14 +15,23 @@ env:
   RUST_TEST_THREADS: 2
 
 # Keep each ref's native CLI gate independent. A worker branch must not replace
-# main's pending test run.
+# main's pending test run. A newer push to the same pull request cancels that
+# pull request's older run (otherwise every push queues behind the previous run and
+# the wait multiplies). A push to main is keyed on its commit and is never
+# cancelled: with one group per ref GitHub replaces a pending run when a newer one
+# queues, so merges landing close together lost their CLI run (nine main runs ended
+# "cancelled" with no jobs between a6d716278 and 8f49ea74e), and a red head could
+# not be traced to the merge that caused it.
 concurrency:
-  group: cli-tests-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: cli-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   cli-tests:
     runs-on: ubuntu-latest
+    # FUSE tests must fail, not skip, on every step of this job.
+    env:
+      ORNA_REQUIRE_FUSE: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -37,13 +46,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y emacs-nox
 
+      # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
+      # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
       - name: Test the orna-cli-v1 integration suite
-        env:
-          ORNA_REQUIRE_FUSE: "1"
-        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-cli-v1 --no-fail-fast -- --nocapture --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata
 
       - name: Test the publication crash-barrier matrix
         run: cargo test --locked -p orna-cli-v1 --features crash-barriers --test publication_crash_matrix -- --nocapture
+
+      # Format-3 project loading: loose-row refusal, module and row admission.
+      - name: Test the orna-project-v1 project loader
+        run: cargo test --locked -p orna-project-v1 --test project_loader -- --nocapture
+
+      # Owner-lease and crash-recovery tests. Lease acquisition fences a writer whose runtime
+      # owner lock was released (a killed process) and recovers its Running requests in the
+      # same transaction; a live owner keeps LeaseHeld. durable_crash_recovery re-executes the
+      # test binary through /bin/sh and ulimit, so it is Linux-only (ubuntu-latest).
+      - name: Test owner-lease fencing and durable crash recovery
+        run: cargo test --locked -p orna-runtime-v1 --test owner_fence_gate_d --test durable_crash_recovery -- --nocapture
+
+      # Gate D: recovery of an uncertain external effect never fabricates a proven rollback.
+      # A rollback receipt needs the controlled marker the activation records before its table
+      # transaction; absent or reported external evidence recovers as uncertain. The lib tests
+      # are selected by exact path and their count is asserted, so a rename cannot drop one.
+      - name: Test rollback-proof effect evidence
+        run: |
+          cargo test --locked -p orna-runtime-v1 --test uncertain_effect_recovery -- --nocapture
+          cargo test --locked -p orna-runtime-v1 --lib -- --nocapture --exact \
+            tests::external_effect_marker_keeps_fault_recovery_uncertain \
+            tests::recovery_retains_uncertainty_and_clears_old_owner_evidence \
+            tests::rollback_proof_requires_controlled_marker \
+            tests::activation_records_controlled_marker_before_its_table_transaction \
+            tests::external_effect_downgrades_a_marker_left_by_an_earlier_commit_attempt \
+            tests::controlled_fault_receipt_recovers_as_proven_after_owner_takeover_and_reopen \
+            tests::runtime_owned_activation_failure_rolls_back_and_recovers_as_proven_after_reopen \
+            tests::migrated_ledger_retains_controlled_rollback_recovery_after_reopen \
+            2>&1 | tee rollback-proof-lib.log
+          grep -q 'test result: ok. 8 passed; 0 failed' rollback-proof-lib.log
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
     steps:
@@ -59,4 +98,4 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
           RUST_TEST_THREADS: 2
-        run: cargo test --locked -p orna-repository-v1 --lib --no-fail-fast -- --nocapture
+        run: cargo test --locked -p orna-repository-v1 --lib --test req_publication_cas --test git_repository --no-fail-fast -- --nocapture

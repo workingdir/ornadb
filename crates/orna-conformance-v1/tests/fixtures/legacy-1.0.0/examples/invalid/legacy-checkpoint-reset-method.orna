@@ -1,0 +1,2 @@
+pub fn bad(checkpoint: sys.Checkpoint, position: sys.CheckpointPosition) =
+    checkpoint.reset(to: position);

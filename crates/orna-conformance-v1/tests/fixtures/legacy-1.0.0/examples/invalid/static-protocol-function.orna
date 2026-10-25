@@ -1,0 +1,1 @@
+pub protocol Currency { static fn code(): Str; }

@@ -57,7 +57,7 @@ Programs:
 
 **ORNA-CLI-004** `orna status --short` SHOULD preserve Git's compact style while adding stable codes for runtime CWD summaries.
 
-## Diagnostics
+## Diagnostics {#cli-diagnostics}
 
 ```text
 error[E0312]: column `email` cannot become non-optional
@@ -110,3 +110,22 @@ No emoji-heavy celebration or decorative ASCII branding is required.
 **ORNA-UX-003** `--verbose` MAY provide additional Orna-level context. Raw implementation details require `--debug` or an equivalent explicitly technical interface.
 
 **ORNA-UX-004** A diagnostic MUST lead with the user-visible condition and an actionable remedy. An implementation MAY attach machine-readable technical causes without rendering them by default.
+
+
+## Format-3 paths and editing
+
+`orna mount`, `orna unmount` and `orna edit` use VFS-1's exact forms. The mount
+itself is not a Git worktree. Git-compatible commands target the backing
+repository. `orna add --row TABLE KEY_TEXT` and `orna restore --staged --row
+TABLE KEY_TEXT` stage/unstage a logical row into the admitted index store;
+`--table TABLE` selects a complete table explicitly. KEY_TEXT is one canonical
+Orna key expression, not a host path. CLI parsers must not consume it as shell
+source. Those extensions never redirect plain `git add` to a generated VFS.
+
+`orna upgrade --to-format 3` prepares UPGRADE-3 against the selected current
+workspace and publishes only after explicit reviewed confirmation (or existing
+authorized noninteractive mode). No automatic downgrade command is provided.
+`orna export DEST --at SELECTOR` freezes and verifies complete selected snapshot
+closure and dependencies before claiming an offline-complete copy. Runtime
+private sessions and unaccepted drafts are excluded; exporting CWD first
+creates a private frozen snapshot without moving the user's branch.

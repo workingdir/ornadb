@@ -65,4 +65,27 @@ Diagnostic codes identify primary error classifications. Implementations may add
 
 Distributed transactions across independent databases, exactly-once effects in arbitrary external services, automatic resolution of all semantic merge conflicts and enterprise authorisation are outside this specification. Trusted-process deployments enforce the specified type safety, privacy boundaries, cancellation, integrity checks and destructive-operation preconditions.
 
+## Final 1.1.0 scope and conceptual integrity
 
+Conceptual integrity is the governing principle: one executable Git snapshot,
+one stored row representation, one immutable content graph, one mutation and
+validation engine, and optional UI/filesystem projections. This publication
+supersedes the earlier 1.1.0 authoring draft by exact artifact identity.
+
+The Repository-engine 1.1 claim requires repository format 3, OGS-1, ORP-1,
+OGB-2, annotated Blob/value profiles and UPGRADE-3. The `vfs-linux-v1` claim
+requires both read and validated write support from [VFS](#vfs); merely a
+read-only mount is not that completed profile. MIME-1 applies to new Blob
+values independently of installing a mount.
+
+The first product milestone is a real table/Run/result/content path and an
+editable workspace mount. It need not expose watches, saved queries, theme
+systems or a complete Wasm UI. Existing language/protocol requirements remain
+available; staged delivery does not lower the full conformance bar.
+
+`source-hosted-app-v1`, `orna-browser-client-v1` and `media-inspection-v1` are
+separate conditional claims. Their host capabilities must be implemented and
+tested, not silently replaced by native app code or made a prerequisite for
+reading a broken database. No machine-learning model is required for basic
+Blob capture/inspection. [Profiles](profiles/conformance-1.1.json) identify
+required sets; implementation status is separate from specification status.

@@ -122,3 +122,17 @@ On reconnect the host sends complete snapshots for resumed watches; delta histor
 
 The message registry is also available as `profiles/live-messages.json`. The accompanying structural tests validate fields and bounds; independent client/server execution and malformed-frame fuzzing remain separate server-profile conformance obligations.
 
+
+
+## Format-3 value compatibility
+
+`orna.present.v1` remains frozen at its existing OVB-1 payload encoding. It
+MUST NOT accept OVB-2/ROV-3/SOV-3 tags without a new explicitly negotiated
+protocol. Typed inspector summaries can use safe legacy nodes/fields; exact
+row/content references are validated against server-owned context. Full new
+annotated values use explicit OVB-2 content/export responses. An operation
+whose required argument cannot be represented fails before effects. A result
+that cannot be richly encoded after commitment uses the existing retained
+terminal-without-rich-value contract; it is never rerun under a fresh ID.
+Legacy bytes-only values remain valid in their legacy context. An explicit
+raw-byte conversion is not the identity operation for an annotated Blob.

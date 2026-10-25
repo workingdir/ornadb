@@ -1,0 +1,179 @@
+{
+  "version": "1.1.0",
+  "publication_revision": "final-2026-10-05",
+  "functions": [
+    {
+      "name": "sys.blob.length",
+      "effect": "read",
+      "signature": "fn sys.blob.length(value: Blob): Int",
+      "purpose": "Return the exact byte count without hydrating payloads.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.digest",
+      "effect": "read",
+      "signature": "fn sys.blob.digest(value: Blob): Digest",
+      "purpose": "Return the raw-content SHA-256 commitment, independent of layout; not a full-verification claim.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.read",
+      "effect": "read",
+      "signature": "fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob",
+      "purpose": "Return bounded raw-byte slice with octet-stream/null annotation; no media decoding.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.verify",
+      "effect": "read",
+      "signature": "fn sys.blob.verify(value: Blob): Unit",
+      "purpose": "Incrementally verify the complete content and its native dependency structure.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.from_bytes",
+      "effect": "read",
+      "signature": "fn sys.blob.from_bytes(values: [Int]): Blob",
+      "purpose": "Construct at most 8 MiB of bytes from integers in 0..255. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.to_bytes",
+      "effect": "read",
+      "signature": "fn sys.blob.to_bytes(value: Blob): [Int]",
+      "purpose": "Explicit bounded materialisation of at most 8 MiB.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.begin",
+      "effect": "invoke",
+      "signature": "fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter",
+      "purpose": "Begin an owned capture with a checked total bound.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.append",
+      "effect": "invoke",
+      "signature": "fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit",
+      "purpose": "Append at most 8 MiB in order; enforce the total bound before acceptance.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.finish",
+      "effect": "invoke",
+      "signature": "fn sys.blob.finish(writer: sys.BlobWriter): Blob",
+      "purpose": "Seal, verify and protect the captured value without implicitly inserting a row. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.abort",
+      "effect": "invoke",
+      "signature": "fn sys.blob.abort(writer: sys.BlobWriter): Unit",
+      "purpose": "Abort unfinished capture; never delete a returned value.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.capture_file",
+      "effect": "invoke",
+      "signature": "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob",
+      "purpose": "Capture an authorised regular file using the shared Blob writer and protection boundary. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.blob.resource",
+      "effect": "read",
+      "signature": "fn sys.blob.resource(path: Str): Blob",
+      "purpose": "Read a safe package-relative resource in the caller module's admitted source snapshot. The fallback annotation is application/octet-stream with no suffix; explicit annotate changes metadata only.",
+      "since": "1.1.0",
+      "contract": "blob-value-and-storage"
+    },
+    {
+      "name": "sys.admin.review_commit",
+      "effect": "read",
+      "signature": "fn sys.admin.review_commit(): sys.CommitReview",
+      "purpose": "Validate and bind the exact staged candidate without changing index, branch or user data.",
+      "since": "1.1.0",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.commit_reviewed",
+      "effect": "admin",
+      "signature": "fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+      "purpose": "Revalidate a reviewed candidate at protected publication and commit exactly that candidate.",
+      "since": "1.1.0",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.blob.media_type",
+      "signature": "fn sys.blob.media_type(value: Blob): Str",
+      "effect": "read",
+      "purpose": "Read canonical declared MIME without payload hydration.",
+      "since": "1.1.0",
+      "contract": "annotated-blob-format-3"
+    },
+    {
+      "name": "sys.blob.suffix",
+      "signature": "fn sys.blob.suffix(value: Blob): Str?",
+      "effect": "read",
+      "purpose": "Read the canonical optional suffix hint without payload hydration.",
+      "since": "1.1.0",
+      "contract": "annotated-blob-format-3"
+    },
+    {
+      "name": "sys.blob.annotate",
+      "signature": "fn sys.blob.annotate(value: Blob, media_type: Str, suffix: Str? = null): Blob",
+      "effect": "read",
+      "purpose": "Return the same immutable bytes with MIME-1-validated canonical annotations.",
+      "since": "1.1.0",
+      "contract": "annotated-blob-format-3"
+    },
+    {
+      "name": "sys.blob.same_content",
+      "signature": "fn sys.blob.same_content(left: Blob, right: Blob): Bool",
+      "effect": "read",
+      "purpose": "Exact content-only equality under admitted-witness/collision rules; may stream bytes and fail unavailable.",
+      "since": "1.1.0",
+      "contract": "annotated-blob-format-3"
+    }
+  ],
+  "retired": "api/retired.json",
+  "changed": [
+    "sys.Storage fields",
+    "sys.StorageProfile values",
+    "Blob annotated value semantics and codecs"
+  ],
+  "failure_conditions": {
+    "sys.blob.bounds": "Negative/out-of-range offset, length or octet value.",
+    "sys.blob.limit": "Per-call or total capture/materialisation quota would be exceeded.",
+    "sys.blob.length_mismatch": "Observed bytes do not match the expected complete length.",
+    "sys.blob.unavailable": "A required promised object cannot be obtained under the selected policy.",
+    "sys.blob.corrupt": "Descriptor, tree, chunk bytes, length or content digest contradict the selected profile.",
+    "sys.blob.collision": "Unequal contents would otherwise receive the same content commitment.",
+    "sys.blob.writer_state": "An operation is invalid for an aborted or finished writer.",
+    "sys.blob.source_changed": "Detected change to the external input during capture.",
+    "sys.blob.source_denied": "The selected host source/resource is not permitted or not a regular safe input.",
+    "sys.blob.reference_context": "A repository reference is decoded outside an admitted repository Blob slot.",
+    "sys.git.stale_review": "The supplied review token or candidate state no longer matches at protected publication.",
+    "sys.blob.invalid_media_type": "The declaration is malformed, non-ASCII or exceeds MIME-1 bounds.",
+    "sys.blob.invalid_suffix": "The suffix contains prohibited characters or exceeds the pinned safe suffix bounds.",
+    "sys.blob.incompatible_suffix": "The suffix is not permitted by MIME-1 for the known declared type.",
+    "sys.vfs.name_collision": "The selected portable projection would produce duplicate or ambiguous path names.",
+    "sys.vfs.invalid_document": "The complete editable document fails schema-directed data decoding or row validation.",
+    "sys.vfs.stale_edit": "The write candidate no longer matches its captured row, schema or field baseline.",
+    "sys.vfs.unsupported": "The filesystem operation is outside the explicitly supported EDIT-1 contract.",
+    "sys.vfs.draft_retained": "An edit was not accepted and its candidate is retained in bounded recovery storage.",
+    "sys.format.unsupported": "The repository header selects a format for which no admitted reader/writer is available.",
+    "sys.codec.unsupported_value_profile": "The value profile is not accepted by the selected encoding or wire context."
+  }
+}
