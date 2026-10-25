@@ -100,6 +100,101 @@ fn committed_three_rows() -> tempfile::TempDir {
     directory
 }
 
+/// Seeds the same three keys as `committed_three_rows`, inserted rome, london,
+/// paris (not ascending), so storage insertion order cannot satisfy ORNA-ORDER-001.
+fn committed_rows_inserted_out_of_order() -> tempfile::TempDir {
+    let (directory, _repository, _relation) =
+        format3::format3_repository_for_table(SOURCE, "music");
+    for row in [
+        "main.music.insert({ id: \"rome\", title: \"Third\", artist: \"Kieran\" })",
+        "main.music.insert({ id: \"london\", title: \"Original\", artist: \"Kieran\" })",
+        "main.music.insert({ id: \"paris\", title: \"Second\", artist: \"Kieran\" })",
+    ] {
+        assert_success(&orna(directory.path(), &["repl", row]), "REPL seed insert");
+    }
+    assert_success(
+        &orna(directory.path(), &["publish", "--message", "seed"]),
+        "publish seeded rows",
+    );
+    directory
+}
+
+/// ORNA-ORDER-001: a base table scan is ordered by ascending canonical primary
+/// key. The scan pages one row at a time (`RELATION_SCAN_PAGE_ROWS`), so the
+/// second and third rows come from later pages.
+#[test]
+fn table_scan_orders_committed_rows_by_ascending_primary_key() {
+    let directory = committed_rows_inserted_out_of_order();
+    let first = orna(
+        directory.path(),
+        &["repl", "main.music | map(row => row.id) | first() ?? \"none\""],
+    );
+    assert_success(&first, "first committed row");
+    assert!(
+        combined(&first).contains("\"london\" : Str"),
+        "first row must be the smallest key: {}",
+        combined(&first)
+    );
+    let second = orna(
+        directory.path(),
+        &["repl", "main.music | map(row => row.id) | drop(1) | first() ?? \"none\""],
+    );
+    assert_success(&second, "second committed row");
+    assert!(
+        combined(&second).contains("\"paris\" : Str"),
+        "second row must be the next key: {}",
+        combined(&second)
+    );
+}
+
+const INT_KEY_SOURCE: &str = "pub table nums(n: Int) { label: Str, }\n\
+pub fn main() = nums | count();\n";
+
+/// Seeds an Int-keyed table with 2, -1, 300. Their canonical CBOR key bytes sort as
+/// 2, 300, -1, which is not numeric order.
+fn committed_int_keys() -> tempfile::TempDir {
+    let (directory, _repository, _relation) =
+        format3::format3_repository_for_table(INT_KEY_SOURCE, "nums");
+    for row in [
+        "main.nums.insert({ n: 2, label: \"two\" })",
+        "main.nums.insert({ n: -1, label: \"minus\" })",
+        "main.nums.insert({ n: 300, label: \"big\" })",
+    ] {
+        assert_success(&orna(directory.path(), &["repl", row]), "REPL seed insert");
+    }
+    assert_success(
+        &orna(directory.path(), &["publish", "--message", "seed"]),
+        "publish seeded rows",
+    );
+    directory
+}
+
+/// ORNA-ORDER-001 over a non-text key: Int keys scan in numeric order.
+#[test]
+fn table_scan_orders_int_keys_numerically() {
+    let directory = committed_int_keys();
+    let first = orna(
+        directory.path(),
+        &["repl", "main.nums | map(row => row.n) | first() ?? 0"],
+    );
+    assert_success(&first, "first Int key");
+    assert!(
+        combined(&first).contains("-1 : Int"),
+        "first Int key must be the smallest: {}",
+        combined(&first)
+    );
+    let second = orna(
+        directory.path(),
+        &["repl", "main.nums | map(row => row.n) | drop(1) | first() ?? 0"],
+    );
+    assert_success(&second, "second Int key");
+    assert!(
+        combined(&second).contains("2 : Int"),
+        "second Int key must be the next numeric key: {}",
+        combined(&second)
+    );
+}
+
 #[test]
 fn invoke_reads_three_committed_rows_as_a_value() {
     let directory = committed_three_rows();

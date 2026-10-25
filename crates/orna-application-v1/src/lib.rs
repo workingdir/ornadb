@@ -14,7 +14,9 @@ use orna_evaluator_v1::{
     invoke_named_with_effects, invoke_named_with_sys_host_context,
     reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
+use orna_foundation_v1::{
+    CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys,
+};
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
@@ -42,10 +44,10 @@ use orna_syntax_v1::{
 use sha2::{Digest, Sha256};
 pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
-    ops::Bound,
     pin::Pin,
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
@@ -1539,10 +1541,13 @@ impl SourceMutationEffectHandler {
             .cloned())
     }
 
-    /// Serves one bounded ascending page of an admitted table: the activation
-    /// snapshot merged with this activation's writes, so a row written earlier
-    /// in the activation reads back through the same relation (ORNA-QUERY-005).
-    /// Keys are canonical bytes, so ascending key order is ORNA-ORDER-001.
+    /// Serves one bounded page of an admitted table in ascending logical primary-key
+    /// order (ORNA-ORDER-001, ORNA-ROW-002): the activation snapshot merged with this
+    /// activation's writes, so a row written earlier in the activation reads back through
+    /// the same relation (ORNA-QUERY-005). Canonical key bytes identify rows but are not
+    /// in table order, so the cursor is the big-endian ordinal of the next live row in
+    /// that order. Ordinals increase bytewise, as the evaluator requires of cursors.
+    /// The order is recomputed per page.
     fn table_relation_page(
         &self,
         table: &str,
@@ -1555,58 +1560,53 @@ impl SourceMutationEffectHandler {
             .as_ref()
             .and_then(|rows| rows.get(table))
             .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
-        let lower: Bound<&[u8]> = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let mut captured_rows = captured
-            .range::<[u8], _>((lower, Bound::Unbounded))
-            .peekable();
-        let mut overlay_rows = self
-            .overlay
-            .get(table)
-            .into_iter()
-            .flat_map(|rows| rows.range::<[u8], _>((lower, Bound::Unbounded)))
-            .peekable();
-        let mut rows = Vec::new();
-        let mut last_key: Option<&Vec<u8>> = None;
-        loop {
-            let from_overlay = match (captured_rows.peek(), overlay_rows.peek()) {
-                (None, None) => break,
-                (None, Some(_)) => true,
-                (Some(_), None) => false,
-                // An overlay entry shadows the captured row with the same key.
-                (Some((captured_key, _)), Some((overlay_key, _))) => overlay_key <= captured_key,
-            };
-            let (key, row) = if from_overlay {
-                let Some((key, row)) = overlay_rows.next() else {
-                    break;
-                };
-                if captured_rows
-                    .peek()
-                    .is_some_and(|(captured_key, _)| *captured_key == key)
-                {
-                    captured_rows.next();
-                }
-                (key, row.as_ref())
-            } else {
-                let Some((key, row)) = captured_rows.next() else {
-                    break;
-                };
-                (key, Some(row))
-            };
-            // A tombstone frees the key and contributes no row.
+        // An overlay entry shadows the captured row with the same key; a tombstone frees it.
+        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> = captured
+            .iter()
+            .map(|(key, row)| (key, Some(row)))
+            .collect();
+        for (key, row) in self.overlay.get(table).into_iter().flatten() {
+            merged.insert(key, row.as_ref());
+        }
+        let mut live = Vec::with_capacity(merged.len());
+        for (key, row) in merged {
             let Some(row) = row else {
                 continue;
             };
-            if rows.len() == limit {
-                return Ok(RelationPage {
-                    rows,
-                    next: last_key.cloned(),
-                });
-            }
-            budget.debit(1)?;
-            rows.push(row.clone());
-            last_key = Some(key);
+            let logical = orna_foundation_v1::Value::decode(key)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+            live.push((logical, row));
         }
-        Ok(RelationPage { rows, next: None })
+        let mut comparison_failed = false;
+        live.sort_by(|(left, _), (right, _)| {
+            compare_primary_keys(left, right).unwrap_or_else(|_| {
+                comparison_failed = true;
+                Ordering::Equal
+            })
+        });
+        if comparison_failed {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"));
+        }
+        let start = match after {
+            None => 0,
+            Some(cursor) => {
+                let bytes: [u8; 8] = cursor
+                    .try_into()
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+                usize::try_from(u64::from_be_bytes(bytes))
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?
+            }
+        }
+        .min(live.len());
+        let end = start.saturating_add(limit).min(live.len());
+        let mut rows = Vec::with_capacity(end - start);
+        for (_, row) in &live[start..end] {
+            budget.debit(1)?;
+            rows.push(CanonicalValue::clone(row));
+        }
+        let next =
+            (end < live.len() && !rows.is_empty()).then(|| (end as u64).to_be_bytes().to_vec());
+        Ok(RelationPage { rows, next })
     }
 
     fn admitted_table_name(&self, path: &str) -> Option<&str> {
