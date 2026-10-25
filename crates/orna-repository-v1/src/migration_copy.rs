@@ -686,6 +686,7 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     let mut command = git_command(root);
     command.args(["update-ref", "--no-deref", &reference, &object_id, &zero]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, root);
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -696,6 +697,7 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     let mut verify = git_command(root);
     verify.args(["rev-parse", "--verify", &reference]);
     crate::scrub_git_routing_environment(&mut verify);
+    crate::bind_git_discovery_to_worktree(&mut verify, root);
     let output = verify
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -712,6 +714,7 @@ fn pin_migration_index(repository: &Repository, tree: &str) -> Result<(), Reposi
     let mut command = git_command(repository.worktree());
     command.args(["update-ref", "--no-deref", &reference, tree, &zero]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, repository.worktree());
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -727,6 +730,7 @@ fn require_migration_index_pin(repository: &Repository, tree: &str) -> Result<()
     let mut command = git_command(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, repository.worktree());
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -754,6 +758,7 @@ fn pin_migration_candidate(
         &zero,
     ]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, repository.worktree());
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -772,6 +777,7 @@ fn require_migration_candidate_pin(
     let mut command = git_command(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, repository.worktree());
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -936,6 +942,7 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
         let mut command = git_command(root);
         command.args(["config", "--local", key, value]);
         crate::scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, root);
         let output = command
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -1034,6 +1041,7 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
         .arg(&canonical_source)
         .arg(&root);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, &parent);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -1091,6 +1099,7 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
     let mut command = git_command(root);
     command.args(["rev-parse", "--path-format=absolute", "--git-path", name]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, root);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -1108,6 +1117,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
     let mut command = git_command(source);
     command.args(["ls-files", "--stage", "-z"]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, source);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -1142,6 +1152,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             .args(["cat-file", "-e"])
             .arg(format!("{object_id}^{{blob}}"));
         crate::scrub_git_routing_environment(&mut exists);
+        crate::bind_git_discovery_to_worktree(&mut exists, destination);
         if exists
             .stderr(Stdio::null())
             .status()
@@ -1157,6 +1168,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             .args(["cat-file", "blob", object_id])
             .stdout(Stdio::piped());
         crate::scrub_git_routing_environment(&mut read);
+        crate::bind_git_discovery_to_worktree(&mut read, source);
         let mut read = read.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
         let mut write = git_command(destination);
         write
@@ -1164,6 +1176,7 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
         crate::scrub_git_routing_environment(&mut write);
+        crate::bind_git_discovery_to_worktree(&mut write, destination);
         let mut write = write.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
         std::io::copy(
             &mut read
@@ -1392,6 +1405,7 @@ fn settle_index(root: &Path) -> Result<(), RepositoryError> {
     let mut command = git_command(root);
     command.args(["update-index", "--refresh", "--quiet"]);
     crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, root);
     // A refresh that reports `needs update` still repaired every stat entry it
     // could, which is the whole purpose here; only a missing Git or a killed
     // process is fatal.
@@ -1543,6 +1557,7 @@ fn hash_nested_git_state(root: &Path, hash: &mut Sha256) -> Result<(), Repositor
     let mut head = git_command(root);
     head.args(["rev-parse", "--verify", "HEAD"]);
     crate::scrub_git_routing_environment(&mut head);
+    crate::bind_git_discovery_to_worktree(&mut head, root);
     let output = head.output().map_err(|_| RepositoryError::GitUnavailable)?;
     if output.status.success() {
         let object = crate::trim_output(&output.stdout);
