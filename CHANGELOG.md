@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
+  legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
+  ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
+  ORNA-REPO-CONTEXT-003 (unknown format) because the gate reclassified the
+  mixed snapshot (ORNA-META-001, ORNA-META-002; Gate A).
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the

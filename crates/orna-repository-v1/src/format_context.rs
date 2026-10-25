@@ -1196,12 +1196,16 @@ impl Repository {
     /// `.orna/format.orna` record that does not classify as a known format,
     /// whatever the cause (unknown number, string or overflowing integer,
     /// syntax-broken or open record, unreadable tree), the gate refuses with
-    /// [`FormatContextError::UnknownFormat`]. It falls through only when `HEAD`
-    /// is unborn or tracks no format record at all. Those cases are decided by
+    /// [`FormatContextError::UnknownFormat`]. A `HEAD` whose metadata mixes
+    /// layouts (a legacy record beside `.orna/store`, ORNA-META-001) is refused
+    /// with [`FormatContextError::MixedFormats`] (ORNA-REPO-CONTEXT-004), never
+    /// reclassified as unknown. It falls through only when `HEAD` is unborn or
+    /// tracks no format record at all. Those cases are decided by
     /// [`Self::require_writable_head_format`] and the metadata checks after it.
     pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
         match self.open_format_context() {
             Ok(_) => Ok(()),
+            Err(error @ FormatContextError::MixedFormats { .. }) => Err(error),
             Err(FormatContextError::UnknownFormat) => Err(FormatContextError::UnknownFormat),
             Err(_) => self.refuse_unclassifiable_head_records(),
         }
