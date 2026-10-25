@@ -847,6 +847,11 @@ fn all_unique_factory_compares_complete_nested_record_keys() {
     }
 }
 
+// Spec 29-formats: tuples are Tag(60015, Array); zero arity canonicalises to Unit.
+fn tuple_value(items: Vec<Raw>) -> Raw {
+    Raw::Tag(60015, Box::new(Raw::Array(items)))
+}
+
 #[test]
 fn relation_predicate_folds_preserve_paired_optional_values() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
@@ -856,18 +861,18 @@ fn relation_predicate_folds_preserve_paired_optional_values() {
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
     let expected_keys = [
-        Raw::Array(vec![
+        tuple_value(vec![
             Raw::Null,
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+            tuple_value(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
         ]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+        tuple_value(vec![
+            tuple_value(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
             Raw::Null,
         ]),
-        Raw::Array(vec![Raw::Null, Raw::Null]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
-            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        tuple_value(vec![Raw::Null, Raw::Null]),
+        tuple_value(vec![
+            tuple_value(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            tuple_value(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
         ]),
     ];
     for (index, expected_key) in expected_keys.iter().enumerate() {
