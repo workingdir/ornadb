@@ -18,6 +18,19 @@ been published.
   `git fsck` passes. Managed-worktree and index reconciliation checks run only for
   non-store paths, and format-3 candidates have none, so they are vacuous here.
   No production behaviour changes.
+- A complete-copy export of a workspace with a legacy format-1/2 snapshot now
+  admits that snapshot by its recorded format record, and an offline restore
+  re-admits each member (Gate F, `ACCEPTANCE.md:63-68`,
+  `24-git-history.md:19`). Format-3 members still require their schema and
+  store roots. Earlier builds refused every non-format-3 snapshot as a complete
+  copy. The migrated-member leg (`migrate copy` publication) remains open under
+  ornadb-5il1.192, and a gitlink whose dependency repository is absent is still
+  refused.
+- Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
+  legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
+  ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
+  ORNA-REPO-CONTEXT-003 (unknown format) because the gate reclassified the
+  mixed snapshot (ORNA-META-001, ORNA-META-002; Gate A).
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
   41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
