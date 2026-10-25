@@ -2232,8 +2232,18 @@ fn run_pure_invocation(
             module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
-            let authority =
-                ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
+            let authority = ApplicationAuthority::new(
+                orna_semantic_v1::Catalogue::authoritative_core(),
+                Limits::default(),
+            )
+            .with_loaded_standard(&project)
+            .map_err(|_| {
+                Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                )
+            })?;
             let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
