@@ -8,6 +8,7 @@ been published.
 
 ### Fixed
 - Runtime `reserve_request` now refuses a secondary handle that does not own the worktree lock with `LeaseHeld` before inserting a row (ORNA-TURSO-005, ornadb-f69b). Test setup that reserved through a secondary handle now reserves through the host's owner-bound runtime, or releases the owner handle first.
+- Secondary runtime handles (another live runtime holds the worktree owner lock) are refused with `LeaseHeld` by every writer-lease entry point, not only `reserve_request`: `begin_observed_request` (with admission), `acquire_lease`, `current_lease`, `takeover_lease` and `recover_abandoned` (ORNA-TURSO-005, ornadb-3c2s). A secondary can no longer read, take over or reclaim the writer lease, so a second local writer must coordinate with the owner or fail. Tests that relied on a second handle performing this setup now use the owner handle, a handle outside the owner lock for compare-and-swap races, or a real secondary for `LeaseHeld` assertions.
 
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.

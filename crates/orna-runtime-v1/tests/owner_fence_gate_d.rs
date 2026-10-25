@@ -319,7 +319,7 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             ),
             "a secondary participant must not take the writer lease from a live owner"
         );
-        assert_eq!(secondary.current_lease().await.unwrap(), Some(dead));
+        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
         drop(secondary);
     });
 
@@ -547,7 +547,7 @@ fn a_secondary_participant_cannot_create_or_take_the_writer_lease() {
             Err(RuntimeError::LeaseHeld),
             "a secondary must not create the lease on a fresh worktree"
         );
-        assert_eq!(secondary.current_lease().await.unwrap(), None);
+        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
 
         let lease = holder
             .acquire_lease(process_owner_id())
@@ -559,7 +559,8 @@ fn a_secondary_participant_cannot_create_or_take_the_writer_lease() {
             Err(RuntimeError::LeaseHeld),
             "a secondary must not take the lease from the live lock holder"
         );
-        assert_eq!(secondary.current_lease().await.unwrap(), Some(lease));
+        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(holder.current_lease().await.unwrap(), Some(lease));
     });
 }
 
