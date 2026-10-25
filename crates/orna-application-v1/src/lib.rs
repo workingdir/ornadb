@@ -596,12 +596,34 @@ impl ApplicationAuthority {
         snapshot: &RuntimeTableActivationSnapshot,
         publication_rows: Option<RuntimePublicationMetadataRows>,
     ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_with_table_snapshot_rows(
+            application,
+            arguments,
+            snapshot,
+            snapshot.table_rows().clone(),
+            publication_rows,
+        )
+    }
+
+    /// Evaluates against `snapshot`'s activation with `rows` as the table
+    /// contents. The caller supplies the rows in evaluator form (the form the
+    /// admitted schemas expect), typically the snapshot's merged committed and
+    /// live rows converted once at the project boundary. The returned work is
+    /// still staged against the snapshot's captured generation.
+    pub fn evaluate_staged_with_table_snapshot_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        snapshot: &RuntimeTableActivationSnapshot,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Result<StagedActivation, ApplicationError> {
         let table_object_ids = application_table_object_ids(application);
         validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
         self.evaluate_staged_over_table_rows(
             application,
             arguments,
-            snapshot.table_rows().clone(),
+            rows,
             publication_rows,
             Some(snapshot.context().capture().generation_digest()),
         )

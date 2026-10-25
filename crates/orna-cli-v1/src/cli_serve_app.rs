@@ -174,14 +174,11 @@ impl ServeApp {
         let state = runtime
             .block_on(RuntimeState::open(&repository, identity, initial_digest))
             .map_err(|_| "serve.table_rows_unavailable")?;
-        let rows = committed_rows_at(&repository, &commit, &admitted, &tables)
+        let (rows, storage_orders) = committed_rows_at(&repository, &commit, &admitted, &tables)
             .map_err(|_| "serve.table_rows_unavailable")?;
         check_committed_read_limits(&rows)?;
-        let pin = runtime
-            .block_on(state.published_pin())
+        let committed = pin_committed_tables(&runtime, &state, rows, storage_orders)
             .map_err(|_| "serve.table_rows_unavailable")?;
-        let committed =
-            PinnedCommittedRows::new(pin, rows).map_err(|_| "serve.table_rows_unavailable")?;
         let (_snapshot, staged) = evaluate_over_committed_tables(
             &runtime,
             &state,
