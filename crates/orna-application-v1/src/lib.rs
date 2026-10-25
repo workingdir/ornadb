@@ -64,6 +64,7 @@ pub fn remote_analysis_request(
 
 mod repl_transaction;
 mod browser_profile;
+mod table_reference;
 pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::ReplTransactionScope;
 mod format3_store;
@@ -430,11 +431,15 @@ impl ApplicationAuthority {
     /// This is required for operations whose result depends on the previous
     /// row value (`update`, patching `upsert`, and `rekey`). The returned work
     /// can only be staged against the same captured generation.
+    /// `publication_rows` carries the durable publication snapshot for the
+    /// same activation when the entry scans `sys` relations, mirroring
+    /// [`Self::evaluate_staged_with_publication_rows`].
     pub fn evaluate_staged_with_table_snapshot(
         &self,
         application: &AdmittedApplication,
         arguments: &Environment,
         snapshot: &RuntimeTableActivationSnapshot,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
@@ -450,6 +455,7 @@ impl ApplicationAuthority {
             application.limits,
         )
         .with_sys_host_context(self.sys_host.clone());
+        handler.publication_rows = publication_rows;
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -3529,6 +3535,14 @@ impl AdmittedApplication {
     #[must_use]
     pub const fn requires_publication_metadata(&self) -> bool {
         self.requires_publication_metadata
+    }
+
+    /// Returns whether the entry can reach an admitted table by name. An entry
+    /// that cannot reach a table evaluates without committed table state.
+    #[must_use]
+    pub fn entry_references_tables(&self) -> bool {
+        let tables: BTreeSet<&str> = self.table_schemas.keys().map(String::as_str).collect();
+        table_reference::entry_references_tables(&self.functions, &self.entry, &tables)
     }
 
     #[must_use]
