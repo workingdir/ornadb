@@ -3663,9 +3663,9 @@ impl Filesystem for WorkspaceFilesystem {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .nodes
                 .contains_key(&inode.0);
-        if !data.is_empty() && is_tracked {
+        let writes_candidate = !data.is_empty() && is_tracked;
+        if writes_candidate {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
-            draft_state.dirty_handles.insert(handle.0);
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
@@ -3700,6 +3700,11 @@ impl Filesystem for WorkspaceFilesystem {
             }
             reply.error(draft_errno(&result));
         } else {
+            if writes_candidate {
+                // Dirty means an accepted-or-refused candidate is pending. A failed
+                // write leaves no candidate, so it must not mark the handle dirty.
+                draft_state.dirty_handles.insert(handle.0);
+            }
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
             }
@@ -3733,7 +3738,8 @@ impl Filesystem for WorkspaceFilesystem {
             Err(DocumentCommitError::NoCandidate) => {
                 // The handle submitted nothing, so nothing is pending for it. A clean
                 // handle acknowledges (POSIX fsync of an unmodified handle succeeds);
-                // a dirty one fails closed (ORNA-VFS-008, EDIT-1 step 2).
+                // a dirty one fails closed (EDIT-1 step 2: a successful sync acknowledges
+                // only accepted state).
                 match noncandidate_ack(&mut draft_state, handle.0, "fsync") {
                     Ok(()) => reply.ok(),
                     Err(errno) => reply.error(errno),
