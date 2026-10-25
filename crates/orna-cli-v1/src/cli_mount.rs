@@ -1005,7 +1005,7 @@ fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
             }
         }
         Err(error) => {
-            let _ = writeln!(stderr, "unresolved drafts could not be listed: {error}");
+            let _ = writeln!(stderr, "unresolved drafts could not be listed: {}", draft_listing_failure(error));
         }
     }
     Diagnostic::target_with_detail(
@@ -1231,7 +1231,19 @@ fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>
                 .collect(),
             None,
         ),
-        Err(error) => (Vec::new(), Some(error)),
+        Err(error) => (Vec::new(), Some(draft_listing_failure(error))),
+    }
+}
+
+/// Names a failed draft listing. A writable record whose mountpoint is no longer
+/// a live Orna mount (the daemon exited, so the kernel answers ENOTCONN, or the
+/// path is gone, ENOENT) is a stale record; any other error is a live failure.
+#[cfg(target_os = "linux")]
+fn draft_listing_failure(error: rustix::io::Errno) -> String {
+    if error == rustix::io::Errno::NOTCONN || error == rustix::io::Errno::NOENT {
+        "stale mount record: the mountpoint is not a live Orna mount (its process is gone); run `orna unmount` to clear it".to_owned()
+    } else {
+        format!("could not list Orna mount drafts: {error}")
     }
 }
 
@@ -1341,6 +1353,28 @@ mod tests {
             !object.contains("a\"b"),
             "raw quote must not appear: {object}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_writable_record_is_reported_distinctly_from_a_live_draft_failure() {
+        use super::draft_listing_failure;
+        use rustix::io::Errno;
+
+        let stale = draft_listing_failure(Errno::NOTCONN);
+        let missing = draft_listing_failure(Errno::NOENT);
+        let live = draft_listing_failure(Errno::NODATA);
+        assert!(stale.starts_with("stale mount record"), "{stale}");
+        assert_eq!(stale, missing);
+        assert!(live.starts_with("could not list Orna mount drafts"), "{live}");
+        assert!(!live.contains("stale"), "{live}");
+
+        let stale_json = mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &[], Some(&stale));
+        assert!(stale_json.contains("\"draft_error\":\"stale mount record"), "{stale_json}");
+        assert!(stale_json.contains("\"writable\":true"), "{stale_json}");
+        let live_json = mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &[], Some(&live));
+        assert!(live_json.contains("could not list Orna mount drafts"), "{live_json}");
+        assert!(!live_json.contains("stale"), "{live_json}");
     }
 
     #[test]
