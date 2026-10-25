@@ -17,6 +17,7 @@ been published.
 
 ### Added
 - Format-2 Blob read API (not yet reachable from a production row read path): `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record or a ROV-2 CBOR reference (authority `ORNA-ROW-013`, `ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. Content per call is capped at 8 MiB (`ORNA-BLOB-011`); the effective limit is the smaller of the caller's limit and that cap. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. The ORR-2, ROV-2 and OGB-1 clause IDs in the code are superseded draft IDs, not final-spec clauses. Loose-row and compact-v2 physical row decoders are not part of this change. `ornadb-nne7` remains open.
+- Row-map resume paging (ORNA-ROW-002): a resume cursor skips exactly the keys at or below it under the shared `Int`/`UInt` rank, is intersected with the range's lower bound, and is refused at or above the upper bound. Composite (tuple) predicate scans page every row in key order across page boundaries; a 300-row composite fixture is checked key by key by the native graph and CLI e2e tests.
 
 ### Fixes
 - Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)

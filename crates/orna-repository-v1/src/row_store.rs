@@ -1565,6 +1565,272 @@ mod tests {
         assert!(rows.iter().all(|row| row.version() == &version));
     }
 
+    /// Seals an in-memory row map over `keys`, which must be strictly
+    /// ascending and of one key type.
+    fn sealed_snapshot(keys: &[TypedKey]) -> RowMapSnapshot {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(keys.len() as u64),
+        )
+        .expect("coherent row-map version");
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        let entries = keys
+            .iter()
+            .map(|key| RowEntry::new(key.clone(), value.clone()))
+            .collect();
+        RowMapSnapshot::issue(version, [0x77; 32], entries).expect("seal row map")
+    }
+
+    /// The keys a resume cursor must return: strictly after `after`, inside
+    /// the bounds, at most `limit` of them, in key order.
+    fn expected_after(
+        keys: &[TypedKey],
+        lower: Option<&TypedKey>,
+        upper: Option<&TypedKey>,
+        after: &TypedKey,
+        limit: usize,
+    ) -> Vec<TypedKey> {
+        keys.iter()
+            .filter(|key| lower.is_none_or(|lower| *key >= lower))
+            .filter(|key| upper.is_none_or(|upper| *key < upper))
+            .filter(|key| *key > after)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Asserts that a resume cursor returns exactly the sorted suffix that
+    /// [`expected_after`] names, and that a cursor at or above the upper
+    /// bound is refused. Cursors may be present, absent or outside the bounds.
+    fn assert_resume_skips_to_the_sorted_suffix(
+        keys: &[TypedKey],
+        lower: Option<TypedKey>,
+        upper: Option<TypedKey>,
+        cursors: &[TypedKey],
+        limit: usize,
+    ) {
+        let snapshot = sealed_snapshot(keys);
+        for cursor in cursors {
+            let range = KeyRange::new(lower.clone(), upper.clone(), limit).expect("valid range");
+            if upper.as_ref().is_some_and(|upper| cursor >= upper) {
+                assert!(
+                    range.with_resume_after(cursor.clone()).is_err(),
+                    "cursor {cursor:?} at or above the upper bound is refused"
+                );
+                continue;
+            }
+            let resumed = range
+                .with_resume_after(cursor.clone())
+                .expect("cursor below the upper bound");
+            let rows: Vec<TypedKey> = snapshot
+                .range(&resumed)
+                .expect("read the resumed range")
+                .iter()
+                .map(|row| row.key().clone())
+                .collect();
+            assert_eq!(
+                rows,
+                expected_after(keys, lower.as_ref(), upper.as_ref(), cursor, limit),
+                "resume after {cursor:?} with limit {limit}"
+            );
+        }
+    }
+
+    /// Pages every key of `[lower, upper)` with `limit` rows per page, each
+    /// page resuming after the last key the previous page returned.
+    fn page_through(
+        snapshot: &RowMapSnapshot,
+        lower: Option<TypedKey>,
+        upper: Option<TypedKey>,
+        limit: usize,
+    ) -> Vec<TypedKey> {
+        let base = KeyRange::new(lower, upper, limit).expect("valid page range");
+        let mut collected = Vec::new();
+        let mut range = base.clone();
+        loop {
+            let page: Vec<TypedKey> = snapshot
+                .range(&range)
+                .expect("read one page")
+                .iter()
+                .map(|row| row.key().clone())
+                .collect();
+            let short = page.len() < limit;
+            let last = page.last().cloned();
+            collected.extend(page);
+            let Some(last) = last.filter(|_| !short) else {
+                break;
+            };
+            range = base
+                .clone()
+                .with_resume_after(last)
+                .expect("resume cursor inside the range");
+        }
+        collected
+    }
+
+    /// ORNA-ROW-002: `Int` and `UInt` share one key rank, so a resume cursor
+    /// on either spelling skips the same keys across zero. Cursors below the
+    /// first key, on the first, middle and last keys, on absent keys, and
+    /// past the last key are each exclusive.
+    #[test]
+    fn resume_skip_is_exclusive_for_mixed_int_spellings_across_zero() {
+        let keys = vec![
+            TypedKey::Int(-9),
+            TypedKey::Int(-2),
+            TypedKey::Int(-1),
+            TypedKey::UInt(0),
+            TypedKey::Int(3),
+            TypedKey::UInt(4),
+            TypedKey::UInt(10),
+        ];
+        assert_logical_order(&keys);
+        let cursors = [
+            TypedKey::Int(-100),
+            TypedKey::Int(-9),
+            TypedKey::Int(-5),
+            TypedKey::UInt(0),
+            TypedKey::Int(2),
+            TypedKey::UInt(10),
+            TypedKey::UInt(99),
+        ];
+        for limit in [1, 2, 7] {
+            assert_resume_skips_to_the_sorted_suffix(&keys, None, None, &cursors, limit);
+        }
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 3, 256] {
+            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+        }
+    }
+
+    /// ORNA-ROW-002: a resume cursor is checked against the range's bounds.
+    /// A cursor below the lower bound returns the intersection with the
+    /// bounds; a cursor at or above the upper bound is refused. Tuple keys
+    /// compare component by component.
+    #[test]
+    fn resume_skip_respects_tuple_bounds_and_refuses_a_cursor_at_the_upper_bound() {
+        let keys: Vec<TypedKey> = (0..3_i64)
+            .flat_map(|first| {
+                ["a", "b", "c"].into_iter().map(move |second| {
+                    TypedKey::Tuple(vec![
+                        TypedKey::Int(first),
+                        TypedKey::Text(second.to_owned()),
+                    ])
+                })
+            })
+            .collect();
+        let pair = |first: i64, second: &str| {
+            TypedKey::Tuple(vec![TypedKey::Int(first), TypedKey::Text(second.to_owned())])
+        };
+        let lower = pair(1, "b");
+        let upper = pair(2, "b");
+        let in_range: Vec<TypedKey> = keys
+            .iter()
+            .filter(|key| *key >= &lower && *key < &upper)
+            .cloned()
+            .collect();
+        assert_eq!(in_range.len(), 3, "(1,b), (1,c) and (2,a) lie in [(1,b), (2,b))");
+        let cursors = [
+            pair(0, "z"),
+            pair(1, "b"),
+            pair(1, "bb"),
+            pair(1, "c"),
+            pair(2, "a"),
+            pair(2, "b"),
+            pair(2, "c"),
+        ];
+        for limit in [1, 2, 256] {
+            assert_resume_skips_to_the_sorted_suffix(
+                &keys,
+                Some(lower.clone()),
+                Some(upper.clone()),
+                &cursors,
+                limit,
+            );
+        }
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 256] {
+            assert_eq!(
+                page_through(&snapshot, Some(lower.clone()), Some(upper.clone()), limit),
+                in_range,
+                "limit {limit}"
+            );
+        }
+    }
+
+    /// Paging crosses each page boundary by the resume cursor alone, for Text,
+    /// Bytes and Bool keys, and a composite key whose canonical encoding is
+    /// exactly 256 bytes pages in order beside a 257-byte neighbour.
+    #[test]
+    fn paging_is_exact_for_text_bytes_bool_and_a_256_byte_tuple_key() {
+        let texts: Vec<TypedKey> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|text| TypedKey::Text(text.to_owned()))
+            .collect();
+        let bytes: Vec<TypedKey> = [vec![0x00], vec![0x00, 0x01], vec![0x01], vec![0xff]]
+            .into_iter()
+            .map(TypedKey::Bytes)
+            .collect();
+        let bools = vec![TypedKey::Bool(false), TypedKey::Bool(true)];
+        for keys in [&texts, &bytes, &bools] {
+            assert_logical_order(keys);
+            let snapshot = sealed_snapshot(keys);
+            for limit in [1, 2, 3, 256] {
+                assert_eq!(page_through(&snapshot, None, None, limit), *keys, "limit {limit}");
+            }
+        }
+
+        let tuple_of = |text_len: usize, last: i64| {
+            TypedKey::Tuple(vec![
+                TypedKey::Text("x".repeat(text_len)),
+                TypedKey::Int(last),
+            ])
+        };
+        let canonical_len = |key: &TypedKey| key.canonical_bytes().expect("canonical key").len();
+        let text_len = (0..512)
+            .find(|&len| canonical_len(&tuple_of(len, 1)) == 256)
+            .expect("some text length encodes the tuple in exactly 256 bytes");
+        let exact = tuple_of(text_len, 1);
+        let longer = tuple_of(text_len + 1, 1);
+        let keys = vec![
+            TypedKey::Tuple(vec![TypedKey::Text("a".to_owned()), TypedKey::Int(1)]),
+            exact,
+            longer,
+        ];
+        assert_eq!(canonical_len(&keys[1]), 256);
+        assert_eq!(canonical_len(&keys[2]), 257);
+        assert_logical_order(&keys);
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 256] {
+            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+        }
+    }
+
+    /// ORNA-ROW-002: a resume cursor at or above the upper bound is refused
+    /// for Text keys, and one just below it returns nothing.
+    #[test]
+    fn resume_cursor_at_or_above_a_text_upper_bound_is_refused() {
+        let keys: Vec<TypedKey> = (0..4)
+            .map(|index| TypedKey::Text(format!("row-{index}")))
+            .collect();
+        assert_resume_skips_to_the_sorted_suffix(
+            &keys,
+            None,
+            Some(TypedKey::Text("row-2".to_owned())),
+            &[
+                TypedKey::Text("row-1".to_owned()),
+                TypedKey::Text("row-2".to_owned()),
+                TypedKey::Text("row-9".to_owned()),
+            ],
+            2,
+        );
+    }
+
     fn key_of(raw: Raw) -> TypedKey {
         TypedKey::from_value(&Value::new(raw).expect("registered canonical value"))
             .expect("permitted key value")

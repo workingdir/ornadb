@@ -11365,14 +11365,16 @@ mod persisted_orp_tests {
             "reclamation must stay inside the killed owner's pin namespace"
         );
     }
-    #[test]
-    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
-        let (_directory, mut graph) = capture_test_context();
+
+    /// Publishes `keys` as a multi-page row map under the relation's primary
+    /// root, so range reads run through this graph's production read path.
+    fn publish_row_map(graph: &mut NativeGraphContext, keys: impl IntoIterator<Item = TypedKey>) {
         let seed_scope = graph.open_read_scope().expect("owner seed scope");
         let seed_value = vec![0x80];
-        let mutations: Vec<_> = (0..700)
-            .map(|index| RowIndexMutation::Insert {
-                key: TypedKey::Text(format!("row-{index:04}")),
+        let mutations: Vec<_> = keys
+            .into_iter()
+            .map(|key| RowIndexMutation::Insert {
+                key,
                 fields: seed_value.clone(),
             })
             .collect();
@@ -11399,7 +11401,88 @@ mod persisted_orp_tests {
         )
         .expect("load seeded format-3 row map");
         graph.store_root = seeded_store_root;
-        drop(seed_scope);
+    }
+
+    /// A composite key pages in key order through the production row map:
+    /// 300 tuple rows cross the 256-row page boundary and each is returned
+    /// exactly once. A resume cursor on the first, a middle, the last or an
+    /// absent key skips exactly the sorted suffix, and a cursor at or above
+    /// the upper bound is refused.
+    #[test]
+    fn composite_keys_page_through_the_native_row_map_in_order() {
+        let (_directory, mut graph) = capture_test_context();
+        let keys: Vec<TypedKey> = (0..300)
+            .map(|index| {
+                TypedKey::Tuple(vec![
+                    TypedKey::Text("north".to_owned()),
+                    TypedKey::Text(format!("sku-{index:03}")),
+                ])
+            })
+            .collect();
+        publish_row_map(&mut graph, keys.clone());
+        let scope = graph.open_read_scope().expect("composite query scope");
+        let read = |range: &crate::row_store::KeyRange| -> Vec<TypedKey> {
+            graph
+                .range_rows(range, &scope)
+                .expect("read one row-map page")
+                .into_iter()
+                .map(|row| row.key().clone())
+                .collect()
+        };
+
+        let mut paged = Vec::new();
+        let mut cursor: Option<TypedKey> = None;
+        loop {
+            let base = crate::row_store::KeyRange::new(None, None, 256).expect("valid page");
+            let range = match cursor.take() {
+                Some(after) => base.with_resume_after(after).expect("cursor inside the map"),
+                None => base,
+            };
+            let page = read(&range);
+            let short = page.len() < 256;
+            cursor = page.last().cloned();
+            paged.extend(page);
+            if short {
+                break;
+            }
+        }
+        assert_eq!(paged, keys, "every composite key once, in key order");
+
+        let resumed = |after: &TypedKey| {
+            let range = crate::row_store::KeyRange::new(None, None, 256)
+                .expect("valid page")
+                .with_resume_after(after.clone())
+                .expect("cursor inside the map");
+            read(&range)
+        };
+        assert_eq!(resumed(&keys[0]), keys[1..257].to_vec(), "first key");
+        assert_eq!(resumed(&keys[150]), keys[151..300].to_vec(), "middle key");
+        let absent = TypedKey::Tuple(vec![
+            TypedKey::Text("north".to_owned()),
+            TypedKey::Text("sku-150x".to_owned()),
+        ]);
+        assert_eq!(resumed(&absent), keys[151..300].to_vec(), "absent key");
+        assert!(resumed(&keys[299]).is_empty(), "last key");
+
+        let bounded = crate::row_store::KeyRange::new(None, Some(keys[200].clone()), 256)
+            .expect("valid bounded page");
+        assert!(
+            bounded.clone().with_resume_after(keys[200].clone()).is_err(),
+            "a cursor at the upper bound is refused"
+        );
+        let inside = bounded
+            .with_resume_after(keys[150].clone())
+            .expect("cursor below the upper bound");
+        assert_eq!(read(&inside), keys[151..200].to_vec(), "bounded middle");
+    }
+
+    #[test]
+    fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
+        let (_directory, mut graph) = capture_test_context();
+        publish_row_map(
+            &mut graph,
+            (0..700).map(|index| TypedKey::Text(format!("row-{index:04}"))),
+        );
 
         let bounded_scope = graph.open_read_scope().expect("bounded query scope");
         let bounded_range = crate::row_store::KeyRange::new(
