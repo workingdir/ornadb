@@ -8774,6 +8774,40 @@ mod tests {
         }
     }
 
+    /// Counts event invocations so the event path can prove an applied
+    /// mismatch is retained rather than rerun on retry.
+    #[derive(Default)]
+    struct WrongRequestEventApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongRequestEventApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn event(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([98; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+    }
+
     /// Applied effects followed by a result that correlates to the request but
     /// carries the wrong fingerprint.
     #[derive(Default)]
@@ -9679,6 +9713,53 @@ mod tests {
         );
         assert_eq!(replay, response);
         assert_eq!(application.calls, 1, "a retry must never rerun the application");
+    }
+
+    #[test]
+    fn applied_event_with_unvalidatable_response_is_retained_without_value() {
+        let request = [15; 16];
+        let watch = [16; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestEventApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The event published its effects before returning a response the
+        // host could not validate. The terminal must be retained-without-value,
+        // not a correlated wire.request_mismatch that reads as "not applied".
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied event must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        // An exact retry replays the terminal result without rerunning the event.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the event");
     }
 
     #[test]
