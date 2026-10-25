@@ -31,7 +31,8 @@ fn assert_database_helper_summary(analysis: &Analysis) {
     assert_eq!(
         helper.effects,
         EffectSummary {
-            effects: BTreeSet::from(["database read".to_owned()]),
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         }
     );
@@ -67,7 +68,8 @@ fn explicit_imported_helper_assertion_keeps_transitive_dependencies_and_effects(
     assert_eq!(
         plan.effects,
         EffectSummary {
-            effects: BTreeSet::from(["database read".to_owned()]),
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         }
     );
@@ -92,7 +94,7 @@ fn aliased_imported_helper_assertion_keeps_transitive_dependencies() {
     assert_eq!(plan.effects.may_fail, true);
     assert_eq!(
         plan.effects.effects,
-        BTreeSet::from(["database read".to_owned()])
+        BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
     );
 }
 

@@ -577,7 +577,7 @@ impl MountWriter {
     ) -> Result<Arc<Self>, String> {
         let (identity, initial_digest) = super::runtime_identity(repository)
             .map_err(|error| format!("repository runtime identity is unavailable: {error}"))?;
-        let owner_id = super::invocation_owner_id(identity);
+        let owner_id = super::invocation_owner_id();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1119,6 +1119,12 @@ impl DocumentCommitError {
     }
 }
 
+/// Cause recorded for a dirty document released without an accepted save: the
+/// refusal already recorded for it (ORNA-VFS-009), else `unsynced`.
+fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'static str {
+    refusal.map_or("unsynced", |refusal| refusal.cause)
+}
+
 /// Classifies a failed durable save. Semantic admission and malformed-draft
 /// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
 /// backing I/O `Failed`.
@@ -1241,6 +1247,7 @@ impl RowSaveContext {
     fn commit_document(
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save().map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
@@ -1271,7 +1278,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(accepted_row);
+                if record_baseline {
+                    self.record_accepted_row(accepted_row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1288,6 +1297,7 @@ impl RowSaveContext {
         scratch: &TemporarySave<RowMapSnapshot>,
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let replacement_bytes = self.writer.runtime.block_on(scratch.candidate_bytes());
         let length = u64::try_from(replacement_bytes.len())
@@ -1354,7 +1364,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(row);
+                if record_baseline {
+                    self.record_accepted_row(row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1369,6 +1381,7 @@ impl RowSaveContext {
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
         expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row)?;
         let row_context = Arc::clone(self);
@@ -1399,7 +1412,9 @@ impl RowSaveContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
-                self.record_accepted_row(accepted_row);
+                if record_baseline {
+                    self.record_accepted_row(accepted_row);
+                }
                 Ok(())
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
@@ -1438,6 +1453,9 @@ pub(super) fn spawn_read_only(
     fuser::spawn_mount(filesystem, mountpoint, &config)
         .map_err(|error| format!("FUSE mount could not be created: {error}"))
 }
+/// The editor mount omits `AllowOther`, so the kernel admits only the mounting
+/// uid. The owner's control handler therefore does not check the caller uid
+/// (`_request` is unused): same-user access is the access boundary.
 pub(super) fn spawn_editor(
     repository: &Repository,
     commit: &GitCommitRef,
@@ -1479,127 +1497,28 @@ impl From<&str> for EditError {
     }
 }
 
-pub(super) fn edit_path(
-    repository: &Repository,
-    commit: &GitCommitRef,
-    context: &HistoricalFormatContext,
-    path: &str,
-    grouped_row: bool,
-    row_baselines: Option<MountRowBaselines>,
-) -> Result<(), EditError> {
-    let writer = MountWriter::open(repository, commit, row_baselines)?;
-    let filesystem =
-        WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer.clone()))?;
-    let relative = Path::new(path);
-    if relative.is_absolute() {
-        return Err("edit path must be relative to the projected row tree".into());
+/// An explicit edit prepared against a live row tree: `initial_bytes` seeds the
+/// editor draft, and `commit` admits the editor's candidate exactly once.
+pub(super) struct PreparedEdit {
+    initial_bytes: Vec<u8>,
+    commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>>,
+}
+
+impl PreparedEdit {
+    /// Admits `candidate` for the draft at `draft_path`; the draft is removed once accepted.
+    /// `record_baseline` false leaves the mounted captured baseline unchanged (ORNA-VFS-015).
+    fn commit(self, candidate: &[u8], draft_path: &Path, record_baseline: bool) -> Result<(), EditError> {
+        (self.commit)(candidate, draft_path, record_baseline)
     }
-    let mut inode = ROOT_INODE;
-    {
-        let mut builder = filesystem
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for component in relative.components() {
-            let std::path::Component::Normal(name) = component else {
-                return Err("edit path contains an unsupported component".into());
-            };
-            inode = builder
-                .lookup_child(inode, name)?
-                .ok_or_else(|| format!("edit path does not exist: {path}"))?;
-        }
-    }
-    let (save, initial_bytes, blob_edit) = {
-        let mut builder = filesystem
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let node = builder
-            .nodes
-            .get(&inode)
-            .ok_or_else(|| "edit target disappeared".to_owned())?;
-        match &node.kind {
-            NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
-            NodeKind::Blob { graph, reference } => {
-                let parent = node.parent;
-                let graph = Arc::clone(graph);
-                let reference = reference.clone();
-                let document = builder
-                    .lookup_child(parent, OsStr::new("data.orna"))?
-                    .ok_or_else(|| "Blob row has no data.orna document".to_owned())?;
-                let save = match &builder
-                    .nodes
-                    .get(&document)
-                    .ok_or_else(|| "Blob row document disappeared".to_owned())?
-                    .kind
-                {
-                    NodeKind::Document { save, .. } => Arc::clone(save),
-                    _ => return Err("Blob row document is not editable".into()),
-                };
-                let file_name = relative
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                let field = save
-                    .blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .find(|field| field.file_name == file_name)
-                    .cloned()
-                    .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
-                let scope = graph
-                    .open_read_scope()
-                    .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
-                let length = usize::try_from(reference.content_identity().length())
-                    .map_err(|_| "Blob length is not addressable".to_owned())?;
-                let initial = graph
-                    .read_blob_range(&reference, 0..length as u64, &scope)
-                    .map_err(|error| format!("Blob content could not be read: {error:?}"))?
-                    .bytes()
-                    .to_vec();
-                let expected = save
-                    .expected_baseline_row
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                let image = Arc::new(VfsFileSnapshot::new(
-                    row_image_pin(&save.source.rows),
-                    Arc::<[u8]>::from([]),
-                ));
-                let target = writer
-                    .runtime
-                    .block_on(writer.cache.managed_file(image))
-                    .map_err(|error| format!("Blob edit target could not be opened: {error:?}"))?;
-                let scratch = Arc::new(
-                    writer
-                        .runtime
-                        .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
-                );
-                (save, initial, Some((target, scratch, field, expected)))
-            }
-            _ => {
-                return Err(if grouped_row {
-                "edit --row requires a projected row document or Blob path".into()
-            } else {
-                "edit target is not a managed row document or Blob".into()
-                });
-            }
-        }
-    };
-    let draft = if blob_edit.is_none() {
-        Some(Arc::new(
-            writer
-                .runtime
-                .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
-        ))
-    } else {
-        None
-    };
-    let (mut file, draft_path) = create_editor_draft(repository.runtime_paths().root())
+}
+
+/// Writes `initial` to a new explicit editor draft, runs `$EDITOR` on it and
+/// returns the draft path. The draft is retained on every failure.
+pub(super) fn run_editor_on_draft(runtime_root: &Path, initial: &[u8]) -> Result<PathBuf, EditError> {
+    let (mut file, draft_path) = create_editor_draft(runtime_root)
         .map_err(|error| format!("explicit edit draft could not be created: {error}"))?;
     use std::io::Write as _;
-    file.write_all(&initial_bytes)
+    file.write_all(initial)
         .and_then(|()| file.sync_all())
         .map_err(|error| {
             format!(
@@ -1631,46 +1550,34 @@ pub(super) fn edit_path(
         )
         .into());
     }
-    let candidate = std::fs::read(&draft_path).map_err(|error| {
-        format!(
-            "edited candidate could not be read: {error}; draft retained at {}",
-            draft_path.display()
-        )
-    })?;
-    let admission =
-        if let Some((target, scratch, field, expected)) = blob_edit {
-            writer
-                .runtime
-                .block_on(async {
-                    scratch.truncate(0).await.map_err(|error| {
-                        format!("Blob candidate exceeds draft limits: {error:?}")
-                    })?;
-                    scratch
-                        .write_at(0, &candidate)
-                        .await
-                        .map_err(|error| format!("Blob candidate exceeds draft limits: {error:?}"))
-        })
-        .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_blob_temporary(&target, &scratch, &field, expected)
-    } else {
-        let draft = draft.expect("document route creates an editor draft before launch");
-            writer
-                .runtime
-                .block_on(async {
-                    draft.truncate(0).await.map_err(|error| {
-                        format!("edited candidate exceeds draft limits: {error:?}")
-                    })?;
-                    draft.write_at(0, &candidate).await.map_err(|error| {
-                        format!("edited candidate exceeds draft limits: {error:?}")
-                    })
-        })
-        .map_err(|error| format!("{error}; draft retained at {}", draft_path.display()))?;
-        save.commit_document(&draft)
-    };
+    Ok(draft_path)
+}
+
+fn retained_edit_error(detail: &str, draft_path: &Path) -> EditError {
+    EditError::Failed(format!("{detail}; draft retained at {}", draft_path.display()))
+}
+
+/// Maps a durable admission result to the explicit edit outcome. An accepted
+/// edit removes its draft; any refusal retains it.
+fn admit_edit_result(
+    admission: Result<(), DocumentCommitError>,
+    draft_path: &Path,
+) -> Result<(), EditError> {
     match admission {
-        Ok(()) => std::fs::remove_file(&draft_path).map_err(|error| {
-            EditError::Failed(format!("edit was accepted but its explicit draft could not be removed: {error}"))
-        }),
+        Ok(()) => {
+            // The commit is durable, so the owner reports acceptance even when the
+            // explicit draft cannot be removed (ORNA-ADMIN-003). The leftover draft
+            // is named in the warning for the operator to remove.
+            if let Err(error) = std::fs::remove_file(draft_path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "warning: edit was accepted but its explicit draft could not be removed: {error}; remove {} by hand",
+                        draft_path.display()
+                    );
+                }
+            }
+            Ok(())
+        }
         Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
             "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
             draft_path.display()
@@ -1680,6 +1587,251 @@ pub(super) fn edit_path(
             draft_path.display()
         ))),
     }
+}
+
+impl WorkspaceFilesystem {
+    /// Resolves `relative` in the live row tree to its editable target and
+    /// prepares the admission step. No draft is created on refusal.
+    fn prepare_edit(&self, relative: &Path, grouped_row: bool) -> Result<PreparedEdit, EditError> {
+        let writer = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone()
+            .ok_or_else(|| "explicit edit requires an editor mount".to_owned())?;
+        let mut inode = ROOT_INODE;
+        {
+            let mut builder = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for component in relative.components() {
+                let std::path::Component::Normal(name) = component else {
+                    return Err("edit path contains an unsupported component".into());
+                };
+                inode = builder
+                    .lookup_child(inode, name)?
+                    .ok_or_else(|| format!("edit path does not exist: {}", relative.display()))?;
+            }
+        }
+        let (save, initial_bytes, blob_edit) = {
+            let mut builder = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let node = builder
+                .nodes
+                .get(&inode)
+                .ok_or_else(|| "edit target disappeared".to_owned())?;
+            match &node.kind {
+                NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
+                NodeKind::Blob { graph, reference } => {
+                    let parent = node.parent;
+                    let graph = Arc::clone(graph);
+                    let reference = reference.clone();
+                    let document = builder
+                        .lookup_child(parent, OsStr::new("data.orna"))?
+                        .ok_or_else(|| "Blob row has no data.orna document".to_owned())?;
+                    let save = match &builder
+                        .nodes
+                        .get(&document)
+                        .ok_or_else(|| "Blob row document disappeared".to_owned())?
+                        .kind
+                    {
+                        NodeKind::Document { save, .. } => Arc::clone(save),
+                        _ => return Err("Blob row document is not editable".into()),
+                    };
+                    let file_name = relative
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    let field = save
+                        .blob_fields
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .find(|field| field.file_name == file_name)
+                        .cloned()
+                        .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
+                    let scope = graph
+                        .open_read_scope()
+                        .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
+                    let length = usize::try_from(reference.content_identity().length())
+                        .map_err(|_| "Blob length is not addressable".to_owned())?;
+                    let initial = graph
+                        .read_blob_range(&reference, 0..length as u64, &scope)
+                        .map_err(|error| format!("Blob content could not be read: {error:?}"))?
+                        .bytes()
+                        .to_vec();
+                    let expected = save
+                        .expected_baseline_row
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    let image = Arc::new(VfsFileSnapshot::new(
+                        row_image_pin(&save.source.rows),
+                        Arc::<[u8]>::from([]),
+                    ));
+                    let target = writer
+                        .runtime
+                        .block_on(writer.cache.managed_file(image))
+                        .map_err(|error| format!("Blob edit target could not be opened: {error:?}"))?;
+                    let scratch = Arc::new(
+                        writer
+                            .runtime
+                            .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
+                    );
+                    (save, initial, Some((target, scratch, field, expected)))
+                }
+                _ => {
+                    return Err(if grouped_row {
+                        "edit --row requires a projected row document or Blob path".into()
+                    } else {
+                        "edit target is not a managed row document or Blob".into()
+                    });
+                }
+            }
+        };
+        let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
+            Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path, record_baseline| {
+                writer
+                    .runtime
+                    .block_on(async {
+                        scratch.truncate(0).await.map_err(|error| {
+                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        })?;
+                        scratch.write_at(0, candidate).await.map_err(|error| {
+                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        })
+                    })
+                    .map_err(|error| retained_edit_error(&error, draft_path))?;
+                admit_edit_result(
+                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline),
+                    draft_path,
+                )
+            }),
+            None => {
+                let draft = Arc::new(
+                    writer
+                        .runtime
+                        .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
+                );
+                Box::new(move |candidate, draft_path, record_baseline| {
+                    writer
+                        .runtime
+                        .block_on(async {
+                            draft.truncate(0).await.map_err(|error| {
+                                format!("edited candidate exceeds draft limits: {error:?}")
+                            })?;
+                            draft.write_at(0, candidate).await.map_err(|error| {
+                                format!("edited candidate exceeds draft limits: {error:?}")
+                            })
+                        })
+                        .map_err(|error| retained_edit_error(&error, draft_path))?;
+                    admit_edit_result(save.commit_document(&draft, record_baseline), draft_path)
+                })
+            }
+        };
+        Ok(PreparedEdit {
+            initial_bytes,
+            commit,
+        })
+    }
+
+    /// Commits an explicit edit requested through the `user.orna.edit-commit`
+    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft`; the draft
+    /// must be a regular editor draft in this repository's recovery store.
+    fn commit_requested_edit(&self, request: &[u8]) -> Result<(), EditError> {
+        use std::os::unix::ffi::OsStrExt as _;
+        let fields: Vec<&[u8]> = request.split(|byte| *byte == 0).collect();
+        let [mode, path, draft_bytes] = fields.as_slice() else {
+            return Err("edit request is malformed".into());
+        };
+        let grouped_row = match *mode {
+            b"0" => false,
+            b"1" => true,
+            _ => return Err("edit request names no edit mode".into()),
+        };
+        let writer = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writer
+            .clone()
+            .ok_or_else(|| "explicit edit requires an editor mount".to_owned())?;
+        let drafts = writer
+            .repository
+            .runtime_paths()
+            .root()
+            .join(VFS_RETAINED_DRAFT_DIRECTORY)
+            .join(VFS_EDITOR_DRAFT_DIRECTORY);
+        let draft = Path::new(OsStr::from_bytes(draft_bytes));
+        let in_store = draft.parent() == Some(drafts.as_path())
+            && draft
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("orna-edit-") && name.ends_with(".draft"));
+        if !in_store {
+            return Err("edit draft is outside the editor draft store".into());
+        }
+        let candidate = read_regular_draft(draft)?;
+        // ORNA-VFS-015: `edit --row` is this mount's own grouped row save, so the
+        // mount records the row it accepted and its next save compares against it
+        // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
+        // `edit PATH` owner-routed by another writer leaves the mounted baseline
+        // unchanged, so the mount's next save is stale against that writer's row.
+        self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
+            .commit(&candidate, draft, grouped_row)
+    }
+}
+
+/// Reads an editor draft through one descriptor opened without following a
+/// symbolic link, so the regular-file check and the read name the same inode.
+/// `O_NONBLOCK` keeps a FIFO from stalling the open before the check rejects it.
+fn read_regular_draft(draft: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let descriptor = rustix::fs::open(
+        draft,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|error| format!("edit draft could not be opened: {error}"))?;
+    let stat = rustix::fs::fstat(&descriptor)
+        .map_err(|error| format!("edit draft could not be inspected: {error}"))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err("edit draft is not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(descriptor)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("edited candidate could not be read: {error}"))?;
+    Ok(bytes)
+}
+
+pub(super) fn edit_path(
+    repository: &Repository,
+    commit: &GitCommitRef,
+    context: &HistoricalFormatContext,
+    path: &str,
+    grouped_row: bool,
+    row_baselines: Option<MountRowBaselines>,
+) -> Result<(), EditError> {
+    let writer = MountWriter::open(repository, commit, row_baselines)?;
+    let filesystem =
+        WorkspaceFilesystem::from_snapshot(repository, commit, context, Some(writer))?;
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err("edit path must be relative to the projected row tree".into());
+    }
+    let prepared = filesystem.prepare_edit(relative, grouped_row)?;
+    let draft_path = run_editor_on_draft(repository.runtime_paths().root(), &prepared.initial_bytes)?;
+    let candidate = read_regular_draft(&draft_path)
+        .map_err(|error| retained_edit_error(&error, &draft_path))?;
+    prepared.commit(&candidate, &draft_path, grouped_row)
 }
 #[derive(Debug)]
 pub(super) enum UnmountPreparationError {
@@ -1833,14 +1985,20 @@ enum OpenFile {
     ),
 }
 /// Why a submitted candidate was not accepted, for the unmount listing and
-/// the stop-time report. `draft` is its recovery record once retained.
+/// the stop-time report. `draft` is its recovery record once retained. While
+/// recovery storage refuses the candidate, `unretained` holds its save context
+/// and bytes so a later retention attempt can still write them.
 struct DraftRefusal {
     cause: &'static str,
     draft: Option<String>,
+    /// The handle whose candidate this refusal describes; a write by that handle clears it.
+    handle: Option<u64>,
+    unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
-/// Unsynced Document drafts are discarded on release; a Document whose fsync was
-/// rejected stays unresolved until a later sync of the same file is accepted.
+/// Unsynced Document drafts are retained on release with cause `unsynced`; a
+/// Document whose fsync was rejected stays unresolved until a later sync of the
+/// same file is accepted.
 /// Replacement scratch drafts remain unresolved until their rename is accepted
 /// or the scratch is removed.
 #[derive(Default)]
@@ -1861,6 +2019,17 @@ impl DraftState {
             || !self.retained_scratch.is_empty()
             || !self.rejected_documents.is_empty()
             || !self.rejected_scratch.is_empty()
+    }
+
+    /// A write or truncate by `handle` makes its candidate newer than the refused
+    /// one, so the refusal no longer names that handle. An accepted save must not
+    /// end the unresolved state of that newer candidate (ORNA-VFS-008).
+    fn candidate_written(&mut self, handle: u64, inode: u64) {
+        if let Some(refusal) = self.rejected_documents.get_mut(&inode) {
+            if refusal.handle == Some(handle) {
+                refusal.handle = None;
+            }
+        }
     }
 }
 
@@ -1929,13 +2098,10 @@ impl WorkspaceFilesystem {
 
         // A mount runs under the lease owner its writer holds, so accepted pins
         // the runtime captured resolve through this graph. A read-only mount takes
-        // the owner the runtime would take; a repository without a runtime
-        // identity keeps the repository-derived owner.
+        // the owner the runtime would take: this process's owner.
         let graph_owner_id = match &writer {
             Some(writer) => Some(writer.owner_id),
-            None => super::runtime_identity(repository)
-                .ok()
-                .map(|(identity, _)| super::invocation_owner_id(identity)),
+            None => Some(super::invocation_owner_id()),
         };
 
         for (relation_id, qualified_name) in tables {
@@ -2140,38 +2306,181 @@ impl WorkspaceFilesystem {
         &self,
         draft_state: &mut DraftState,
         inode: u64,
+        handle: u64,
         save: &Arc<RowSaveContext>,
         draft: &EditDraft<RowMapSnapshot>,
         error: &DocumentCommitError,
     ) {
-        let cause = error.cause();
+        self.retain_candidate(
+            draft_state,
+            inode,
+            handle,
+            save,
+            draft,
+            error.cause(),
+            matches!(error, DocumentCommitError::Stale),
+        );
+    }
+
+    /// Accepts a dirty document candidate (EDIT-1 steps 1-2). The caller holds
+    /// the draft-state lock, so acceptance serializes with writes (ORNA-VFS-008).
+    /// A refused candidate is retained before its error is returned.
+    fn accept_document(
+        &self,
+        draft_state: &mut DraftState,
+        handle: u64,
+        inode: u64,
+        save: &Arc<RowSaveContext>,
+        draft: &EditDraft<RowMapSnapshot>,
+    ) -> Result<(), DocumentCommitError> {
+        if let Err(error) = save.commit_document(draft, true) {
+            // NoCandidate: the handle submitted no bytes, so there is no candidate to
+            // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
+            if !matches!(error, DocumentCommitError::NoCandidate) {
+                self.refuse_document(draft_state, inode, handle, save, draft, &error);
+            }
+            return Err(error);
+        }
+        let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
+        if let Some(NodeKind::Document {
+            bytes: current,
+            save: current_save,
+        }) = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .nodes
+            .get_mut(&inode)
+            .map(|node| &mut node.kind)
+        {
+            *current = bytes.to_vec();
+            // A handle opened before a refresh saves through its own
+            // context; new opens now continue from the row it accepted.
+            if !Arc::ptr_eq(current_save, save) {
+                *current_save = Arc::clone(save);
+            }
+        }
+        draft_state.unresolved_handles.remove(&handle);
+        // The accepted save supersedes the refusal it replaces. A refusing handle
+        // whose candidate is unchanged holds only obsolete bytes, so its unresolved
+        // state ends here and its later RELEASE retains nothing.
+        if let Some(DraftRefusal {
+            handle: Some(refused),
+            ..
+        }) = draft_state.rejected_documents.remove(&inode)
+        {
+            draft_state.unresolved_handles.remove(&refused);
+        }
+        Ok(())
+    }
+
+    /// Commits the pending state of an open handle: a document candidate is
+    /// accepted, and a scratch file is persisted to the scratch store.
+    fn commit_open_handle(
+        &self,
+        draft_state: &mut DraftState,
+        inode: INodeNo,
+        handle: u64,
+    ) -> Result<(), DocumentCommitError> {
+        let open_file = self
+            .open_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&handle)
+            .cloned();
+        match open_file {
+            Some(OpenFile::Document(save, draft)) => {
+                self.accept_document(draft_state, handle, inode.0, &save, &draft)
+            }
+            Some(OpenFile::Temporary(save, _, scratch, _)) => {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match state.nodes.get(&inode.0).map(|node| &node.kind) {
+                    Some(NodeKind::Temporary {
+                        identity, baseline, ..
+                    }) => save
+                        .fsync_temporary(&scratch, identity, baseline.as_deref())
+                        .map_err(DocumentCommitError::Failed),
+                    // Rename already accepted and removed this scratch node.
+                    None => Ok(()),
+                    _ => Err(DocumentCommitError::Failed(
+                        "open scratch node is unavailable".to_owned(),
+                    )),
+                }
+            }
+            None => Err(DocumentCommitError::Failed(
+                "file handle is not open".to_owned(),
+            )),
+        }
+    }
+
+    /// Keeps the candidate of a document released while dirty (EDIT-1 step 5).
+    /// Release only cleans up, so the candidate is retained and reported, never
+    /// accepted.
+    fn retain_unsynced_document(
+        &self,
+        draft_state: &mut DraftState,
+        inode: u64,
+        handle: u64,
+        save: &Arc<RowSaveContext>,
+        draft: &EditDraft<RowMapSnapshot>,
+    ) {
+        // A candidate already refused by fsync or flush keeps its refusal cause
+        // (ORNA-VFS-009); only a candidate never refused is recorded as unsynced.
+        let cause = release_retention_cause(draft_state.rejected_documents.get(&inode));
+        self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
+    }
+
+    /// Writes a candidate that was not accepted to recovery storage and records
+    /// it against the file for unmount reporting (ORNA-VFS-009). A stale save
+    /// also re-projects the row, so a new open shows and saves against the row
+    /// another writer accepted (W15-03).
+    fn retain_candidate(
+        &self,
+        draft_state: &mut DraftState,
+        inode: u64,
+        handle: u64,
+        save: &Arc<RowSaveContext>,
+        draft: &EditDraft<RowMapSnapshot>,
+        cause: &'static str,
+        refresh: bool,
+    ) {
         let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
-        let retained_draft = match save.writer.retained_drafts.retain(&path, cause, &bytes) {
+        let retained = save.writer.retained_drafts.retain(&path, cause, &bytes);
+        let (retained_draft, unretained) = match retained {
             Ok(retained) => {
                 eprintln!(
-                    "{path}: save refused ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
+                    "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
                     retained.id,
                     retained.record.display()
                 );
-                Some(retained.id)
+                (Some(retained.id), None)
             }
             Err(retain_error) => {
-                eprintln!("{path}: save refused ({cause}); candidate could not be retained: {retain_error}");
-                None
+                eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
+                (None, Some((Arc::clone(save), bytes)))
             }
         };
-        draft_state
-            .rejected_documents
-            .insert(inode, DraftRefusal {
+        if let Some(superseded) = draft_state.rejected_documents.insert(
+            inode,
+            DraftRefusal {
                 cause,
+                handle: Some(handle),
                 draft: retained_draft,
-            });
-        if matches!(error, DocumentCommitError::Stale) {
+                unretained,
+            },
+        ) && superseded.unretained.is_some()
+        {
+            eprintln!("{path}: an earlier unretained candidate was superseded");
+        }
+        if refresh {
             state.report_refresh(inode, save, &path);
         }
     }
@@ -2191,10 +2500,10 @@ impl WorkspaceFilesystem {
         for (inode, refusal) in &draft_state.rejected_documents {
             let detail = match &refusal.draft {
                 Some(draft) => format!(
-                    "save refused ({}); the file shows the current row; candidate retained as draft {draft}",
+                    "not accepted ({}); the file shows the current row; candidate retained as draft {draft}",
                     refusal.cause
                 ),
-                None => format!("save refused ({})", refusal.cause),
+                None => format!("not accepted ({}); candidate not retained", refusal.cause),
             };
             unresolved.insert(*inode, detail);
         }
@@ -2236,8 +2545,10 @@ impl WorkspaceFilesystem {
     /// recovery storage; unsynced document writes and truncates are added to
     /// it; scratch files are persisted to the scratch store, which the next
     /// mount restores. Every kept draft is reported with
-    /// `sys.vfs.draft_retained`.
-    fn retain_all_drafts(&self, draft_state: &mut DraftState) {
+    /// `sys.vfs.draft_retained`. A candidate that recovery storage refuses keeps
+    /// its bytes as an unresolved refusal, so a later attempt retries it.
+    /// Returns whether every document draft was retained.
+    fn retain_all_drafts(&self, draft_state: &mut DraftState) -> bool {
         let open_files = self
             .open_files
             .lock()
@@ -2248,21 +2559,12 @@ impl WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut reports = std::collections::BTreeSet::new();
-        let mut retain = |save: &RowSaveContext, inode: u64, cause: &str, bytes: &[u8]| {
-            let path = state.display_path(inode);
-            reports.insert(match save.writer.retained_drafts.retain(&path, cause, bytes) {
-                Ok(retained) => format!(
-                    "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
-                    retained.id,
-                    retained.record.display()
-                ),
-                Err(error) => format!("draft for {path} ({cause}) could not be retained: {error}"),
-            });
-        };
+        let mut candidates: Vec<(u64, Option<u64>, &'static str, Arc<RowSaveContext>, Arc<[u8]>)> =
+            Vec::new();
         for (handle, inode) in &draft_state.unresolved_handles {
             if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
                 let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
-                retain(save.as_ref(), *inode, "unsynced", &bytes);
+                candidates.push((*inode, Some(*handle), "unsynced", Arc::clone(save), bytes));
             }
         }
         for (inode, size) in &draft_state.pending_truncates {
@@ -2271,21 +2573,50 @@ impl WorkspaceFilesystem {
             {
                 let mut candidate = bytes.clone();
                 candidate.resize(usize::try_from(*size).unwrap_or(usize::MAX), 0);
-                retain(save.as_ref(), *inode, "unsynced", &candidate);
+                candidates.push((*inode, None, "unsynced", Arc::clone(save), Arc::from(candidate)));
             }
         }
-        for (inode, refusal) in &draft_state.rejected_documents {
-            let path = state.display_path(*inode);
-            reports.insert(match &refusal.draft {
-                Some(draft) => format!(
-                    "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
-                    refusal.cause
-                ),
-                None => format!(
-                    "draft for {path} ({}) could not be retained when it was refused",
-                    refusal.cause
-                ),
-            });
+        let mut unresolved = HashMap::new();
+        for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
+            match (refusal.draft, refusal.unretained) {
+                (_, Some((save, bytes))) => {
+                    candidates.push((inode, refusal.handle, refusal.cause, save, bytes));
+                }
+                (Some(draft), None) => {
+                    let path = state.display_path(inode);
+                    reports.insert(format!(
+                        "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
+                        refusal.cause
+                    ));
+                }
+                (None, None) => {}
+            }
+        }
+        for (inode, handle, cause, save, bytes) in candidates {
+            let path = state.display_path(inode);
+            match save.writer.retained_drafts.retain(&path, cause, &bytes) {
+                Ok(retained) => {
+                    reports.insert(format!(
+                        "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
+                        retained.id,
+                        retained.record.display()
+                    ));
+                }
+                Err(error) => {
+                    reports.insert(format!(
+                        "draft for {path} ({cause}) could not be retained: {error}"
+                    ));
+                    unresolved.insert(
+                        inode,
+                        DraftRefusal {
+                            cause,
+                            draft: None,
+                            handle,
+                            unretained: Some((save, bytes)),
+                        },
+                    );
+                }
+            }
         }
         let scratch = draft_state
             .retained_scratch
@@ -2318,8 +2649,10 @@ impl WorkspaceFilesystem {
         draft_state.unresolved_handles.clear();
         draft_state.pending_truncates.clear();
         draft_state.retained_scratch.clear();
-        draft_state.rejected_documents.clear();
         draft_state.rejected_scratch.clear();
+        let all_retained = unresolved.is_empty();
+        draft_state.rejected_documents = unresolved;
+        all_retained
     }
 }
 
@@ -2368,6 +2701,39 @@ impl Filesystem for WorkspaceFilesystem {
         position: u32,
         reply: ReplyEmpty,
     ) {
+        if name.to_str() == Some("user.orna.edit-commit") {
+            if inode.0 != ROOT_INODE {
+                reply.error(Errno::ENODATA);
+                return;
+            }
+            if flags != 0 || position != 0 {
+                reply.error(Errno::EINVAL);
+                return;
+            }
+            let quiescing = self
+                .draft_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .quiescing;
+            if quiescing {
+                reply.error(Errno::EBUSY);
+                return;
+            }
+            // Commit runs without the draft-state lock so it cannot deadlock
+            // with the FUSE operations that take it (ORNA-VFS-015).
+            match self.commit_requested_edit(value) {
+                Ok(()) => reply.ok(),
+                Err(EditError::Stale(message)) => {
+                    eprintln!("explicit edit refused: {message}");
+                    reply.error(Errno::ESTALE);
+                }
+                Err(EditError::Failed(message)) => {
+                    eprintln!("explicit edit failed: {message}");
+                    reply.error(Errno::EIO);
+                }
+            }
+            return;
+        }
         let retain = match name.to_str() {
             Some("user.orna.unmount-quiesce") if inode.0 == ROOT_INODE => false,
             Some("user.orna.retain-drafts") if inode.0 == ROOT_INODE => true,
@@ -2390,8 +2756,11 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
             draft_state.quiescing = true;
-            self.retain_all_drafts(&mut draft_state);
-            reply.ok();
+            if self.retain_all_drafts(&mut draft_state) {
+                reply.ok();
+            } else {
+                reply.error(Errno::EIO);
+            }
         } else if value == b"1" {
             if draft_state.has_unresolved_drafts() {
                 reply.error(Errno::EBUSY);
@@ -2595,6 +2964,7 @@ impl Filesystem for WorkspaceFilesystem {
         let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
         if truncate_size.is_some() {
             draft_state.unresolved_handles.insert(handle, inode.0);
+            draft_state.candidate_written(handle, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
             }
@@ -2889,8 +3259,8 @@ impl Filesystem for WorkspaceFilesystem {
             )
         };
         let committed = match &blob_field {
-            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline),
-            None => save.commit_temporary(&scratch, baseline),
+            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
+            None => save.commit_temporary(&scratch, baseline, true),
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
@@ -2974,7 +3344,15 @@ impl Filesystem for WorkspaceFilesystem {
             .retain(|_, dirty_inode| *dirty_inode != source_inode);
         draft_state.retained_scratch.remove(&source_inode);
         draft_state.rejected_scratch.remove(&source_inode);
-        draft_state.rejected_documents.remove(&destination_inode);
+        // The accepted replacement supersedes the refused candidate it replaces, so
+        // the refusing handle no longer holds the destination unresolved (ORNA-VFS-024).
+        if let Some(DraftRefusal {
+            handle: Some(refused),
+            ..
+        }) = draft_state.rejected_documents.remove(&destination_inode)
+        {
+            draft_state.unresolved_handles.remove(&refused);
+        }
         draft_state.pending_truncates.remove(&source_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
@@ -3220,6 +3598,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .contains_key(&inode.0);
         if !data.is_empty() && is_tracked {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
+            draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
             }
@@ -3276,72 +3655,11 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EBUSY);
             return;
         }
-        let open_file = self
-            .open_files
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&handle.0)
-            .cloned();
-        let document = match &open_file {
-            Some(OpenFile::Document(save, draft)) => Some((Arc::clone(save), Arc::clone(draft))),
-            _ => None,
-        };
-        let result: Result<(), DocumentCommitError> = match open_file {
-            Some(OpenFile::Document(save, draft)) => {
-                let result = save.commit_document(&draft);
-                if result.is_ok() {
-                    let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
-                    if let Some(NodeKind::Document {
-                        bytes: current,
-                        save: current_save,
-                    }) = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .nodes
-                        .get_mut(&inode.0)
-                        .map(|node| &mut node.kind)
-                    {
-                        *current = bytes.to_vec();
-                        // A handle opened before a refresh saves through its own
-                        // context; new opens now continue from the row it accepted.
-                        if !Arc::ptr_eq(current_save, &save) {
-                            *current_save = Arc::clone(&save);
-                        }
-                    }
-                }
-                result
-            }
-            Some(OpenFile::Temporary(save, _, scratch, _)) => {
-                let state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match state.nodes.get(&inode.0).map(|node| &node.kind) {
-                    Some(NodeKind::Temporary {
-                        identity, baseline, ..
-                    }) => save
-                        .fsync_temporary(&scratch, identity, baseline.as_deref())
-                        .map_err(DocumentCommitError::Failed),
-                    // Rename already accepted and removed this scratch node.
-                    None => Ok(()),
-                    _ => Err(DocumentCommitError::Failed(
-                        "open scratch node is unavailable".to_owned(),
-                    )),
-                }
-            }
-            None => Err(DocumentCommitError::Failed(
-                "file handle is not open".to_owned(),
-            )),
-        };
-        match result {
+        match self.commit_open_handle(&mut draft_state, inode, handle.0) {
             Ok(()) => {
                 // A successful fsync makes this handle's bytes durable; nothing is
                 // unresolved for it, so unlink must not wait on its RELEASE.
                 draft_state.unresolved_handles.remove(&handle.0);
-                if document.is_some() {
-                    draft_state.rejected_documents.remove(&inode.0);
-                }
                 reply.ok();
             }
             Err(DocumentCommitError::NoCandidate) => {
@@ -3351,31 +3669,49 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            Err(
-                error @ (DocumentCommitError::Rejected(_)
-                | DocumentCommitError::Stale
-                | DocumentCommitError::Failed(_)),
-            ) => {
-                // A submission that did not commit (rejected, stale or failed I/O)
-                // stays unresolved until a later sync of the same file is accepted.
-                // Its candidate is retained, and a stale save shows the current row.
-                if let Some((save, draft)) = &document {
-                    self.refuse_document(&mut draft_state, inode.0, save, draft, &error);
-                }
-                reply.error(error.errno());
-            }
+            // A refused document candidate was already retained by accept_document
+            // (ORNA-VFS-009); the error goes to the caller.
+            Err(error) => reply.error(error.errno()),
         }
     }
 
     fn flush(
         &self,
         _request: &Request,
-        _inode: INodeNo,
-        _handle: fuser::FileHandle,
+        inode: INodeNo,
+        handle: fuser::FileHandle,
         _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
-        reply.ok();
+        // Close-time flush (EDIT-1 step 5) attempts the same commit as fsync, but
+        // only for a dirty handle. An accepted handle is clean, so a repeated flush
+        // cannot accept the same candidate twice (ORNA-VFS-008).
+        let mut draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !draft_state.unresolved_handles.contains_key(&handle.0) {
+            reply.ok();
+            return;
+        }
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
+        match self.commit_open_handle(&mut draft_state, inode, handle.0) {
+            Ok(()) => {
+                draft_state.unresolved_handles.remove(&handle.0);
+                reply.ok();
+            }
+            // The handle submitted nothing, so it cannot block unmount (same as fsync).
+            Err(DocumentCommitError::NoCandidate) => {
+                draft_state.unresolved_handles.remove(&handle.0);
+                reply.ok();
+            }
+            // The error goes to close(2), which applications may ignore; a refused
+            // candidate stays retained (ORNA-VFS-009).
+            Err(error) => reply.error(error.errno()),
+        }
     }
 
     fn release(
@@ -3404,10 +3740,16 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
-        if let Some(inode) = draft_state.unresolved_handles.remove(&handle.0)
-            && matches!(&released, Some(OpenFile::Temporary(_, _, _, _)))
-        {
-            draft_state.retained_scratch.insert(inode);
+        match (draft_state.unresolved_handles.remove(&handle.0), released) {
+            (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
+                draft_state.retained_scratch.insert(inode);
+            }
+            // Release is cleanup only (EDIT-1 step 4): an unsynced document is
+            // retained as a draft, never accepted here.
+            (Some(inode), Some(OpenFile::Document(save, draft))) => {
+                self.retain_unsynced_document(&mut draft_state, inode, handle.0, &save, &draft);
+            }
+            _ => {}
         }
         reply.ok();
     }
@@ -5636,20 +5978,8 @@ mod tests {
                 (key, source)
             })
             .collect::<Vec<_>>();
-        let paths = fixture_rows
-            .iter()
-            .map(|(key, source)| (format!("Music/{key}.orna"), source.clone()))
-            .collect::<Vec<_>>();
-        let path_sources = paths
-            .iter()
-            .map(|(path, source)| (path.as_str(), source.as_str()))
-            .collect::<Vec<_>>();
         let (_repository_directory, repository, relation_id, format_context) =
-            crate::format3::format3_repository_for_table_with_source_rows(
-                SOURCE,
-                "Music",
-                &path_sources,
-            );
+            crate::format3::format3_repository_with_context(SOURCE, "Music");
         let (identity, digest) = crate::format3::cli_runtime_identity(&repository);
         let state = orna_runtime_v1::RuntimeState::open(&repository, identity, digest)
             .await
@@ -5664,7 +5994,7 @@ mod tests {
             .map(|(index, (key, source))| crate::media_commit::SourceCaptureRow {
                 key,
                 blob_fields: &[],
-                source_row: Some(source),
+                source_row: source,
                 ordinal: u8::try_from(index).unwrap(),
                 insert_only: true,
             })
@@ -5840,5 +6170,54 @@ mod hardening_tests {
         }
         let error = create_editor_draft(runtime.path()).unwrap_err();
         assert!(error.contains("editor draft store is full"), "{error}");
+    }
+
+    #[test]
+    fn owner_draft_read_refuses_a_symlink_and_reads_a_regular_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("elsewhere");
+        std::fs::write(&target, b"outside the draft store").unwrap();
+        let draft = directory.path().join("orna-edit-1.draft");
+        std::os::unix::fs::symlink(&target, &draft).unwrap();
+        assert!(super::read_regular_draft(&draft).is_err());
+        std::fs::remove_file(&draft).unwrap();
+        std::fs::write(&draft, b"candidate").unwrap();
+        assert_eq!(super::read_regular_draft(&draft).unwrap(), b"candidate");
+    }
+
+    #[test]
+    fn accepted_edit_reports_success_even_when_its_draft_cannot_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        // A directory at the draft path makes remove_file fail after a durable commit.
+        let undeletable = directory.path().join("orna-edit-1.draft");
+        std::fs::create_dir(&undeletable).unwrap();
+        assert!(super::admit_edit_result(Ok(()), &undeletable).is_ok());
+        assert!(undeletable.is_dir(), "the undeletable draft is left in place");
+        // A draft that is already gone is still an accepted edit.
+        let gone = directory.path().join("orna-edit-2.draft");
+        assert!(super::admit_edit_result(Ok(()), &gone).is_ok());
+    }
+
+    #[test]
+    fn accepted_edit_removes_its_draft_and_refusals_retain_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let draft = directory.path().join("orna-edit-3.draft");
+        std::fs::write(&draft, b"candidate").unwrap();
+        assert!(super::admit_edit_result(Err(super::DocumentCommitError::Stale), &draft).is_err());
+        assert!(draft.exists(), "a refused edit retains its draft");
+        assert!(super::admit_edit_result(Ok(()), &draft).is_ok());
+        assert!(!draft.exists(), "an accepted edit removes its draft");
+    }
+
+    #[test]
+    fn release_names_an_unrefused_candidate_unsynced_and_keeps_a_refusal_cause() {
+        assert_eq!(super::release_retention_cause(None), "unsynced");
+        let refusal = super::DraftRefusal {
+            cause: "sys.vfs.stale_edit",
+            handle: None,
+            draft: None,
+            unretained: None,
+        };
+        assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
     }
 }

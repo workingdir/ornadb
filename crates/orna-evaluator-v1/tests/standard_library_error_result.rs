@@ -9,7 +9,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 
 #[test]
 fn pinned_error_and_result_modules_load_from_the_captured_snapshot() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/error.orna" || path == "std/result.orna")
         .collect::<Vec<_>>();

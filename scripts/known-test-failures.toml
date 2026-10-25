@@ -22,22 +22,14 @@ package = "workspace"
 target = "check:fmt"
 test = "fmt"
 bead = "ornadb-5il1.224"
-reason = "cargo fmt --all -- --check reports diffs in 216+ files at cf1c6aa82."
-
-[[failure]]
-package = "orna-repository-v1"
-target = "test:row_store_scale"
-test = "*"
-record = "gate-c-million-rows"
-bead = "ornadb-5il1.6"
-reason = "The one-million-row case has never finished; a local run was killed after 1,800 s with no result."
+reason = "cargo fmt --all -- --check reports diffs in at least 253 files on origin/main d35b7c0c3; the count was cut short when rustfmt hit the 4G lane memory cap."
 
 [[failure]]
 package = "orna-cli-v1"
 target = "test:req_vfs"
 test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
 bead = "ornadb-9aj6"
-reason = "Fails intermittently in a full req_vfs run on main."
+reason = "Fails intermittently in a full req_vfs run on main. Passed in the d35b7c0c3 baseline (orna-cli-v1 req_vfs: 36 of 36)."
 intermittent = true
 
 [[failure]]
@@ -45,7 +37,7 @@ package = "orna-repository-v1"
 target = "lib"
 test = "tests::runtime_owner_chain_survives_repeated_startup_crashes"
 bead = "ornadb-mmsa.37"
-reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite."
+reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite. Passed in the d35b7c0c3 baseline run (orna-repository-v1 lib: 304 of 304)."
 intermittent = true
 
 [[failure]]
@@ -53,7 +45,7 @@ package = "orna-cli-v1"
 target = "test:publication_crash_matrix"
 test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary"
 bead = "ornadb-aflz"
-reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:284)."
+reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:284). Passed in one d35b7c0c3 baseline run (publication_crash_matrix: 12 of 12)."
 intermittent = true
 
 [[failure]]
@@ -61,7 +53,7 @@ package = "orna-cli-v1"
 target = "test:publication_crash_matrix"
 test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work"
 bead = "ornadb-aflz"
-reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520."
+reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520. Passed in one d35b7c0c3 baseline run (publication_crash_matrix: 12 of 12)."
 intermittent = true
 
 [[failure]]
@@ -215,117 +207,7 @@ package = "orna-core"
 target = "lib"
 test = "inspect::tests::trace_event_accessors_expose_the_closed_facts"
 bead = "ornadb-5il1.166"
-reason = "Fails in PR 9186 CI; the PR changes no crate code. Main baseline not yet measured; old-stack island slated for removal (ornadb-5il1.166)."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_collection_encoding"
-test = "ovb_sorts_structural_keys_but_collections_keep_signed_zero_representatives"
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_error_collection"
-test = "pinned_error_and_collection_edge_contracts_return_documented_values"
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_prelude_9npab"
-test = "curated_prelude_helpers_compute_versioned_collection_text_and_option_values"
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_query_behavior"
-test = "pinned_query_exports_execute_their_source_bodies"
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_query_paired_window_distinct_y5hv5"
-test = "paired_sparse_window_distinct_folds_keep_frame_and_lane_identity"
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_query_recursive_cte_n0o0e"
-tests = [
-    "paired_lateral_anchors_keep_distinct_identity_across_recursive_folds",
-    "paired_recursive_anchors_keep_identity_through_sparse_window_frame_folds",
-    "paired_recursive_window_folds_keep_empty_short_lane_independent",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_query_recursive_distinct_anchor_t7vp3"
-tests = [
-    "paired_recursive_folds_keep_empty_sparse_distinct_anchor_independent",
-    "paired_recursive_folds_preserve_sparse_distinct_anchor_order",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_remainder"
-tests = [
-    "pinned_collection_predicate_callbacks_keep_captured_values",
-    "pinned_collection_transform_callbacks_keep_captured_values",
-    "pinned_core_relation_exports_return_the_section_9_values",
-    "pinned_stats_aggregates_require_the_captured_std_module",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_size_budget"
-tests = [
-    "pinned_collection_helpers_complete_at_the_default_item_limit",
-    "pinned_collection_helpers_complete_over_one_thousand_elements",
-    "pinned_collection_helpers_complete_over_ten_thousand_elements",
-    "pinned_slicing_completes_at_the_default_item_limit",
-    "pinned_slicing_completes_over_one_thousand_elements",
-    "pinned_slicing_completes_over_ten_thousand_elements",
-    "pinned_text_split_completes_at_the_default_item_limit",
-    "pinned_text_split_completes_over_one_thousand_elements",
-    "pinned_text_split_completes_over_ten_thousand_elements",
-    "pinned_union_accumulation_completes_at_the_default_item_limit",
-    "pinned_union_accumulation_completes_over_one_thousand_elements",
-    "pinned_union_accumulation_completes_over_ten_thousand_elements",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_text_lines_t71"
-tests = [
-    "line_count_uses_logical_lines_and_unicode_scalars_remain_in_each_line",
-    "line_join_normalises_delimiters_without_changing_line_boundaries",
-    "line_split_preserves_blank_and_terminal_lines_across_all_delimiters",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
-
-[[failure]]
-package = "orna-evaluator-v1"
-target = "test:standard_library_text_slicing_t72"
-tests = [
-    "text_drop_clamps_to_scalar_count_and_handles_unicode",
-    "text_slice_covers_range_boundaries_and_unicode_scalars",
-    "text_take_clamps_to_scalar_count_and_handles_empty_text",
-]
-bead = "ornadb-5il1.207"
-reason = "Fails on main; evaluator regressions in standard-library collection, query and size-budget behaviour."
+reason = "Fails on origin/main d35b7c0c3: orna-core --lib reports 588 passed and this test fails. Old-stack island slated for removal (ornadb-5il1.166)."
 
 [[failure]]
 package = "orna-semantic-v1"
@@ -395,14 +277,3 @@ tests = [
 ]
 bead = "ornadb-5il1.273"
 reason = "Fails on main as well; owned by the orna-semantic-v1 main-failure triage."
-
-[[failure]]
-package = "orna-standard"
-target = "lib"
-tests = [
-    "tests::v1_profile::pinned_byte_buffer_utilities_are_included_and_typecheck",
-    "tests::v1_profile::pinned_core_collection_exports_are_declared_in_source",
-    "tests::v1_profile::reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports",
-]
-bead = "ornadb-5il1.242"
-reason = "Fails on main; pinned std does not yet declare or include the required surfaces."

@@ -53,6 +53,19 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+/// The writer owner identity of this operating-system process.
+///
+/// Every CLI invocation, served host, REPL and mount in one process shares this
+/// identity. A different process never reuses it, so a process that opens the
+/// runtime after a predecessor died takes the writer lease over with a new
+/// epoch (see [`RuntimeState::acquire_lease`]) instead of resuming the dead
+/// owner's token.
+#[must_use]
+pub fn process_owner_id() -> [u8; 16] {
+    static OWNER: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    *OWNER.get_or_init(|| *Uuid::new_v4().as_bytes())
+}
+
 mod activation;
 pub use activation::{
     ActivationError, ActivationWork, run_admitted_table_activation,
@@ -66,7 +79,9 @@ mod query;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
 mod repository_identity;
-pub use repository_identity::{repository_runtime_identity, runtime_identity_for_database_id};
+pub use repository_identity::{
+    migration_copy_runtime_identity, repository_runtime_identity, runtime_identity_for_database_id,
+};
 mod stream_carry;
 pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use catalogue::{
@@ -113,7 +128,8 @@ CREATE TABLE IF NOT EXISTS runtime_schema_migration (
 CREATE TABLE IF NOT EXISTS writer_lease (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
-    epoch INTEGER NOT NULL CHECK (epoch > 0)
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    lock_owner_id BLOB CHECK (lock_owner_id IS NULL OR length(lock_owner_id) = 16)
 );
 CREATE TABLE IF NOT EXISTS takeover_recovery_pending (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -445,7 +461,7 @@ CREATE TABLE IF NOT EXISTS admin_invocation_audit (
     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
-    observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+    observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
@@ -454,6 +470,13 @@ CREATE TABLE IF NOT EXISTS admin_invocation_checkpoint_result (
     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
     version INTEGER NOT NULL CHECK (version >= 0),
     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+);
+CREATE TABLE IF NOT EXISTS admin_invocation_stale_capture (
+    invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+    database_id BLOB NOT NULL CHECK (length(database_id) = 16),
+    runtime_id BLOB NOT NULL CHECK (length(runtime_id) = 16),
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    generation_digest BLOB NOT NULL CHECK (length(generation_digest) = 32)
 );
 
 CREATE TABLE IF NOT EXISTS sys_run_observation (
@@ -582,6 +605,10 @@ CREATE TABLE IF NOT EXISTS runtime_catalogue_admission (
     snapshot BLOB PRIMARY KEY CHECK (length(snapshot) > 0),
     FOREIGN KEY (snapshot) REFERENCES runtime_catalogue_capture(snapshot)
 );
+-- No runtime path binds a new revision pair or reads a binding back; catalogue
+-- carry-forward only copies an existing predecessor row to its successor
+-- snapshot. The table stays so existing and new state.db files share one
+-- schema; dropping it requires a state-schema migration.
 CREATE TABLE IF NOT EXISTS runtime_catalogue_revision_binding (
     snapshot BLOB PRIMARY KEY REFERENCES runtime_catalogue_admission(snapshot),
     source_revision_id BLOB NOT NULL CHECK (length(source_revision_id) = 16),
@@ -2450,6 +2477,7 @@ pub enum RuntimeError {
     InvocationTailInvalid,
     InvocationTailLimit,
     StreamIdentityMismatch,
+    MigrationCarryTargetDiffers,
     StreamSourceNotReplayable,
     StreamCheckpointStale,
     CheckpointNotReplayable,
@@ -2487,6 +2515,10 @@ pub enum RuntimeError {
     /// (ORNA-UPGRADE-001, ORNA-UPGRADE-003). The refusal carries its code,
     /// format and remedy.
     LegacyHeadReadOnly(orna_repository_v1::LegacyWriteRefused),
+    /// The format recorded at `HEAD` is not a format this build knows, so
+    /// runtime admission is refused before any worktree metadata or runtime
+    /// state is read (ORNA-REPO-CONTEXT-003). The refusal carries its code.
+    UnknownHeadFormat(orna_repository_v1::FormatContextError),
     /// A retry, skip or resolve named a failure version or successor that is
     /// not the stored one (`sys.failure.stale_version`).
     StreamFailureStale,
@@ -2543,6 +2575,7 @@ impl fmt::Display for RuntimeError {
             Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
             Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
+            Self::MigrationCarryTargetDiffers => "migration carry target holds stream rows that differ from the carry",
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
@@ -2584,6 +2617,7 @@ impl fmt::Display for RuntimeError {
             Self::SystemProviderAbiInvalid => "baked system provider ABI is invalid",
             Self::StorageUnavailable => "runtime state unavailable",
             Self::LegacyHeadReadOnly(refusal) => refusal.title(),
+            Self::UnknownHeadFormat(_) => "repository format is unknown",
         })
     }
 }
@@ -2627,11 +2661,43 @@ impl AcceptedContentPin {
 pub struct RuntimeState {
     connection: Connection,
     graph_repository_id: Option<[u8; 32]>,
-    runtime_owner_lock: Option<RuntimeOwnerLock>,
+    writer_authority: WriterAuthority,
     compact_receipt_signing_key: SigningKey,
     system_dispatch: &'static orna_sys_v1::SystemDispatchTable,
     system_provider_roles: orna_sys_v1::ProviderRoleRegistry,
     vfs_repository_cache: vfs::VfsRepositoryCache,
+}
+
+/// What a runtime handle may do with its worktree's single writer lease
+/// (ORNA-TURSO-004/005).
+enum WriterAuthority {
+    /// Opened by path without a repository owner lock, which only unit tests
+    /// do. The caller is the only writer of that database; a different
+    /// recorded owner is never presumed departed.
+    #[cfg(test)]
+    Unmanaged,
+    /// Another live runtime holds the worktree's owner lock. This handle may
+    /// re-acquire a lease its own owner already holds, but it can neither
+    /// create the lease nor fence its holder.
+    Secondary,
+    /// This handle holds the worktree's runtime owner lock under `lock_id`.
+    /// Every lease it creates, re-acquires or takes over is bound to that
+    /// lock identity.
+    Owner {
+        lock: RuntimeOwnerLock,
+        lock_id: [u8; 16],
+    },
+}
+
+impl WriterAuthority {
+    fn lock_id(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Owner { lock_id, .. } => Some(*lock_id),
+            Self::Secondary => None,
+            #[cfg(test)]
+            Self::Unmanaged => None,
+        }
+    }
 }
 
 enum RequestActivationTransactionError {
@@ -4299,7 +4365,8 @@ pub struct AdminInvocationAudit {
     pub function: String,
     pub safe_arguments: String,
     pub owner: WriterLease,
-    pub observed_generation: u64,
+    /// Admitted generation; `None` when the failed call could not observe the CWD.
+    pub observed_generation: Option<u64>,
     pub terminal_outcome: String,
     /// Typed runtime effect decoded from the durable terminal outcome.
     pub effect: AdminLifecycleEffect,
@@ -4466,17 +4533,34 @@ fn admin_reference_descriptor(
     }
 }
 
-fn replay_admin_stream_result(
+/// Replays a stored failure or outcome for an admitted invocation.
+///
+/// A `failure:stale_capture` row replays the capture that rejected the call,
+/// stored in `admin_invocation_stale_capture`, so the replayed error equals the
+/// recorded one after later commits advance the CWD. Rows written before that
+/// table replay the CWD capture current at replay time. A
+/// `failure:unobservable:<class>` row (its CWD capture could not be read)
+/// replays that class. Its `stale_capture` class replays as `RecoveryInvalid`,
+/// because the rejecting capture was never stored. A bare legacy
+/// `failure:unobservable` row replays as `RecoveryInvalid`.
+async fn replay_admin_stream_result(
+    connection: &Connection,
     receipt: &AdminInvocationAudit,
 ) -> Result<AdminOperationResult, RuntimeError> {
     if let Some(failure) = receipt.terminal_outcome.strip_prefix("failure:") {
-        return Err(match failure {
-            "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
-            "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
-            "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
-            "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
-            _ => RuntimeError::StorageUnavailable,
-        });
+        if failure == "stale_capture" {
+            let current = match load_admin_stale_capture(connection, receipt.invocation_id).await? {
+                Some(current) => current,
+                None => capture_tx(connection).await?,
+            };
+            return Err(RuntimeError::StaleCapture {
+                current: Box::new(current),
+            });
+        }
+        if let Some(class) = failure.strip_prefix("unobservable:") {
+            return Err(admin_failure_from_class(class));
+        }
+        return Err(admin_failure_from_class(failure));
     }
     let result = match receipt.terminal_outcome.as_str() {
         "paused" => StreamAdministrationOutcome::Paused { changed: true },
@@ -4492,17 +4576,138 @@ fn replay_admin_stream_result(
     Ok(AdminOperationResult::Stream(result))
 }
 
-fn admin_failure_outcome(error: &RuntimeError) -> &'static str {
+/// Stable failure class stored in admin audit rows. Exhaustive: every new
+/// variant must choose its class here. Payload-carrying variants store only
+/// the class; their payload is not persisted (see `admin_failure_from_class`).
+fn admin_failure_class(error: &RuntimeError) -> &'static str {
     match error {
-        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::InvalidIdentity => "invalid_identity",
+        RuntimeError::InvalidDigest => "invalid_digest",
         RuntimeError::InvalidObservationReference => "invalid_observation_reference",
-        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::ObservationCoordinateMismatch => "observation_coordinate_mismatch",
+        RuntimeError::ProcedureMaterializationConflict => "procedure_materialization_conflict",
+        RuntimeError::InvocationObservationConflict => "invocation_observation_conflict",
+        RuntimeError::InvocationStateConflict => "invocation_state_conflict",
+        RuntimeError::QueryObservationConflict => "query_observation_conflict",
+        RuntimeError::QueryStateConflict => "query_state_conflict",
+        RuntimeError::InvocationChildrenActive => "invocation_children_active",
+        RuntimeError::InvocationOwnerInvalid => "invocation_owner_invalid",
+        RuntimeError::InvocationTailInvalid => "invocation_tail_invalid",
+        RuntimeError::InvocationTailLimit => "invocation_tail_limit",
+        RuntimeError::StreamIdentityMismatch => "stream_identity_mismatch",
+        RuntimeError::MigrationCarryTargetDiffers => "migration_carry_target_differs",
+        RuntimeError::StreamSourceNotReplayable => "stream_source_not_replayable",
         RuntimeError::StreamCheckpointStale => "stream_checkpoint_stale",
-        _ => "unavailable",
+        RuntimeError::CheckpointNotReplayable => "checkpoint_not_replayable",
+        RuntimeError::SnapshotNotFound => "snapshot_not_found",
+        RuntimeError::SnapshotIncomplete => "snapshot_incomplete",
+        RuntimeError::SnapshotContextMismatch => "snapshot_context_mismatch",
+        RuntimeError::LeaseHeld => "lease_held",
+        RuntimeError::AdminBusy => "admin_busy",
+        RuntimeError::AdminInvocationConflict => "admin_invocation_conflict",
+        RuntimeError::OwnerLost => "owner_lost",
+        RuntimeError::RecoveryPending => "recovery_pending",
+        RuntimeError::StaleCapture { .. } => "stale_capture",
+        RuntimeError::InvalidCapture => "invalid_capture",
+        RuntimeError::EmptyMutationBatch => "empty_mutation_batch",
+        RuntimeError::StreamFailureStale => "stream_failure_stale",
+        RuntimeError::StreamFailureStateConflict => "stream_failure_state_conflict",
+        RuntimeError::StreamFailureSkipUnsupported => "stream_failure_skip_unsupported",
+        RuntimeError::InvalidTableMutation => "invalid_table_mutation",
+        RuntimeError::ConflictingPublicationIntent => "conflicting_publication_intent",
+        RuntimeError::ConflictingPublicationCommit => "conflicting_publication_commit",
+        RuntimeError::InvalidPublicationCommit => "invalid_publication_commit",
+        RuntimeError::InvalidPublicationPolicy => "invalid_publication_policy",
+        RuntimeError::CompactPublicationRequired => "compact_publication_required",
+        RuntimeError::CompactReceiptKeyMismatch => "compact_receipt_key_mismatch",
+        RuntimeError::InvalidCompactReceipt => "invalid_compact_receipt",
+        RuntimeError::RequestUnknown => "request_unknown",
+        RuntimeError::RequestFingerprintMismatch => "request_fingerprint_mismatch",
+        RuntimeError::RequestOwnerConflict => "request_owner_conflict",
+        RuntimeError::RequestStateConflict => "request_state_conflict",
+        RuntimeError::SessionClosed => "session_closed",
+        RuntimeError::SessionWorkActive => "session_work_active",
+        RuntimeError::TerminalOutcomeTooLarge => "terminal_outcome_too_large",
+        RuntimeError::RecoveryInvalid => "recovery_invalid",
+        // Payload-carrying: the injected point is not stored, so it replays as RecoveryInvalid.
+        RuntimeError::FaultInjected(_) => "fault_injected",
+        RuntimeError::SystemProviderAbiInvalid => "system_provider_abi_invalid",
+        RuntimeError::StorageUnavailable => "storage_unavailable",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
+        RuntimeError::LegacyHeadReadOnly(_) => "legacy_head_read_only",
+        // Payload-carrying: the row stores only this class, so it replays as RecoveryInvalid.
+        RuntimeError::UnknownHeadFormat(_) => "unknown_head_format",
     }
 }
 
-fn admin_result_from_receipt(
+/// Rebuilds the runtime error for a stored failure class.
+///
+/// Classes whose variant carries a payload that the row does not store
+/// (`fault_injected`, `legacy_head_read_only`) and unknown names surface as
+/// `RecoveryInvalid`. `stale_capture` is handled in `replay_admin_stream_result`
+/// because its payload is captured at replay. Outcomes stored before stable
+/// classes keep their original variants: `unavailable`, and the `AdminBusy`
+/// message that busy rows stored before durable admin receipts.
+fn admin_failure_from_class(class: &str) -> RuntimeError {
+    match class {
+        "admin_busy" | "runtime administration callback is busy" => RuntimeError::AdminBusy,
+        "invalid_identity" => RuntimeError::InvalidIdentity,
+        "invalid_digest" => RuntimeError::InvalidDigest,
+        "invalid_observation_reference" => RuntimeError::InvalidObservationReference,
+        "observation_coordinate_mismatch" => RuntimeError::ObservationCoordinateMismatch,
+        "procedure_materialization_conflict" => RuntimeError::ProcedureMaterializationConflict,
+        "invocation_observation_conflict" => RuntimeError::InvocationObservationConflict,
+        "invocation_state_conflict" => RuntimeError::InvocationStateConflict,
+        "query_observation_conflict" => RuntimeError::QueryObservationConflict,
+        "query_state_conflict" => RuntimeError::QueryStateConflict,
+        "invocation_children_active" => RuntimeError::InvocationChildrenActive,
+        "invocation_owner_invalid" => RuntimeError::InvocationOwnerInvalid,
+        "invocation_tail_invalid" => RuntimeError::InvocationTailInvalid,
+        "invocation_tail_limit" => RuntimeError::InvocationTailLimit,
+        "stream_identity_mismatch" => RuntimeError::StreamIdentityMismatch,
+        "stream_source_not_replayable" => RuntimeError::StreamSourceNotReplayable,
+        "stream_checkpoint_stale" => RuntimeError::StreamCheckpointStale,
+        "checkpoint_not_replayable" => RuntimeError::CheckpointNotReplayable,
+        "snapshot_not_found" => RuntimeError::SnapshotNotFound,
+        "snapshot_incomplete" => RuntimeError::SnapshotIncomplete,
+        "snapshot_context_mismatch" => RuntimeError::SnapshotContextMismatch,
+        "lease_held" => RuntimeError::LeaseHeld,
+        "admin_invocation_conflict" => RuntimeError::AdminInvocationConflict,
+        "owner_lost" => RuntimeError::OwnerLost,
+        "recovery_pending" => RuntimeError::RecoveryPending,
+        "invalid_capture" => RuntimeError::InvalidCapture,
+        "stream_failure_stale" => RuntimeError::StreamFailureStale,
+        "stream_failure_state_conflict" => RuntimeError::StreamFailureStateConflict,
+        "stream_failure_skip_unsupported" => RuntimeError::StreamFailureSkipUnsupported,
+        "empty_mutation_batch" => RuntimeError::EmptyMutationBatch,
+        "invalid_table_mutation" => RuntimeError::InvalidTableMutation,
+        "conflicting_publication_intent" => RuntimeError::ConflictingPublicationIntent,
+        "conflicting_publication_commit" => RuntimeError::ConflictingPublicationCommit,
+        "invalid_publication_commit" => RuntimeError::InvalidPublicationCommit,
+        "invalid_publication_policy" => RuntimeError::InvalidPublicationPolicy,
+        "compact_publication_required" => RuntimeError::CompactPublicationRequired,
+        "compact_receipt_key_mismatch" => RuntimeError::CompactReceiptKeyMismatch,
+        "invalid_compact_receipt" => RuntimeError::InvalidCompactReceipt,
+        "request_unknown" => RuntimeError::RequestUnknown,
+        "request_fingerprint_mismatch" => RuntimeError::RequestFingerprintMismatch,
+        "request_owner_conflict" => RuntimeError::RequestOwnerConflict,
+        "request_state_conflict" => RuntimeError::RequestStateConflict,
+        "session_closed" => RuntimeError::SessionClosed,
+        "session_work_active" => RuntimeError::SessionWorkActive,
+        "terminal_outcome_too_large" => RuntimeError::TerminalOutcomeTooLarge,
+        "system_provider_abi_invalid" => RuntimeError::SystemProviderAbiInvalid,
+        "storage_unavailable" | "unavailable" => RuntimeError::StorageUnavailable,
+        "unobservable" => RuntimeError::RecoveryInvalid,
+        _ => RuntimeError::RecoveryInvalid,
+    }
+}
+
+fn admin_observed_generation(capture: &CwdCapture) -> Result<u64, RuntimeError> {
+    u64::try_from(bigint_to_i64(capture.generation())?).map_err(|_| RuntimeError::RecoveryInvalid)
+}
+
+async fn admin_result_from_receipt(
+    connection: &Connection,
     operation: Option<&AdminInvocationOperation>,
     descriptor: &AdminInvocationDescriptor,
     receipt: &AdminInvocationAudit,
@@ -4516,7 +4721,7 @@ fn admin_result_from_receipt(
     match operation {
         Some(AdminInvocationOperation::Reset { key, .. }) => {
             if receipt.terminal_outcome.starts_with("failure:") {
-                return replay_admin_stream_result(receipt);
+                return replay_admin_stream_result(connection, receipt).await;
             }
             let result = receipt
                 .checkpoint_reset_result
@@ -4530,7 +4735,7 @@ fn admin_result_from_receipt(
         }
         Some(AdminInvocationOperation::Pause { .. })
         | Some(AdminInvocationOperation::Resume { .. })
-        | None => replay_admin_stream_result(receipt),
+        | None => replay_admin_stream_result(connection, receipt).await,
     }
 }
 
@@ -4577,8 +4782,10 @@ impl RuntimeState {
     }
 
     /// Opens the runtime with an owner identity shared with the component
-    /// issuing its owner-scoped graph references. A busy owner lock still
-    /// opens the runtime as a secondary participant.
+    /// issuing its owner-scoped graph references. That identity is also the
+    /// runtime owner lock identity every writer lease this handle establishes
+    /// is bound to. A busy owner lock still opens the runtime as a secondary
+    /// participant.
     pub async fn open_with_owner_id(
         repository: &Repository,
         identity: RuntimeIdentity,
@@ -4589,15 +4796,17 @@ impl RuntimeState {
             .runtime_paths()
             .ensure_exists()
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let runtime_owner_lock = match repository.acquire_runtime_owner_lock(owner_id) {
-            Ok(owner_lock) => Some(owner_lock),
-            // The owner lock is the takeover lock that reclaims a departed
-            // owner's protected pins. It says nothing about the state
-            // database or the writer lease, so a second live runtime in the
-            // same worktree opens as a secondary participant instead of
-            // refusing every verb that needs the runtime. Reclamation stays
-            // with the owner that holds the lock.
-            Err(RepositoryError::RepositoryBusy) => None,
+        let writer_authority = match repository.acquire_runtime_owner_lock(owner_id) {
+            Ok(lock) => WriterAuthority::Owner {
+                lock,
+                lock_id: owner_id,
+            },
+            // A second live runtime in the same worktree opens as a secondary
+            // participant instead of refusing every verb that needs the
+            // runtime. It cannot create the writer lease or fence its holder,
+            // and the reclamation of departed owners' pins stays with the
+            // owner that holds the lock.
+            Err(RepositoryError::RepositoryBusy) => WriterAuthority::Secondary,
             Err(_) => return Err(RuntimeError::StorageUnavailable),
         };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
@@ -4611,11 +4820,12 @@ impl RuntimeState {
                     .runtime_paths()
                     .compact_runtime_receipt_public_key(),
             ),
-            runtime_owner_lock,
+            writer_authority,
         )
         .await
     }
 
+    #[cfg(test)]
     async fn open_path(
         path: &Path,
         identity: RuntimeIdentity,
@@ -4628,7 +4838,7 @@ impl RuntimeState {
             initial_digest,
             None,
             public_key_path,
-            None,
+            WriterAuthority::Unmanaged,
         )
         .await
     }
@@ -4638,7 +4848,7 @@ impl RuntimeState {
         initial_digest: [u8; 32],
         graph_repository_id: Option<[u8; 32]>,
         public_key_path: Option<PathBuf>,
-        runtime_owner_lock: Option<RuntimeOwnerLock>,
+        writer_authority: WriterAuthority,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -4676,21 +4886,23 @@ impl RuntimeState {
             system_dispatch,
             system_provider_roles,
             vfs_repository_cache: vfs::VfsRepositoryCache::new(),
-            runtime_owner_lock,
+            writer_authority,
         };
         state.migrate_observation_projection_schema().await?;
         state.migrate_stream_observation_failure_identity().await?;
         state.migrate_request_recovery_evidence().await?;
+        state.migrate_writer_lease_lock_binding().await?;
         state.migrate_stream_failure_payloads().await?;
         state.migrate_stream_failure_assertion_details().await?;
         state.migrate_nullable_stream_partitions().await?;
         state.migrate_stream_observation_checkpoint_reuse().await?;
         state.migrate_catalogue_identity_schema().await?;
+        state.migrate_admin_failure_unobservable().await?;
         let accepted_pending = state.validate_recovery_with_pin_manifest().await?;
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
         // departed-owner chain until publication becomes terminal.
-        if let Some(owner_lock) = &state.runtime_owner_lock {
+        if let WriterAuthority::Owner { lock: owner_lock, .. } = &state.writer_authority {
             owner_lock
                 .reclaim_departed_owner_pins(&accepted_pending)
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -4701,7 +4913,7 @@ impl RuntimeState {
     /// Whether this state owns the repository runtime lock used to reclaim
     /// scratch references for its owner identity.
     pub fn holds_runtime_owner_lock(&self) -> bool {
-        self.runtime_owner_lock.is_some()
+        matches!(self.writer_authority, WriterAuthority::Owner { .. })
     }
     /// The runtime links the baked module roles at startup. Extension loading
     /// is not part of this 1.0 runtime surface.
@@ -5713,74 +5925,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = match reference
-            .encode()
-            .map_err(|_| RuntimeError::InvalidObservationReference)
-            .and_then(decode_row_ref)
-        {
-            Ok(row) => row,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let requested = match validate_stream_reference(row, expected_capture) {
-            Ok(requested) => requested,
-            Err(_) => {
-                return Err(self
-                    .record_failed_admin_and_return(
-                        &descriptor,
-                        lease,
-                        RuntimeError::InvalidObservationReference,
-                    )
-                    .await);
-            }
-        };
-        let fence = match self.runtime_observation_fence(lease).await {
-            Ok(fence) => fence,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        if fence.capture() != expected_capture {
-            return Err(self
-                .record_failed_admin_and_return(
-                    &descriptor,
-                    lease,
-                    RuntimeError::StaleCapture {
-                        current: Box::new(fence.capture().clone()),
-                    },
-                )
-                .await);
-        }
-        let view = match self.current_runtime_observations(&fence).await {
-            Ok(view) => view,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference);
-        let key = match key {
-            Ok(key) => key,
-            Err(error) => {
-                return Err(self
-                    .record_failed_admin_and_return(&descriptor, lease, error)
-                    .await);
-            }
-        };
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Pause { key, reason };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -5928,7 +6075,7 @@ impl RuntimeState {
         {
             let error = RuntimeError::CheckpointNotReplayable;
             return match self
-                .record_failed_admin_descriptor(&descriptor, lease, &error)
+                .record_failed_admin_descriptor(&descriptor, lease, None, &error)
                 .await
             {
                 Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -6013,7 +6160,7 @@ impl RuntimeState {
         let descriptor =
             admin_reference_descriptor(invocation_id, function, &reference, reason.as_deref());
         match self
-            .record_failed_admin_descriptor(&descriptor, lease, &RuntimeError::AdminBusy)
+            .record_failed_admin_descriptor(&descriptor, lease, None, &RuntimeError::AdminBusy)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => Err(RuntimeError::AdminBusy),
@@ -6093,29 +6240,9 @@ impl RuntimeState {
         if activation::runtime_activation_active(self) {
             return Err(self.reentrant_admin_busy_error(&descriptor, lease).await);
         }
-        let row = decode_row_ref(
-            reference
-                .encode()
-                .map_err(|_| RuntimeError::InvalidObservationReference)?,
-        )?;
-        let requested = validate_stream_reference(row, expected_capture)
-            .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let fence = self.runtime_observation_fence(lease).await?;
-        if fence.capture() != expected_capture {
-            return Err(RuntimeError::StaleCapture {
-                current: Box::new(fence.capture().clone()),
-            });
-        }
-        let view = self.current_runtime_observations(&fence).await?;
-        let key = view
-            .streams
-            .iter()
-            .find_map(|stream| {
-                let run = view.runs.iter().find(|run| run.id == stream.run)?;
-                (stream.reference(run).ok().as_ref() == Some(&requested))
-                    .then(|| stream.checkpoint.clone())
-            })
-            .ok_or(RuntimeError::InvalidObservationReference)?;
+        let key = self
+            .resolve_admin_stream_reference(lease, &descriptor, &reference, expected_capture)
+            .await?;
         let operation = AdminInvocationOperation::Resume { key };
         self.apply_admin_invocation_with_descriptor(
             lease,
@@ -6158,14 +6285,23 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut admitted_generation: Option<u64> = None;
         let attempt = async {
             self.require_owner(&transaction, lease).await?;
             if let Some(receipt) =
                 load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?
             {
-                return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                return admin_result_from_receipt(
+                    &transaction,
+                    Some(&operation),
+                    &descriptor,
+                    &receipt,
+                )
+                .await;
             }
             let current_capture = capture_tx(&transaction).await?;
+            let observed_generation = admin_observed_generation(&current_capture)?;
+            admitted_generation = Some(observed_generation);
             if let Some(expected_capture) = expected_capture {
                 if &current_capture != expected_capture {
                     return Err(RuntimeError::StaleCapture {
@@ -6173,15 +6309,13 @@ impl RuntimeState {
                     });
                 }
             }
-            let observed_generation = u64::try_from(bigint_to_i64(current_capture.generation())?)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?;
             let result =
                 apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
             store_admin_invocation_audit(
                 &transaction,
                 &descriptor,
                 lease,
-                observed_generation,
+                Some(observed_generation),
                 admin_operation_outcome(&result),
                 admin_operation_succeeded(&result),
                 match &result {
@@ -6207,10 +6341,16 @@ impl RuntimeState {
                     load_admin_invocation_receipt(&self.connection, descriptor.invocation_id)
                         .await?
                 {
-                    return admin_result_from_receipt(Some(&operation), &descriptor, &receipt);
+                    return admin_result_from_receipt(
+                        &self.connection,
+                        Some(&operation),
+                        &descriptor,
+                        &receipt,
+                    )
+                    .await;
                 }
                 match self
-                    .record_failed_admin_descriptor(&descriptor, lease, &error)
+                    .record_failed_admin_descriptor(&descriptor, lease, admitted_generation, &error)
                     .await
                 {
                     Ok(()) | Err(RuntimeError::OwnerLost) => Err(error),
@@ -6233,10 +6373,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?;
         self.require_owner(&transaction, lease).await?;
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
-        let result = receipt
-            .as_ref()
-            .map(|receipt| admin_result_from_receipt(operation, descriptor, receipt))
-            .transpose()?;
+        let result = match receipt.as_ref() {
+            Some(receipt) => Some(
+                admin_result_from_receipt(&transaction, operation, descriptor, receipt).await?,
+            ),
+            None => None,
+        };
         transaction
             .commit()
             .await
@@ -6251,7 +6393,7 @@ impl RuntimeState {
     ) -> RuntimeError {
         let error = RuntimeError::AdminBusy;
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, None, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
@@ -6259,10 +6401,19 @@ impl RuntimeState {
         }
     }
 
+    /// Records a failed admin call with its observed generation and stable
+    /// failure class (ORNA-ADMIN-001). `admitted_generation` is the generation
+    /// captured under the lock that admitted the call; a call rejected before
+    /// any capture records the generation current when its failure is
+    /// recorded. A `failure:stale_capture` row also stores the rejecting
+    /// capture. If that capture cannot be read, the row records a NULL
+    /// generation with `failure:unobservable:<class>`, where `<class>` is the
+    /// stable class of the original error; the caller still returns that error.
     async fn record_failed_admin_descriptor(
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: &RuntimeError,
     ) -> Result<(), RuntimeError> {
         let transaction = self
@@ -6287,22 +6438,33 @@ impl RuntimeState {
                 Err(RuntimeError::AdminInvocationConflict)
             };
         }
-        let observed_generation = capture_tx(&transaction)
-            .await
-            .ok()
-            .and_then(|capture| bigint_to_i64(capture.generation()).ok())
-            .and_then(|generation| u64::try_from(generation).ok())
-            .unwrap_or(0);
+        let observed_generation = match admitted_generation {
+            Some(generation) => Some(generation),
+            None => capture_tx(&transaction)
+                .await
+                .and_then(|capture| admin_observed_generation(&capture))
+                .ok(),
+        };
+        let (terminal_outcome, stale_capture) = match (observed_generation, error) {
+            (None, error) => (format!("failure:unobservable:{}", admin_failure_class(error)), None),
+            (Some(_), RuntimeError::StaleCapture { current }) => {
+                ("failure:stale_capture".to_owned(), Some(&**current))
+            }
+            (Some(_), error) => (format!("failure:{}", admin_failure_class(error)), None),
+        };
         store_admin_invocation_audit(
             &transaction,
             descriptor,
             lease,
             observed_generation,
-            format!("failure:{}", admin_failure_outcome(error)),
+            terminal_outcome,
             false,
             None,
         )
         .await?;
+        if let Some(current) = stale_capture {
+            store_admin_stale_capture(&transaction, descriptor.invocation_id, current).await?;
+        }
         transaction
             .commit()
             .await
@@ -6313,14 +6475,73 @@ impl RuntimeState {
         &self,
         descriptor: &AdminInvocationDescriptor,
         lease: WriterLease,
+        admitted_generation: Option<u64>,
         error: RuntimeError,
     ) -> RuntimeError {
         match self
-            .record_failed_admin_descriptor(descriptor, lease, &error)
+            .record_failed_admin_descriptor(descriptor, lease, admitted_generation, &error)
             .await
         {
             Ok(()) | Err(RuntimeError::OwnerLost) => error,
             Err(audit_error) => audit_error,
+        }
+    }
+
+    /// Resolves an admitted `sys.StreamRef` to the checkpoint of the live
+    /// stream it names, under the writer fence and only while
+    /// `expected_capture` is current. Each rejection is recorded under
+    /// `descriptor` as a failed invocation (ORNA-ADMIN-001); a rejection
+    /// decided under the fence records the generation the fence observed.
+    async fn resolve_admin_stream_reference(
+        &self,
+        lease: WriterLease,
+        descriptor: &AdminInvocationDescriptor,
+        reference: &Value,
+        expected_capture: &CwdCapture,
+    ) -> Result<CheckpointKey, RuntimeError> {
+        let fenced = async {
+            let row = decode_row_ref(
+                reference
+                    .encode()
+                    .map_err(|_| RuntimeError::InvalidObservationReference)?,
+            )?;
+            let requested = validate_stream_reference(row, expected_capture)
+                .map_err(|_| RuntimeError::InvalidObservationReference)?;
+            let fence = self.runtime_observation_fence(lease).await?;
+            let generation = admin_observed_generation(fence.capture())?;
+            Ok::<_, RuntimeError>((requested, fence, generation))
+        }
+        .await;
+        let (requested, fence, generation) = match fenced {
+            Ok(fenced) => fenced,
+            Err(error) => {
+                return Err(self
+                    .record_failed_admin_and_return(descriptor, lease, None, error)
+                    .await);
+            }
+        };
+        let resolved = async {
+            if fence.capture() != expected_capture {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(fence.capture().clone()),
+                });
+            }
+            let view = self.current_runtime_observations(&fence).await?;
+            view.streams
+                .iter()
+                .find_map(|stream| {
+                    let run = view.runs.iter().find(|run| run.id == stream.run)?;
+                    (stream.reference(run).ok().as_ref() == Some(&requested))
+                        .then(|| stream.checkpoint.clone())
+                })
+                .ok_or(RuntimeError::InvalidObservationReference)
+        }
+        .await;
+        match resolved {
+            Ok(key) => Ok(key),
+            Err(error) => Err(self
+                .record_failed_admin_and_return(descriptor, lease, Some(generation), error)
+                .await),
         }
     }
 
@@ -6920,12 +7141,14 @@ impl RuntimeState {
     /// The request must already be `Running` under `lease`; admission and
     /// owner assignment remain separate durable steps. On a successful first
     /// call, typed table rows, the mutation/checkpoint capture, and the
-    /// validated terminal outcome commit together. If the controlled table
-    /// transaction faults before commit, this method records a runtime-owned
-    /// rollback receipt. That proof is deliberately narrower than an entry
-    /// marker: only this method observes the transaction unwind after the
-    /// controlled table boundary. An externally marked activation remains
-    /// conservatively uncertain.
+    /// validated terminal outcome commit together. Before the table
+    /// transaction opens, the activation durably records the positive
+    /// controlled-transaction marker unless a possible external effect is
+    /// already on record. If the controlled table transaction faults before
+    /// commit, this method records a runtime-owned rollback receipt bound to
+    /// that marker. Only this method observes the transaction unwind after
+    /// the controlled table boundary; an externally marked activation, or one
+    /// with no positive evidence, remains conservatively uncertain.
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_table_request_activation(
         &self,
@@ -6948,7 +7171,6 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
-                None,
                 None,
                 None,
             )
@@ -7004,7 +7226,7 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, None, None)
+        self.commit_validated_request_activation(request, None)
             .await
     }
 
@@ -7019,21 +7241,7 @@ impl RuntimeState {
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: &catalogue::CatalogueAdmission,
     ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), None)
-            .await
-    }
-
-    /// Publishes a complete compiler-resolved source catalogue with the exact
-    /// source/catalogue revision pair that produced it. The pair is retained
-    /// only as compiler/core identity evidence; this boundary neither derives
-    /// a revision identity nor constructs a snapshot-pinned reference.
-    pub async fn commit_validated_catalogue_table_request_activation_with_revision_pair(
-        &self,
-        request: ValidatedTableRequestActivationCommit<'_>,
-        admission: &catalogue::CatalogueAdmission,
-        revision_pair: orna_core::revision::RevisionPair,
-    ) -> Result<RequestActivationCommit, TableActivationError> {
-        self.commit_validated_request_activation(request, Some(admission), Some(revision_pair))
+        self.commit_validated_request_activation(request, Some(admission))
             .await
     }
 
@@ -7041,7 +7249,6 @@ impl RuntimeState {
         &self,
         request: ValidatedTableRequestActivationCommit<'_>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, TableActivationError> {
         let ValidatedTableRequestActivationCommit {
             writer,
@@ -7066,7 +7273,6 @@ impl RuntimeState {
                 faults,
                 Some(validator),
                 admission,
-                revision_pair,
             )
             .await
         {
@@ -7114,10 +7320,13 @@ impl RuntimeState {
         faults: &dyn FaultInjector,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
-        revision_pair: Option<orna_core::revision::RevisionPair>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
+        // The marker commits on its own first: it is the precondition for an
+        // observed-rollback receipt and changes nothing for crash recovery.
+        self.record_activation_controlled_marker(lease, identity, fingerprint)
+            .await?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -7220,7 +7429,6 @@ impl RuntimeState {
                 &current_capture,
                 &next,
                 admission,
-                revision_pair,
             )
             .await
             {
@@ -9602,6 +9810,78 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
+    /// Makes the admin audit's `observed_generation` nullable, so a failed
+    /// invocation whose CWD cannot be read is still recorded as
+    /// `failure:unobservable`. The audit table and its checkpoint-result child
+    /// are rebuilt in one transaction; existing rows keep their values.
+    async fn migrate_admin_failure_unobservable(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut columns = transaction
+            .query("PRAGMA table_info(admin_invocation_audit)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut generation_required = None;
+        while let Some(column) = columns
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let name: String = column.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if name == "observed_generation" {
+                let notnull: i64 = column.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?;
+                generation_required = Some(notnull == 1);
+            }
+        }
+        if generation_required.ok_or(RuntimeError::RecoveryInvalid)? {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE admin_invocation_audit_nullable (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                        function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                        safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                        owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                        owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                        observed_generation INTEGER CHECK (observed_generation IS NULL OR observed_generation >= 0),
+                        terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                        succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                        redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                    );
+                    CREATE TABLE admin_invocation_checkpoint_result_nullable (
+                        invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit_nullable(invocation_id),
+                        version INTEGER NOT NULL CHECK (version >= 0),
+                        committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                    );
+                    INSERT INTO admin_invocation_audit_nullable SELECT * FROM admin_invocation_audit;
+                    INSERT INTO admin_invocation_checkpoint_result_nullable
+                        SELECT * FROM admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_checkpoint_result;
+                    DROP TABLE admin_invocation_audit;
+                    ALTER TABLE admin_invocation_audit_nullable RENAME TO admin_invocation_audit;
+                    ALTER TABLE admin_invocation_checkpoint_result_nullable
+                        RENAME TO admin_invocation_checkpoint_result;",
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('admin-failure-unobservable-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     /// Upgrades the runtime catalogue kind domain to include committed module
     /// identities. The dependency graph is rebuilt inside one transaction
     /// with foreign keys enabled; all old rows are copied before the old
@@ -10020,6 +10300,58 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)
     }
 
+    /// Adds the runtime owner lock identity a writer lease is bound to. A
+    /// lease written before this column existed stays unbound (null): no
+    /// live lock vouches for its holder, so only the worktree's current lock
+    /// holder may fence it.
+    async fn migrate_writer_lease_lock_binding(&self) -> Result<(), RuntimeError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut rows = transaction
+            .query("PRAGMA table_info(writer_lease)", ())
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let mut found = false;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            if row
+                .get::<String>(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?
+                == "lock_owner_id"
+            {
+                found = true;
+            }
+        }
+        if !found {
+            transaction
+                .execute(
+                    "ALTER TABLE writer_lease ADD COLUMN lock_owner_id BLOB
+                     CHECK (lock_owner_id IS NULL OR length(lock_owner_id) = 16)",
+                    (),
+                )
+                .await
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO runtime_schema_migration (migration)
+                 VALUES ('writer-lease-lock-binding-v1')",
+                (),
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
     pub async fn identity(&self) -> Result<RuntimeIdentity, RuntimeError> {
         let mut rows = self
             .connection
@@ -10059,48 +10391,74 @@ impl RuntimeState {
         CwdCapture::new(snapshot, digest).map_err(|_| RuntimeError::RecoveryInvalid)
     }
 
+    /// Acquires the worktree's single writer lease for `owner_id`.
+    ///
+    /// The holder re-acquires its own lease unchanged. Only a handle holding
+    /// the worktree's runtime owner lock creates the lease or fences a
+    /// different holder (ORNA-TURSO-004/005), and every lease such a handle
+    /// establishes is bound to its lock identity. That binding is the
+    /// liveness proof: while this handle holds the exclusive lock, a lease
+    /// bound to another lock identity, or to none, has no live lock holder
+    /// behind it. It is taken over with a bumped epoch, so every stale token
+    /// fails with `OwnerLost`, and the same transaction fences each Running
+    /// request those tokens left into its conservative orphaned outcome
+    /// (ORNA-TASK-003, REQUEST-1 step 5). The replacement is therefore
+    /// admitted only after recovery. A different owner bound to this
+    /// handle's own lock is live and is refused with `LeaseHeld`, as is every
+    /// different owner seen by a handle without the lock.
     pub async fn acquire_lease(&self, owner_id: [u8; 16]) -> Result<WriterLease, RuntimeError> {
         validate_id(owner_id)?;
+        let lock_id = self.writer_authority.lock_id();
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let mut rows = tx
-            .query(
-                "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
-                (),
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if let Some(row) = rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
-            let owner = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-            let epoch: i64 = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            if owner != owner_id {
-                return Err(RuntimeError::LeaseHeld);
-            }
-            tx.commit()
+        let lease = match bound_writer_lease_tx(&tx).await? {
+            None => {
+                if matches!(self.writer_authority, WriterAuthority::Secondary) {
+                    return Err(RuntimeError::LeaseHeld);
+                }
+                tx.execute(
+                    "INSERT INTO writer_lease (singleton, owner_id, epoch, lock_owner_id)
+                     VALUES (1, ?1, 1, ?2)",
+                    params![owner_id.to_vec(), lock_id.map(|id| id.to_vec())],
+                )
                 .await
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok(WriterLease {
-                owner_id,
-                epoch: u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-            });
-        }
-        tx.execute(
-            "INSERT INTO writer_lease VALUES (1, ?1, 1)",
-            params![owner_id.to_vec()],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                WriterLease { owner_id, epoch: 1 }
+            }
+            Some((current, bound_lock)) if current.owner_id == owner_id => {
+                if let Some(lock_id) = lock_id
+                    && bound_lock != Some(lock_id)
+                {
+                    tx.execute(
+                        "UPDATE writer_lease SET lock_owner_id = ?1 WHERE singleton = 1",
+                        params![lock_id.to_vec()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                }
+                current
+            }
+            Some((current, bound_lock)) => {
+                let Some(lock_id) = lock_id.filter(|lock_id| bound_lock != Some(*lock_id)) else {
+                    return Err(RuntimeError::LeaseHeld);
+                };
+                Self::replace_writer_lease_tx(
+                    &tx,
+                    current,
+                    owner_id,
+                    Some(lock_id),
+                    TakeoverRecovery::OrphanRunning,
+                )
+                .await?
+            }
+        };
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(WriterLease { owner_id, epoch: 1 })
+        Ok(lease)
     }
 
     /// Reads the current writer lease without changing runtime state.
@@ -10140,6 +10498,10 @@ impl RuntimeState {
     /// This is a compare-and-swap fence, not an abandonment detector: the
     /// caller owns the liveness proof. A changed owner or epoch returns
     /// `OwnerLost`; no blind or arbitrary steal is permitted by this method.
+    /// The replacement is bound to this handle's runtime owner lock when it
+    /// holds one. Running requests stay with the caller: a durable recovery
+    /// barrier blocks ordinary writes until the caller recovers them with
+    /// its own outcomes and completes takeover recovery.
     pub async fn takeover_lease(
         &self,
         abandoned: WriterLease,
@@ -10155,15 +10517,43 @@ impl RuntimeState {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
+        let lease = Self::replace_writer_lease_tx(
+            &transaction,
+            abandoned,
+            replacement,
+            self.writer_authority.lock_id(),
+            TakeoverRecovery::Barrier,
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(lease)
+    }
+
+    /// Replaces exactly the expected abandoned writer lease inside
+    /// `transaction`, binds the replacement to `lock_id`, settles the Running
+    /// requests the fenced tokens left as `recovery` selects, and resets the
+    /// abandoned owner's stream work. A changed owner or epoch returns
+    /// `OwnerLost`.
+    async fn replace_writer_lease_tx(
+        transaction: &Connection,
+        abandoned: WriterLease,
+        replacement: [u8; 16],
+        lock_id: Option<[u8; 16]>,
+        recovery: TakeoverRecovery,
+    ) -> Result<WriterLease, RuntimeError> {
         let changed = transaction
             .execute(
                 "UPDATE writer_lease
-                 SET owner_id = ?1, epoch = epoch + 1
+                 SET owner_id = ?1, epoch = epoch + 1, lock_owner_id = ?4
                  WHERE singleton = 1 AND owner_id = ?2 AND epoch = ?3",
                 params![
                     replacement.to_vec(),
                     abandoned.owner_id.to_vec(),
                     i64::try_from(abandoned.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    lock_id.map(|id| id.to_vec()),
                 ],
             )
             .await
@@ -10175,38 +10565,49 @@ impl RuntimeState {
             .epoch
             .checked_add(1)
             .ok_or(RuntimeError::RecoveryInvalid)?;
-        let mut running = transaction
-            .query(
-                "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
-                params![RequestState::Running.code()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if running
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-            .is_some()
-        {
-            transaction
-                .execute(
-                    "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
-                     VALUES (1, ?1, ?2)
-                     ON CONFLICT(singleton) DO UPDATE SET
-                       owner_id = excluded.owner_id, owner_epoch = excluded.owner_epoch",
-                    params![
-                        replacement.to_vec(),
-                        i64::try_from(replacement_epoch)
-                            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-                    ],
-                )
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-        } else {
-            transaction
-                .execute("DELETE FROM takeover_recovery_pending", ())
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
+        match recovery {
+            TakeoverRecovery::Barrier => {
+                let mut running = transaction
+                    .query(
+                        "SELECT 1 FROM request_ledger WHERE state = ?1 LIMIT 1",
+                        params![RequestState::Running.code()],
+                    )
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                if running
+                    .next()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?
+                    .is_some()
+                {
+                    transaction
+                        .execute(
+                            "INSERT INTO takeover_recovery_pending (singleton, owner_id, owner_epoch)
+                             VALUES (1, ?1, ?2)
+                             ON CONFLICT(singleton) DO UPDATE SET
+                               owner_id = excluded.owner_id, owner_epoch = excluded.owner_epoch",
+                            params![
+                                replacement.to_vec(),
+                                i64::try_from(replacement_epoch)
+                                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                            ],
+                        )
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                } else {
+                    transaction
+                        .execute("DELETE FROM takeover_recovery_pending", ())
+                        .await
+                        .map_err(|_| RuntimeError::StorageUnavailable)?;
+                }
+            }
+            TakeoverRecovery::OrphanRunning => {
+                orphan_fenced_running_requests_tx(transaction).await?;
+                transaction
+                    .execute("DELETE FROM takeover_recovery_pending", ())
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+            }
         }
         // A retrying delivery can be returned to `Failed` only when the
         // durable execution lease and its retry claim still describe the same
@@ -10283,10 +10684,6 @@ impl RuntimeState {
             .get(0)
             .map_err(|_| RuntimeError::RecoveryInvalid)?;
         let epoch = u64::try_from(epoch).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
         Ok(WriterLease {
             owner_id: replacement,
             epoch,
@@ -12306,7 +12703,6 @@ impl RuntimeState {
         if owner.epoch == 0 {
             return Err(RuntimeError::InvalidIdentity);
         }
-        let marker = controlled_transaction_marker(identity, fingerprint, owner);
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -12327,28 +12723,63 @@ impl RuntimeState {
         if evidence.effects.is_some() || evidence.controlled_marker.is_some() {
             return Err(RuntimeError::RequestStateConflict);
         }
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET effect_evidence = 1, controlled_transaction_proof = ?1
-                 WHERE session_id = ?2 AND request_id = ?3 AND fingerprint = ?4
-                   AND state = ?5 AND owner_id = ?6 AND owner_epoch = ?7
-                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
-                params![
-                    marker.to_vec(),
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Running.code(),
-                    owner.owner_id.to_vec(),
-                    i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                ],
-            )
+        record_controlled_transaction_marker_tx(&tx, identity, fingerprint, owner).await?;
+        tx.commit()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records that the caller reported no external effect for an activation
+    /// that reached its Orna-controlled table boundary. The marker commits on
+    /// its own before the table transaction opens and is the precondition
+    /// for an observed-rollback receipt; a marker without a receipt changes
+    /// nothing for crash recovery, which stays uncertain. It is not proof
+    /// that no external effect occurred: callers that perform one must
+    /// report it through `record_external_effect`, which always downgrades
+    /// the request. Only a `Running` request owned by the current `lease`
+    /// with no effect evidence is marked: an externally marked request stays
+    /// external, an existing marker is kept, and every other state is left
+    /// for the activation transaction to replay or reject with its own error.
+    async fn record_activation_controlled_marker(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+    ) -> Result<(), RuntimeError> {
+        fn defer_to_activation(error: RuntimeError) -> Result<(), RuntimeError> {
+            match error {
+                RuntimeError::StorageUnavailable => Err(error),
+                _ => Ok(()),
+            }
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RecoveryInvalid);
+        let current = match request_status_tx(&tx, identity).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return Ok(()),
+            Err(error) => return defer_to_activation(error),
+        };
+        if current.fingerprint != fingerprint || current.state != RequestState::Running {
+            return Ok(());
         }
+        let evidence = match request_execution_evidence_tx(&tx, identity).await {
+            Ok(evidence) => evidence,
+            Err(error) => return defer_to_activation(error),
+        };
+        if evidence.owner != Some(RequestOwner::from(lease))
+            || evidence.effects.is_some()
+            || evidence.controlled_marker.is_some()
+            || evidence.rollback_proof.is_some()
+        {
+            return Ok(());
+        }
+        if let Err(error) = self.require_owner(&tx, lease).await {
+            return defer_to_activation(error);
+        }
+        record_controlled_transaction_marker_tx(&tx, identity, fingerprint, lease).await?;
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
@@ -12356,7 +12787,9 @@ impl RuntimeState {
 
     /// Records that an effect outside Orna's transaction boundary may have
     /// occurred. This is intentionally one-way and can only make recovery
-    /// more conservative.
+    /// more conservative: it also downgrades a request that already carries
+    /// a controlled marker or rollback receipt, for example one left by an
+    /// earlier commit attempt that failed its prechecks.
     pub async fn record_external_effect(
         &self,
         identity: RequestIdentity,
@@ -12368,9 +12801,10 @@ impl RuntimeState {
     }
 
     /// Persists evidence only after this runtime observed its own controlled
-    /// table transaction fail before commit. An entry marker alone never
-    /// reaches this transition, and a possible external effect keeps recovery
-    /// conservative.
+    /// table transaction fail before commit. The proof requires the positive
+    /// controlled marker recorded when the activation reached its table
+    /// boundary: a request with no effect evidence, or with a possible
+    /// external effect, keeps recovery conservatively uncertain.
     async fn record_controlled_rollback_proof(
         &self,
         identity: RequestIdentity,
@@ -12394,37 +12828,32 @@ impl RuntimeState {
         if evidence.owner != Some(RequestOwner::from(owner)) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        if evidence.effects == Some(EffectEvidence::ExternalPossible) {
-            tx.commit()
-                .await
-                .map_err(|_| RuntimeError::StorageUnavailable)?;
-            return Ok(());
+        match evidence.effects {
+            Some(EffectEvidence::ControlledTransaction) => {}
+            // Defence in depth: production activations record the marker
+            // before their table transaction, so `None` is not expected
+            // here; absent evidence is never promoted to a receipt.
+            None | Some(EffectEvidence::ExternalPossible) => {
+                tx.commit()
+                    .await
+                    .map_err(|_| RuntimeError::StorageUnavailable)?;
+                return Ok(());
+            }
         }
-        if evidence.rollback_proof.is_some()
-            || !matches!(
-                evidence.effects,
-                None | Some(EffectEvidence::ControlledTransaction)
-            )
-        {
+        if evidence.rollback_proof.is_some() {
             return Err(RuntimeError::RequestStateConflict);
         }
         let marker = controlled_transaction_marker(identity, fingerprint, owner);
-        if evidence
-            .controlled_marker
-            .is_some_and(|existing| existing != marker)
-        {
+        if evidence.controlled_marker != Some(marker) {
             return Err(RuntimeError::RecoveryInvalid);
         }
         let proof = controlled_rollback_proof(marker);
         let changed = tx
             .execute(
-                "UPDATE request_ledger
-             SET effect_evidence = 1, controlled_transaction_proof = ?1,
-                 controlled_rollback_proof = ?2
+                "UPDATE request_ledger SET controlled_rollback_proof = ?2
              WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
                AND state = ?6 AND owner_id = ?7 AND owner_epoch = ?8
-               AND effect_evidence IN (0, 1)
-               AND (controlled_transaction_proof IS NULL OR controlled_transaction_proof = ?1)
+               AND effect_evidence = 1 AND controlled_transaction_proof = ?1
                AND controlled_rollback_proof IS NULL",
                 params![
                     marker.to_vec(),
@@ -12476,18 +12905,24 @@ impl RuntimeState {
         if evidence.owner != Some(RequestOwner::from(owner)) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        match (evidence.effects, evidence.controlled_marker) {
+        let downgrade_controlled = match (evidence.effects, evidence.controlled_marker) {
             (Some(EffectEvidence::ExternalPossible), None) => return Ok(()),
-            (Some(_), _) => return Err(RuntimeError::RequestStateConflict),
-            (None, None) => {}
-            (None, Some(_)) => return Err(RuntimeError::RequestStateConflict),
-        }
+            (Some(EffectEvidence::ControlledTransaction), Some(_)) => true,
+            (None, None) => false,
+            (Some(_), _) | (None, Some(_)) => return Err(RuntimeError::RequestStateConflict),
+        };
         let changed = tx
             .execute(
-                "UPDATE request_ledger SET effect_evidence = 2
+                "UPDATE request_ledger
+                 SET effect_evidence = 2, controlled_transaction_proof = NULL,
+                     controlled_rollback_proof = NULL
                  WHERE session_id = ?1 AND request_id = ?2 AND fingerprint = ?3
                    AND state = ?4 AND owner_id = ?5 AND owner_epoch = ?6
-                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
+                   AND ((?7 AND effect_evidence = 1
+                         AND controlled_transaction_proof IS NOT NULL)
+                     OR (NOT ?7 AND effect_evidence = 0
+                         AND controlled_transaction_proof IS NULL
+                         AND controlled_rollback_proof IS NULL))",
                 params![
                     identity.session_id.to_vec(),
                     identity.request_id.to_vec(),
@@ -12495,6 +12930,7 @@ impl RuntimeState {
                     RequestState::Running.code(),
                     owner.owner_id.to_vec(),
                     i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    i64::from(downgrade_controlled),
                 ],
             )
             .await
@@ -12730,63 +13166,14 @@ impl RuntimeState {
         if evidence.owner != Some(lost_owner) || lost_owner == RequestOwner::from(fence) {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let disposition = if evidence.effects == Some(EffectEvidence::ControlledTransaction)
-            && evidence.controlled_marker.is_some()
-            && evidence.rollback_proof.is_some()
-        {
-            RecoveryDisposition::RollbackProven
-        } else {
-            RecoveryDisposition::ExternalEffectsUncertain
-        };
-        let outcome = match disposition {
-            RecoveryDisposition::RollbackProven => rollback_proven_outcome,
-            RecoveryDisposition::ExternalEffectsUncertain => external_effects_uncertain_outcome,
-        };
-        let retained_effect_evidence = if disposition == RecoveryDisposition::RollbackProven {
-            1
-        } else {
-            0
-        };
-        let retained_marker = if disposition == RecoveryDisposition::RollbackProven {
-            evidence.controlled_marker.map(|value| value.to_vec())
-        } else {
-            None
-        };
-        let retained_rollback_proof = if disposition == RecoveryDisposition::RollbackProven {
-            evidence.rollback_proof.map(|value| value.to_vec())
-        } else {
-            None
-        };
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
-                     owner_epoch = NULL, effect_evidence = ?3,
-                     recovery_disposition = ?4, controlled_transaction_proof = ?5,
-                     controlled_rollback_proof = ?6
-                 WHERE session_id = ?7 AND request_id = ?8 AND fingerprint = ?9
-                   AND state = ?10 AND owner_id = ?11 AND owner_epoch = ?12",
-                params![
-                    RequestState::Orphaned.code(),
-                    outcome.as_bytes().to_vec(),
-                    retained_effect_evidence,
-                    disposition.code(),
-                    retained_marker,
-                    retained_rollback_proof,
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Running.code(),
-                    lost_owner.owner_id.to_vec(),
-                    i64::try_from(lost_owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RequestOwnerConflict);
-        }
-        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        let (disposition, outcome) = orphan_running_request_tx(
+            &tx,
+            &current,
+            evidence,
+            rollback_proven_outcome,
+            external_effects_uncertain_outcome,
+        )
+        .await?;
         self.clear_takeover_recovery_if_resolved(&tx, fence, false)
             .await?;
         tx.commit()
@@ -12841,30 +13228,8 @@ impl RuntimeState {
         {
             return Err(RuntimeError::RequestOwnerConflict);
         }
-        let changed = tx
-            .execute(
-                "UPDATE request_ledger
-                 SET state = ?1, terminal_outcome = ?2, recovery_disposition = 2
-                 WHERE session_id = ?3 AND request_id = ?4 AND fingerprint = ?5
-                   AND state = ?6 AND owner_id IS NULL AND owner_epoch IS NULL
-                   AND effect_evidence = 0 AND controlled_transaction_proof IS NULL
-                   AND controlled_rollback_proof IS NULL
-                   AND recovery_disposition = 0",
-                params![
-                    RequestState::Orphaned.code(),
-                    outcome.as_bytes().to_vec(),
-                    identity.session_id.to_vec(),
-                    identity.request_id.to_vec(),
-                    fingerprint.to_vec(),
-                    RequestState::Running.code(),
-                ],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        if changed != 1 {
-            return Err(RuntimeError::RequestOwnerConflict);
-        }
-        sync_run_request_state_tx(&tx, identity, RunObservationStatus::Orphaned).await?;
+        let (disposition, outcome) =
+            orphan_running_request_tx(&tx, &current, evidence, outcome.clone(), outcome).await?;
         self.clear_takeover_recovery_if_resolved(&tx, fence, false)
             .await?;
         tx.commit()
@@ -12877,7 +13242,7 @@ impl RuntimeState {
                 state: RequestState::Orphaned,
                 terminal_outcome: Some(outcome),
             },
-            disposition: RecoveryDisposition::ExternalEffectsUncertain,
+            disposition,
         })
     }
 
@@ -16306,7 +16671,7 @@ async fn store_admin_invocation_audit(
     connection: &Connection,
     descriptor: &AdminInvocationDescriptor,
     owner: WriterLease,
-    observed_generation: u64,
+    observed_generation: Option<u64>,
     terminal_outcome: String,
     succeeded: bool,
     checkpoint_result: Option<&StreamCheckpoint>,
@@ -16323,7 +16688,10 @@ async fn store_admin_invocation_audit(
                 descriptor.safe_arguments.clone(),
                 owner.owner_id.to_vec(),
                 i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
-                i64::try_from(observed_generation).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                observed_generation
+                    .map(i64::try_from)
+                    .transpose()
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 terminal_outcome,
                 if succeeded { 1_i64 } else { 0_i64 },
                 if descriptor.redacted { 1_i64 } else { 0_i64 },
@@ -16350,6 +16718,55 @@ async fn store_admin_invocation_audit(
             .map_err(|_| RuntimeError::StorageUnavailable)?;
     }
     Ok(())
+}
+
+async fn store_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+    capture: &CwdCapture,
+) -> Result<(), RuntimeError> {
+    connection
+        .execute(
+            "INSERT INTO admin_invocation_stale_capture
+             (invocation_id, database_id, runtime_id, generation, generation_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                invocation_id.to_vec(),
+                capture.database_id().to_vec(),
+                capture.runtime_id().to_vec(),
+                bigint_to_i64(capture.generation())?,
+                capture.generation_digest().to_vec(),
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    Ok(())
+}
+
+async fn load_admin_stale_capture(
+    connection: &Connection,
+    invocation_id: [u8; 16],
+) -> Result<Option<CwdCapture>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT database_id, runtime_id, generation, generation_digest
+             FROM admin_invocation_stale_capture WHERE invocation_id = ?1",
+            params![invocation_id.to_vec()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let database_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest).map(Some)
 }
 
 async fn load_admin_invocation_audits(
@@ -16400,10 +16817,11 @@ async fn load_admin_invocation_audits_through(
             )?,
         };
         validate_writer_lease(owner)?;
-        let observed_generation = decode_u64(
-            row.get::<i64>(6)
-                .map_err(|_| RuntimeError::RecoveryInvalid)?,
-        )?;
+        let observed_generation = row
+            .get::<Option<i64>>(6)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?
+            .map(decode_u64)
+            .transpose()?;
         let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
         validate_observation_text(&terminal_outcome)?;
         let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -16477,10 +16895,11 @@ async fn load_admin_invocation_receipt(
         )?,
     };
     validate_writer_lease(owner)?;
-    let observed_generation = decode_u64(
-        row.get::<i64>(6)
-            .map_err(|_| RuntimeError::RecoveryInvalid)?,
-    )?;
+    let observed_generation = row
+        .get::<Option<i64>>(6)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(decode_u64)
+        .transpose()?;
     let terminal_outcome: String = row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?;
     validate_observation_text(&terminal_outcome)?;
     let effect = decode_admin_lifecycle_effect(&terminal_outcome)?;
@@ -16844,22 +17263,18 @@ fn stream_pause_key(result: &CommitResult) -> Result<&CheckpointKey, RuntimeErro
 /// Maps a rejected failure transition to its public system outcome.
 ///
 /// A version or successor the stored failure did not record is
-/// `sys.failure.stale_version`. A resolve that is blocked by an open or
-/// retrying failure, or a retry that the stored state does not admit, is
-/// `sys.failure.state_conflict`. A skip over a failure that is not skippable
-/// is `sys.failure.skip_unsupported`. Other rejections keep their internal
-/// classification and return `None`.
-pub fn failure_transition_error(
-    reason: RejectReason,
-    purpose: Option<LeasePurpose>,
-) -> Option<RuntimeError> {
-    match (reason, purpose) {
-        (RejectReason::StaleFailure, _) => Some(RuntimeError::StreamFailureStale),
-        (RejectReason::ResolveBlocked, _) => Some(RuntimeError::StreamFailureStateConflict),
-        (RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)) => {
-            Some(RuntimeError::StreamFailureSkipUnsupported)
+/// `sys.failure.stale_version`. A transition the stored failure status does
+/// not admit, such as resolving an open failure or skipping one that is no
+/// longer open, is `sys.failure.state_conflict`. Other rejections keep their
+/// internal classification and return `None`. No rejection maps to
+/// `sys.failure.skip_unsupported`: that code reports a provider that cannot
+/// safely advance past a delivery, not a failure-state check.
+pub fn failure_transition_error(reason: RejectReason) -> Option<RuntimeError> {
+    match reason {
+        RejectReason::StaleFailure => Some(RuntimeError::StreamFailureStale),
+        RejectReason::ResolveBlocked | RejectReason::RetryNotAllowed => {
+            Some(RuntimeError::StreamFailureStateConflict)
         }
-        (RejectReason::RetryNotAllowed, _) => Some(RuntimeError::StreamFailureStateConflict),
         _ => None,
     }
 }
@@ -18774,6 +19189,15 @@ async fn capture_tx(connection: &Connection) -> Result<CwdCapture, RuntimeError>
     let runtime_id = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let generation: i64 = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let digest = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    cwd_capture_from_parts(database_id, runtime_id, generation, digest)
+}
+
+fn cwd_capture_from_parts(
+    database_id: [u8; 16],
+    runtime_id: [u8; 16],
+    generation: i64,
+    digest: [u8; 32],
+) -> Result<CwdCapture, RuntimeError> {
     if generation < 0 {
         return Err(RuntimeError::RecoveryInvalid);
     }
@@ -18901,6 +19325,170 @@ async fn current_writer_lease_tx(
     let lease = WriterLease { owner_id, epoch };
     validate_writer_lease(lease)?;
     Ok(Some(lease))
+}
+
+/// The current writer lease and the runtime owner lock identity it is bound
+/// to. An unbound lease (null) predates lock binding or was installed by a
+/// handle without the lock; no live lock holder vouches for it.
+async fn bound_writer_lease_tx(
+    connection: &Connection,
+) -> Result<Option<(WriterLease, Option<[u8; 16]>)>, RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT owner_id, epoch, lock_owner_id FROM writer_lease WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    else {
+        return Ok(None);
+    };
+    let owner_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let epoch = u64::try_from(
+        row.get::<i64>(1)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
+    )
+    .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let lease = WriterLease { owner_id, epoch };
+    validate_writer_lease(lease)?;
+    let lock_id = row
+        .get::<Option<Vec<u8>>>(2)
+        .map_err(|_| RuntimeError::RecoveryInvalid)?
+        .map(fixed)
+        .transpose()?;
+    Ok(Some((lease, lock_id)))
+}
+
+/// How a writer lease takeover settles the Running requests left by the
+/// tokens it fences.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TakeoverRecovery {
+    /// Explicit takeover: the caller recovers each Running request with its
+    /// own outcome payloads, and a durable barrier blocks ordinary writes
+    /// until it completes takeover recovery.
+    Barrier,
+    /// Takeover on lease acquisition: every Running request is fenced into
+    /// its conservative orphaned outcome inside the takeover transaction.
+    OrphanRunning,
+}
+
+/// Fences every Running request into its conservative orphaned outcome
+/// (REQUEST-1 step 5) while a lease takeover commits. The takeover has just
+/// installed a fresh token, so each Running request records a fenced token,
+/// or none for a pre-evidence legacy row, and its owner can never record its
+/// own terminal outcome. The runtime retains the identity, fingerprint and
+/// recovery disposition. The outcome payload is empty because the consumer
+/// that would render it is gone; rich output is what retention may prune.
+async fn orphan_fenced_running_requests_tx(connection: &Connection) -> Result<(), RuntimeError> {
+    let mut rows = connection
+        .query(
+            "SELECT session_id, request_id, fingerprint, state, terminal_outcome,
+                    owner_id, owner_epoch, effect_evidence, recovery_disposition,
+                    controlled_transaction_proof, controlled_rollback_proof
+             FROM request_ledger
+             WHERE state = ?1
+             ORDER BY session_id, request_id",
+            params![RequestState::Running.code()],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let mut running = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?
+    {
+        let status = decode_request_status(&row).map_err(|_| RuntimeError::RecoveryInvalid)?;
+        let evidence = decode_request_execution_evidence(&row, 5)?;
+        validate_request_execution_evidence(&status, evidence)?;
+        running.push((status, evidence));
+    }
+    drop(rows);
+    let unrendered = TerminalOutcome::new(Vec::new())?;
+    for (status, evidence) in running {
+        orphan_running_request_tx(
+            connection,
+            &status,
+            evidence,
+            unrendered.clone(),
+            unrendered.clone(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Moves one validated Running request whose owner token is fenced to
+/// `Orphaned`, keeping the outcome that matches its durable evidence:
+/// rollback only with the complete controlled-transaction proof, otherwise
+/// uncertain external effects. The update is guarded by the owner evidence
+/// read in the caller's transaction.
+async fn orphan_running_request_tx(
+    connection: &Connection,
+    status: &RequestStatus,
+    evidence: RequestExecutionEvidence,
+    rollback_proven_outcome: TerminalOutcome,
+    external_effects_uncertain_outcome: TerminalOutcome,
+) -> Result<(RecoveryDisposition, TerminalOutcome), RuntimeError> {
+    let rollback_proven = evidence.effects == Some(EffectEvidence::ControlledTransaction)
+        && evidence.controlled_marker.is_some()
+        && evidence.rollback_proof.is_some();
+    let (disposition, outcome) = if rollback_proven {
+        (RecoveryDisposition::RollbackProven, rollback_proven_outcome)
+    } else {
+        (
+            RecoveryDisposition::ExternalEffectsUncertain,
+            external_effects_uncertain_outcome,
+        )
+    };
+    let retained_marker = evidence
+        .controlled_marker
+        .filter(|_| rollback_proven)
+        .map(|value| value.to_vec());
+    let retained_rollback_proof = evidence
+        .rollback_proof
+        .filter(|_| rollback_proven)
+        .map(|value| value.to_vec());
+    let owner_epoch = evidence
+        .owner
+        .map(|owner| i64::try_from(owner.epoch))
+        .transpose()
+        .map_err(|_| RuntimeError::RecoveryInvalid)?;
+    let changed = connection
+        .execute(
+            "UPDATE request_ledger
+             SET state = ?1, terminal_outcome = ?2, owner_id = NULL,
+                 owner_epoch = NULL, effect_evidence = ?3,
+                 recovery_disposition = ?4, controlled_transaction_proof = ?5,
+                 controlled_rollback_proof = ?6
+             WHERE session_id = ?7 AND request_id = ?8 AND fingerprint = ?9
+               AND state = ?10 AND owner_id IS ?11 AND owner_epoch IS ?12",
+            params![
+                RequestState::Orphaned.code(),
+                outcome.as_bytes().to_vec(),
+                i64::from(rollback_proven),
+                disposition.code(),
+                retained_marker,
+                retained_rollback_proof,
+                status.identity.session_id.to_vec(),
+                status.identity.request_id.to_vec(),
+                status.fingerprint.to_vec(),
+                RequestState::Running.code(),
+                evidence.owner.map(|owner| owner.owner_id.to_vec()),
+                owner_epoch,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if changed != 1 {
+        return Err(RuntimeError::RequestOwnerConflict);
+    }
+    sync_run_request_state_tx(connection, status.identity, RunObservationStatus::Orphaned).await?;
+    Ok((disposition, outcome))
 }
 
 async fn request_admission_exists_tx(
@@ -20112,7 +20700,8 @@ async fn migrate_historical_governance(connection: &Connection) -> Result<(), Ru
              SELECT checkpoint.generation,
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM admin_invocation_audit AS audit
-                              WHERE audit.observed_generation < checkpoint.generation), 0),
+                              WHERE audit.observed_generation IS NOT NULL
+                                AND audit.observed_generation < checkpoint.generation), 0),
                     COALESCE((SELECT MAX(audit.sequence)
                               FROM stream_checkpoint_reset_audit AS audit
                               WHERE audit.observed_generation >= 0
@@ -20603,6 +21192,41 @@ fn admission_capability_digest(capability: &RequestAdmissionCapability) -> [u8; 
     digest.update(b"orna.runtime.request-admission.v1");
     digest.update(capability.0);
     digest.finalize().into()
+}
+
+/// Writes the controlled-transaction marker for a `Running` request owned by
+/// `owner` that has no effect evidence yet. Callers validate the request and
+/// owner in the same immediate transaction first.
+async fn record_controlled_transaction_marker_tx(
+    tx: &Connection,
+    identity: RequestIdentity,
+    fingerprint: [u8; 32],
+    owner: WriterLease,
+) -> Result<(), RuntimeError> {
+    let marker = controlled_transaction_marker(identity, fingerprint, owner);
+    let changed = tx
+        .execute(
+            "UPDATE request_ledger
+             SET effect_evidence = 1, controlled_transaction_proof = ?1
+             WHERE session_id = ?2 AND request_id = ?3 AND fingerprint = ?4
+               AND state = ?5 AND owner_id = ?6 AND owner_epoch = ?7
+               AND effect_evidence = 0 AND controlled_transaction_proof IS NULL",
+            params![
+                marker.to_vec(),
+                identity.session_id.to_vec(),
+                identity.request_id.to_vec(),
+                fingerprint.to_vec(),
+                RequestState::Running.code(),
+                owner.owner_id.to_vec(),
+                i64::try_from(owner.epoch).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            ],
+        )
+        .await
+        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    if changed != 1 {
+        return Err(RuntimeError::RecoveryInvalid);
+    }
+    Ok(())
 }
 
 fn controlled_transaction_marker(
@@ -21526,7 +22150,14 @@ mod tests {
         git(root, &["add", "--all"]);
         git(root, &["commit", "-m", "format3 graph fixture metadata"]);
 
-        let schema_digest: [u8; 32] = Sha256::digest(schema_source).into();
+        // The chunk entry carries the chunk's SHA-256; the kind-6 node and the
+        // rows domain carry the format-3 schema identity.
+        let chunk_digest: [u8; 32] = Sha256::digest(schema_source).into();
+        let schema_digest: [u8; 32] = Sha256::new()
+            .chain_update(b"orna.schema.v3\0")
+            .chain_update(schema_source)
+            .finalize()
+            .into();
         let chunk_oid = git_object(root, "blob", schema_source);
         let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
         append_cbor_head(&mut byte_index, 0, schema_source.len());
@@ -21534,7 +22165,7 @@ mod tests {
         byte_index.push(0x83);
         append_cbor_head(&mut byte_index, 0, schema_source.len());
         append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
-        append_cbor_bytes(&mut byte_index, &schema_digest);
+        append_cbor_bytes(&mut byte_index, &chunk_digest);
         let byte_index_oid =
             native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
@@ -40686,28 +41317,115 @@ mod tests {
         assert!(checkpoint.committed.is_none());
     }
 
-    #[test]
-    fn failure_transition_rejections_map_to_public_failure_codes() {
-        let code = |reason, purpose| {
-            failure_transition_error(reason, purpose).and_then(|error| error.public_code())
+    #[tokio::test]
+    async fn runtime_skip_lease_on_a_skipped_failure_is_a_failure_state_conflict() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let recorded = stream_delivery("runtime-skip-twice", "runtime-skip-twice-next");
+        let expected = CheckpointPrecondition {
+            version: 0,
+            committed: None,
+        };
+        let mut stream = state.stream_backend(writer);
+        let deliver_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Deliver,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected stream acquire result: {other:?}"),
+        };
+        let failed = match stream
+            .fail_async(
+                deliver_lease,
+                SafeDiagnostic {
+                    code: DiagnosticCode::ExecutionRejected,
+                    class: DiagnosticClass::Permanent,
+                },
+                StreamFailurePayload::Plaintext(Vec::new()),
+            )
+            .await
+            .unwrap()
+        {
+            CommitResult::Failed { failure } => failure,
+            other => panic!("unexpected stream failure result: {other:?}"),
+        };
+        let skip_lease = match stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: expected.clone(),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::Acquired { lease } => lease,
+            other => panic!("unexpected skip acquire result: {other:?}"),
+        };
+        let checkpoint = match stream
+            .apply_async(CommitIntent::Skip {
+                lease: skip_lease,
+                expected,
+                expected_failure_version: failed.version,
+            })
+            .await
+            .unwrap()
+        {
+            CommitResult::CheckpointAdvanced { checkpoint } => checkpoint,
+            other => panic!("unexpected skip result: {other:?}"),
+        };
+
+        // The failure is no longer open, so a second skip lease is refused by
+        // the failure-status check: a state conflict, not an unsupported skip.
+        let rejected = stream
+            .apply_async(CommitIntent::Acquire {
+                delivery: recorded.clone(),
+                expected: CheckpointPrecondition::from(&checkpoint),
+                purpose: LeasePurpose::Skip,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            rejected,
+            CommitResult::Rejected(RejectReason::RetryNotAllowed)
+        );
+        let CommitResult::Rejected(reason) = rejected else {
+            unreachable!("asserted above");
         };
         assert_eq!(
-            code(RejectReason::StaleFailure, Some(LeasePurpose::Skip)),
-            Some("sys.failure.stale_version")
+            failure_transition_error(reason).and_then(|error| error.public_code()),
+            Some("sys.failure.state_conflict"),
         );
+        let stored = stream
+            .failure_async(&failed.identity)
+            .await
+            .unwrap()
+            .expect("stable failure");
+        assert_eq!(stored.status, FailureStatus::Skipped);
         assert_eq!(
-            code(RejectReason::ResolveBlocked, None),
-            Some("sys.failure.state_conflict")
+            stream
+                .checkpoint_async(&recorded.checkpoint_key())
+                .await
+                .unwrap(),
+            checkpoint,
+            "a refused skip lease must not move the checkpoint",
         );
-        assert_eq!(
-            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Deliver)),
-            Some("sys.failure.state_conflict")
-        );
-        assert_eq!(
-            code(RejectReason::RetryNotAllowed, Some(LeasePurpose::Skip)),
-            Some("sys.failure.skip_unsupported")
-        );
-        assert_eq!(code(RejectReason::StreamBusy, None), None);
+    }
+
+    #[test]
+    fn failure_transition_rejections_map_to_public_failure_codes() {
+        let code = |reason| failure_transition_error(reason).and_then(|error| error.public_code());
+        assert_eq!(code(RejectReason::StaleFailure), Some("sys.failure.stale_version"));
+        assert_eq!(code(RejectReason::ResolveBlocked), Some("sys.failure.state_conflict"));
+        // Skip acquisition rejects a failure that is no longer open with
+        // RetryNotAllowed: a state conflict, not an unsupported skip.
+        assert_eq!(code(RejectReason::RetryNotAllowed), Some("sys.failure.state_conflict"));
+        assert_eq!(code(RejectReason::StreamBusy), None);
     }
 
     #[tokio::test]
@@ -40851,6 +41569,315 @@ mod tests {
             reopened.stream_pause_reason(&key).await,
             Ok(Some("maintenance boundary".into())),
         );
+    }
+
+    #[tokio::test]
+    async fn admin_capture_failure_records_unobservable_row() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-capture", "admin-capture-next").checkpoint_key();
+        // Dropping the singleton makes capture_tx fail on the attempt path and
+        // again on the re-capture. Owner checks read writer_lease, not runtime_meta.
+        state
+            .connection
+            .execute("DELETE FROM runtime_meta", ())
+            .await
+            .unwrap();
+        let error = state
+            .pause_stream_with_reason_and_invocation_id(
+                writer,
+                key,
+                "maintenance boundary".into(),
+                id(72),
+            )
+            .await
+            .expect_err("capture failure must fail the call");
+        assert_eq!(error, RuntimeError::RecoveryInvalid);
+        let audits = state.admin_invocation_audits().await.unwrap();
+        assert_eq!(audits.len(), 1, "the failed call still gets one row: {audits:?}");
+        assert_eq!(audits[0].observed_generation, None);
+        assert_eq!(audits[0].terminal_outcome, "failure:unobservable:recovery_invalid");
+        assert!(!audits[0].succeeded);
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_replays_recorded_class() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let cases: [(&str, RuntimeError); 4] = [
+            ("failure:unobservable:invalid_digest", RuntimeError::InvalidDigest),
+            ("failure:unobservable:stale_capture", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable:fault_injected", RuntimeError::RecoveryInvalid),
+            ("failure:unobservable", RuntimeError::RecoveryInvalid),
+        ];
+        for (index, (outcome, expected)) in cases.into_iter().enumerate() {
+            let invocation = [80 + index as u8; 16];
+            state
+                .connection
+                .execute(
+                    "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (?1, 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, NULL, ?2, 0, 0)",
+                    (invocation.to_vec(), outcome),
+                )
+                .await
+                .unwrap();
+            let receipt = state
+                .admin_invocation_audits()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|audit| audit.invocation_id == invocation)
+                .unwrap();
+            match replay_admin_stream_result(&state.connection, &receipt).await {
+                Err(error) => assert_eq!(error, expected, "{outcome}"),
+                Ok(_) => panic!("{outcome} must replay its failure"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_failure_unobservable_migration_keeps_legacy_rows() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        // Rebuild the pre-1.1.0 shape: observed_generation NOT NULL and no
+        // stale-capture child table.
+        state
+            .connection
+            .execute_batch(
+                "DROP TABLE admin_invocation_stale_capture;
+                 DROP TABLE admin_invocation_checkpoint_result;
+                 DROP TABLE admin_invocation_audit;
+                 CREATE TABLE admin_invocation_audit (
+                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                     invocation_id BLOB NOT NULL UNIQUE CHECK (length(invocation_id) = 16),
+                     function_name TEXT NOT NULL CHECK (length(function_name) > 0),
+                     safe_arguments TEXT NOT NULL CHECK (length(safe_arguments) <= 16777216),
+                     owner_id BLOB NOT NULL CHECK (length(owner_id) = 16),
+                     owner_epoch INTEGER NOT NULL CHECK (owner_epoch > 0),
+                     observed_generation INTEGER NOT NULL CHECK (observed_generation >= 0),
+                     terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND length(terminal_outcome) <= 16777216),
+                     succeeded INTEGER NOT NULL CHECK (succeeded IN (0, 1)),
+                     redacted INTEGER NOT NULL CHECK (redacted IN (0, 1))
+                 );
+                 CREATE TABLE admin_invocation_checkpoint_result (
+                     invocation_id BLOB PRIMARY KEY REFERENCES admin_invocation_audit(invocation_id),
+                     version INTEGER NOT NULL CHECK (version >= 0),
+                     committed_position TEXT NOT NULL CHECK (length(committed_position) > 0)
+                 );
+                 INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'02020202020202020202020202020202', 'sys.admin.pause_stream', 'stream_key_digest=x', x'01010101010101010101010101010101', 1, 7, 'paused', 1, 0);
+                 INSERT INTO admin_invocation_checkpoint_result (invocation_id, version, committed_position)
+                     VALUES (x'02020202020202020202020202020202', 3, 'pos');",
+            )
+            .await
+            .unwrap();
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        // Raw counts: the decoder requires coherent checkpoint-reset rows, and
+        // this test is about storage fidelity, not decoding.
+        macro_rules! count {
+            ($sql:expr) => {{
+                let mut rows = state.connection.query($sql, ()).await.unwrap();
+                rows.next().await.unwrap().expect("count row").get::<i64>(0).unwrap()
+            }};
+        }
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation = 7 AND terminal_outcome = 'paused'"),
+            1,
+            "legacy audit row keeps its generation"
+        );
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_checkpoint_result WHERE version = 3 AND committed_position = 'pos'"),
+            1,
+            "checkpoint result child is kept"
+        );
+        // The rebuilt table accepts an unobservable row with a NULL generation.
+        state
+            .connection
+            .execute_batch(
+                "INSERT INTO admin_invocation_audit (invocation_id, function_name, safe_arguments, owner_id, owner_epoch, observed_generation, terminal_outcome, succeeded, redacted)
+                     VALUES (x'04040404040404040404040404040404', 'sys.admin.pause_stream', 'x', x'01010101010101010101010101010101', 1, NULL, 'failure:unobservable:recovery_invalid', 0, 0);",
+            )
+            .await
+            .unwrap();
+        // A second run is a no-op and keeps both rows.
+        state.migrate_admin_failure_unobservable().await.unwrap();
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation IS NULL"),
+            1,
+            "NULL generation row is accepted"
+        );
+        assert_eq!(count!("SELECT COUNT(*) FROM admin_invocation_audit"), 2, "migration keeps every row");
+    }
+
+    #[test]
+    fn admin_failure_class_round_trips_every_payload_free_variant() {
+        // The 48 payload-free variants. StaleCapture, FaultInjected,
+        // LegacyHeadReadOnly and UnknownHeadFormat carry payloads the row does not
+        // store; they are checked by the class-only assertions below.
+        let table: &[(RuntimeError, &str)] = &[
+            (RuntimeError::InvalidIdentity, "invalid_identity"),
+            (RuntimeError::InvalidDigest, "invalid_digest"),
+            (RuntimeError::InvalidObservationReference, "invalid_observation_reference"),
+            (RuntimeError::ObservationCoordinateMismatch, "observation_coordinate_mismatch"),
+            (RuntimeError::ProcedureMaterializationConflict, "procedure_materialization_conflict"),
+            (RuntimeError::InvocationObservationConflict, "invocation_observation_conflict"),
+            (RuntimeError::InvocationStateConflict, "invocation_state_conflict"),
+            (RuntimeError::QueryObservationConflict, "query_observation_conflict"),
+            (RuntimeError::QueryStateConflict, "query_state_conflict"),
+            (RuntimeError::InvocationChildrenActive, "invocation_children_active"),
+            (RuntimeError::InvocationOwnerInvalid, "invocation_owner_invalid"),
+            (RuntimeError::InvocationTailInvalid, "invocation_tail_invalid"),
+            (RuntimeError::InvocationTailLimit, "invocation_tail_limit"),
+            (RuntimeError::StreamIdentityMismatch, "stream_identity_mismatch"),
+            (RuntimeError::StreamSourceNotReplayable, "stream_source_not_replayable"),
+            (RuntimeError::StreamCheckpointStale, "stream_checkpoint_stale"),
+            (RuntimeError::CheckpointNotReplayable, "checkpoint_not_replayable"),
+            (RuntimeError::SnapshotNotFound, "snapshot_not_found"),
+            (RuntimeError::SnapshotIncomplete, "snapshot_incomplete"),
+            (RuntimeError::SnapshotContextMismatch, "snapshot_context_mismatch"),
+            (RuntimeError::LeaseHeld, "lease_held"),
+            (RuntimeError::AdminBusy, "admin_busy"),
+            (RuntimeError::AdminInvocationConflict, "admin_invocation_conflict"),
+            (RuntimeError::OwnerLost, "owner_lost"),
+            (RuntimeError::RecoveryPending, "recovery_pending"),
+            (RuntimeError::InvalidCapture, "invalid_capture"),
+            (RuntimeError::EmptyMutationBatch, "empty_mutation_batch"),
+            (RuntimeError::InvalidTableMutation, "invalid_table_mutation"),
+            (RuntimeError::ConflictingPublicationIntent, "conflicting_publication_intent"),
+            (RuntimeError::ConflictingPublicationCommit, "conflicting_publication_commit"),
+            (RuntimeError::InvalidPublicationCommit, "invalid_publication_commit"),
+            (RuntimeError::InvalidPublicationPolicy, "invalid_publication_policy"),
+            (RuntimeError::CompactPublicationRequired, "compact_publication_required"),
+            (RuntimeError::CompactReceiptKeyMismatch, "compact_receipt_key_mismatch"),
+            (RuntimeError::InvalidCompactReceipt, "invalid_compact_receipt"),
+            (RuntimeError::RequestUnknown, "request_unknown"),
+            (RuntimeError::RequestFingerprintMismatch, "request_fingerprint_mismatch"),
+            (RuntimeError::RequestOwnerConflict, "request_owner_conflict"),
+            (RuntimeError::RequestStateConflict, "request_state_conflict"),
+            (RuntimeError::SessionClosed, "session_closed"),
+            (RuntimeError::SessionWorkActive, "session_work_active"),
+            (RuntimeError::TerminalOutcomeTooLarge, "terminal_outcome_too_large"),
+            (RuntimeError::RecoveryInvalid, "recovery_invalid"),
+            (RuntimeError::SystemProviderAbiInvalid, "system_provider_abi_invalid"),
+            (RuntimeError::StorageUnavailable, "storage_unavailable"),
+            (RuntimeError::StreamFailureStale, "stream_failure_stale"),
+            (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
+            (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
+        ];
+        assert_eq!(table.len(), 48);
+        for (variant, class) in table {
+            assert_eq!(admin_failure_class(variant), *class);
+            assert_eq!(admin_failure_from_class(class), *variant, "{class}");
+        }
+        // Payload-carrying classes replay as RecoveryInvalid: the payload is not stored.
+        assert_eq!(
+            admin_failure_class(&RuntimeError::FaultInjected(FaultPoint::AfterCommit)),
+            "fault_injected",
+        );
+        assert_eq!(
+            admin_failure_from_class("fault_injected"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("legacy_head_read_only"),
+            RuntimeError::RecoveryInvalid,
+        );
+        assert_eq!(
+            admin_failure_from_class("unknown_head_format"),
+            RuntimeError::RecoveryInvalid,
+        );
+    }
+
+    #[test]
+    fn admin_failure_replays_legacy_outcome_names() {
+        // Outcomes stored before stable failure classes keep replaying as
+        // their original variants.
+        assert_eq!(admin_failure_from_class("unavailable"), RuntimeError::StorageUnavailable);
+        assert_eq!(admin_failure_from_class("admin_busy"), RuntimeError::AdminBusy);
+        assert_eq!(
+            admin_failure_from_class("runtime administration callback is busy"),
+            RuntimeError::AdminBusy,
+        );
+        assert_eq!(
+            admin_failure_from_class("invalid_observation_reference"),
+            RuntimeError::InvalidObservationReference,
+        );
+        assert_eq!(
+            admin_failure_from_class("checkpoint_not_replayable"),
+            RuntimeError::CheckpointNotReplayable,
+        );
+        assert_eq!(
+            admin_failure_from_class("stream_checkpoint_stale"),
+            RuntimeError::StreamCheckpointStale,
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_replays_failure_rows_stored_before_stable_classes() {
+        // Rows as earlier releases stored them. Each legacy failure outcome
+        // replays as the error it recorded, and a replay neither applies the
+        // pause nor appends a row (ORNA-ADMIN-003).
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let writer = state.acquire_lease(id(4)).await.unwrap();
+        let key = stream_delivery("admin-legacy", "admin-legacy-next").checkpoint_key();
+        let reason = String::from("maintenance boundary");
+        let generation = admin_observed_generation(&state.capture().await.unwrap()).unwrap();
+        let legacy = [
+            ("unavailable", RuntimeError::StorageUnavailable),
+            ("admin_busy", RuntimeError::AdminBusy),
+            (
+                "runtime administration callback is busy",
+                RuntimeError::AdminBusy,
+            ),
+            (
+                "invalid_observation_reference",
+                RuntimeError::InvalidObservationReference,
+            ),
+            (
+                "checkpoint_not_replayable",
+                RuntimeError::CheckpointNotReplayable,
+            ),
+            (
+                "stream_checkpoint_stale",
+                RuntimeError::StreamCheckpointStale,
+            ),
+        ];
+        for (invocation_id, (outcome, expected)) in (80u8..).map(id).zip(legacy.iter()) {
+            let operation = AdminInvocationOperation::Pause {
+                key: key.clone(),
+                reason: Some(reason.clone()),
+            };
+            store_admin_invocation_audit(
+                &state.connection,
+                &admin_invocation_descriptor_with_id(&operation, invocation_id),
+                writer,
+                Some(generation),
+                format!("failure:{outcome}"),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state
+                    .pause_stream_with_reason_and_invocation_id(
+                        writer,
+                        key.clone(),
+                        reason.clone(),
+                        invocation_id,
+                    )
+                    .await,
+                Err(expected.clone()),
+                "{outcome}",
+            );
+        }
+        assert_eq!(
+            state.admin_invocation_audits().await.unwrap().len(),
+            legacy.len()
+        );
+        assert_eq!(state.stream_pause_reason(&key).await, Ok(None));
     }
 
     #[tokio::test]
@@ -41052,7 +42079,9 @@ mod tests {
         assert_eq!(failed.function, "sys.admin.pause_stream_with_reason");
         assert!(failed.safe_arguments.contains("stream_ref_digest="));
         assert!(failed.safe_arguments.contains("reason_digest="));
-        assert!(failed.terminal_outcome.starts_with("failure:"));
+        assert_eq!(failed.terminal_outcome, "failure:admin_busy");
+        let generation = admin_observed_generation(&capture_before).unwrap();
+        assert_eq!(failed.observed_generation, Some(generation));
         let receipt = reopened
             .admin_invocation_receipt(invocation_id)
             .await
@@ -41072,6 +42101,7 @@ mod tests {
         assert!(!rejected_receipt.succeeded);
         assert_eq!(rejected_receipt.terminal_outcome, "failure:admin_busy");
         assert_eq!(rejected_receipt.effect, AdminLifecycleEffect::Failed);
+        assert_eq!(rejected_receipt.observed_generation, Some(generation));
     }
 
     #[tokio::test]
@@ -46018,6 +47048,309 @@ mod tests {
                 .terminal_outcome,
             Some(outcome(13))
         );
+    }
+
+    async fn ledger_effect_evidence(
+        state: &RuntimeState,
+        identity: RequestIdentity,
+    ) -> (i64, Option<Vec<u8>>, Option<Vec<u8>>) {
+        let mut rows = state
+            .connection
+            .query(
+                "SELECT effect_evidence, controlled_transaction_proof, controlled_rollback_proof
+                 FROM request_ledger WHERE session_id = ?1 AND request_id = ?2",
+                params![identity.session_id.to_vec(), identity.request_id.to_vec()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        (
+            row.get::<i64>(0).unwrap(),
+            row.get::<Option<Vec<u8>>>(1).unwrap(),
+            row.get::<Option<Vec<u8>>>(2).unwrap(),
+        )
+    }
+
+    // Gate D: a rollback receipt requires the controlled marker; absent
+    // effect evidence is never promoted to a receipt and recovers uncertain.
+    #[tokio::test]
+    async fn rollback_proof_requires_controlled_marker() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, identity).await,
+            (0, None, None)
+        );
+
+        // The runtime observed its table transaction unwind, but nothing
+        // positively recorded that the activation stayed Orna-controlled.
+        state
+            .record_controlled_rollback_proof(identity, fingerprint, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, identity).await,
+            (0, None, None),
+            "absent effect evidence must not be promoted to a rollback receipt"
+        );
+
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(12),
+                outcome(13),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(recovered.status.terminal_outcome, Some(outcome(13)));
+        drop(state);
+
+        let reopened = open_state(&repo).await;
+        assert_eq!(
+            reopened
+                .request_recovery_disposition(identity, fingerprint)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+    }
+
+    // Gate D: the activation records its positive controlled marker in its
+    // own durable step before the table transaction, so the rollback receipt
+    // is bound to that marker; a successful commit clears the evidence.
+    #[tokio::test]
+    async fn activation_records_controlled_marker_before_its_table_transaction() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        let marker = controlled_transaction_marker(identity, fingerprint, owner);
+        assert_eq!(
+            ledger_effect_evidence(&state, identity).await,
+            (
+                1,
+                Some(marker.to_vec()),
+                Some(controlled_rollback_proof(marker).to_vec())
+            )
+        );
+
+        // An existing receipt is never issued a second time.
+        assert_eq!(
+            state
+                .record_controlled_rollback_proof(identity, fingerprint, owner)
+                .await,
+            Err(RuntimeError::RequestStateConflict)
+        );
+
+        let fresh = request(4, 6);
+        let (_, capability) = state
+            .reserve_request_with_admission(fresh, fingerprint)
+            .await
+            .unwrap();
+        state
+            .start_request_with_owner_and_admission(
+                fresh,
+                fingerprint,
+                owner,
+                capability.expect("fresh owner-bound capability"),
+            )
+            .await
+            .unwrap();
+        let committed = state
+            .commit_table_request_activation(
+                owner,
+                fresh,
+                fingerprint,
+                &context,
+                &[table_mutation(8, 1, Some(9))],
+                digest(10),
+                outcome(11),
+                &NoFault,
+            )
+            .await
+            .unwrap();
+        assert_eq!(committed.request.state, RequestState::Completed);
+        assert_eq!(ledger_effect_evidence(&state, fresh).await, (0, None, None));
+    }
+
+    // Gate D: a reported external effect always downgrades the request, even
+    // after an earlier commit attempt left the controlled marker (a failed
+    // precheck) or a rollback receipt, so a later rollback stays uncertain.
+    #[tokio::test]
+    async fn external_effect_downgrades_a_marker_left_by_an_earlier_commit_attempt() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let fingerprint = digest(6);
+        let prechecked = request(4, 5);
+        let receipted = request(4, 6);
+        for identity in [prechecked, receipted] {
+            let (_, capability) = state
+                .reserve_request_with_admission(identity, fingerprint)
+                .await
+                .unwrap();
+            state
+                .start_request_with_owner_and_admission(
+                    identity,
+                    fingerprint,
+                    owner,
+                    capability.expect("fresh owner-bound capability"),
+                )
+                .await
+                .unwrap();
+        }
+        let context = state.begin_activation().await.unwrap();
+
+        // A precheck failure after the marker step leaves the marker behind.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    prechecked,
+                    fingerprint,
+                    &context,
+                    &[],
+                    digest(10),
+                    outcome(11),
+                    &NoFault,
+                )
+                .await,
+            Err(RuntimeError::EmptyMutationBatch)
+        );
+        let marker = controlled_transaction_marker(prechecked, fingerprint, owner);
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (1, Some(marker.to_vec()), None)
+        );
+        state
+            .record_external_effect(prechecked, fingerprint, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (2, None, None)
+        );
+        // The retry neither re-marks the request nor records a receipt.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    prechecked,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        assert_eq!(
+            ledger_effect_evidence(&state, prechecked).await,
+            (2, None, None)
+        );
+
+        // A receipt from an observed rollback is downgraded as well.
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    receipted,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        let marker = controlled_transaction_marker(receipted, fingerprint, owner);
+        assert_eq!(
+            ledger_effect_evidence(&state, receipted).await,
+            (
+                1,
+                Some(marker.to_vec()),
+                Some(controlled_rollback_proof(marker).to_vec())
+            )
+        );
+        state
+            .record_external_effect(receipted, fingerprint, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger_effect_evidence(&state, receipted).await,
+            (2, None, None)
+        );
+
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        for identity in [prechecked, receipted] {
+            let recovered = state
+                .recover_running_request_with_outcomes(
+                    identity,
+                    fingerprint,
+                    RequestOwner::from(owner),
+                    fence,
+                    outcome(12),
+                    outcome(13),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                recovered.disposition,
+                RecoveryDisposition::ExternalEffectsUncertain
+            );
+            assert_eq!(recovered.status.terminal_outcome, Some(outcome(13)));
+        }
     }
 
     #[tokio::test]

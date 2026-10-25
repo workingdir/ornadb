@@ -1,6 +1,7 @@
 //! Process-kill recovery checks for the real `orna publish` executable.
 use std::{
     fs::File,
+    ops::{Deref, DerefMut},
     path::Path,
     process::{Child, Command, Output},
     thread,
@@ -40,7 +41,7 @@ async fn commit_capture(
     writer: WriterLease,
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
-    logical_path: &str,
+    media_root: &Path,
     insert_only: bool,
     owner_id: [u8; 16],
     request: RequestIdentity,
@@ -49,13 +50,14 @@ async fn commit_capture(
 ) {
     use orna_project_v1::{ProjectLoader, admit_source_row_with_owner_fields};
 
+    // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
+    // source is the fixture document, never a committed file.
+    let logical_path = "Object/image.orna";
+    let row_source = object_source_row(media_root, "image");
     let loader = ProjectLoader::default();
     let project = loader.load_committed_snapshot(repository, source_commit).unwrap();
     let schema = loader
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
-        .unwrap();
-    let row_source = repository
-        .read_committed_file(source_commit, logical_path, 1 << 20)
         .unwrap();
     let value = evaluate_expression_ovb2_with_effects(
         expression, &Default::default(), Limits::default(), bindings,
@@ -64,7 +66,7 @@ async fn commit_capture(
     let admitted = admit_source_row_with_owner_fields(
         &project,
         logical_path,
-        std::str::from_utf8(&row_source).unwrap(),
+        &row_source,
         &schema,
         format_context,
         vec![("payload".to_owned(), blob_binding)],
@@ -108,6 +110,32 @@ async fn commit_capture(
     drop(source_bindings);
 }
 
+/// A crash child that is SIGKILLed and reaped when dropped, so a failed
+/// assertion mid-matrix never leaks a parked publisher or its runtime locks.
+struct ChildGuard(Child);
+
+impl Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn cli(directory: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command.current_dir(directory)
@@ -119,11 +147,11 @@ fn cli(directory: &Path, arguments: &[&str]) -> Output {
     command.args(arguments).output().expect("CLI process starts")
 }
 
-fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> Child {
+fn launch(directory: &Path, boundary: &str, crash_dir: &Path) -> ChildGuard {
     launch_with_arguments(directory, boundary, crash_dir, &["publish"])
 }
 
-fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arguments: &[&str]) -> Child {
+fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arguments: &[&str]) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command.current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -131,7 +159,7 @@ fn launch_with_arguments(directory: &Path, boundary: &str, crash_dir: &Path, arg
         .env(CRASH_AT, boundary)
         .env(CRASH_DIR, crash_dir);
     command.args(arguments);
-    command.spawn().expect("publication child starts")
+    ChildGuard(command.spawn().expect("publication child starts"))
 }
 
 fn launch_capture_child(
@@ -142,7 +170,7 @@ fn launch_capture_child(
     store_root: &str,
     boundary: &str,
     crash_dir: &Path,
-) -> Child {
+) -> ChildGuard {
     let mut command = Command::new(std::env::current_exe().expect("test executable path"));
     command
         .current_dir(repository_root)
@@ -159,7 +187,7 @@ fn launch_capture_child(
         command.env_remove(name);
     }
     command.args(["--exact", "capture_crash_child", "--nocapture"]);
-    command.spawn().expect("capture crash child starts")
+    ChildGuard(command.spawn().expect("capture crash child starts"))
 }
 
 #[tokio::test]
@@ -209,7 +237,7 @@ async fn capture_crash_child() {
                 writer,
                 &mut bindings,
                 &expression,
-                "Object/image.orna",
+                source_root,
                 true,
                 [33; 16],
                 RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
@@ -233,7 +261,7 @@ async fn seeded_project() -> (
 ) {
     let source = TempDir::new().unwrap();
     std::fs::copy(Path::new(MEDIA_FIXTURES).join("pixel.png"), source.path().join("pixel.png")).unwrap();
-    let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let base = repository.head().unwrap().unwrap();
     let (identity, digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
@@ -254,7 +282,7 @@ async fn seeded_project() -> (
         writer,
         &mut bindings,
         &expression,
-        "Object/image.orna",
+        source.path(),
         true,
         [33; 16],
         RequestIdentity { session_id: [21; 16], request_id: [22; 16] },
@@ -628,11 +656,11 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         // accepted pending pin must survive the kill and recovery (ORNA-PUB-018).
         let seeded_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(String::from_utf8_lossy(&seeded_pins).lines().count(), 1, "fixture pin set changed before {boundary}");
-        let abandoned = state
+        let seeded_lease = state
             .current_lease()
             .await
             .unwrap()
-            .expect("seeded project leaves a writer lease for the abandoned owner");
+            .expect("seeded project leaves a writer lease");
 
         let crash = TempDir::new().unwrap();
         let marker = crash.path().join(MARKER_FILE);
@@ -699,16 +727,24 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
         assert!(publication_pin_refs(root).is_empty(), "publication pins remain after second publish at {boundary}");
-        // Fence last: takeover_lease may leave takeover_recovery_pending set.
-        let fresh = [0x5a; 16];
-        let replacement = reopened.takeover_lease(abandoned, fresh).await.expect("takeover of abandoned lease");
-        assert_eq!(replacement.owner_id, fresh);
-        assert_eq!(replacement.epoch, abandoned.epoch + 1);
-        assert!(matches!(
-            reopened.takeover_lease(abandoned, [0x5b; 16]).await,
-            Err(orna_runtime_v1::RuntimeError::OwnerLost)
-        ), "abandoned lease took over twice after {boundary}");
-        assert!(reopened.acquire_lease(abandoned.owner_id).await.is_err(), "abandoned owner regained writer lease after {boundary}");
+        // Lock and lease-release evidence only. This block does NOT prove Gate D P5 ("no abandoned
+        // owner retains write permission"): no token is rejected here, and the publisher never held
+        // the seeded writer lease. P5 stays open until production fencing lands (W76 F1; beads
+        // .127 and .220). `orna publish` acquires no writer lease, so the seeded lease must be
+        // untouched by the killed publish or its recovery, and the publisher's own runtime-owner
+        // and coordination locks must be released and acquirable afterwards.
+        assert_eq!(
+            reopened.current_lease().await.unwrap(),
+            Some(seeded_lease),
+            "publication changed the writer lease at {boundary}"
+        );
+        assert!(
+            reopened.holds_runtime_owner_lock(),
+            "runtime owner lock still held by the killed publisher at {boundary}"
+        );
+        repository
+            .with_coordination_lock(|| Ok::<(), orna_repository_v1::RepositoryError>(()))
+            .unwrap_or_else(|error| panic!("coordination lock still held after {boundary}: {error:?}"));
         println!(
             "{boundary}: SIGKILL recovery_publish_exit={}, second_publish_exit={}",
             resumed.status.code().unwrap(),
@@ -932,7 +968,7 @@ async fn recovery_consumes_only_frozen_range_and_preserves_unrelated_work() {
         writer,
         &mut bindings,
         &expression,
-        "Object/image.orna",
+        source.path(),
         false,
         [43; 16],
         RequestIdentity { session_id: [41; 16], request_id: [42; 16] },
@@ -1090,7 +1126,7 @@ async fn capture_and_row_commit_recover_after_process_kill() {
         let payload = vec![0x6d; 128 * 1024];
         let source_path = source.path().join("capture.bin");
         std::fs::write(&source_path, &payload).unwrap();
-        let (directory, repository, relation_id, format_context) = object_format3_repository(source.path());
+        let (directory, repository, relation_id, format_context) = object_format3_repository();
         let root = directory.path();
         std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
         git(root, &["add", "--", "unrelated-tracked.txt"]);
