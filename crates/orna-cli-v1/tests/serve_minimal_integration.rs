@@ -113,8 +113,8 @@ fn devtools_are_absent_while_local_query_and_serving_remain_available() {
         thread::sleep(Duration::from_millis(25));
     }
     let (status, body) = root.expect("local server becomes available");
-    assert_eq!(status, 200);
-    assert!(!body.contains("/devtools/tables"));
+    assert_eq!(status, 404, "no serve entry: no native root page");
+    assert!(!body.contains("<html"));
     let (status, _) = http_get(&address, "/devtools/tables").expect("request removed route");
     assert_eq!(status, 404, "removed devtools route must not be reinstalled");
 }
