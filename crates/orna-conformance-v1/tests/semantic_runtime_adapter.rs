@@ -1732,6 +1732,7 @@ fn project_row_admission_accepts_exact_current_container_forms() {
     .expect("container row admission");
     assert!(matches!(rows[0].body["emails"].raw(), OvbRaw::Array(_)));
     assert!(matches!(rows[0].body["contact"].raw(), OvbRaw::Map(_)));
+    // Spec 29-formats: tuples are stored as Tag(60015, Array) of ordered components.
     assert!(matches!(
         rows[0].body["coordinates"].raw(),
         OvbRaw::Tag(60015, _)
