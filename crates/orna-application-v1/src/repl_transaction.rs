@@ -58,7 +58,7 @@ impl ApplicationAuthority {
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
         // The REPL evaluation always runs under its bound registry, whose environment provider and host providers may reach external state.
-        let declared = crate::declared_effects(effects.bindings.may_reach_external_state());
+        let declared = repl_declared_effects(effects.bindings);
         let activation = effects
             .mutations
             .into_staged_activation(
@@ -905,5 +905,27 @@ fn restore_contextual_blob_values(
         *value = original.clone();
     }
     Ok(OvbRaw::Map(restored))
+}
+
+/// The effect set declared for one REPL transaction. Every REPL evaluation runs
+/// under a bound registry, whose providers may reach external state (for example
+/// `std.io.fs.write_text`), so the declaration derives from those bindings and
+/// never from the absence of a sys host.
+pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
+    crate::declared_effects(bindings.may_reach_external_state())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repl_bound_registry_declares_external_possible() {
+        let bindings = SysHostBindingRegistry::default();
+        assert!(matches!(
+            repl_declared_effects(&bindings),
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
 }
 
