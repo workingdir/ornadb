@@ -541,7 +541,7 @@ const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 s
 
 /// Remedy for a managed-path edit that recovery refused (ORNA-PUB-010). The edit
 /// stays on disk; the user either admits it or discards it, then retries.
-const MANAGED_EDIT_HELP: &str = "to keep the edit, run `git update-index --no-skip-worktree <path>` then `git add <path>` (`git add` alone does not stage a skip-worktree store path), then run `orna commit -m MESSAGE`, then retry `orna publish`; to discard it, run `git show HEAD:<path> > <path>` (`git checkout -- <path>` does not restore a skip-worktree store path), then retry `orna publish`";
+const MANAGED_EDIT_HELP: &str = "the edited bytes are retained on disk and were not overwritten (copy them elsewhere if you need them); keeping edits to orna-managed store paths is not supported; to discard the edit, run `git show HEAD:<path> > <path>` (`git checkout -- <path>` does not restore a skip-worktree store path), then retry `orna publish`";
 
 /// ORNA-PUB-012: names the read-only legacy format, states that nothing was
 /// written, and gives the remedy that fits the worktree's migration state.
@@ -669,26 +669,26 @@ mod tests {
     }
 
     #[test]
-    fn managed_edit_refusal_names_keep_and_discard_remedies() {
+    fn managed_edit_refusal_names_the_discard_remedy_only() {
         let diagnostic = describe_storage_failure(
             "pending publication could not be recovered",
             &orna_storage_v1::Error::ManagedWorktreeConflict,
         );
         assert_eq!(diagnostic.code, "E2300");
         assert_eq!(diagnostic.help, MANAGED_EDIT_HELP);
-        assert!(diagnostic.help.contains("`git update-index --no-skip-worktree <path>`"));
-        assert!(diagnostic.help.contains("`git add <path>`"));
-        assert!(diagnostic.help.contains("`orna commit -m MESSAGE`"));
+        assert!(diagnostic.help.contains("not supported"));
         assert!(diagnostic.help.contains("`git show HEAD:<path> > <path>`"));
+        assert!(!diagnostic.help.contains("git add"));
+        assert!(!diagnostic.help.contains("orna commit"));
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
             detail.contains("the edit is retained on disk and HEAD was not changed")
         }));
     }
 
-    /// Runs the MANAGED_EDIT_HELP keep and discard sequences literally against a skip-worktree
-    /// store payload in a real Git repository: keep must stage the edit, discard must restore HEAD bytes.
+    /// Runs the MANAGED_EDIT_HELP discard sequence literally against a skip-worktree
+    /// store payload in a real Git repository: discard must restore HEAD bytes.
     #[test]
-    fn managed_edit_help_sequences_work_on_skip_worktree_store_path() {
+    fn managed_edit_help_discard_sequence_restores_head_on_skip_worktree_store_path() {
         use std::process::Command;
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -699,24 +699,17 @@ mod tests {
                 .current_dir(root)
                 .output()
                 .unwrap();
-            (status.status.success(), String::from_utf8_lossy(&status.stdout).into_owned())
+            status.status.success()
         };
         let path = ".orna/store/data";
-        assert!(run("git init -q . && git config user.email t@t && git config user.name t").0);
+        assert!(run("git init -q . && git config user.email t@t && git config user.name t"));
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(path), b"committed\n").unwrap();
-        assert!(run("git add -A && git commit -q -m base").0);
-        assert!(run(&format!("git update-index --skip-worktree {path}")).0);
-
-        std::fs::write(root.join(path), b"keep me\n").unwrap();
-        assert!(run(&format!("git update-index --no-skip-worktree {path} && git add {path}")).0);
-        let (_, staged) = run("git diff --cached --name-only");
-        assert_eq!(staged.trim(), path, "keep sequence did not stage the edit");
-        assert!(run("git reset -q").0);
-        assert!(run(&format!("git update-index --skip-worktree {path}")).0);
+        assert!(run("git add -A && git commit -q -m base"));
+        assert!(run(&format!("git update-index --skip-worktree {path}")));
 
         std::fs::write(root.join(path), b"discard me\n").unwrap();
-        assert!(run(&format!("git show HEAD:{path} > {path}")).0);
+        assert!(run(&format!("git show HEAD:{path} > {path}")));
         assert_eq!(std::fs::read(root.join(path)).unwrap(), b"committed\n");
     }
 
