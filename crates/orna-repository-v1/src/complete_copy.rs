@@ -1152,22 +1152,10 @@ fn dependency_directory(
 }
 
 fn is_repository(directory: &Path) -> bool {
-    if directory.join(".git").exists() {
-        return true;
-    }
-    let mut command = Command::new("git");
-    command
-        .current_dir(directory)
-        .args(["rev-parse", "--git-dir"]);
-    scrub_git_routing_environment(&mut command);
-    crate::bind_git_discovery_to_worktree(&mut command, directory);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    // Only a directory that carries its own `.git` entry is a repository root.
+    // Asking Git would let discovery climb into an enclosing repository and adopt
+    // a plain subdirectory.
+    directory.join(".git").exists()
 }
 
 /// Lists the committed gitlinks without consulting a checkout or remote.

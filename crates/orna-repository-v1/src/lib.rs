@@ -10110,15 +10110,21 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
-/// Stops Git's repository discovery at the worktree's real parent directory so a
-/// corrupt worktree `.git` cannot fall through to an enclosing repository. The
-/// path is canonicalized first so a symlinked worktree binds to the directory it
-/// really resolves to; a relative path cannot yield an empty or relative ceiling.
+/// Stops Git's repository discovery at the parent of a repository root so a
+/// corrupt root `.git` cannot fall through to an enclosing repository. Only a
+/// directory that carries its own `.git` entry is a root; a plain subdirectory
+/// of a worktree (for example `.orna/` or `nested/`) must still discover the
+/// enclosing repository, so it is left unbound. The path is canonicalized first
+/// so a symlinked root binds to the directory it really resolves to; a relative
+/// path cannot yield an empty or relative ceiling.
 pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
     let resolved = worktree
         .canonicalize()
         .or_else(|_| std::path::absolute(worktree))
         .unwrap_or_else(|_| worktree.to_path_buf());
+    if !resolved.join(".git").exists() {
+        return;
+    }
     if let Some(parent) = resolved.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
     }
@@ -13079,8 +13085,11 @@ mod git_binding_tests {
 
     #[test]
     fn discovery_bind_makes_a_relative_ceiling_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
         let mut command = Command::new("git");
-        bind_git_discovery_to_worktree(&mut command, std::path::Path::new("relative/child"));
+        bind_git_discovery_to_worktree(&mut command, &child);
         let ceiling = command
             .get_envs()
             .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
@@ -13088,6 +13097,20 @@ mod git_binding_tests {
             .map(std::path::PathBuf::from)
             .expect("discovery ceiling is bound");
         assert!(ceiling.is_absolute());
-        assert_eq!(ceiling, std::path::absolute("relative").unwrap());
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discovery_bind_leaves_a_plain_subdirectory_free_to_discover_its_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join(".orna");
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &plain);
+        assert!(
+            command
+                .get_envs()
+                .all(|(name, _)| name != "GIT_CEILING_DIRECTORIES")
+        );
     }
 }
