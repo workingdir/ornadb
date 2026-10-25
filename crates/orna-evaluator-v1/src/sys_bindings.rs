@@ -1164,6 +1164,9 @@ pub(crate) fn dispatch_blob_reflection(
 fn blob_reflection_failure(error: ValueError) -> EvaluationError {
     match error {
         ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
+        ValueError::OwnerExpired | ValueError::MissingDescriptor => {
+            redacted_error("sys.blob.unavailable")
+        }
         ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
         ValueError::Cancelled => redacted_error("ORNA-EVAL-CANCELLED"),
         ValueError::ContentCollision => redacted_error("sys.blob.collision"),
@@ -1429,6 +1432,7 @@ pub(crate) enum BlobReadValue {
     Int(u64),
     Blob(ContextValue),
     Bytes(Vec<u8>),
+    Digest([u8; 32]),
     Unit,
 }
 
@@ -1437,7 +1441,10 @@ pub(crate) enum BlobReadValue {
 fn blob_read_failure(error: ValueError) -> EvaluationError {
     let code = match error {
         ValueError::InvalidContext => "sys.blob.reference_context",
-        ValueError::ContentUnavailable => "sys.blob.unavailable",
+        ValueError::ContentUnavailable
+        | ValueError::OwnerExpired
+        | ValueError::MissingDescriptor => "sys.blob.unavailable",
+        ValueError::Cancelled => "ORNA-EVAL-CANCELLED",
         ValueError::ContentCollision => "sys.blob.collision",
         ValueError::InvalidRange => "sys.blob.bounds",
         ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
@@ -1461,10 +1468,7 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
         | ValueError::InvalidProfile
         | ValueError::InvalidOid
         | ValueError::ContentDigestMismatch
-        | ValueError::MissingDescriptor
         | ValueError::RoleMismatch { .. }
-        | ValueError::OwnerExpired
-        | ValueError::Cancelled
         | ValueError::SinkFailed => "sys.blob.corrupt",
     };
     redacted_error(code)
@@ -1481,9 +1485,7 @@ pub(crate) fn dispatch_blob_read(
     let blob = source.blob().map_err(blob_read_failure)?;
     match (operation, bounds) {
         ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
-        // The declared Digest result has no evaluator value representation yet,
-        // so it is a typed failure rather than a Blob-shaped stand-in.
-        ("sys.blob.digest", []) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+        ("sys.blob.digest", []) => Ok(BlobReadValue::Digest(blob.content_identity().sha256())),
         ("sys.blob.verify", []) => {
             blob.verify().map_err(blob_read_failure)?;
             Ok(BlobReadValue::Unit)
@@ -1910,11 +1912,17 @@ mod tests {
             panic!("length must return Int");
         };
         assert_eq!(length, 10);
+        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        else {
+            panic!("digest must return Digest");
+        };
         assert_eq!(
-            dispatch_blob_read("sys.blob.digest", &source, &[])
-                .err()
-                .map(|error| error.code().to_owned()),
-            Some("ORNA-EVAL-UNSUPPORTED".to_owned())
+            digest,
+            source
+                .blob()
+                .expect("source Blob")
+                .content_identity()
+                .sha256()
         );
         assert!(matches!(
             dispatch_blob_read("sys.blob.verify", &source, &[]),
@@ -2060,6 +2068,26 @@ mod tests {
         assert_eq!(
             blob_read_failure(ValueError::InvalidContext).code(),
             "sys.blob.reference_context"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::OwnerExpired).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::MissingDescriptor).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::Cancelled).code(),
+            "ORNA-EVAL-CANCELLED"
+        );
+        assert_eq!(
+            blob_reflection_failure(ValueError::OwnerExpired).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_reflection_failure(ValueError::MissingDescriptor).code(),
+            "sys.blob.unavailable"
         );
     }
 
