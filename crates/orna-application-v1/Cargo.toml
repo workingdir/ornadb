@@ -13,6 +13,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = []
 browser-wasm = ["orna-evaluator-v1/browser-wasm"]
+test-support = []
 [dependencies]
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
@@ -31,3 +32,4 @@ orna-security-v1 = { path = "../orna-security-v1" }
 
 [dev-dependencies]
 futures = "0.3.31"
+orna-application-v1 = { path = ".", features = ["test-support"] }
