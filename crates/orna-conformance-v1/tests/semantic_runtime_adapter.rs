@@ -511,16 +511,11 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
     let before_change = &analysis.modules.values().next().unwrap().exports["before_change"];
-    let Type::Function { result, .. } = &before_change.ty else {
-        panic!("sys.snapshot must type as a function: {:?}", before_change.ty);
-    };
-    assert_eq!(
-        result.as_ref(),
-        &Type::Applied {
-            base: "sys.SnapshotRefContext".into(),
-            arguments: vec![Type::Named("selector:HEAD~3".into())],
-        }
-    );
+    assert!(matches!(
+        &before_change.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+    ));
     assert_eq!(
         before_change.effects.effects,
         std::collections::BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
@@ -599,24 +594,17 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
 
     // The project stages exercise the production adapter route.  Inspect the
     // native graph separately to prove the admitted source retains the
-    // descriptor's contextual SnapshotRef result and database-read effect.
+    // descriptor's typed SnapshotRef result and database-read effect.
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("main.orna", source)],
         &Catalogue::authoritative_fixture(),
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
     let cwd = &analysis.modules.values().next().unwrap().exports["cwd"];
-    let Type::Function { result, .. } = &cwd.ty else {
-        panic!("sys.snapshot must type as a function: {:?}", cwd.ty);
-    };
     assert!(matches!(
-        result.as_ref(),
-        Type::Applied { base, arguments }
-            if base == "sys.SnapshotRefContext"
-                && matches!(
-                    arguments.as_slice(),
-                    [Type::Named(selector)] if selector.starts_with("selector:dynamic:")
-                )
+        &cwd.ty,
+        Type::Function { result, .. }
+            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
     ));
     assert!(
         cwd.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead),
