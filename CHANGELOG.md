@@ -7,10 +7,15 @@ been published.
 ## Unreleased
 - Git probes that decide publication admission, blob verification, and
   migration index pins now stop repository discovery at the probed directory's
-  parent. A nested repository with a corrupt `HEAD` fails closed instead of
-  reading an enclosing repository. A plain subdirectory of another repository is
-  no longer adopted as a dependency checkout (`DependencyUnavailable`);
-  dependencies must be their own repositories (ornadb-6vxj).
+  parent only when that directory carries its own `.git` entry. A nested
+  repository with a corrupt `HEAD` fails closed instead of reading an enclosing
+  repository. Migration Git commands always stop discovery at their directory's
+  parent, so a plain subdirectory cannot reach an enclosing repository's refs or
+  index. A plain subdirectory of another repository is no longer adopted as a
+  dependency checkout (`DependencyUnavailable`); `is_repository` is now a plain
+  `.git` existence check and makes no Git call. Exporting from a subdirectory of
+  a worktree and porcelain status again discover the enclosing repository
+  (ornadb-6vxj).
 - The language server's semantic rename keeps a table or field's object identity.
   Owner-visible behaviour: on save, the editor writes to the git index. The index
   entry for `main.orna` is replaced with the whole saved file (not only the renamed
