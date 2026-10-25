@@ -26,6 +26,10 @@ been published.
 - Test-expectation migration (ornadb-0im9): bare root intrinsic names (`sort_by`, `every`, `sum`, `min`, `max`, ...) resolve without a standard profile (09-standard-library L7), so the five finite-list tests that expected them unresolved now assert `is_ok`; their qualified `std.collection` assertions remain unresolved without a profile. Added signature regression table `root_intrinsic_calls_are_checked_against_their_signatures` (arity, argument types, callback arity/return; bad calls report `ORNA-S021-TYPE`). Known-red entries for those tests are removed.
 
 ### Fixes
+- REPL results carrying a format-3 Blob (`ROV3`) now present its payload-free summary (`type`, `length`, `sha256`, `suffix`, `media_type`) at the REPL canonical boundary. Blob capture followed by an insert no longer fails with `ORNA-EVAL-VALUE` and then `ORNA-REPL-EFFECT-UNCERTAIN` (tracked by ornadb-rg5g). The descriptor OID and payload bytes do not cross the boundary. The summary is a metadata Map, not a Blob: `$_` after such a line holds that Map, so `sys.blob.media_type($_)` or `sys.blob.annotate($_, ...)` on the next line is a type error.
+- An uncertain REPL outcome, where external effects may already have happened, keeps `ORNA-REPL-EFFECT-UNCERTAIN` as its code and names the evaluator cause in the located detail instead of dropping it.
+- Known limitation: carrying the live context result through `$_` (preserving `ORNA-BLOB-008` held-context behaviour) is not in this change; it is tracked as P2 follow-up `ornadb-ssrk`. Until it lands, `$_` after a Blob result is the payload-free Map described above. `SOV3` `ContextualBlob` values still fail canonical validation at the REPL boundary.
+- Known limitation: `ROV3_OVERFLOW_TAG` (60113) blob references are refused fail-closed by the evaluator (test `overflow_reference_is_refused_by_the_evaluator`). No end-to-end test proves that a REPL capture produces this shape.
 - Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)
   for tuple-typed fields, where it previously failed with `ORNA-CONFORMANCE-ROW-TYPE`.
   Stale conformance and application test expectations were migrated to
