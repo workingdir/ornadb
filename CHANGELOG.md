@@ -9,13 +9,14 @@ been published.
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
-- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so bound-registry evaluations no longer declare `None`; `declared_effects` takes that boolean. The REPL declaration is now truthful, but the REPL commit path does not yet persist declared effects to the request ledger and writes no controlled marker or rollback proof, so the REPL cannot produce `RollbackProven` today; routing REPL commits through the ledger is tracked by ornadb-rg5g.
+- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so bound-registry evaluations no longer declare `None`; `declared_effects` takes that boolean. The REPL declaration is now truthful. REPL table commits reserve and start their request row in the runtime ledger before committing; a failed commit leaves that row Running until fenced recovery settles it (tracked by ornadb-rg5g).
 - `ControlledEffectToken` is a proof a declaration was made, not a verification; trust rests on callers declaring truthfully.
 - `commit_table_request_activation` gains a final `effects: ActivationEffectReport` argument; callers must pass a report built with `ActivationEffectReport::declare`.
 - `StagedTableActivation::from_source` gains a final `effects: ActivationEffectReport` argument; callers must pass a declared report.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
 ### Fixes
+- REPL table inserts now run through the runtime request ledger: the request row is reserved and started with a request-scoped fingerprint, and the commit records a terminal outcome. A failure after reservation finishes the REPL query as failed with `ORNA-REPL-EFFECT` and leaves the request row for fenced recovery instead of cancelling it.
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
   only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
