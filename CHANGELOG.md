@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A single-module project that imports `std` and `sys.Storage` now runs
+  `use std.<module>.{name}` calls through the production authority route
+  (`orna invoke`). The authority admits the captured standard
+  dependency's function bodies, so a standard function is callable from the
+  importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
+  Glob and module-alias standard imports are refused with `DIAG_IMPORT`.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each

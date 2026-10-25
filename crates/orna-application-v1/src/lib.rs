@@ -34,11 +34,12 @@ use orna_runtime_v1::{
     RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
-    Catalogue, ModuleInput, Namespace, SystemProviders, TableSchema, analyze_with_providers,
+    Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace, StandardCatalogueError,
+    StandardDependencyProfile, SystemProviders, TableSchema, analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    TableMember, parse_module_with_file, parse_repl,
+    TableMember, UseTail, parse_module_with_file, parse_repl,
 };
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
@@ -204,13 +205,79 @@ pub struct ApplicationAuthority {
     catalogue: Catalogue,
     limits: Limits,
     sys_host: Option<SysHostContext>,
+    standard_functions: Functions,
 }
 
 impl ApplicationAuthority {
     /// Creates an authority with an explicit declaration catalogue and limits.
     #[must_use]
     pub fn new(catalogue: Catalogue, limits: Limits) -> Self {
-        Self { catalogue, limits, sys_host: None }
+        Self {
+            catalogue,
+            limits,
+            sys_host: None,
+            standard_functions: Functions::new(),
+        }
+    }
+
+    /// Pins the standard dependency this authority admits against. Every source
+    /// is verified against `profile` before any body is retained. The catalogue
+    /// gains the verified declarations, and each standard function becomes
+    /// callable from an admitted module through its `use std.<module>.{name}`
+    /// import.
+    pub fn with_standard_sources(
+        mut self,
+        profile: &StandardDependencyProfile,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, StandardCatalogueError> {
+        let mut sources = sources.into_iter().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        self.catalogue = self
+            .catalogue
+            .with_standard_sources(profile, sources.clone())?;
+        let mut functions = Functions::new();
+        for (logical_path, source) in sources {
+            let parsed = parse_module_with_file(&source, logical_path.clone());
+            if !parsed.is_ok() {
+                return Err(StandardCatalogueError::InvalidSource);
+            }
+            let namespace = module_namespace(&logical_path).0.join(".");
+            for item in parsed.value.items {
+                // Only functions execute. Other standard declarations are
+                // catalogue-only and were already verified by the semantic catalogue.
+                let Declaration::Function { signature, body } = item.declaration else {
+                    continue;
+                };
+                let key = format!("{namespace}.{}", signature.name);
+                if functions.contains_key(&key) {
+                    return Err(StandardCatalogueError::DuplicateDeclaration);
+                }
+                functions.insert(
+                    key,
+                    PureFunction {
+                        parameters: signature.parameters,
+                        body,
+                        environment: Environment::new(),
+                    },
+                );
+            }
+        }
+        self.standard_functions = functions;
+        Ok(self)
+    }
+
+    /// Applies the standard dependency captured by `project`, when it has one.
+    /// A project without a captured dependency leaves the authority unchanged.
+    pub fn with_loaded_standard(
+        self,
+        project: &LoadedProject,
+    ) -> Result<Self, StandardCatalogueError> {
+        match project.standard_profile() {
+            Some(profile) => {
+                self.with_standard_sources(profile, project.standard_sources().iter().cloned())
+            }
+            None => Ok(self),
+        }
     }
 
     /// Attaches the host-owned activation facts that `sys.rt.info()` reads for
@@ -263,7 +330,7 @@ impl ApplicationAuthority {
             ));
         }
 
-        let mut functions = Functions::new();
+        let mut functions = self.standard_functions.clone();
         let table_insert_defaults = table_insert_defaults(&parsed.value.items);
         for item in &parsed.value.items {
             if let Declaration::Function { signature, body } = &item.declaration {
@@ -277,6 +344,7 @@ impl ApplicationAuthority {
                 );
             }
         }
+        bind_standard_imports(&mut functions, &parsed.value.items)?;
         if !functions.contains_key(&entry) {
             return Err(ApplicationError::MissingEntry(entry));
         }
@@ -2574,6 +2642,55 @@ fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
         }
     }
     defaults
+}
+
+/// Binds unqualified names from `use std.<module>.{name}` declarations to the
+/// admitted standard functions. A user function keeps its own name, and an
+/// alias is inserted only where no user function occupies the name. Glob and
+/// module-alias imports are refused, an imported name must exist in the pinned
+/// module, and one unqualified name may not bind two different functions.
+fn bind_standard_imports(
+    functions: &mut Functions,
+    items: &[Item],
+) -> Result<(), ApplicationError> {
+    let mut aliases = BTreeMap::<String, String>::new();
+    for item in items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+            continue;
+        }
+        let namespace = path
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let names = match tail {
+            UseTail::None => continue,
+            UseTail::Names(names) => names,
+            UseTail::Glob { .. } | UseTail::Alias { .. } => {
+                return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+            }
+        };
+        for name in names {
+            let target = format!("{namespace}.{}", name.name);
+            if !functions.contains_key(&target) {
+                return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+            }
+            if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
+                && previous != target
+            {
+                return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+            }
+        }
+    }
+    for (alias, target) in aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            functions.entry(alias).or_insert(function);
+        }
+    }
+    Ok(())
 }
 
 fn module_namespace(logical_path: &str) -> Namespace {
