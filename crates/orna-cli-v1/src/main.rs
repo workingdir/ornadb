@@ -46,7 +46,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orna_application_v1::{ApplicationAuthority, ApplicationError, ReplTransactionScope};
+use orna_application_v1::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, CommittedTableIdentity,
+    ReplTransactionScope, StagedActivation,
+};
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
@@ -55,7 +58,7 @@ use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
     QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
-    RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
+    RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, TableObjectId, WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2232,6 +2235,17 @@ fn run_pure_invocation(
             if let Some(admitted) = admitted
                 .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
             {
+            if !admitted.table_schemas().is_empty() {
+                run_committed_table_invocation(
+                    endpoint,
+                    &authority,
+                    &admitted,
+                    identity.logical_path(),
+                    &module.source,
+                )?;
+                write_success_line("invocation completed", color_enabled)?;
+                return Ok(());
+            }
             if admitted.requires_publication_metadata() {
                 let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
                     endpoint,
@@ -2384,6 +2398,143 @@ struct ReplTransactions {
     state: Option<RuntimeState>,
 }
 
+/// Reads the committed identity of each named admitted table from `commit`.
+/// Each name must resolve to exactly one live table record; otherwise the result
+/// is `None` and the caller fails closed. The REPL and one-shot `run` both bind
+/// tables through this function, so neither resolves a table by name alone.
+fn committed_table_identities(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    table_names: Vec<String>,
+) -> Option<Vec<RuntimeTableIdentity>> {
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)
+        .ok()?;
+    let mut tables = Vec::with_capacity(table_names.len());
+    for name in table_names {
+        let mut matching = identities.records().iter().filter(|record| {
+            record.kind() == orna_project_v1::ObjectKind::Table
+                && !record.is_retired()
+                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
+        });
+        let record = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        tables.push(RuntimeTableIdentity::new(name, TableObjectId::new(*record.id())).ok()?);
+    }
+    Some(tables)
+}
+
+/// Evaluates an admitted module over the activation at `state`: the snapshot
+/// holds the committed rows of every admitted table, and the staged result
+/// carries only the mutations this activation produced.
+fn evaluate_over_committed_tables(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<(RuntimeTableActivationSnapshot, StagedActivation), Diagnostic> {
+    let snapshot = runtime
+        .block_on(state.begin_admitted_table_activation(tables))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let staged = authority
+        .evaluate_staged_with_table_snapshot(admitted, &Environment::new(), &snapshot)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2200",
+                "pure project invocation failed",
+                "fix the admitted function or retry the invocation",
+                error.to_string(),
+            )
+        })?;
+    Ok((snapshot, staged))
+}
+
+/// One-shot `run` of a single admitted module that declares tables. Tables bind
+/// to their committed identities at `HEAD`, so reads see the same committed rows
+/// as the REPL. `run` never commits the activation's table mutations.
+fn run_committed_table_invocation(
+    endpoint: &Endpoint,
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    logical_path: &str,
+    source: &str,
+) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let commit = repository.head().ok().flatten().ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "table reads need a committed project",
+            "commit the project, then run the command again",
+        )
+    })?;
+    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
+    let tables = committed_table_identities(&repository, &commit, names).ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities are unavailable",
+            "commit the project so every table has exactly one identity",
+        )
+    })?;
+    let entry = admitted.entry().to_owned();
+    let committed = tables
+        .iter()
+        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+    let admitted = authority
+        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
+            )
+        })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let (_snapshot, activation) =
+        evaluate_over_committed_tables(&runtime, &state, authority, &admitted, &tables)?;
+    if !activation.mutations().is_empty() {
+        return Err(Diagnostic::unavailable(
+            "one-shot invocation cannot commit table mutations",
+            "use a supported table transaction; stream roots require the explicit stream runtime",
+        ));
+    }
+    Ok(())
+}
+
 fn repl_transactions(
     repository: &orna_repository_v1::Repository,
     workspace_project: &orna_project_v1::LoadedProject,
@@ -2425,27 +2576,7 @@ fn repl_transactions(
     {
         return None;
     }
-    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
-        .ok()?;
-    let mut tables = Vec::with_capacity(table_names.len());
-    for name in table_names {
-        let mut matching = identities.records().iter().filter(|record| {
-            record.kind() == orna_project_v1::ObjectKind::Table
-                && !record.is_retired()
-                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
-        });
-        let record = matching.next()?;
-        if matching.next().is_some() {
-            return None;
-        }
-        tables.push(
-            RuntimeTableIdentity::new(
-                name,
-                TableObjectId::new(*record.id()),
-            )
-            .ok()?,
-        );
-    }
+    let tables = committed_table_identities(repository, &commit, table_names)?;
     let capture_relation_id = tables.first()?.object_id().bytes();
     let (identity, initial_digest) = runtime_identity(repository).ok()?;
     if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
