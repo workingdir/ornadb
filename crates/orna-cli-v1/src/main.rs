@@ -46,7 +46,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orna_application_v1::{ApplicationAuthority, ApplicationError, ReplTransactionScope};
+use orna_application_v1::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, CommittedTableIdentity,
+    ReplTransactionScope, StagedActivation,
+};
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
@@ -54,8 +57,9 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
-    QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
-    RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
+    PinnedCommittedRows, QueryObservationRegistration, RequestIdentity, RuntimeIdentity,
+    RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, TableObjectId, WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2193,6 +2197,20 @@ fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagno
     delivery
 }
 
+/// A multi-module project that declares a table cannot run one-shot: the bounded
+/// pure evaluator rejects any table declaration, and the committed-table route
+/// admits a single module only. Single-module projects never reach this check.
+fn multi_module_declares_tables(project: &orna_project_v1::LoadedProject) -> bool {
+    project.modules().len() != 1
+        && project.modules().iter().any(|module| {
+            orna_syntax_v1::parse_module(&module.source)
+                .value
+                .items
+                .iter()
+                .any(|item| matches!(item.declaration, orna_syntax_v1::Declaration::Table { .. }))
+        })
+}
+
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
@@ -2235,51 +2253,63 @@ fn run_pure_invocation(
             if let Some(admitted) = admitted
                 .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
             {
-            if admitted.requires_publication_metadata() {
-                let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
-                    endpoint,
-                    sys_host::std_snapshot_pin(&project),
-                )?;
-                let authority = authority.with_sys_host_context(sys_host_context);
-                let activation = authority
-                    .evaluate_staged_with_publication_rows(
+                if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
+                    run_committed_table_invocation(
+                        endpoint,
+                        authority,
                         &admitted,
-                        &Environment::new(),
-                        publication_rows,
-                    )
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
-                        )
-                    })?;
-                if !activation.mutations().is_empty() {
-                    return Err(Diagnostic::unavailable(
-                        "one-shot invocation cannot commit table mutations",
-                        "use a supported table transaction; stream roots require the explicit stream runtime",
-                    ));
+                        identity.logical_path(),
+                        &module.source,
+                        sys_host::std_snapshot_pin(&project),
+                    )?;
+                    write_success_line("invocation completed", color_enabled)?;
+                    return Ok(());
                 }
-            } else {
-                let std_snapshot = sys_host::std_snapshot_pin(&project);
-                let authority = match pure_sys_host_context(endpoint, std_snapshot) {
-                    Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
-                    None => authority,
-                };
-                authority
-                    .evaluate(&admitted, &Environment::new())
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
+                if admitted.requires_publication_metadata() {
+                    let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                        endpoint,
+                        sys_host::std_snapshot_pin(&project),
+                    )?;
+                    let authority = authority.with_sys_host_context(sys_host_context);
+                    let activation = authority
+                        .evaluate_staged_with_publication_rows(
+                            &admitted,
+                            &Environment::new(),
+                            publication_rows,
                         )
-                    })?;
-            }
-            write_success_line("invocation completed", color_enabled)?;
-            return Ok(());
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
+                    if !activation.mutations().is_empty() {
+                        return Err(Diagnostic::unavailable(
+                            "one-shot invocation cannot commit table mutations",
+                            "use a supported table transaction; stream roots require the explicit stream runtime",
+                        ));
+                    }
+                } else {
+                    let std_snapshot = sys_host::std_snapshot_pin(&project);
+                    let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                        Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                        None => authority,
+                    };
+                    authority
+                        .evaluate(&admitted, &Environment::new())
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
+                }
+                write_success_line("invocation completed", color_enabled)?;
+                return Ok(());
             }
         }
     }
@@ -2290,6 +2320,13 @@ fn run_pure_invocation(
             "E2101",
             "project semantic analysis failed",
             "fix the first reported source contract error, then run check again",
+        ));
+    }
+    if multi_module_declares_tables(&project) {
+        return Err(Diagnostic::target(
+            "E2200",
+            "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
+            "one-shot invocation admits table declarations only in single-module projects",
         ));
     }
 
@@ -2387,6 +2424,256 @@ struct ReplTransactions {
     state: Option<RuntimeState>,
 }
 
+/// Reads the committed identity of each named admitted table from `commit`.
+/// Each name must resolve to exactly one live table record; the error names the
+/// table that does not, so the caller fails closed with a reason. The REPL and
+/// one-shot `run` both bind tables through this function, so neither resolves a
+/// table by name alone.
+fn committed_table_identities(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    table_names: Vec<String>,
+) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)
+        .map_err(|_| {
+            unavailable_table_identity(
+                "the committed object identity manifest could not be read".to_owned(),
+            )
+        })?;
+    let mut tables = Vec::with_capacity(table_names.len());
+    for name in table_names {
+        let mut matching = identities.records().iter().filter(|record| {
+            record.kind() == orna_project_v1::ObjectKind::Table
+                && !record.is_retired()
+                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
+        });
+        let record = matching.next().ok_or_else(|| {
+            unavailable_table_identity(format!("table `{name}` has no live identity at HEAD"))
+        })?;
+        if matching.next().is_some() {
+            return Err(unavailable_table_identity(format!(
+                "table `{name}` has more than one live identity at HEAD"
+            )));
+        }
+        let identity = RuntimeTableIdentity::new(name.clone(), TableObjectId::new(*record.id()))
+            .map_err(|_| {
+                unavailable_table_identity(format!(
+                    "table `{name}` has an invalid identity at HEAD"
+                ))
+            })?;
+        tables.push(identity);
+    }
+    Ok(tables)
+}
+
+fn unavailable_table_identity(detail: String) -> Diagnostic {
+    Diagnostic::target_with_detail(
+        "E2200",
+        "committed table identities are unavailable",
+        "commit the project so every table has exactly one identity",
+        detail,
+    )
+}
+
+/// Evaluates an admitted module over the activation at `state`: the snapshot
+/// holds the committed rows of every admitted table, and the staged result
+/// carries only the mutations this activation produced. `publication_rows`
+/// supplies the durable publication snapshot when the module scans `sys`
+/// relations.
+fn evaluate_over_committed_tables(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+    committed: PinnedCommittedRows,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
+) -> Result<(RuntimeTableActivationSnapshot, StagedActivation), Diagnostic> {
+    let snapshot = runtime
+        .block_on(state.begin_admitted_table_activation_over_committed(tables, committed))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let staged = authority
+        .evaluate_staged_with_table_snapshot(
+            admitted,
+            &Environment::new(),
+            &snapshot,
+            publication_rows,
+        )
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2200",
+                "pure project invocation failed",
+                "fix the admitted function or retry the invocation",
+                error.to_string(),
+            )
+        })?;
+    Ok((snapshot, staged))
+}
+
+/// Builds the committed rows of every admitted table at `commit`, pinned to
+/// the runtime's published generation. The rows are the evaluator form the
+/// admitted schemas expect (the conversion the REPL uses), so an invocation
+/// reads committed field values rather than raw stored tuples.
+fn committed_invocation_rows(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<PinnedCommittedRows, Diagnostic> {
+    let read_error = || {
+        Diagnostic::target(
+            "E2200",
+            "committed table rows could not be read",
+            "retry the invocation after checking local runtime state",
+        )
+    };
+    let format = repository
+        .open_pinned_format_context(commit.as_str())
+        .map_err(|_| read_error())?;
+    let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
+        .table_schemas()
+        .iter()
+        .map(|(name, table)| (name.clone(), table.schema().clone()))
+        .collect();
+    let table_ids: BTreeMap<String, TableObjectId> = tables
+        .iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect();
+    let committed =
+        orna_project_v1::committed_tables(repository, &format, commit, &schemas, &table_ids)
+            .map_err(|_| read_error())?;
+    let mut rows = BTreeMap::new();
+    for (name, schema) in &schemas {
+        let table = committed.get(name).ok_or_else(read_error)?;
+        let table_rows =
+            orna_project_v1::evaluator_rows(table, schema).map_err(|_| read_error())?;
+        rows.insert(name.clone(), table_rows);
+    }
+    let pin = runtime
+        .block_on(state.published_pin())
+        .map_err(|_| read_error())?;
+    PinnedCommittedRows::new(pin, rows).map_err(|_| read_error())
+}
+
+/// One-shot `run` of a single admitted module that declares tables and reads
+/// them. Tables bind to their committed identities at `HEAD`, so reads see the
+/// same committed rows as the REPL. The sys host context and publication
+/// snapshot follow the pure path: a module that needs publication metadata runs
+/// as an embedded host, and any other module runs with the run host. `run` never
+/// commits the activation's table mutations.
+fn run_committed_table_invocation(
+    endpoint: &Endpoint,
+    authority: ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    logical_path: &str,
+    source: &str,
+    std_snapshot: StdSnapshotPin,
+) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let commit = repository.head().ok().flatten().ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "table reads need a committed project",
+            "commit the project, then run the command again",
+        )
+    })?;
+    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
+    let tables = committed_table_identities(&repository, &commit, names)?;
+    let entry = admitted.entry().to_owned();
+    let committed = tables
+        .iter()
+        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+    let admitted = authority
+        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
+            )
+        })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let mode = if admitted.requires_publication_metadata() {
+        RuntimeMode::Embedded
+    } else {
+        RuntimeMode::Run
+    };
+    let authority = authority.with_sys_host_context(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        mode,
+        std_snapshot,
+    ));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let publication_rows = if admitted.requires_publication_metadata() {
+        Some(
+            runtime
+                .block_on(state.publication_metadata_rows())
+                .map_err(|_| {
+                    Diagnostic::target(
+                        "E2200",
+                        "local runtime publication metadata could not be read",
+                        "retry the invocation after checking local runtime state",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let committed =
+        committed_invocation_rows(&repository, &commit, &runtime, &state, &admitted, &tables)?;
+    let (_snapshot, activation) = evaluate_over_committed_tables(
+        &runtime,
+        &state,
+        &authority,
+        &admitted,
+        &tables,
+        committed,
+        publication_rows,
+    )?;
+    if !activation.mutations().is_empty() {
+        return Err(Diagnostic::unavailable(
+            "one-shot invocation cannot commit table mutations",
+            "use a supported table transaction; stream roots require the explicit stream runtime",
+        ));
+    }
+    Ok(())
+}
+
 fn repl_transactions(
     repository: &orna_repository_v1::Repository,
     workspace_project: &orna_project_v1::LoadedProject,
@@ -2428,27 +2715,7 @@ fn repl_transactions(
     {
         return None;
     }
-    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
-        .ok()?;
-    let mut tables = Vec::with_capacity(table_names.len());
-    for name in table_names {
-        let mut matching = identities.records().iter().filter(|record| {
-            record.kind() == orna_project_v1::ObjectKind::Table
-                && !record.is_retired()
-                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
-        });
-        let record = matching.next()?;
-        if matching.next().is_some() {
-            return None;
-        }
-        tables.push(
-            RuntimeTableIdentity::new(
-                name,
-                TableObjectId::new(*record.id()),
-            )
-            .ok()?,
-        );
-    }
+    let tables = committed_table_identities(repository, &commit, table_names).ok()?;
     let capture_relation_id = tables.first()?.object_id().bytes();
     let (identity, initial_digest) = runtime_identity(repository).ok()?;
     if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
