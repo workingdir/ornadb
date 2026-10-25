@@ -5,6 +5,41 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
+  `Content-Security-Policy` (`default-src 'none'`, inline styles only,
+  `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` (ORNA-APP-012,
+  ORNA-APP-013). Oversize bodies on non-`/orna` routes answer 413 instead of
+  400, and the Origin/Host refusal now runs before the size check (bead
+  ornadb-5il1.387).
+- `orna mount status --json` now reports `writable`, `read_only`, `unresolved_drafts`
+  (each `{path, detail}`), and `draft_error`. The record of a `--cwd` mount now
+  stores `read_only false`, matching the FUSE session that was already writable;
+  the record and status previously reported it read-only. Records written by this
+  build carry a `read_only` value that older binaries reject as invalid (RecordInvalid).
+  The `--read-only` flag from profiles/vfs-1.md:20 is not implemented; every `--cwd`
+  mount is writable.
+- `orna publish` gains four crash barriers behind the `crash-barriers` test
+  feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
+  `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
+  barrier and asserts, after `orna publish` recovery: HEAD equals the base at the
+  pre-CAS barriers (`ref-cas-pre-journal`, `store-worktree`) and equals the
+  journaled candidate at the post-CAS barriers (`worktree`, `runtime-complete`)
+  while the journal is present; the recovered candidate is checked to be parented
+  on the captured HEAD only at the pre-CAS barriers; exactly one publication commit
+  exists; a second publish is a no-op; staged and unstaged user work, pins, the
+  runtime tail, the writer lease and locks are preserved or released; and
+  `git fsck` passes. Managed-worktree and index reconciliation checks run only for
+  non-store paths, and format-3 candidates have none, so they are vacuous here.
+  No production behaviour changes.
+- A complete-copy export of a workspace with a legacy format-1/2 snapshot now
+  admits that snapshot by its recorded format record, and an offline restore
+  re-admits each member (Gate F, `ACCEPTANCE.md:63-68`,
+  `24-git-history.md:19`). Format-3 members still require their schema and
+  store roots. Earlier builds refused every non-format-3 snapshot as a complete
+  copy. The migrated-member leg (`migrate copy` publication) remains open under
+  ornadb-5il1.192, and a gitlink whose dependency repository is absent is still
+  refused.
 - Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
   legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
   ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
