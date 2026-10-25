@@ -12517,6 +12517,12 @@ impl RuntimeState {
         issue_capability: bool,
     ) -> Result<(RequestStatus, Option<RequestAdmissionCapability>), RuntimeError> {
         validate_request_identity(identity)?;
+        // ORNA-TURSO-005: a handle that does not own the worktree lock must
+        // coordinate with the owner or fail. A reservation is a durable write,
+        // so a secondary handle is refused before it can insert a row.
+        if matches!(self.writer_authority, WriterAuthority::Secondary) {
+            return Err(RuntimeError::LeaseHeld);
+        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -48446,6 +48452,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn secondary_handle_cannot_reserve_a_request_without_the_writer_lease() {
+        let (_temp, repo) = repository();
+        let owner = open_state(&repo).await;
+        let secondary = open_state(&repo).await;
+        let identity = request(41, 42);
+        assert_eq!(
+            secondary.reserve_request(identity, digest(43)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            secondary
+                .reserve_request_with_admission(identity, digest(43))
+                .await
+                .map(|_| ()),
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn stale_capture_and_competing_owner_are_distinct() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
@@ -49247,6 +49273,10 @@ mod tests {
         state.begin_session_deletion(id(5), owner).await.unwrap();
         assert_eq!(
             external.reserve_request(request(5, 8), digest(9)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(5, 8), digest(9)).await,
             Err(RuntimeError::SessionClosed)
         );
         assert_eq!(
@@ -49274,6 +49304,10 @@ mod tests {
         state.finish_session_deletion(id(5), owner).await.unwrap();
         assert_eq!(
             external.reserve_request(request(5, 11), digest(12)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(5, 11), digest(12)).await,
             Err(RuntimeError::SessionClosed)
         );
 
@@ -49619,6 +49653,10 @@ mod tests {
         let replacement = other.takeover_lease(old, id(145)).await.unwrap();
         assert_eq!(
             other.reserve_request(request(146, 147), digest(148)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(146, 147), digest(148)).await,
             Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
@@ -49646,7 +49684,7 @@ mod tests {
             .unwrap();
         other.complete_takeover_recovery(replacement).await.unwrap();
         assert_eq!(
-            other
+            state
                 .reserve_request(request(146, 147), digest(148))
                 .await
                 .unwrap()
@@ -49792,6 +49830,10 @@ mod tests {
         assert_eq!(winner.epoch, abandoned.epoch + 1);
         assert_eq!(
             second.reserve_request(request(167, 168), digest(169)).await,
+            Err(RuntimeError::LeaseHeld)
+        );
+        assert_eq!(
+            state.reserve_request(request(167, 168), digest(169)).await,
             Err(RuntimeError::RecoveryPending)
         );
         assert_eq!(
@@ -49832,7 +49874,7 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.status.state, RequestState::Orphaned);
         assert_eq!(
-            second
+            state
                 .reserve_request(request(167, 168), digest(169))
                 .await
                 .unwrap()
