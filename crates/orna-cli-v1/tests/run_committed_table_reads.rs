@@ -65,9 +65,9 @@ fn assert_success(output: &Output, label: &str) {
     );
 }
 
-/// An `orna init` project with `source` written and no commit: a Git worktree
-/// whose HEAD is unborn.
-fn uncommitted_project(source: &str) -> tempfile::TempDir {
+/// An `orna init` project with each `(file, source)` written and no commit: a Git
+/// worktree whose HEAD is unborn.
+fn uncommitted_modules(files: &[(&str, &str)]) -> tempfile::TempDir {
     let directory = tempfile::tempdir().expect("project directory");
     let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -75,8 +75,15 @@ fn uncommitted_project(source: &str) -> tempfile::TempDir {
         .output()
         .expect("CLI initialization");
     assert!(init.status.success(), "init: {init:?}");
-    std::fs::write(directory.path().join("main.orna"), source).expect("write main.orna");
+    for (file, source) in files {
+        std::fs::write(directory.path().join(file), source).expect("write module");
+    }
     directory
+}
+
+/// An `orna init` project with `source` written as `main.orna` and no commit.
+fn uncommitted_project(source: &str) -> tempfile::TempDir {
+    uncommitted_modules(&[("main.orna", source)])
 }
 
 /// Seeds the committed format-3 table through the REPL, whose table mutations
@@ -415,4 +422,36 @@ fn table_scan_orders_composite_keys_by_tuple() {
             combined(&output)
         );
     }
+}
+
+const MULTI_MAIN: &str = "use helper;\npub fn main() = helper.count_music();\n";
+const MULTI_HELPER_TABLE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
+pub fn count_music() = music | count();\n";
+
+/// A table read reached across a module boundary cannot be proven by the one-shot
+/// pure path: it must fail closed with the named E2200 reason instead of evaluating.
+#[test]
+fn multi_module_table_read_fails_closed_with_named_reason() {
+    let directory = uncommitted_modules(&[
+        ("main.orna", MULTI_MAIN),
+        ("helper.orna", MULTI_HELPER_TABLE),
+    ]);
+    let output = orna(directory.path(), &["invoke", "main"]);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "a cross-module table read must fail closed: {}",
+        combined(&output)
+    );
+    let text = combined(&output);
+    assert!(
+        text.contains("E2200"),
+        "cross-module table read must report E2200: {text}"
+    );
+    assert!(
+        text.contains(
+            "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run"
+        ),
+        "cross-module table read must name the multi-module limit: {text}"
+    );
 }
