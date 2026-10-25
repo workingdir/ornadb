@@ -514,7 +514,8 @@ fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     assert!(matches!(
         &before_change.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+            if matches!(result.as_ref(), Type::Applied { base, arguments }
+                if base == "sys.SnapshotRefContext" && matches!(arguments.as_slice(), [Type::Named(_)]))
     ));
     assert_eq!(
         before_change.effects.effects,
@@ -604,7 +605,8 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
     assert!(matches!(
         &cwd.ty,
         Type::Function { result, .. }
-            if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
+            if matches!(result.as_ref(), Type::Applied { base, arguments }
+                if base == "sys.SnapshotRefContext" && matches!(arguments.as_slice(), [Type::Named(_)]))
     ));
     assert!(
         cwd.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead),
@@ -1790,7 +1792,7 @@ fn semantic_adapter_keeps_type_errors_in_the_typecheck_phase() {
     let StageOutcome::Failed(diagnostic) = adapter.typecheck(&unit) else {
         panic!("type errors must be reported by typecheck");
     };
-    assert_eq!(diagnostic.code(), "ORNA-S021-TYPE");
+    assert_eq!(diagnostic.code(), "E3003");
 }
 
 #[test]
