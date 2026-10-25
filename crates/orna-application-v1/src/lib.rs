@@ -4080,7 +4080,10 @@ mod tests {
             .expect("second admission");
         // Each admitted table holds one handle to the same layer; no admission
         // deep-copies the standard bodies (M3).
-        assert_eq!(Arc::strong_count(&authority.standard_functions), baseline + 2);
+        assert_eq!(
+            Arc::strong_count(&authority.standard_functions),
+            baseline + 2
+        );
         drop((first, second));
         assert_eq!(Arc::strong_count(&authority.standard_functions), baseline);
     }
