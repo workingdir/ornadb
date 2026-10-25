@@ -1,0 +1,44 @@
+name: Conformance v1 tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+concurrency:
+  group: conformance-v1-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  conformance-v1-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      # Every orna-conformance-v1 test target runs. Tests listed in
+      # scripts/conformance-known-red.txt are excluded from the run and then each one
+      # must still fail when run alone: a new failure or a listed test that passes
+      # both fail this job.
+      # The list may only shrink. Raising CONFORMANCE_KNOWN_RED_MAX requires owner
+      # approval stated in the PR description.
+      # CONFORMANCE_KNOWN_RED_MAX is 6: the product-gap rows tracked by ornadb-ptqm,
+      # ornadb-8rfu, ornadb-cep5 and ornadb-ia1o; shrinks as those beads land.
+      - name: Check conformance v1 tests against the known-red list
+        env:
+          CONFORMANCE_KNOWN_RED_MAX: "6"
+        run: scripts/check-conformance-known-red.sh

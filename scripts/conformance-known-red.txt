@@ -1,0 +1,7 @@
+# Known-red orna-conformance-v1 tests: name<TAB>bead<TAB>reason<TAB>expected failure substring. Checked by scripts/check-conformance-known-red.sh.
+defined_semantic_diagnostic_codes_are_reachable_from_real_fixtures	ornadb-ptqm	assert-owner-type-mismatch: product emits E2001 before ORNA-A091-004 (spec 33-diagnostics)	did not reach stable diagnostic ORNA-A091-004
+every_invalid_sidecar_matches_the_emitted_diagnostic_payload	ornadb-ptqm	assert-owner-type-mismatch: same product gap, payload audit	unexpected payload mismatch for examples/invalid/assert-owner-type-mismatch.orna
+frozen_source_probe_cases_match_parser_acceptance	ornadb-8rfu	ORNA-PIPE-005: parser accepts unparenthesised pipeline lambda; spec 06-expressions requires parentheses	Rust parser behavior changed; re-evaluate the recorded ORNA-PIPE-005 divergence
+parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates	ornadb-cep5	transactional Decimal admission emits E2001 not ORNA-S021-TYPE for an invalid amount	invalid Decimal component did not fail during source admission
+parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_rows	ornadb-cep5	transactional Decimal admission emits a different code than the expected ORNA-S021-TYPE for a key patch	Decimal update key patch did not fail during source admission
+semantic_adapter_preserves_published_closed_type_diagnostics	ornadb-ia1o	implicit-conversion-chain yields ORNA-S012-UNRESOLVED instead of ORNA091-E-CONVERSION-CHAIN (spec 33-diagnostics)	invalid/implicit-conversion-chain.orna:
