@@ -5,9 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- The language server's semantic rename keeps a table or field's object identity
-  in the staged format-3 store, and reports a failed identity read or save as an
-  error to the client instead of skipping it (`ornadb-5il1.414`).
+- The language server's semantic rename keeps a table or field's object identity:
+  on save, the renamed source and identity inventory are staged, uncommitted, like
+  `orna mv` (reviewable with Git; `orna commit` keeps the identity). An identity
+  that cannot be carried leaves the rename applied and shows a warning with code
+  `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`).
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
