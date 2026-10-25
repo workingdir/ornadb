@@ -58,6 +58,14 @@ fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
     }
 }
 
+/// Errno for a mutation refused on the live writable mount. Every such refusal
+/// is a denied or unsupported operation, so it is EPERM (41-vfs.md:103-105;
+/// profiles/vfs-1.md:139). EROFS is reserved for the kernel read-only snapshot
+/// mount (spawn_read_only), which never reaches these handlers.
+fn refused_mutation_errno() -> Errno {
+    Errno::EPERM
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -1886,15 +1894,13 @@ pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
 
 /// The unresolved drafts of a live mount, one `path<TAB>state` line each, for
 /// an unmount refusal that names what blocks it (W15-03).
-pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, String> {
+pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
     const NAME: &str = "user.orna.unresolved-draft-list";
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])
-        .map_err(|error| format!("could not list Orna mount drafts: {error}"))?;
+    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])?;
     let mut value = vec![0_u8; length];
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)
-        .map_err(|error| format!("could not list Orna mount drafts: {error}"))?;
+    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)?;
     value.truncate(length);
-    String::from_utf8(value).map_err(|_| "Orna mount returned an invalid draft list".to_owned())
+    String::from_utf8(value).map_err(|_| rustix::io::Errno::IO)
 }
 
 /// Stops a live mount from accepting edits before a stop-time unmount. A mount
@@ -2010,6 +2016,8 @@ struct DraftState {
     /// Scratch files whose rename was refused, with the cause.
     rejected_scratch: HashMap<u64, &'static str>,
     quiescing: bool,
+    /// Handles whose latest write has not been accepted (per-handle dirty bit).
+    dirty_handles: HashSet<u64>,
 }
 
 impl DraftState {
@@ -2031,6 +2039,25 @@ impl DraftState {
             }
         }
     }
+}
+
+/// Decides the acknowledgement for a commit that found no candidate. A clean
+/// handle submitted nothing, so fsync of it succeeds (POSIX). A handle with a
+/// written but unaccepted candidate must not be acknowledged: that would report
+/// durability the accepted row does not have, so it fails closed with EIO.
+fn noncandidate_ack(
+    draft_state: &mut DraftState,
+    handle: u64,
+    operation: &str,
+) -> Result<(), Errno> {
+    if draft_state.dirty_handles.contains(&handle) {
+        eprintln!(
+            "{operation}: handle {handle} wrote a candidate that no commit found; refusing to acknowledge it (EIO)"
+        );
+        return Err(Errno::EIO);
+    }
+    draft_state.unresolved_handles.remove(&handle);
+    Ok(())
 }
 
 struct WorkspaceFilesystem {
@@ -2361,6 +2388,7 @@ impl WorkspaceFilesystem {
             }
         }
         draft_state.unresolved_handles.remove(&handle);
+        draft_state.dirty_handles.remove(&handle);
         // The accepted save supersedes the refusal it replaces. A refusing handle
         // whose candidate is unchanged holds only obsolete bytes, so its unresolved
         // state ends here and its later RELEASE retains nothing.
@@ -2833,6 +2861,23 @@ impl Filesystem for WorkspaceFilesystem {
         reply.error(Errno::EOPNOTSUPP);
     }
 
+    fn mkdir(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        // Plain mkdir does not invent schema or key semantics (profiles/vfs-1.md:110-113).
+        reply.error(refused_mutation_errno());
+    }
+
+    fn rmdir(&self, _request: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        reply.error(refused_mutation_errno());
+    }
+
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = self
             .state
@@ -2889,6 +2934,15 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
+        // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
+        // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
+        // without truncating or replacing the blob. EPERM is the unsupported-mutation
+        // errno (profiles/vfs-1.md:139; 41-vfs.md:103-105), and unsupported operations
+        // return an explicit errno, never fake success (profiles/vfs-1.md:104-106).
+        // Blob unlink, rename, and path truncate are refused with EPERM by
+        // refused_mutation_errno, so every Blob mutation in this mount agrees.
+        let write_mode =
+            flags.0 & libc::O_ACCMODE != libc::O_RDONLY || flags.0 & libc::O_TRUNC != 0;
         let mut state = self
             .state
             .lock()
@@ -2898,6 +2952,11 @@ impl Filesystem for WorkspaceFilesystem {
             Some(NodeKind::BlobBytes(_))
         );
         if replaced_blob {
+            if write_mode {
+                drop(state);
+                reply.error(Errno::EPERM);
+                return;
+            }
             state.track_blob_open(inode.0);
         }
         drop(state);
@@ -2935,6 +2994,10 @@ impl Filesystem for WorkspaceFilesystem {
                     blob_field.clone(),
                 ),
                 Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => {
+                    if write_mode {
+                        reply.error(Errno::EPERM);
+                        return;
+                    }
                     state.track_blob_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
@@ -3047,7 +3110,7 @@ impl Filesystem for WorkspaceFilesystem {
                 state.nodes.get(&parent.0).map(|node| &node.kind),
                 Some(NodeKind::Row(_))
             ) {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let destination = match state.lookup_child(parent.0, OsStr::new("data.orna")) {
@@ -3060,7 +3123,7 @@ impl Filesystem for WorkspaceFilesystem {
             let save = match state.nodes.get(&destination).map(|node| &node.kind) {
                 Some(NodeKind::Document { save, .. }) => Arc::clone(save),
                 _ => {
-                    reply.error(Errno::EROFS);
+                    reply.error(Errno::EPERM);
                     return;
                 }
             };
@@ -3075,7 +3138,7 @@ impl Filesystem for WorkspaceFilesystem {
                     .cloned()
             };
             if !is_editor_temporary_name(name) && blob_field.is_none() {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let baseline = save
@@ -3154,8 +3217,12 @@ impl Filesystem for WorkspaceFilesystem {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        if parent != newparent || flags != RenameFlags::empty() {
-            reply.error(Errno::EROFS);
+        if flags != RenameFlags::empty() {
+            reply.error(Errno::EPERM);
+            return;
+        }
+        if parent != newparent {
+            reply.error(Errno::EPERM);
             return;
         }
         let mut draft_state = self
@@ -3197,7 +3264,7 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) = state.nodes.get(&source_inode).map(|node| &node.kind)
             else {
-                reply.error(Errno::EROFS);
+                reply.error(refused_mutation_errno());
                 return;
             };
             let (save, target, scratch, blob_field, baseline, identity) = (
@@ -3212,7 +3279,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .as_ref()
                 .map_or("data.orna", |field| field.file_name.as_str());
             if newname.to_str() != Some(expected_name) {
-                reply.error(Errno::EROFS);
+                reply.error(Errno::EPERM);
                 return;
             }
             let destination_inode = match state.lookup_child(newparent.0, newname) {
@@ -3237,13 +3304,13 @@ impl Filesystem for WorkspaceFilesystem {
                     // scratch captured its baseline; the scratch still targets
                     // the same row and keeps its own baseline (ORNA-VFS-011).
                     if !same_row(&save, destination_save) {
-                        reply.error(Errno::EXDEV);
+                        reply.error(Errno::EPERM);
                         return;
                     }
                 }
                 (Some(_), Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_))) => {}
                 _ => {
-                    reply.error(Errno::EROFS);
+                    reply.error(Errno::EPERM);
                     return;
                 }
             }
@@ -3378,7 +3445,7 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&parent.0).map(|node| &node.kind),
             Some(NodeKind::Row(_))
         ) {
-            reply.error(Errno::EROFS);
+            reply.error(Errno::EPERM);
             return;
         }
         let inode = match state.lookup_child(parent.0, OsStr::new(name)) {
@@ -3396,7 +3463,7 @@ impl Filesystem for WorkspaceFilesystem {
             state.nodes.get(&inode).map(|node| &node.kind),
             Some(NodeKind::Temporary { .. })
         ) {
-            reply.error(Errno::EROFS);
+            reply.error(refused_mutation_errno());
             return;
         }
         if draft_state
@@ -3415,7 +3482,7 @@ impl Filesystem for WorkspaceFilesystem {
                 ..
             }) => (Arc::clone(save), Arc::clone(identity), Arc::clone(scratch)),
             _ => {
-                reply.error(Errno::EROFS);
+                reply.error(refused_mutation_errno());
                 return;
             }
         };
@@ -3596,7 +3663,8 @@ impl Filesystem for WorkspaceFilesystem {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .nodes
                 .contains_key(&inode.0);
-        if !data.is_empty() && is_tracked {
+        let writes_candidate = !data.is_empty() && is_tracked;
+        if writes_candidate {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
@@ -3632,6 +3700,11 @@ impl Filesystem for WorkspaceFilesystem {
             }
             reply.error(draft_errno(&result));
         } else {
+            if writes_candidate {
+                // Dirty means an accepted-or-refused candidate is pending. A failed
+                // write leaves no candidate, so it must not mark the handle dirty.
+                draft_state.dirty_handles.insert(handle.0);
+            }
             if let Some(bytes) = candidate_bytes {
                 self.update_writable_bytes(inode.0, &bytes);
             }
@@ -3663,11 +3736,14 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.ok();
             }
             Err(DocumentCommitError::NoCandidate) => {
-                // The handle submitted nothing, so there is nothing to accept or
-                // reject and it cannot block unmount. POSIX requires fsync of an
-                // unmodified handle to succeed.
-                draft_state.unresolved_handles.remove(&handle.0);
-                reply.ok();
+                // The handle submitted nothing, so nothing is pending for it. A clean
+                // handle acknowledges (POSIX fsync of an unmodified handle succeeds);
+                // a dirty one fails closed (EDIT-1 step 2: a successful sync acknowledges
+                // only accepted state).
+                match noncandidate_ack(&mut draft_state, handle.0, "fsync") {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                }
             }
             // A refused document candidate was already retained by accept_document
             // (ORNA-VFS-009); the error goes to the caller.
@@ -3703,10 +3779,12 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            // The handle submitted nothing, so it cannot block unmount (same as fsync).
+            // Same rule as fsync: a clean handle acknowledges; a dirty one fails closed.
             Err(DocumentCommitError::NoCandidate) => {
-                draft_state.unresolved_handles.remove(&handle.0);
-                reply.ok();
+                match noncandidate_ack(&mut draft_state, handle.0, "flush") {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                }
             }
             // The error goes to close(2), which applications may ignore; a refused
             // candidate stays retained (ORNA-VFS-009).
@@ -3740,6 +3818,7 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
+        draft_state.dirty_handles.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
@@ -3848,7 +3927,7 @@ impl Filesystem for WorkspaceFilesystem {
                     state.nodes.get(&inode.0).map(|node| &node.kind),
                     Some(NodeKind::Document { .. })
                 ) {
-                    reply.error(Errno::EROFS);
+                    reply.error(refused_mutation_errno());
                     return;
                 }
                 if size > DRAFT_FILE_BOUND_BYTES as u64 {
@@ -6085,7 +6164,7 @@ mod hardening_tests {
 
     use super::{
         Errno, VFS_EDITOR_DRAFT_DIRECTORY, VFS_RETAINED_DRAFT_DIRECTORY, create_editor_draft,
-        denied_attribute_change,
+        denied_attribute_change, refused_mutation_errno,
     };
 
     #[test]
@@ -6219,5 +6298,30 @@ mod hardening_tests {
             unretained: None,
         };
         assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
+    }
+
+    #[test]
+    fn live_mount_refusal_is_eperm() {
+        assert_eq!(refused_mutation_errno(), Errno::EPERM);
+    }
+}
+
+#[cfg(test)]
+mod dirty_handle_ack_tests {
+    use fuser::Errno;
+
+    use super::{noncandidate_ack, DraftState};
+
+    #[test]
+    fn clean_handle_without_candidate_acknowledges() {
+        let mut draft_state = DraftState::default();
+        assert_eq!(noncandidate_ack(&mut draft_state, 7, "fsync"), Ok(()));
+    }
+
+    #[test]
+    fn dirty_handle_without_candidate_fails_closed_with_eio() {
+        let mut draft_state = DraftState::default();
+        draft_state.dirty_handles.insert(7);
+        assert_eq!(noncandidate_ack(&mut draft_state, 7, "fsync"), Err(Errno::EIO));
     }
 }

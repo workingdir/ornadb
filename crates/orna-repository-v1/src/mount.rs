@@ -198,6 +198,7 @@ pub struct MountView {
     pin_oid_hex: String,
     view_id: [u8; 32],
     context: HistoricalFormatContext,
+    writable: bool,
 }
 
 impl MountView {
@@ -210,6 +211,25 @@ impl MountView {
         repository: &Repository,
         mountpoint: impl AsRef<Path>,
         selector: &str,
+    ) -> Result<Self, MountError> {
+        Self::attach_with_writability(repository, mountpoint, selector, false)
+    }
+
+    /// Attaches one writable workspace view (`--cwd`) of `selector`, with the
+    /// same resolution and placement rules as [`MountView::attach`].
+    pub fn attach_writable(
+        repository: &Repository,
+        mountpoint: impl AsRef<Path>,
+        selector: &str,
+    ) -> Result<Self, MountError> {
+        Self::attach_with_writability(repository, mountpoint, selector, true)
+    }
+
+    fn attach_with_writability(
+        repository: &Repository,
+        mountpoint: impl AsRef<Path>,
+        selector: &str,
+        writable: bool,
     ) -> Result<Self, MountError> {
         let context = repository
             .open_format_context_at_selector(selector)
@@ -281,6 +301,7 @@ impl MountView {
             pin_oid_hex,
             view_id,
             context,
+            writable,
         };
         if let Err(error) = view.write_record() {
             let pin_cleanup = crate::native_graph::delete_mount_snapshot_pin(
@@ -371,7 +392,7 @@ owner {}
 pin {}
 format {}
 legacy {}
-read_only true
+read_only {}
 ",
             self.mountpoint.display(),
             self.selector,
@@ -381,6 +402,7 @@ read_only true
             self.pin_oid_hex.as_str(),
             self.context.repository_format_number(),
             self.context.is_legacy_format(),
+            !self.writable,
         );
         let path = self.record_path();
         let staging = self.staging_path();
@@ -443,6 +465,7 @@ read_only true
             owner_id: record.owner_id,
             format: record.format,
             legacy: record.legacy,
+            writable: record.writable,
         })
     }
     fn release(&mut self) -> Result<(), MountError> {
@@ -509,6 +532,7 @@ pub struct MountStatus {
     owner_id: [u8; 16],
     format: u8,
     legacy: bool,
+    writable: bool,
 }
 
 impl MountStatus {
@@ -532,9 +556,14 @@ impl MountStatus {
         self.legacy
     }
 
-    /// Every attached view is read-only.
+    /// Whether the view refuses mutations. Only a `--cwd` view is writable.
     pub const fn is_read_only(&self) -> bool {
-        true
+        !self.writable
+    }
+
+    /// Whether the view accepts mutations (`--cwd`).
+    pub const fn is_writable(&self) -> bool {
+        self.writable
     }
 
     /// Hex rendering of the view identity, for stable JSON output.
@@ -557,6 +586,7 @@ struct MountRecord {
     view: [u8; 32],
     format: u8,
     legacy: bool,
+    writable: bool,
 }
 
 impl MountRecord {
@@ -574,6 +604,7 @@ impl MountRecord {
         let mut pin_oid_hex = None;
         let mut format = None;
         let mut legacy = None;
+        let mut read_only = None;
         for line in lines {
             let Some((key, value)) = line.split_once(' ') else {
                 return Err(MountError::RecordInvalid);
@@ -595,7 +626,13 @@ impl MountRecord {
                         _ => return Err(MountError::RecordInvalid),
                     })
                 }
-                "read_only" if value == "true" => {}
+                "read_only" => {
+                    read_only = Some(match value {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(MountError::RecordInvalid),
+                    })
+                }
                 _ => return Err(MountError::RecordInvalid),
             }
         }
@@ -608,6 +645,7 @@ impl MountRecord {
             pin_oid_hex: pin_oid_hex.ok_or(MountError::RecordInvalid)?,
             format: format.ok_or(MountError::RecordInvalid)?,
             legacy: legacy.ok_or(MountError::RecordInvalid)?,
+            writable: !read_only.ok_or(MountError::RecordInvalid)?,
         })
     }
 }
@@ -854,6 +892,7 @@ impl Repository {
                 owner_id: record.owner_id,
                 format: record.format,
                 legacy: record.legacy,
+                writable: record.writable,
             });
         }
         statuses.sort_by(|left, right| left.mountpoint.cmp(&right.mountpoint));
@@ -957,6 +996,7 @@ impl Repository {
             pin_oid_hex: record.pin_oid_hex,
             view_id: record.view,
             context,
+            writable: record.writable,
         })
     }
 
@@ -994,6 +1034,7 @@ impl Repository {
             owner_id: record.owner_id,
             format: record.format,
             legacy: record.legacy,
+            writable: record.writable,
         };
         crate::native_graph::delete_mount_snapshot_pin(
             self,
@@ -1005,5 +1046,37 @@ impl Repository {
         .map_err(|_| MountError::SnapshotPinUnavailable)?;
         remove_registry_file(&record_path)?;
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod record_parse_tests {
+    use super::MountRecord;
+
+    fn record_text(read_only: &str) -> String {
+        format!(
+            "orna-mount-view 2\nmountpoint /mnt/library\nselector HEAD\nsnapshot {}\nview {}\nowner {}\npin {}\nformat 3\nlegacy false\nread_only {read_only}\n",
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(16),
+            "44".repeat(20),
+        )
+    }
+
+    #[test]
+    fn read_only_false_parses_as_writable() {
+        let record = MountRecord::parse(record_text("false").as_bytes()).unwrap();
+        assert!(record.writable);
+    }
+
+    #[test]
+    fn read_only_true_parses_as_read_only() {
+        let record = MountRecord::parse(record_text("true").as_bytes()).unwrap();
+        assert!(!record.writable);
+    }
+
+    #[test]
+    fn read_only_other_value_is_rejected() {
+        assert!(MountRecord::parse(record_text("yes").as_bytes()).is_err());
     }
 }

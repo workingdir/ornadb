@@ -21,7 +21,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 }
 
 fn pinned_runtime() -> (Functions, NominalDefinitions) {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| SEQUENCE_MODULES.contains(&path.as_str()))
