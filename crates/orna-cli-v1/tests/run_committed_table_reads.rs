@@ -455,3 +455,34 @@ fn multi_module_table_read_fails_closed_with_named_reason() {
         "cross-module table read must name the multi-module limit: {text}"
     );
 }
+
+const FIELD_SOURCE: &str = "pub table sample(id: Int) { label: Str, active: Bool, ratio: Float, price: Decimal, }\n\
+pub fn check(): Bool { let row = sample | filter(row => row.id == 2) | one(); assert row.label == \"beta\"; assert row.active == false; assert row.ratio == 2.5f; assert row.price == 3.2500; true }\n\
+pub fn main() = sample | count();\n";
+
+/// The committed-row run path converts every scalar stored field type into the
+/// evaluator record (stored-to-evaluator conversion in `orna-project-v1`
+/// `evaluator_rows_from_stored`). Each field of a committed row must read back
+/// with its value, not only the row count.
+#[test]
+fn invoke_reads_every_scalar_field_type_of_a_committed_row() {
+    let (directory, _repository, _relation) =
+        format3::format3_repository_for_table(FIELD_SOURCE, "sample");
+    for row in [
+        "main.sample.insert({ id: 1, label: \"alpha\", active: true, ratio: 1.5f, price: 1.2500 })",
+        "main.sample.insert({ id: 2, label: \"beta\", active: false, ratio: 2.5f, price: 3.2500 })",
+    ] {
+        assert_success(&orna(directory.path(), &["repl", row]), "REPL seed insert");
+    }
+    assert_success(
+        &orna(directory.path(), &["publish", "--message", "seed"]),
+        "publish seeded rows",
+    );
+    let output = orna(directory.path(), &["invoke", "check"]);
+    assert_success(&output, "invoke over every committed field type");
+    assert!(
+        combined(&output).contains("invocation completed"),
+        "invoke did not complete over every field type: {}",
+        combined(&output)
+    );
+}
