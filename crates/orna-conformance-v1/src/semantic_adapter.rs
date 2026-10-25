@@ -6750,7 +6750,11 @@ fn admit_transaction_project(
                 reason: "project transaction modules declare a duplicate table name".into(),
             }));
         }
-        functions.extend(module_functions);
+        functions.extend(module_functions).map_err(|_| {
+            Box::new(StageOutcome::Skipped {
+                reason: "project transaction modules bind a second standard layer".into(),
+            })
+        })?;
         key_fields.extend(module_keys);
         float_fields.extend(module_float_fields);
         table_fields.extend(module_table_fields);

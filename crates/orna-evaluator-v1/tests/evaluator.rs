@@ -7597,9 +7597,11 @@ fn pinned_standard_math_source_executes_every_public_function() {
         .expect("pinned standard source");
     assert_eq!(path, "std/math.orna");
     let mut functions = functions_from_source(&source);
-    functions.extend(functions_from_source(include_str!(
-        "fixtures/v1_standard_math_consumer.orna"
-    )));
+    functions
+        .extend(functions_from_source(include_str!(
+            "fixtures/v1_standard_math_consumer.orna"
+        )))
+        .expect("the consumer fixture binds no second standard layer");
     assert_eq!(
         invoke_named("incremented", &functions, &Environment::new(), Limits::default())
             .unwrap(),

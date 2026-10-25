@@ -943,22 +943,34 @@ impl Functions {
 
     /// Merges `other`'s own functions and aliases into this table; a same-key
     /// entry from `other` replaces this table's. A standard layer is adopted
-    /// when this table has none; a second, distinct standard layer is a
-    /// programming error and panics rather than being silently dropped.
-    pub fn extend(&mut self, other: Functions) {
+    /// when this table has none. A second, distinct standard layer is refused
+    /// before anything is merged, so a failed call leaves this table unchanged.
+    pub fn extend(&mut self, other: Functions) -> Result<(), StandardLayerConflict> {
+        if let (Some(layer), Some(other_layer)) = (&self.standard, &other.standard)
+            && !Arc::ptr_eq(layer, other_layer)
+        {
+            return Err(StandardLayerConflict);
+        }
         self.local.extend(other.local);
         self.local_aliases.extend(other.local_aliases);
-        if let Some(other_layer) = other.standard {
-            match &self.standard {
-                None => self.standard = Some(other_layer),
-                Some(layer) => assert!(
-                    Arc::ptr_eq(layer, &other_layer),
-                    "Functions::extend received a second, distinct standard layer"
-                ),
-            }
+        if self.standard.is_none() {
+            self.standard = other.standard;
         }
+        Ok(())
     }
 }
+
+/// Two distinct standard layers cannot be merged into one function table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardLayerConflict;
+
+impl std::fmt::Display for StandardLayerConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("functions received a second, distinct standard layer")
+    }
+}
+
+impl std::error::Error for StandardLayerConflict {}
 
 impl FromIterator<(String, PureFunction)> for Functions {
     fn from_iter<I: IntoIterator<Item = (String, PureFunction)>>(entries: I) -> Self {
@@ -19209,5 +19221,51 @@ mod blob_equality_tests {
             )
             .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod standard_layer_merge_tests {
+    use super::{Functions, StandardLayer, StandardLayerConflict};
+    use std::{collections::BTreeMap, sync::Arc};
+
+    fn layer(alias: &str) -> Arc<StandardLayer> {
+        Arc::new(StandardLayer::new(
+            BTreeMap::new(),
+            BTreeMap::from([(alias.to_owned(), alias.to_owned())]),
+        ))
+    }
+
+    #[test]
+    fn second_distinct_standard_layer_is_refused_without_mutating_the_table() {
+        let first = layer("first");
+        let mut target = Functions {
+            standard: Some(Arc::clone(&first)),
+            ..Functions::default()
+        };
+        let other = Functions {
+            standard: Some(layer("second")),
+            local_aliases: BTreeMap::from([("extra".to_owned(), "extra".to_owned())]),
+            ..Functions::default()
+        };
+        assert_eq!(target.extend(other), Err(StandardLayerConflict));
+        assert!(Arc::ptr_eq(target.standard.as_ref().unwrap(), &first));
+        assert!(!target.local_aliases.contains_key("extra"));
+    }
+
+    #[test]
+    fn the_same_shared_standard_layer_merges() {
+        let shared = layer("shared");
+        let mut target = Functions {
+            standard: Some(Arc::clone(&shared)),
+            ..Functions::default()
+        };
+        let other = Functions {
+            standard: Some(Arc::clone(&shared)),
+            local_aliases: BTreeMap::from([("extra".to_owned(), "extra".to_owned())]),
+            ..Functions::default()
+        };
+        assert_eq!(target.extend(other), Ok(()));
+        assert!(target.local_aliases.contains_key("extra"));
     }
 }
