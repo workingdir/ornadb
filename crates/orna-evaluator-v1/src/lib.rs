@@ -5634,34 +5634,34 @@ impl Context<'_, '_> {
         }
     }
 
-    /// A bare table name piped into a relation operation reads that table.
-    /// Locals, functions, aliases and namespace-qualified functions keep their
-    /// precedence over a table name, mirroring [`Expr::Name`] resolution in
-    /// [`Context::evaluate_node`].
+    /// A table name piped into a relation operation reads that table: a bare
+    /// `music` or a root-qualified `main.music`. Locals, functions, aliases and
+    /// namespace-qualified functions keep their precedence over a table name,
+    /// mirroring [`Expr::Name`] resolution in [`Context::evaluate_node`].
     fn admitted_table_relation(&self, lhs: &Expr, scope: &Scope) -> Option<String> {
-        let Expr::Name { text, .. } = lhs else {
-            return None;
-        };
-        if scope.0.contains_key(text) {
+        let path = dotted_name_path(lhs)?;
+        let root = path.split('.').next()?;
+        if scope.0.contains_key(root) {
             return None;
         }
-        if !self.restrict_function_names && self.functions.contains_key(text) {
+        if !self.restrict_function_names && self.functions.contains_key(&path) {
             return None;
         }
         if self
             .aliases
-            .and_then(|aliases| aliases.get(text))
+            .and_then(|aliases| aliases.get(&path))
             .is_some_and(|name| self.functions.contains_key(name))
         {
             return None;
         }
         if let Some(namespace) = self.namespace.as_deref() {
-            if self.functions.contains_key(&format!("{namespace}.{text}")) {
+            if self.functions.contains_key(&format!("{namespace}.{path}")) {
                 return None;
             }
         }
-        self.effects.as_deref()?.admitted_relation_source(text)
+        self.effects.as_deref()?.admitted_relation_source(&path)
     }
+
     fn binary(
         &mut self,
         op: &str,
@@ -15314,6 +15314,16 @@ fn function_root_name(expression: &Expr) -> Option<&str> {
     match expression {
         Expr::Name { text, .. } => Some(text),
         Expr::Field { base, .. } => function_root_name(base),
+        _ => None,
+    }
+}
+
+/// The dotted path of a plain `a.b.c` name chain, or `None` for any other
+/// expression.
+fn dotted_name_path(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Name { text, .. } => Some(text.clone()),
+        Expr::Field { base, name, .. } => Some(format!("{}.{name}", dotted_name_path(base)?)),
         _ => None,
     }
 }
