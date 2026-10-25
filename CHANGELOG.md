@@ -10,7 +10,8 @@ been published.
   (`orna invoke`). The authority admits the captured standard
   dependency's function bodies, so a standard function is callable from the
   importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
-  Glob and module-alias standard imports are refused with `DIAG_IMPORT`.
+  Glob and alias standard imports bind no names on this route, so a call through
+  them stays an unresolved name rather than binding silently.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
