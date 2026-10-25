@@ -6,6 +6,7 @@ been published.
 
 ## Unreleased
 - `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`, ORNA-OGB-008 in the draft compatibility spec) with shortest-form, width and 2^63-1 bounds, pinned to the draft golden vectors. Read-only; no format-2 writer or reader is activated.
+- `orna-repository-v1::format2_orr::decode_orr2_blob_field` decodes one draft format-2 ORR-2 Blob field value (ORNA-OGB-007): an exact `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }` storage record or a legacy inline padded-Base64 string. Read-only; does not resolve `.orna/blobs` or produce an OVB-1 Blob.
 - `orna-repository-v1::format2_ogb::verify_ogb_root` read-only verifies a draft OGB-1 descriptor/index/chunk tree (ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. Missing objects are reported distinctly from corruption. No writer or reader is activated.
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
