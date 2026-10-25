@@ -7,9 +7,9 @@ been published.
 ## Unreleased
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
-  41-vfs.md:103-105). They previously returned a different errno. The
-  `EXDEV` cited for cross-directory rename is not in the reference spec, so it
-  is not used; cross-directory rename keeps `EPERM`.
+  41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
+  which is not in the errno table. The `EXDEV` once considered for cross-directory
+  rename is not in the reference spec, so it is not used; that rename keeps `EPERM`.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the

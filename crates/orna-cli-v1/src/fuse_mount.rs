@@ -2850,7 +2850,7 @@ impl Filesystem for WorkspaceFilesystem {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        // Plain mkdir does not invent schema or key semantics (profiles/vfs-1.md:113).
+        // Plain mkdir does not invent schema or key semantics (profiles/vfs-1.md:110-113).
         reply.error(refused_mutation_errno());
     }
 
