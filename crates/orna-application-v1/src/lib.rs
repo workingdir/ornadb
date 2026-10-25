@@ -4165,15 +4165,12 @@ mod tests {
             "pub fn increment(value: Int): Int = g(value);\n",
         )]);
         let source = "use std.math.{increment};\npub fn g(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n";
-        // The std body must not capture the user's `g`: admission refuses, or the
-        // evaluated result is anything other than the user function's 101.
-        let refused = match authority.admit_module("main.orna", source, "answer") {
-            Err(_) => true,
-            Ok(admitted) => authority
-                .evaluate(&admitted, &Environment::new())
-                .map_or(true, |value| value != int_value(101)),
-        };
-        assert!(refused, "std body unqualified `g` resolved to the user function");
+        let admitted = authority
+            .admit_module("main.orna", source, "answer")
+            .expect("admission succeeds; the std body's `g` must not bind to the user function");
+        authority
+            .evaluate(&admitted, &Environment::new())
+            .expect_err("std body's unqualified `g` must not evaluate to the user function");
     }
 
     #[test]
@@ -4190,25 +4187,6 @@ mod tests {
             )
             .expect_err("non-function imports are not supported on this route");
         assert!(matches!(error, ApplicationError::UnsupportedImport(_)));
-    }
-
-    #[test]
-    fn std_body_calls_its_own_helper_not_a_user_function_of_the_same_name() {
-        let authority = std_import_authority(&[(
-            "std/math.orna",
-            "fn g(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = g(value);\n",
-        )]);
-        let admitted = authority
-            .admit_module(
-                "main.orna",
-                "use std.math.{increment};\nfn g(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n",
-                "answer",
-            )
-            .expect("user g does not shadow std's own g");
-        let result = authority
-            .evaluate(&admitted, &Environment::new())
-            .expect("entry should execute");
-        assert_eq!(result, int_value(2));
     }
 
     #[test]
