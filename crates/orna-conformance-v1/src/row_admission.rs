@@ -386,15 +386,18 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
             _ => false,
         },
         Type::Tuple(types) => match (value, expression) {
-            (Raw::Array(values), Expr::Tuple { elements, .. })
-                if values.len() == types.len() && elements.len() == types.len() =>
-            {
-                values
-                    .iter()
-                    .zip(types)
-                    .zip(elements)
-                    .all(|((value, ty), expression)| matches_value(value, ty, expression))
-            }
+            (Raw::Tag(60015, tuple), Expr::Tuple { elements, .. }) => match tuple.as_ref() {
+                Raw::Array(values)
+                    if values.len() == types.len() && elements.len() == types.len() =>
+                {
+                    values
+                        .iter()
+                        .zip(types)
+                        .zip(elements)
+                        .all(|((value, ty), expression)| matches_value(value, ty, expression))
+                }
+                _ => false,
+            },
             _ => false,
         },
         Type::Record(types) => match (value, expression) {
