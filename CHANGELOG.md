@@ -15,6 +15,9 @@ been published.
 - `StagedTableActivation::from_source` gains a final `effects: ActivationEffectReport` argument; callers must pass a declared report.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
+### Added
+- Format-2 Blob reads: `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record (`ORNA-ROW-013`) or a ROV-2 CBOR reference (`ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. The read limit is checked before any content chunk is read. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. Draft IDs for the OGB read rules are recorded in the PR (bead `ornadb-nne7`). Loose-row and compact-v2 physical row decoders are not part of this change.
+
 ### Fixes
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built

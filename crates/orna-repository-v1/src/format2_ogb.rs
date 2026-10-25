@@ -456,7 +456,7 @@ pub fn git_sha1_oid(kind: &str, data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
 
@@ -466,7 +466,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemStore {
+    pub(crate) struct MemStore {
         objects: HashMap<Vec<u8>, Obj>,
     }
 
@@ -539,7 +539,7 @@ mod tests {
 
     /// Builds the one-chunk root described by the zip vector "abc" and returns
     /// `(store, root_entries)`. Descriptor bytes follow draft ORNA-OGB-004 layout.
-    fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
+    pub(crate) fn abc_root(chunk: &[u8]) -> (MemStore, Vec<OgbTreeEntry>) {
         let mut store = MemStore::default();
         let digest: [u8; 32] = Sha256::digest(b"abc").into();
         let chunk_oid = store.put_blob(chunk);
