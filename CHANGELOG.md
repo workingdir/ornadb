@@ -6,6 +6,7 @@ been published.
 
 ## Unreleased
 - `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`, ORNA-OGB-008 in the draft compatibility spec) with shortest-form, width and 2^63-1 bounds, pinned to the draft golden vectors. Read-only; no format-2 writer or reader is activated.
+- `orna-repository-v1::format2_ogb::verify_ogb_root` read-only verifies a draft OGB-1 descriptor/index/chunk tree (ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. Missing objects are reported distinctly from corruption. No writer or reader is activated.
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
   41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
