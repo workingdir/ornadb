@@ -556,7 +556,7 @@ fn handle_notification(state: &mut ServerState, notification: Notification) -> b
                 params.text_document.text,
                 params.text_document.version,
             );
-            lock(&state.context.pending_identity_renames).remove(&uri);
+            discard_pending_identity_renames(&state.context, &uri);
             lock(&state.context.semantic_tokens).by_uri.remove(&uri);
             let home = state.context.projects.home(&uri);
             state.set_document(document, home.clone());
@@ -607,7 +607,7 @@ fn handle_notification(state: &mut ServerState, notification: Notification) -> b
                 serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(notification.params)
             {
                 let uri = params.text_document.uri;
-                lock(&state.context.pending_identity_renames).remove(&uri);
+                discard_pending_identity_renames(&state.context, &uri);
                 lock(&state.context.semantic_tokens).by_uri.remove(&uri);
                 let home = Arc::make_mut(&mut state.context.documents)
                     .remove(&uri)
@@ -1059,6 +1059,21 @@ fn identity_not_carried(reason: &str) -> String {
     )
 }
 
+/// Drops the pending identity renames of a closed or re-opened document. A
+/// rename applied to the buffer but never saved is reported, because its
+/// identity is not carried; a declined rename is dropped silently.
+fn discard_pending_identity_renames(state: &RequestContext, uri: &Uri) {
+    let removed = lock(&state.pending_identity_renames).remove(uri);
+    if removed.is_some_and(|chains| {
+        chains
+            .iter()
+            .flatten()
+            .any(|step| step.applied_version.is_some())
+    }) {
+        state.show_warning(&identity_not_carried("the rename was not saved"));
+    }
+}
+
 /// Saves the identity renames the saved source applies, into the staged store.
 /// Every pending rename that cannot be carried is returned as an error for the
 /// caller to report; the saved text is saved either way.
@@ -1133,28 +1148,54 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
     let mut failures = Vec::new();
     for chain in &chains {
         match rename_for(chain) {
+            // Field renames change the committed schema, which this build does
+            // not admit (ORNA-EVOL-002), so nothing is staged for them.
+            Ok(Some(rename)) if rename.kind() == ObjectKind::Field => {
+                failures.push("schema evolution is not admitted".to_owned());
+            }
             Ok(Some(rename)) => applicable.push(rename),
             Ok(None) => {}
             Err(reason) => failures.push(reason),
         }
     }
     if !applicable.is_empty() {
-        let next = applicable.iter().try_fold(previous, |manifest, rename| {
-            manifest
-                .with_renames(&modules, std::slice::from_ref(rename))
-                .map_err(|error| format!("{error:?}"))
-        })?;
         let relative = path
             .strip_prefix(repository.worktree())
             .map_err(|error| format!("{error:?}"))?;
         let logical_path = relative.to_string_lossy().replace('\\', "/");
-        repository
-            .stage_object_identities(
-                &staged,
-                &next.to_stored(),
-                &[(logical_path.as_str(), saved_text.as_bytes())],
-            )
+        // The save stages the whole file, so it is only written when the index
+        // entry is still HEAD's or the text this edit started from; otherwise
+        // partial staging the user made would be overwritten.
+        let index = repository
+            .index_file_bytes(&logical_path)
             .map_err(|error| format!("{error:?}"))?;
+        let head = repository
+            .head_file_bytes(&logical_path)
+            .map_err(|error| format!("{error:?}"))?;
+        let clean = index == head
+            || chains.iter().any(|chain| {
+                chain
+                    .first()
+                    .is_some_and(|step| index.as_deref() == Some(step.pre_edit_text.as_bytes()))
+            });
+        if clean {
+            let next = applicable.iter().try_fold(previous, |manifest, rename| {
+                manifest
+                    .with_renames(&modules, std::slice::from_ref(rename))
+                    .map_err(|error| format!("{error:?}"))
+            })?;
+            repository
+                .stage_object_identities(
+                    &staged,
+                    &next.to_stored(),
+                    &[(logical_path.as_str(), saved_text.as_bytes())],
+                )
+                .map_err(|error| format!("{error:?}"))?;
+        } else {
+            failures.push(format!(
+                "index entry for {logical_path} differs from HEAD; stage manually"
+            ));
+        }
     }
     if failures.is_empty() {
         Ok(())
