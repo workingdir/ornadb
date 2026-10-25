@@ -3124,15 +3124,41 @@ fn run_repl_input(
             .map(|_| ())
             .map_err(|_| REPL_EFFECT_UNCERTAIN.to_owned())
     };
+    let terminal = |prefix: &'static [u8]| {
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(&query_id);
+        TerminalOutcome::new(bytes).ok()
+    };
+    // A row whose input never reached an external binding is cancelled before
+    // any observation is recorded, so a failed observation write cannot strand
+    // it. A failed cancellation leaves the row unsettled, which is uncertain.
     // REQUEST-1 (Orna-1.1.0 30-protocol.md:104): the request row is reserved
     // and started before evaluation, so an external sys effect dispatched while
-    // the input evaluates is covered by a durable Running row.
+    // the input evaluates is covered by a durable Running row. A panic between
+    // reservation and settlement leaves that row Running, which is the same
+    // state as a crash and is settled by fenced recovery.
     let fingerprint = repl_request_fingerprint(
         transactions.session_id,
         query_id,
         source,
         transactions.initial_digest,
     );
+    let abandon = |original: repl::ReplFailure| -> repl::ReplFailure {
+        let cancelled = terminal(b"orna.repl.cancel.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.cancel_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if finish_query(orna_runtime_v1::InvocationObservationStatus::Failed).is_err() {
+            eprintln!("warning: query observation not recorded");
+        }
+        if cancelled {
+            original
+        } else {
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        }
+    };
     let admission = match transactions
         .runtime
         .block_on(state.reserve_request_with_admission(request, fingerprint))
@@ -3153,62 +3179,59 @@ fn run_repl_input(
         ))
         .is_err()
     {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+        // The failed start leaves the row Reserved and no binding has run.
+        return Err(abandon("ORNA-REPL-EFFECT".to_owned().into()));
     }
-    let terminal = |prefix: &'static [u8]| {
-        let mut bytes = prefix.to_vec();
-        bytes.extend_from_slice(&query_id);
-        TerminalOutcome::new(bytes).ok()
-    };
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
     let (value, successor, activation) = match evaluation {
         Ok(result) => result,
         Err(failure) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
             if failure.external_effects_possible {
                 // The row stays Running: fenced recovery settles it and the
                 // input is never replayed.
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
                 return Err(repl_evaluation_failure(failure));
             }
-            // No external binding ran, so the reserved row is cancelled rather
-            // than left running.
-            let Some(outcome) = terminal(b"orna.repl.cancel.v1") else {
-                return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-            };
-            if transactions
-                .runtime
-                .block_on(state.cancel_request_with_owner(
-                    request,
-                    fingerprint,
-                    writer,
-                    outcome,
-                ))
-                .is_err()
-            {
-                return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-            }
-            return Err(repl_evaluation_failure(failure));
+            return Err(abandon(repl_evaluation_failure(failure)));
+        }
+    };
+    // Known once evaluation succeeded: an external binding may already have run.
+    let external_possible = matches!(
+        activation.effects(),
+        orna_runtime_v1::ActivationEffectReport::ExternalPossible
+    );
+    // The request is committed, so an observation write failure is only a
+    // warning and never reports the committed input as uncertain.
+    let record_committed = |status: orna_runtime_v1::InvocationObservationStatus| {
+        if finish_query(status).is_err() {
+            eprintln!("warning: committed; query observation not recorded");
+        }
+    };
+    // Failure after evaluation: uncertain when external effects may have run
+    // (the row stays Running for fenced recovery); otherwise cancelled.
+    let unsettled_after_evaluation = || -> repl::ReplFailure {
+        if external_possible {
+            let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        } else {
+            abandon("ORNA-REPL-EFFECT".to_owned().into())
         }
     };
     if activation.mutations().is_empty() {
         // Read-only results are retained: the request completes with its
         // terminal outcome instead of being left running.
-        let Some(outcome) = terminal(b"orna.repl.read.v1") else {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        };
-        if transactions
-            .runtime
-            .block_on(state.complete_request_with_owner(request, fingerprint, writer, outcome))
-            .is_err()
-        {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        let completed = terminal(b"orna.repl.read.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.complete_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if !completed {
+            return Err(unsettled_after_evaluation());
         }
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
+        record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
         *session = successor;
         return Ok(value);
     }
@@ -3216,10 +3239,7 @@ fn run_repl_input(
         .stage_for_request(&transactions.authority, snapshot.context(), request)
     {
         Ok(activation) => activation,
-        Err(_) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        }
+        Err(_) => return Err(unsettled_after_evaluation()),
     };
     // The application stages with NoFault; rebuild the identical unit carrying
     // the runtime's injector so the request boundary owns the fault seam.
@@ -3231,14 +3251,10 @@ fn run_repl_input(
         activation.effects(),
     ) {
         Ok(staged) => staged,
-        Err(_) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        }
+        Err(_) => return Err(unsettled_after_evaluation()),
     };
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        return Err(unsettled_after_evaluation());
     };
     let committed = transactions
         .runtime
@@ -3253,7 +3269,7 @@ fn run_repl_input(
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
         return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
-    finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
+    record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
     *session = successor;
     Ok(value)
 }
