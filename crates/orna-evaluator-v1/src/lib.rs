@@ -8801,7 +8801,14 @@ impl Context<'_, '_> {
                 return Some(alias.clone());
             }
         }
-        if let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))
+        // Bare session aliases come from top-level REPL imports (ORNA-IMPORT-003,
+        // ORNA-IMPORT-005) and bind only in that lexical scope. A body inside a
+        // named module resolves its own imports through `namespace::name` keys
+        // above, so a REPL `use std.prelude as _;` must not capture bare names
+        // such as `count` inside `std.list` (which would recurse through the
+        // prelude back into `std.list.length`).
+        if self.namespace.is_none()
+            && let Some(alias) = self.aliases.and_then(|aliases| aliases.get(&name))
             && self.functions.contains_key(alias)
         {
             return Some(alias.clone());
