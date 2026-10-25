@@ -1751,6 +1751,17 @@ enum DurableAdmission {
     Replay(Box<DispatchOutcome>),
 }
 
+/// Test-only access to the runtime handle that holds the worktree writer lease.
+#[cfg(feature = "test-support")]
+impl LiveHost {
+    /// Returns the owner-bound runtime handle, or `None` when the host is not
+    /// durable. Only the lock holder may reserve requests (ORNA-TURSO-005).
+    #[must_use]
+    pub fn owner_runtime_for_test(&self) -> Option<Arc<RuntimeState>> {
+        self.runtime.clone()
+    }
+}
+
 // The state boundary is synchronous today, but the async methods keep the
 // adapter signature ready for hosts whose credential and deletion adapters
 // perform I/O. The explicit lint allowance records that deliberate seam.

@@ -6,6 +6,9 @@ been published.
 
 ## Unreleased
 
+### Fixed
+- Runtime `reserve_request` now refuses a secondary handle that does not own the worktree lock with `LeaseHeld` before inserting a row (ORNA-TURSO-005, ornadb-f69b). Test setup that reserved through a secondary handle now reserves through the host's owner-bound runtime, or releases the owner handle first.
+
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
