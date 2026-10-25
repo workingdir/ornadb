@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Git probes that decide publication admission, blob verification, and
+  migration index pins now stop repository discovery at the probed directory's
+  parent. A nested repository with a corrupt `HEAD` fails closed instead of
+  reading an enclosing repository. A plain subdirectory of another repository is
+  no longer adopted as a dependency checkout (`DependencyUnavailable`);
+  dependencies must be their own repositories (ornadb-6vxj).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
