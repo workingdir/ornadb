@@ -1438,6 +1438,7 @@ fn blob_read_failure(error: ValueError) -> EvaluationError {
     let code = match error {
         ValueError::InvalidContext => "sys.blob.reference_context",
         ValueError::ContentUnavailable => "sys.blob.unavailable",
+        ValueError::ContentCollision => "sys.blob.collision",
         ValueError::InvalidRange => "sys.blob.bounds",
         ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
         ValueError::Truncated
@@ -2023,9 +2024,10 @@ mod tests {
         );
     }
 
-    /// A held ROV-3 source that reads only through `resolver`, so each call's
-    /// outcome is decided by the resolution context it was obtained under.
-    fn held_rov3_source(resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver>) -> ContextValue {
+    /// A ROV-3 Blob whose reads go only through `resolver`. It is built as a
+    /// `Blob`, not through `ContextValue` (which holds ROV-3 descriptor-only,
+    /// ornadb-55op), so the resolver's outcome reaches the reader.
+    fn reference_blob(resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver>) -> Blob {
         let database = [1; 16];
         let context = orna_value_v1::Format3Context::from_persisted(
             database,
@@ -2046,14 +2048,25 @@ mod tests {
                 orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
             )
             .unwrap();
-        let source =
-            Blob::from_reference_with_annotation(reference, "application/octet-stream", None)
-                .unwrap();
-        ContextValue::from_blob(&source, ValueFormat::Rov3).unwrap()
+        Blob::from_reference_with_annotation(reference, "application/octet-stream", None).unwrap()
     }
 
     #[test]
-    fn blob_read_of_an_unknown_handle_is_unavailable() {
+    fn blob_read_failures_map_unknown_handle_and_rejected_context_to_declared_codes() {
+        assert_eq!(
+            blob_read_failure(ValueError::ContentUnavailable).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::InvalidContext).code(),
+            "sys.blob.reference_context"
+        );
+    }
+
+    #[test]
+    fn held_reference_refuses_unknown_handle_and_rejected_context_without_rebinding() {
+        // ORNA-BLOB-008: the held reference keeps its exact context. An unknown
+        // handle or a rejected context refuses the read; it never rebinds.
         struct UnknownHandle;
 
         impl orna_value_v1::BlobResolver for UnknownHandle {
@@ -2063,25 +2076,10 @@ mod tests {
                 _offset: u64,
                 _length: u64,
             ) -> orna_value_v1::Result<Vec<u8>> {
-                Err(orna_value_v1::Error::ContentUnavailable)
+                Err(ValueError::ContentUnavailable)
             }
         }
 
-        let source = held_rov3_source(std::sync::Arc::new(UnknownHandle));
-        assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.to_bytes", &source, &[])),
-            "sys.blob.unavailable"
-        );
-        assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[0, 3]))),
-            "sys.blob.unavailable"
-        );
-    }
-
-    #[test]
-    fn blob_read_refuses_a_held_value_whose_context_is_rejected() {
-        // A held value keeps its exact resolution context (ORNA-BLOB-008): a
-        // rejected context refuses the read and never rebinds to other bytes.
         struct RejectedContext;
 
         impl orna_value_v1::BlobResolver for RejectedContext {
@@ -2091,19 +2089,17 @@ mod tests {
                 _offset: u64,
                 _length: u64,
             ) -> orna_value_v1::Result<Vec<u8>> {
-                Err(orna_value_v1::Error::InvalidContext)
+                Err(ValueError::InvalidContext)
             }
         }
 
-        let source = held_rov3_source(std::sync::Arc::new(RejectedContext));
-        assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.to_bytes", &source, &[])),
-            "sys.blob.reference_context"
-        );
-        assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[0, 3]))),
-            "sys.blob.reference_context"
-        );
+        let unknown = reference_blob(std::sync::Arc::new(UnknownHandle));
+        assert_eq!(unknown.read_to_end(), Err(ValueError::ContentUnavailable));
+        assert_eq!(unknown.read(0, 3), Err(ValueError::ContentUnavailable));
+
+        let rejected = reference_blob(std::sync::Arc::new(RejectedContext));
+        assert_eq!(rejected.read_to_end(), Err(ValueError::InvalidContext));
+        assert_eq!(rejected.read(0, 3), Err(ValueError::InvalidContext));
     }
 
     // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
