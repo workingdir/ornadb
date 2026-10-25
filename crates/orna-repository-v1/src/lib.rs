@@ -10060,15 +10060,16 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
-/// Stops Git's repository discovery at the worktree's parent directory so a
-/// corrupt worktree `.git` cannot fall through to an enclosing repository.
-/// The directory is made absolute first, so a relative path cannot yield an
-/// empty or relative ceiling.
+/// Stops Git's repository discovery at the worktree's real parent directory so a
+/// corrupt worktree `.git` cannot fall through to an enclosing repository. The
+/// path is canonicalized first so a symlinked worktree binds to the directory it
+/// really resolves to; a relative path cannot yield an empty or relative ceiling.
 pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
-    let absolute = std::path::absolute(worktree)
-        .or_else(|_| worktree.canonicalize())
+    let resolved = worktree
+        .canonicalize()
+        .or_else(|_| std::path::absolute(worktree))
         .unwrap_or_else(|_| worktree.to_path_buf());
-    if let Some(parent) = absolute.parent() {
+    if let Some(parent) = resolved.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
     }
 }
@@ -10633,6 +10634,62 @@ mod tests {
         let recovered = PublicationJournal::decode(&journal.encode().unwrap(), 40).unwrap();
         assert_eq!(recovered.runtime_intent_id(), Some([1; 16]));
         assert_eq!(recovered.logical_rekeys(), &[event]);
+    }
+
+    /// Builds `parent/healthy` as a real repository and `parent/healthy/child`
+    /// with a corrupt `HEAD`, so discovery from `child` must not reach `healthy`.
+    #[cfg(unix)]
+    fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
+        let healthy = root.join("healthy");
+        fs::create_dir_all(&healthy).unwrap();
+        let init = Command::new("git")
+            .current_dir(&healthy)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let child = healthy.join("child");
+        fs::create_dir_all(child.join(".git")).unwrap();
+        fs::write(child.join(".git").join("HEAD"), b"garbage\n").unwrap();
+        child
+    }
+
+    /// Runs `rev-parse HEAD` in `directory` under the production discovery bind.
+    #[cfg(unix)]
+    fn head_probe_succeeds_bound(directory: &Path) -> bool {
+        let mut command = Command::new("git");
+        command.current_dir(directory).args(["rev-parse", "HEAD"]);
+        super::scrub_git_routing_environment(&mut command);
+        super::bind_git_discovery_to_worktree(&mut command, directory);
+        command
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_symlinked_worktree_does_not_fall_through_to_real_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let link = outside.join("L");
+        std::os::unix::fs::symlink(&child, &link).unwrap();
+        assert!(!head_probe_succeeds_bound(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_relative_path_to_corrupt_child_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let _child = corrupt_child_under_healthy_parent(root.path());
+        let previous = env::current_dir().unwrap();
+        env::set_current_dir(root.path()).unwrap();
+        let relative = Path::new("healthy").join("child");
+        let ok = head_probe_succeeds_bound(&relative);
+        env::set_current_dir(previous).unwrap();
+        assert!(!ok, "relative corrupt child must not adopt healthy parent");
     }
 
     /// Replaces one length-prefixed string in an encoded journal with another,
