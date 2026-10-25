@@ -302,9 +302,9 @@ pub fn validate_reference_context<Kind>(
 
 /// Stable implementation-defined physical identities for the canonical
 /// `sys.Type`, `sys.Function`, `sys.Snapshot`, `sys.Invocation`,
-/// `sys.InvocationArgument`, `sys.Table`, `sys.Key`, `sys.Storage`,
-/// `sys.Run`, and `sys.Stream` relations. The Orna specification names these
-/// relations but does not prescribe their sixteen-byte physical identities.
+/// `sys.InvocationArgument`, `sys.Run`, and `sys.Stream` relations. The Orna
+/// specification names these relations but does not prescribe their
+/// sixteen-byte physical identities.
 /// These constants are therefore versioned implementation compatibility
 /// values, not per-runtime generated identifiers.
 pub const SYS_INVOCATION_TABLE_ID: [u8; 16] = [
@@ -324,6 +324,9 @@ pub const SYS_INVOCATION_ARGUMENT_TABLE_ID: [u8; 16] = [
 ];
 pub const SYS_TABLE_TABLE_ID: [u8; 16] = [
     0x3c, 0xa0, 0x14, 0x6e, 0x52, 0x9b, 0x4e, 0x27, 0x8f, 0x61, 0xd4, 0x03, 0x7a, 0xe8, 0x15, 0x02,
+];
+pub const SYS_DEFINITION_TABLE_ID: [u8; 16] = [
+    0x9d, 0x42, 0x7e, 0x15, 0xb8, 0x0a, 0x4c, 0x63, 0xa6, 0x2f, 0xe1, 0x70, 0x38, 0xc9, 0x5b, 0x0d,
 ];
 pub const SYS_KEY_TABLE_ID: [u8; 16] = [
     0x5e, 0x11, 0xc7, 0x8a, 0x2d, 0x74, 0x40, 0xb9, 0x9c, 0x06, 0x67, 0xf3, 0x84, 0x1a, 0xd2, 0x08,
@@ -365,6 +368,27 @@ pub fn key_reference(object: ObjectRef) -> Result<KeyRef, SystemReferenceError> 
 /// authority over the storage it names.
 pub fn storage_reference(object: ObjectRef) -> Result<StorageRef, SystemReferenceError> {
     catalogue_reference(SYS_STORAGE_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.DefinitionRef` from the exact `sys.Definition`
+/// natural key (`id`). The definition ID is a tag-37 UUID-shaped identity and
+/// is pinned to the supplied snapshot. The reference is coordinate data only.
+pub fn definition_reference(
+    database_id: [u8; 16],
+    definition_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+) -> Result<DefinitionRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    let key = OvbRaw::Array(vec![
+        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(definition_id.to_vec()))),
+        snapshot.raw(),
+    ]);
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_DEFINITION_TABLE_ID,
+        key,
+        snapshot,
+    }))
 }
 
 /// Constructs a checked `sys.SnapshotRef` from the exact `sys.Snapshot`

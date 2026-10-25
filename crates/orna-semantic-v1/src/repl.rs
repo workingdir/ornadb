@@ -355,7 +355,6 @@ impl ReplContext {
         );
         scope.imported_enum_variants = imported_enums;
         scope.unlinked_system_members = self.system_providers.admission_record();
-        scope.system_providers = self.system_providers;
         scope
     }
 }

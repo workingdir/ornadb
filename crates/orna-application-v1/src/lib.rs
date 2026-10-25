@@ -15,8 +15,7 @@ use orna_evaluator_v1::{
     reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
-    CanonicalSnapshot, CanonicalValue, OvbRaw, RowRef, SafeText, compare_primary_keys,
-    key_reference, object_reference, storage_reference, table_reference,
+    CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys,
 };
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
@@ -70,8 +69,6 @@ pub fn remote_analysis_request(
 mod repl_transaction;
 mod browser_profile;
 mod table_reference;
-mod table_component_object;
-use table_component_object::{TableComponent, table_component_object_id};
 pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::ReplTransactionScope;
 mod format3_store;
@@ -614,7 +611,6 @@ impl ApplicationAuthority {
         )
         .with_sys_host_context(self.sys_host.clone());
         handler.publication_rows = publication_rows;
-        handler.catalog_tables = Some(catalog_table_rows(application, snapshot)?);
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -1276,9 +1272,6 @@ pub struct SourceMutationEffectHandler {
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
-    /// `sys.Table` rows served by `sys.catalog.tables` for this activation;
-    /// `None` when the activation carries no table snapshot.
-    catalog_tables: Option<Vec<CanonicalValue>>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
@@ -1302,7 +1295,6 @@ impl SourceMutationEffectHandler {
             mutations: Vec::new(),
             next_ordinal: 0,
             publication_rows: None,
-            catalog_tables: None,
             captured_rows: None,
             overlay: BTreeMap::new(),
             source_row_schemas: Vec::new(),
@@ -2640,12 +2632,6 @@ impl EffectHandler for SourceMutationEffectHandler {
                 next: None,
             }));
         }
-        if source == SYS_CATALOG_TABLES_SOURCE {
-            let Some(rows) = self.catalog_tables.as_deref() else {
-                return Ok(None);
-            };
-            return catalog_table_page(rows, after, limit, budget).map(Some);
-        }
         if self.tables.contains_key(source) {
             return self.table_relation_page(source, after, limit, budget).map(Some);
         }
@@ -2675,113 +2661,6 @@ impl EffectHandler for SourceMutationEffectHandler {
             .as_ref()
             .map(|catalogue| catalogue as &dyn orna_evaluator_v1::ExplainCatalogue)
     }
-}
-
-/// Relation source name for the `sys.Table` rows of the activation snapshot.
-const SYS_CATALOG_TABLES_SOURCE: &str = "sys.catalog.tables";
-
-/// Builds the `sys.Table` rows for the committed tables of one activation,
-/// ordered by stable object identity. Tables without a committed identity have
-/// no catalogue object and are absent. Only fields this runtime sources are
-/// present: `definition`, `columns`, `assertions`, and `references` have no
-/// authoritative source here and are omitted rather than fabricated. The row
-/// count is not computed, so it is null and not exact.
-fn catalog_table_rows(
-    application: &AdmittedApplication,
-    snapshot: &RuntimeTableActivationSnapshot,
-) -> Result<Vec<CanonicalValue>, ApplicationError> {
-    let capture = snapshot.context().capture();
-    let database_id = capture.database_id();
-    let activation = capture.snapshot().clone();
-    let mut object_ids: Vec<TableObjectId> = application_table_object_ids(application)
-        .into_values()
-        .collect();
-    object_ids.sort();
-    object_ids
-        .into_iter()
-        .map(|object_id| {
-            let object = object_reference(database_id, object_id.bytes(), activation.clone())
-                .map_err(invalid_table_metadata)?;
-            let key_object = object_reference(
-                database_id,
-                table_component_object_id(object_id, TableComponent::Key),
-                activation.clone(),
-            )
-            .map_err(invalid_table_metadata)?;
-            let storage_object = object_reference(
-                database_id,
-                table_component_object_id(object_id, TableComponent::Storage),
-                activation.clone(),
-            )
-            .map_err(invalid_table_metadata)?;
-            let reference = table_reference(object.clone()).map_err(invalid_table_metadata)?;
-            let key = key_reference(key_object).map_err(invalid_table_metadata)?;
-            let storage = storage_reference(storage_object).map_err(invalid_table_metadata)?;
-            let fields = vec![
-                ("reference", catalog_reference_field(reference.as_row_ref())?),
-                ("object", catalog_reference_field(object.as_row_ref())?),
-                ("key", catalog_reference_field(key.as_row_ref())?),
-                ("storage", catalog_reference_field(storage.as_row_ref())?),
-                ("row_count", OvbRaw::Null),
-                ("row_count_exact", OvbRaw::Bool(false)),
-            ];
-            CanonicalValue::new(catalog_text_map(fields)).map_err(invalid_table_metadata)
-        })
-        .collect()
-}
-
-fn invalid_table_metadata<E>(_: E) -> ApplicationError {
-    ApplicationError::InvalidTableMetadata
-}
-
-/// Converts one checked reference into the OVB value stored in a `sys.Table`
-/// field, using the reference's own canonical encoding.
-fn catalog_reference_field(reference: &RowRef) -> Result<OvbRaw, ApplicationError> {
-    let bytes = reference.encode().map_err(invalid_table_metadata)?;
-    CanonicalValue::decode(&bytes)
-        .map(|value| value.raw().clone())
-        .map_err(invalid_table_metadata)
-}
-
-/// Canonical text-keyed map: fields sorted by length, then lexicographically.
-fn catalog_text_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
-    let mut fields = fields;
-    fields.sort_by(|(left, _), (right, _)| {
-        left.len().cmp(&right.len()).then_with(|| left.cmp(right))
-    });
-    OvbRaw::Map(
-        fields
-            .into_iter()
-            .map(|(key, value)| (OvbRaw::Text(key.into()), value))
-            .collect(),
-    )
-}
-
-/// Pages the activation's `sys.Table` rows with the same offset cursor
-/// encoding as captured table relations.
-fn catalog_table_page(
-    rows: &[CanonicalValue],
-    after: Option<&[u8]>,
-    limit: usize,
-    budget: &mut StepBudget,
-) -> Result<RelationPage, EvaluationError> {
-    let invalid_cursor = || SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-SNAPSHOT");
-    let start = match after {
-        None => 0,
-        Some(cursor) => {
-            let bytes: [u8; 8] = cursor.try_into().map_err(|_| invalid_cursor())?;
-            usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| invalid_cursor())?
-        }
-    }
-    .min(rows.len());
-    let end = start.saturating_add(limit).min(rows.len());
-    let mut page = Vec::with_capacity(end - start);
-    for row in &rows[start..end] {
-        budget.debit(1)?;
-        page.push(row.clone());
-    }
-    let next = (end < rows.len() && !page.is_empty()).then(|| (end as u64).to_be_bytes().to_vec());
-    Ok(RelationPage { rows: page, next })
 }
 
 fn encoded_key(key: &CanonicalValue) -> Result<Vec<u8>, EvaluationError> {

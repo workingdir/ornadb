@@ -48,9 +48,6 @@ pub enum SystemProviderHost {
     /// The `orna run` and `orna serve` hosts read the rows from runtime
     /// publication metadata.
     PublicationMetadata,
-    /// The `orna run` and `orna serve` hosts page the rows of the activation's
-    /// admitted table snapshot.
-    ActivationTableSnapshot,
 }
 
 /// One member and the production boundary that links its provider.
@@ -61,7 +58,7 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 11] = [
+const DECLARED_LINKS: [SystemProviderLink; 10] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
@@ -123,13 +120,6 @@ const DECLARED_LINKS: [SystemProviderLink; 11] = [
         member: SystemSurfaceMember::Relation("sys.Storage"),
         host: SystemProviderHost::PublicationMetadata,
     },
-    // `orna-evaluator-v1` recognises the grouped catalogue handle as a relation
-    // source; the run and serve hosts page it from the activation table
-    // snapshot, so admission only links it on those hosts.
-    SystemProviderLink {
-        member: SystemSurfaceMember::Relation("sys.catalog.tables"),
-        host: SystemProviderHost::ActivationTableSnapshot,
-    },
 ];
 
 /// The complete production provider linkage for the portable `sys` surface.
@@ -147,16 +137,6 @@ impl SystemProviderLinkage {
     /// True when at least one production host links a provider for `member`.
     pub fn is_linked(&self, member: SystemSurfaceMember<'_>) -> bool {
         self.links.iter().any(|link| link.member == member)
-    }
-
-    /// True when a production host other than `excluded` links a provider for
-    /// `member`. A host that serves no activation table snapshot excludes
-    /// [`SystemProviderHost::ActivationTableSnapshot`] so it never admits a
-    /// member only that host can execute (ORNA-SYS-008).
-    pub fn is_linked_except(&self, member: SystemSurfaceMember<'_>, excluded: SystemProviderHost) -> bool {
-        self.links
-            .iter()
-            .any(|link| link.member == member && link.host != excluded)
     }
 }
 
@@ -304,22 +284,5 @@ mod tests {
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
         }
-    }
-
-    #[test]
-    fn snapshot_only_members_are_not_linked_when_their_host_is_excluded() {
-        let linkage = system_provider_linkage();
-        let snapshot_only = SystemSurfaceMember::Relation("sys.catalog.tables");
-        assert!(linkage.is_linked(snapshot_only));
-        assert!(linkage.is_linked_except(snapshot_only, SystemProviderHost::HostOperationRegistry));
-        assert!(!linkage.is_linked_except(
-            snapshot_only,
-            SystemProviderHost::ActivationTableSnapshot,
-        ));
-        let always_linked = SystemSurfaceMember::Callable("sys.rt.info");
-        assert!(linkage.is_linked_except(
-            always_linked,
-            SystemProviderHost::ActivationTableSnapshot,
-        ));
     }
 }

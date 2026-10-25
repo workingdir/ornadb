@@ -195,11 +195,7 @@ fn admitted_project_tables(
     Functions,
 ), ApplicationError> {
     let project = scope.project;
-    let analysis = analyze_with_providers(
-        project.modules(),
-        &authority.catalogue,
-        SystemProviders::ProductionWithoutActivationSnapshot,
-    );
+    let analysis = analyze_with_providers(project.modules(), &authority.catalogue, SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(ApplicationError::Semantic(
             analysis

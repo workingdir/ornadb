@@ -251,7 +251,7 @@ impl AdmittedReplSession {
     pub fn new(limits: Limits) -> Self {
         Self {
             limits,
-            semantic: ReplContext::with_providers(SystemProviders::ProductionWithoutActivationSnapshot),
+            semantic: ReplContext::with_providers(SystemProviders::Production),
             runtime: ReplSession::new(limits),
             attached_databases: None,
             repository_scope: None,
@@ -316,11 +316,7 @@ impl AdmittedReplSession {
         limits: Limits,
     ) -> Result<Self, ReplError> {
         let standard_sources = standard_sources.into_iter().collect::<Vec<_>>();
-        let analysis = analyze_with_providers(
-            modules,
-            &catalogue,
-            SystemProviders::ProductionWithoutActivationSnapshot,
-        );
+        let analysis = analyze_with_providers(modules, &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
@@ -376,11 +372,7 @@ impl AdmittedReplSession {
             }
             None => Catalogue::authoritative_core(),
         };
-        let analysis = analyze_with_providers(
-            project.modules(),
-            &catalogue,
-            SystemProviders::ProductionWithoutActivationSnapshot,
-        );
+        let analysis = analyze_with_providers(project.modules(), &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }

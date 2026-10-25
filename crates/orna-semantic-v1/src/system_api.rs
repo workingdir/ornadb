@@ -4,7 +4,6 @@
 //! names and type references before the semantic layer uses them, but it does
 //! not manufacture runtime values or make unavailable operations callable.
 
-use crate::SystemProviders;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -806,25 +805,16 @@ impl SystemApi {
             .map(|(name, _)| name.as_str())
     }
 
-    /// True when the provider linkage admits `member` for the given providers.
-    /// Only a production admission reaches this check.
+    /// True when a production host links a provider for `member`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn provider_linked(&self, member: SystemMember<'_>, providers: SystemProviders) -> bool {
-        let linkage = orna_sys_v1::system_provider_linkage();
-        match providers {
-            SystemProviders::DeclaredSurface => true,
-            SystemProviders::Production => linkage.is_linked(member.into()),
-            SystemProviders::ProductionWithoutActivationSnapshot => linkage.is_linked_except(
-                member.into(),
-                orna_sys_v1::SystemProviderHost::ActivationTableSnapshot,
-            ),
-        }
+    pub(crate) fn provider_linked(&self, member: SystemMember<'_>) -> bool {
+        orna_sys_v1::system_provider_linkage().is_linked(member.into())
     }
 
     /// Wasm builds carry no host bindings, so no provider is linked there.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn provider_linked(&self, _member: SystemMember<'_>, providers: SystemProviders) -> bool {
-        matches!(providers, SystemProviders::DeclaredSurface)
+    pub(crate) fn provider_linked(&self, _member: SystemMember<'_>) -> bool {
+        false
     }
 }
 
@@ -2220,16 +2210,8 @@ mod tests {
             api.validate_provider_links(orna_sys_v1::system_provider_linkage().links()),
             Ok(())
         );
-        assert!(api.provider_linked(SystemMember::Callable("sys.blob.annotate"), SystemProviders::Production));
-        assert!(api.provider_linked(SystemMember::Callable("sys.rt.info"), SystemProviders::Production));
-        // `sys.catalog.tables` is served only from an activation table snapshot, so a
-        // host without one admits it only under the production set that includes that host.
-        assert!(api.provider_linked(SystemMember::Relation("sys.catalog.tables"), SystemProviders::Production));
-        assert!(!api.provider_linked(
-            SystemMember::Relation("sys.catalog.tables"),
-            SystemProviders::ProductionWithoutActivationSnapshot,
-        ));
-        assert!(api.provider_linked(SystemMember::Callable("sys.rt.info"), SystemProviders::ProductionWithoutActivationSnapshot));
+        assert!(api.provider_linked(SystemMember::Callable("sys.blob.annotate")));
+        assert!(api.provider_linked(SystemMember::Callable("sys.rt.info")));
         for member in [
             SystemSurfaceMember::Callable("sys.blob.annotate_all"),
             SystemSurfaceMember::Callable("sys.snapshot"),

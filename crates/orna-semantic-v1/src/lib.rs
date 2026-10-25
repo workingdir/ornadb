@@ -2141,8 +2141,8 @@ pub struct Analysis {
     /// Payload rows of every admitted module's source enums, keyed by module,
     /// so a REPL session admits the same enum spellings as the project.
     pub(crate) source_enums: BTreeMap<Namespace, BTreeMap<String, EnumVariantRows>>,
-    /// The provider linkage `sys` members were admitted against.
-    system_providers: SystemProviders,
+    /// Whether `sys` members were admitted against production providers.
+    production_sys_providers: bool,
 }
 impl Analysis {
     pub fn is_ok(&self) -> bool {
@@ -2151,7 +2151,11 @@ impl Analysis {
 
     /// The provider linkage this analysis admitted `sys` members against.
     pub(crate) fn system_providers(&self) -> SystemProviders {
-        self.system_providers
+        if self.production_sys_providers {
+            SystemProviders::Production
+        } else {
+            SystemProviders::DeclaredSurface
+        }
     }
 }
 
@@ -2159,24 +2163,17 @@ impl Analysis {
 ///
 /// A member's static type comes from the declared `api/sys.json` surface;
 /// whether it can execute depends on the providers of the host that evaluates
-/// the program. Every caller that evaluates analysed source passes the variant
-/// for its host: [`SystemProviders::Production`] where an activation table
-/// snapshot is served, and [`SystemProviders::ProductionWithoutActivationSnapshot`]
-/// where none is.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// the program. Every caller that evaluates analysed source passes
+/// [`SystemProviders::Production`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemProviders {
     /// Every member of the declared surface counts as linked, so analysis
     /// checks typing only. For source that is not admitted for evaluation.
-    #[default]
     DeclaredSurface,
     /// Only members a production host links a provider for are admitted;
     /// every other member is rejected with `sys.version.incompatible`
     /// (ORNA-SYS-008).
     Production,
-    /// As [`SystemProviders::Production`], but a member linked only by a host
-    /// that serves an activation table snapshot is rejected. For hosts, such
-    /// as the REPL, that evaluate without one.
-    ProductionWithoutActivationSnapshot,
 }
 
 impl SystemProviders {
@@ -2184,7 +2181,7 @@ impl SystemProviders {
     fn admission_record(self) -> Option<Rc<RefCell<BTreeSet<String>>>> {
         match self {
             Self::DeclaredSurface => None,
-            Self::Production | Self::ProductionWithoutActivationSnapshot => Some(Rc::default()),
+            Self::Production => Some(Rc::default()),
         }
     }
 }
@@ -2410,7 +2407,6 @@ pub fn admit_row_unit_with_owner_fields(
     let mut inferred = Vec::new();
     let scope = Scope {
         unlinked_system_members: analysis.system_providers().admission_record(),
-        system_providers: analysis.system_providers(),
         ..Scope::default()
     };
     let input_type = infer_table_row_input(
@@ -2506,7 +2502,7 @@ fn analyze_recording_origins(
     let mut contexts = Vec::new();
     let mut result = Analysis {
         modules: catalogue.modules.clone(),
-        system_providers: providers,
+        production_sys_providers: providers == SystemProviders::Production,
         ..Analysis::default()
     };
     let mut parsed = Vec::new();
@@ -2641,7 +2637,6 @@ fn analyze_recording_origins(
         );
         scope.current_namespace = Some(namespace.clone());
         scope.unlinked_system_members = unlinked_system_members.clone();
-        scope.system_providers = providers;
         let spellings = secret_spellings.get(namespace).cloned().unwrap_or_default();
         scope.secret_types = imported_secret_types(tree, &spellings, &secret_rows, &secret_aliases);
         // Import visibility is enforced by `scope.names`; every unit a name
@@ -4162,8 +4157,6 @@ struct Scope {
     /// never alters inferred types or other diagnostics. Clones share the
     /// record: nested scopes belong to the same admission.
     unlinked_system_members: Option<Rc<RefCell<BTreeSet<String>>>>,
-    /// The provider linkage the admission record checks `sys` members against.
-    system_providers: SystemProviders,
     ambiguous: BTreeSet<String>,
     /// Source spellings mapped to compiler-local nominal identities. The
     /// values are qualified by defining module and are never a substitute for
@@ -4300,7 +4293,6 @@ fn resolve_imports_with_dependencies(
         source_dimensions: Rc::clone(&units.dimensions),
         function_dependencies: RefCell::new(BTreeMap::new()),
         unlinked_system_members: None,
-        system_providers: SystemProviders::DeclaredSurface,
         ambiguous: BTreeSet::new(),
         nominal_identities: BTreeMap::new(),
         modules: BTreeMap::new(),
@@ -18767,7 +18759,7 @@ fn infer_descriptor_system_path(
 /// on unchanged; the record only feeds `report_unlinked_system_members`.
 fn require_linked_system_member(member: system_api::SystemMember<'_>, scope: &Scope) {
     if let Some(record) = &scope.unlinked_system_members
-        && !system_api::embedded_system_api().provider_linked(member, scope.system_providers)
+        && !system_api::embedded_system_api().provider_linked(member)
     {
         record
             .borrow_mut()
@@ -28900,34 +28892,6 @@ mod tests {
             analysis.is_ok(),
             "{:#?}",
             diagnostic_texts(&analysis.diagnostics)
-        );
-    }
-
-    /// `sys.catalog.tables` is served only from a committed activation snapshot (ORNA-SYS-017).
-    /// A host with no such snapshot (`ProductionWithoutActivationSnapshot`) must reject it
-    /// as unlinked, while `Production` admits it.
-    #[test]
-    fn activation_snapshot_member_is_rejected_without_snapshot() {
-        let source = "pub fn tables() = sys.catalog.tables | count();";
-        let input = [ModuleInput::new("main.orna", source)];
-        let with_snapshot = analyze_with_providers(
-            &input,
-            &Catalogue::empty(),
-            SystemProviders::Production,
-        );
-        assert!(
-            with_snapshot.is_ok(),
-            "{:#?}",
-            diagnostic_texts(&with_snapshot.diagnostics)
-        );
-        let without_snapshot = analyze_with_providers(
-            &input,
-            &Catalogue::empty(),
-            SystemProviders::ProductionWithoutActivationSnapshot,
-        );
-        assert_eq!(
-            diagnostic_texts(&without_snapshot.diagnostics),
-            [unlinked("portable system relation `sys.catalog.tables`")],
         );
     }
 
