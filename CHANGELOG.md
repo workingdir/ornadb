@@ -9,7 +9,7 @@ been published.
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
-- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so REPL transactions with bound registries no longer declare `None`; `declared_effects` takes that boolean.
+- `SysHostBindingRegistry` reports `ExternalPossible` from `may_reach_external_state()`, so bound-registry evaluations no longer declare `None`; `declared_effects` takes that boolean. The REPL declaration is now truthful, but the REPL commit path does not yet persist declared effects to the request ledger and writes no controlled marker or rollback proof, so the REPL cannot produce `RollbackProven` today; routing REPL commits through the ledger is tracked by ornadb-rg5g.
 - `ControlledEffectToken` is a proof a declaration was made, not a verification; trust rests on callers declaring truthfully.
 
 ### Fixes

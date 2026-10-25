@@ -57,7 +57,7 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
-        // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`.
+        // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`. Persistence to the ledger is not wired (ornadb-rg5g).
         let declared = repl_declared_effects(effects.bindings);
         let activation = effects
             .mutations
@@ -909,9 +909,10 @@ fn restore_contextual_blob_values(
 
 /// The effect set declared for one REPL transaction. Every REPL evaluation runs
 /// under a bound registry. `may_reach_external_state` is currently constant `true`
-/// (environment reads are always external), so this always yields `ExternalPossible`;
-/// the declaration is still routed through the registry so a future provider-aware
-/// answer changes it in one place.
+/// (environment reads are always external), so this always yields `ExternalPossible`.
+/// The declaration is truthful, but the REPL commit path does not yet persist it to
+/// the request ledger (tracked by ornadb-rg5g); this helper only maps the registry
+/// answer to the declared effect set.
 pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
     crate::declared_effects(bindings.may_reach_external_state())
 }
@@ -921,7 +922,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repl_bound_registry_declares_external_possible() {
+    fn repl_declared_effects_maps_bound_registry_to_external_possible() {
         let bindings = SysHostBindingRegistry::default();
         assert!(matches!(
             repl_declared_effects(&bindings),
