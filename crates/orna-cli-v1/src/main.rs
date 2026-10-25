@@ -3108,9 +3108,14 @@ fn run_repl_input(
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
     let (value, successor, activation) = match evaluation {
         Ok(result) => result,
-        Err(error) => {
+        Err(failure) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error).into());
+            let message = if failure.external_effects_possible {
+                REPL_EFFECT_UNCERTAIN.to_owned()
+            } else {
+                repl_application_error(failure.error)
+            };
+            return Err(message.into());
         }
     };
     if activation.mutations().is_empty() {
@@ -5601,5 +5606,29 @@ mod repl_request_effect_tests {
         ] {
             assert_commit_fault_reports_uncertain(point);
         }
+    }
+
+    #[test]
+    fn repl_pure_evaluation_failure_keeps_its_evaluator_code() {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            "1 / 0",
+        )
+        .err()
+        .expect("the division by zero fails");
+        assert_eq!(
+            failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "a failure with no external effect keeps the evaluator code"
+        );
     }
 }
