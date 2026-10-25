@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna mount status --json` reports `writable`, `read_only`, and the unresolved
+  draft list (`unresolved_drafts` with path and detail, plus `draft_error`). A
+  mount opened by `mount` in the current directory is recorded and reopened as
+  writable, so status and later operations see its writability rather than
+  assuming read-only.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
