@@ -2,7 +2,8 @@ use orna_conformance_v1::{SourceUnit, StageOutcome, TransactionalEvaluator};
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
 use orna_semantic_v1::{
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, ModuleInput, analyze,
+    Catalogue, DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, ModuleInput, analyze,
+    analyze_with_catalogue,
 };
 
 const RUNTIME_FIXTURE: &str = include_str!("fixtures/assert-evidence-batch-two/runtime-boundaries.orna");
@@ -63,7 +64,10 @@ fn assert_014_table_assertion_failure_rolls_back_all_candidate_writes() {
 // Specified: ORNA-ASSERT-021.
 fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
     let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
-    let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("cross-table-assertion.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().flat_map(|plans| plans.iter()).collect::<Vec<_>>();
     assert_eq!(plans.len(), 1);
