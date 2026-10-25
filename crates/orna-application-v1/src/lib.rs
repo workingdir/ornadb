@@ -70,7 +70,7 @@ mod repl_transaction;
 mod browser_profile;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
-pub use repl_transaction::ReplTransactionScope;
+pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;
 pub use format3_store::{Format3TableSchemaError, StagedRelations, build_format3_store_relations};
 
