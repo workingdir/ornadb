@@ -5,15 +5,19 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- A project that imports `std` and `sys.Storage` now runs `use std.<module>.{name}`
-  calls through the production authority route (`orna invoke`). The route is taken
-  only when the project uses std and the admitted entry requires publication
-  metadata; other std projects keep their previous path. The authority admits the
-  captured standard dependency's function bodies, so a standard function is callable
-  from the importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
-  Glob imports (`use std.<module>.*`) bind the module's public exports; `use std.<module>
-  as _` binds only the names the module records in its prelude; a named alias binds no
-  names. A standard body calls its own module helpers, never a user function of the same name.
+- A project that imports `std` and whose source text contains `sys.Storage` or
+  `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
+  authority route (`orna invoke`). The gate is a substring match on the admitted source
+  text (`requires_publication_metadata`); a project that imports std but does not contain
+  either name keeps its previous path, unchanged. The authority admits the captured
+  standard dependency's function bodies, so a standard function is callable from the
+  importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
+  Glob imports (`use std.<module>.*`) bind every public function of the module
+  (ORNA-IMPORT-003). `use std.<module> as _` binds only the names the module records in its
+  prelude. A module alias (`use std.<module> as <name>`, or a bare `use std.<module>;`
+  bound to a name) is refused at admission with `UnsupportedImport` ("qualified std module
+  alias not supported on this route"). A standard body calls its own module helpers, never a
+  user function of the same name.
 
 - The language server's semantic rename keeps a table or field's object identity.
   Owner-visible behaviour: on save, the editor writes to the git index. The index
