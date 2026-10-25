@@ -18,8 +18,10 @@ been published.
 ### Added
 - Format-2 Blob read API (not yet reachable from a production row read path): `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record or a ROV-2 CBOR reference (authority `ORNA-ROW-013`, `ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. Content per call is capped at 8 MiB (`ORNA-BLOB-011`); the effective limit is the smaller of the caller's limit and that cap. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. The ORR-2, ROV-2 and OGB-1 clause IDs in the code are superseded draft IDs, not final-spec clauses. Loose-row and compact-v2 physical row decoders are not part of this change. `ornadb-nne7` remains open.
 
+### Changed
+- Test-expectation migration (ornadb-0im9): bare root intrinsic names (`sort_by`, `every`, `sum`, `min`, `max`, ...) resolve without a standard profile (09-standard-library L7), so the five finite-list tests that expected them unresolved now assert `is_ok`; their qualified `std.collection` assertions remain unresolved without a profile. Added signature regression table `root_intrinsic_calls_are_checked_against_their_signatures` (arity, argument types, callback arity/return; bad calls report `ORNA-S021-TYPE`). Known-red entries for those tests are removed.
+
 ### Fixes
-- Root intrinsics (`sort_by`, `every`, `filter`, `one`, `take`, `union`, `sum`, `min`, `max`, ...) are now pinned by one signature regression table (`root_intrinsic_calls_are_checked_against_their_signatures`) covering arity, argument types and callback arity/return; bad calls report `ORNA-S021-TYPE` (ornadb-0im9). Bare root intrinsic names resolve without a standard profile (09-standard-library L7); the five finite-list tests that expected them unresolved now assert that, and their known-red entries are removed.
 - Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)
   for tuple-typed fields, where it previously failed with `ORNA-CONFORMANCE-ROW-TYPE`.
   Stale conformance and application test expectations were migrated to
