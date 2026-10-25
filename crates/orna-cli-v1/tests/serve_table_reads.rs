@@ -411,6 +411,47 @@ fn corrupt_committed_table_is_refused_without_a_value() {
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
-    assert!(body.contains("serve."), "a coded refusal: {body}");
+    // Every store file is overwritten, so the identity inventory is unreadable
+    // and fails before any committed row is read; no value is served.
+    assert!(
+        body.contains("serve.table_identity_unavailable"),
+        "body: {body}"
+    );
+    assert!(!body.contains(": Int"), "no partial value: {body}");
+}
+
+const BLOB_SOURCE: &str = "pub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve() = media | count();\n";
+
+#[test]
+fn committed_blob_rows_are_refused_without_a_value() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, BLOB_SOURCE);
+    let pixel = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/media/pixel.png"
+    ))
+    .expect("read the pixel fixture");
+    fs::write(root.join("pixel.png"), &pixel).expect("place the captured file");
+    let root_text = root.to_string_lossy();
+    let stored = orna_repl(
+        &root,
+        &format!(
+            "let raw = sys.blob.capture_file({root_text:?}, \"pixel.png\", 65536);\nlet image = sys.blob.annotate(raw, \"image/png\");\nmain.store(\"one\", image).id"
+        ),
+    );
+    assert_success(&stored, "REPL blob insert");
+    assert!(
+        !transcript(&stored).contains("error["),
+        "the REPL accepts the blob row\n{}",
+        transcript(&stored)
+    );
+    publish(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert!(
+        body.contains("serve.table_read_unsupported"),
+        "body: {body}"
+    );
     assert!(!body.contains(": Int"), "no partial value: {body}");
 }

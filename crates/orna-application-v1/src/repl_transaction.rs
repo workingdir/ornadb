@@ -1,8 +1,8 @@
 use super::*;
 use orna_project_v1::{
     admit_format3_row, blob_placeholder, committed_tables, evaluator_rows, has_text_primary_key,
-    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record, CommittedTable,
-    ProjectLoader,
+    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record,
+    CommittedTable, ProjectLoader,
 };
 use orna_repository_v1::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
@@ -200,8 +200,16 @@ fn committed_table_rows(
         return Ok((rows, BTreeMap::new()));
     }
     let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
-    let committed = committed_tables(scope.repository, scope.format_context, commit, tables, table_ids)
-        .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let limits = ApplicationAuthority::committed_read_limits();
+    let committed = committed_tables(
+        scope.repository,
+        scope.format_context,
+        commit,
+        tables,
+        table_ids,
+        limits,
+    )
+    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
     for (table_name, table_schema) in tables {
         let table = committed.get(table_name).ok_or(ApplicationError::InvalidTableMetadata)?;
         let table_rows = evaluator_rows(table, table_schema).map_err(|_| ApplicationError::InvalidTableMetadata)?;
