@@ -2216,7 +2216,10 @@ mod graph_bridge_tests {
             );
             assert_eq!(staged_error.code(), "ORNA-REPO-CONTEXT-004");
 
-            git(root, &["commit", "--quiet", "-m", "legacy marker beside store"]);
+            git(
+                root,
+                &["commit", "--quiet", "-m", "legacy marker beside store"],
+            );
             let refused = repository
                 .open_format_context()
                 .expect_err("the snapshot reader refuses HEAD");
