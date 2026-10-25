@@ -478,15 +478,6 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
             ..ServeOptions::default()
         },
     )?;
-    if state.app.is_none() {
-        // Without a serving entry the Git transport still serves; `/` is absent.
-        let _ = write_diagnostic(
-            &mut io::stderr().lock(),
-            &cli_serve_app::missing_entry_diagnostic(),
-            false,
-            false,
-        );
-    }
     writeln!(
         io::stdout().lock(),
         "Serving {} at http://{} (loopback{})",
@@ -602,7 +593,13 @@ fn admit_serving_entry(
         }
     };
     match cli_serve_app::ServeApp::admit(&project, &catalogue) {
-        Ok(app) => (Some(project), catalogue, app),
+        Ok(app) => {
+            if app.is_none() {
+                // Without a serving entry the Git transport still serves; `/` is absent.
+                report_serving_diagnostic(&cli_serve_app::missing_entry_diagnostic());
+            }
+            (Some(project), catalogue, app)
+        }
         Err(diagnostic) => {
             report_serving_diagnostic(&diagnostic);
             (Some(project), catalogue, None)
@@ -2700,11 +2697,20 @@ mod tests {
             .expect("nested Orna source fixture");
         std::fs::write(directory.path().join("README.txt"), "committed text\n")
             .expect("generic text file");
+        std::fs::write(directory.path().join("<b>&'\"x.txt"), "hostile name")
+            .expect("hostile file name");
         std::fs::write(directory.path().join("src/data.bin"), [0, 255])
             .expect("generic binary file");
         git_succeeds(
             directory.path(),
-            &["add", "--", "main.orna", "src", "README.txt"],
+            &[
+                "add",
+                "--",
+                "main.orna",
+                "src",
+                "README.txt",
+                "<b>&'\"x.txt",
+            ],
         );
         git_succeeds(
             directory.path(),
@@ -2731,9 +2737,6 @@ mod tests {
 
         let root = listing_page(directory.path(), "/");
         assert_eq!(root.status, 404, "no native root page without serve");
-        let root = String::from_utf8(root.body).expect("root body");
-        assert!(!root.contains("render &lt;listing&gt; safely"));
-        assert!(!root.contains("Branches"));
 
         let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
         assert_eq!(tree.status, 200);
@@ -2742,6 +2745,14 @@ mod tests {
         assert!(tree.contains(&format!("/blob/{commit_id}/main.orna")));
         assert!(tree.contains(&format!("/blob/{commit_id}/README.txt")));
         assert!(!tree.contains("uncommitted.txt"));
+        assert!(
+            tree.contains("&lt;b&gt;&amp;&#39;&quot;x.txt"),
+            "tree names are escaped: {tree}"
+        );
+        assert!(
+            !tree.contains("<b>&'\"x.txt"),
+            "raw hostile name must not render: {tree}"
+        );
 
         let nested_tree = listing_page(directory.path(), &format!("/tree/{commit_id}/src/"));
         assert_eq!(nested_tree.status, 200);

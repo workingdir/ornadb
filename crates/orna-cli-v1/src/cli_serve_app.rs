@@ -49,12 +49,18 @@ impl ServeApp {
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) => Ok(None),
             Err(ApplicationError::MissingEntry(_)) => Ok(None),
-            Err(error) => Err(Diagnostic::target_with_detail(
-                "E2101",
-                "serving module failed semantic analysis",
-                "fix the first reported source contract error in main.orna, then retry `serve`",
-                error.to_string(),
-            )),
+            Err(error) => {
+                let detail = match &error {
+                    ApplicationError::Semantic(codes) => format!("{error}: {}", codes.join(", ")),
+                    _ => error.to_string(),
+                };
+                Err(Diagnostic::target_with_detail(
+                    "E2101",
+                    "serving module failed semantic analysis",
+                    "fix the first reported source contract error in main.orna, then retry `serve`",
+                    detail,
+                ))
+            }
         }
     }
 
@@ -104,10 +110,7 @@ pub(super) fn serving_entry_route(
     Some(response)
 }
 
-fn serving_entry_route_inner(
-    app: Option<&Mutex<ServeApp>>,
-    request: &Request,
-) -> Option<Response> {
+fn serving_entry_route_inner(app: Option<&Mutex<ServeApp>>, request: &Request) -> Option<Response> {
     let app = app?;
     if request.path != "/" {
         return None;

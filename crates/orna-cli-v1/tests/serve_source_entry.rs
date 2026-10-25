@@ -269,6 +269,8 @@ fn semantic_broken_main_reports_and_git_transport_still_serves() {
     let (_server, address, stderr) = start_server_with_stderr(project.path());
     assert!(stderr.contains("E2101"), "stderr: {stderr}");
     assert!(stderr.contains("serving module failed semantic analysis"), "stderr: {stderr}");
+    assert!(!stderr.contains("E2102"), "stderr: {stderr}");
+    assert!(stderr.contains("ORNA-S021-TYPE"), "stderr: {stderr}");
     let (status, _) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 404);
     let clone_root = tempfile::tempdir().expect("clone root");
