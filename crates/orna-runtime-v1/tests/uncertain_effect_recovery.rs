@@ -21,7 +21,8 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ActivationEffectReport, DeclaredEffectSet, FaultInjector, FaultPoint, RecoveryDisposition,
+    ActivationEffectReport, ControlledEffectToken, DeclaredEffectSet, FaultInjector, FaultPoint,
+    RecoveryDisposition,
     RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState,
     TableMutation, TerminalOutcome,
 };
@@ -44,7 +45,8 @@ const FINGERPRINT: [u8; 32] = [6; 32];
 const SIGABRT: i32 = 6;
 const ROLLBACK_PROVEN: &str = "rollback-proven";
 const EFFECTS_UNCERTAIN: &str = "external-effects-uncertain";
-const UNREPORTED_ROLLBACK_TEST: &str = "unreported_rollback_before_the_kill_is_never_proven";
+const UNREPORTED_ROLLBACK_TEST: &str =
+    "explicit_external_possible_rollback_before_the_kill_is_never_proven";
 
 /// Which request-level crash the re-executed child performs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,7 +243,13 @@ fn controlled_rollback_child(repository_path: &Path) {
             .await
             .expect("start owned request");
         state
-            .record_controlled_transaction(request(), FINGERPRINT, owner)
+            .record_controlled_transaction(
+                request(),
+                FINGERPRINT,
+                owner,
+                &ControlledEffectToken::from_declaration(DeclaredEffectSet::None)
+                    .expect("a None declaration yields the controlled token"),
+            )
             .await
             .expect("record controlled transaction");
         let context = state.begin_activation().await.expect("capture activation");
@@ -544,7 +552,7 @@ fn controlled_rollback_before_the_kill_is_the_only_proven_rollback() {
 }
 
 #[test]
-fn unreported_rollback_before_the_kill_is_never_proven() {
+fn explicit_external_possible_rollback_before_the_kill_is_never_proven() {
     if child_scenario() == Some(Scenario::UnreportedRollbackThenKill) {
         unreported_rollback_child(&child_repository());
     }

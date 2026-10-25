@@ -64,7 +64,21 @@ impl PartialEq for SysHostBindingRegistry {
 
 impl Eq for SysHostBindingRegistry {}
 
+/// Environment reads are conservatively external (ORNA-CAP-005): every
+/// registry binds the environment provider, and its snapshot is host state
+/// outside Orna's table transaction, so no bound registry is effect-free.
+const ENVIRONMENT_READS_ARE_EXTERNAL: bool = true;
+
 impl SysHostBindingRegistry {
+    /// Whether evaluation under this registry may reach state outside Orna's
+    /// table transaction (ORNA-CAP-005). A registry is never effect-free: the
+    /// environment provider is always bound and its reads are external. An
+    /// evaluation with no registry at all is the only effect-free shape.
+    #[must_use]
+    pub fn may_reach_external_state(&self) -> bool {
+        ENVIRONMENT_READS_ARE_EXTERNAL
+    }
+
     /// Links the baked environment role to its native provider and a caller
     /// supplied, already allowlisted environment snapshot.
     #[must_use]

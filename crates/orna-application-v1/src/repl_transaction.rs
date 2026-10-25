@@ -57,7 +57,8 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
-        let declared = crate::declared_effects(EffectHandler::sys_host_context(&effects).is_some());
+        // The REPL evaluation always runs under its bound registry, whose environment provider and host providers may reach external state.
+        let declared = crate::declared_effects(effects.bindings.may_reach_external_state());
         let activation = effects
             .mutations
             .into_staged_activation(

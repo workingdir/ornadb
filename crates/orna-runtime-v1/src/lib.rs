@@ -2746,11 +2746,12 @@ pub enum DeclaredEffectSet {
     ExternalPossible,
 }
 
-/// Proof that an activation declared an effect set of `None`: its table
-/// writes are the sole effects it can perform. It can only be produced by
-/// declaring that set, so no other path writes the positive controlled
-/// marker. The private field keeps struct literals outside this module
-/// impossible.
+/// Proof that a caller declared [`DeclaredEffectSet::None`] for one
+/// activation or request transaction. It is not verification: the runtime
+/// cannot observe the effects a caller performs, so trust rests on callers
+/// declaring truthfully. The private field keeps struct literals outside this
+/// module impossible; the value is obtained only via
+/// [`ControlledEffectToken::from_declaration`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlledEffectToken(());
 
@@ -12768,15 +12769,18 @@ impl RuntimeState {
     }
 
     /// Durably records that this owner entered a request transaction that the
-    /// runtime expected to be Orna-controlled. The marker is tied to the exact
-    /// request fingerprint and owner, but it is not a rollback receipt: crash
-    /// recovery remains uncertain until a durable transaction-boundary proof
-    /// exists.
+    /// runtime expected to be Orna-controlled. The caller must hold a
+    /// [`ControlledEffectToken`], which proves only that a declaration of no
+    /// external effects was made for this transaction; the runtime does not
+    /// verify that declaration. The marker is tied to the exact request
+    /// fingerprint and owner, but it is not a rollback receipt: crash recovery
+    /// remains uncertain until a durable transaction-boundary proof exists.
     pub async fn record_controlled_transaction(
         &self,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
         owner: WriterLease,
+        _declared: &ControlledEffectToken,
     ) -> Result<(), RuntimeError> {
         validate_request_identity(identity)?;
         validate_id(owner.owner_id)?;
@@ -22129,6 +22133,10 @@ mod tests {
     }
     fn outcome(value: u8) -> TerminalOutcome {
         TerminalOutcome::new(vec![value]).unwrap()
+    }
+    fn controlled_token() -> ControlledEffectToken {
+        ControlledEffectToken::from_declaration(DeclaredEffectSet::None)
+            .expect("a None declaration yields the controlled token")
     }
     fn git(path: &Path, args: &[&str]) {
         assert!(
@@ -50616,7 +50624,7 @@ mod tests {
                 .unwrap();
         }
         state
-            .record_controlled_transaction(controlled, digest(8), owner)
+            .record_controlled_transaction(controlled, digest(8), owner, &controlled_token())
             .await
             .unwrap();
         state
@@ -50769,7 +50777,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .record_controlled_transaction(identity, fingerprint, owner)
+            .record_controlled_transaction(identity, fingerprint, owner, &controlled_token())
             .await
             .unwrap();
         let completed = state
