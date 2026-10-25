@@ -2577,6 +2577,56 @@ impl Repository {
         self.commit_optional("HEAD^{commit}")
     }
 
+    /// The content of the single index entry for `path`, or `None` when the
+    /// path is not in the index. A conflicted path (several stages) is an error.
+    pub fn index_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"]).arg(path);
+        let output = self.run(command)?.stdout;
+        let records = output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => {
+                let header = record
+                    .split(|byte| *byte == b'\t')
+                    .next()
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = header
+                    .split(|byte| *byte == b' ')
+                    .nth(1)
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+                Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+            }
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// The content of `path` in `HEAD`, or `None` when `HEAD` has no such path
+    /// or the repository has no commit yet.
+    pub fn head_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        if self.head()?.is_none() {
+            return Ok(None);
+        }
+        let output = self.git_bytes(["ls-tree", "-z", "HEAD", "--", path])?;
+        let Some(record) = output.split(|byte| *byte == 0).find(|record| !record.is_empty()) else {
+            return Ok(None);
+        };
+        let header = record
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = header
+            .split(|byte| *byte == b' ')
+            .nth(2)
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+    }
+
     /// Lists the newest commits reachable from `HEAD`, newest first.
     ///
     /// The count and output size are bounded before Git output is accumulated.
