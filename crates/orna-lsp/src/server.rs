@@ -201,6 +201,8 @@ struct ServerState {
     diagnostics: Option<DiagnosticsWorker>,
     /// Answers requests; absent in tests, which call `dispatch` directly.
     requests: Option<RequestPool<RequestContext>>,
+    /// Sends messages to the client; absent in tests.
+    client: Option<Arc<dyn Fn(Message) + Send + Sync>>,
 }
 
 impl ServerState {
@@ -209,6 +211,21 @@ impl ServerState {
             context: RequestContext::default(),
             diagnostics: None,
             requests: None,
+            client: None,
+        }
+    }
+
+    /// Shows the client an error the user must see, as `window/showMessage`.
+    fn show_error(&self, message: &str) {
+        if let Some(client) = &self.client {
+            let params = lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::ERROR,
+                message: message.to_owned(),
+            };
+            client(Message::Notification(Notification {
+                method: "window/showMessage".to_owned(),
+                params: serde_json::to_value(params).unwrap_or_default(),
+            }));
         }
     }
 
@@ -276,6 +293,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let _ = sender.send(message);
         }),
     ));
+    let sender = connection.sender.clone();
+    state.client = Some(Arc::new(move |message| {
+        let _ = sender.send(message);
+    }));
 
     for message in &connection.receiver {
         match message {
@@ -551,7 +572,9 @@ fn handle_notification(state: &mut ServerState, notification: Notification) -> b
                 serde_json::from_value::<lsp_types::DidSaveTextDocumentParams>(notification.params)
             {
                 let uri = params.text_document.uri;
-                persist_pending_rename_identity(&state.context, &uri);
+                if let Err(error) = persist_pending_rename_identity(&state.context, &uri) {
+                    state.show_error(&format!("cannot save rename identity: {error}"));
+                }
                 // Saved files are read from disk for closed modules.
                 state.context.views.invalidate();
                 if let Some(open) = state.context.documents.get(&uri) {
@@ -863,20 +886,22 @@ fn request_document_highlights(
     Ok(serde_json::to_value(highlights)?)
 }
 
+/// The table or field identity rename a rename request implies. `Ok(None)`
+/// when the file is outside a repository or the rename changes no identity.
 fn identity_rename_for_request(
     state: &RequestContext,
     uri: &Uri,
     position: Position,
     new_name: &str,
-) -> Option<ObjectIdentityRename> {
-    let document = state.document(uri)?;
-    let url = url::Url::parse(uri.as_str()).ok()?;
-    let path = url.to_file_path().ok()?;
-    let repository = Repository::discover(&path).ok()?;
-    let root = repository.worktree();
-    let relative = path.strip_prefix(root).ok()?;
+) -> Result<Option<ObjectIdentityRename>, String> {
+    let Some(document) = state.document(uri) else { return Ok(None); };
+    let Ok(url) = url::Url::parse(uri.as_str()) else { return Ok(None); };
+    let Ok(path) = url.to_file_path() else { return Ok(None); };
+    // Outside a repository there is no identity store to keep.
+    let Ok(repository) = Repository::discover(&path) else { return Ok(None); };
+    let Ok(relative) = path.strip_prefix(repository.worktree()) else { return Ok(None); };
     let logical_path = relative.to_string_lossy().replace('\\', "/");
-    let old_name = identifier_at(&document.text, position)?;
+    let Some(old_name) = identifier_at(&document.text, position) else { return Ok(None); };
     let namespace = module_namespace(&logical_path);
     let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
     let table = qualify(&old_name);
@@ -886,7 +911,7 @@ fn identity_rename_for_request(
     if pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).any(|rename| {
         rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table
     }) {
-        return Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name)));
+        return Ok(Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name))));
     }
 
     let suffix = format!(".{old_name}");
@@ -897,42 +922,60 @@ fn identity_rename_for_request(
             && target[..target.len() - suffix.len()].starts_with(&namespace)
     });
     if let Some(rename) = pending_fields.next() {
-        if pending_fields.next().is_some() { return None; }
+        if pending_fields.next().is_some() { return Ok(None); }
         let current = rename.new_qualified_name();
         let parent = &current[..current.len() - old_name.len()];
-        return Some(ObjectIdentityRename::new(
+        return Ok(Some(ObjectIdentityRename::new(
             ObjectKind::Field, current, format!("{parent}{new_name}"),
-        ));
+        )));
     }
 
-    let previous = ObjectIdentityManifest::read_worktree(&repository).ok()??;
-    let (kind, old_qualified, new_qualified) = if previous.id(ObjectKind::Table, &table).is_some() {
-        (ObjectKind::Table, table, qualify(new_name))
-    } else {
-        let mut matches = previous.records().iter().filter(|record| {
-            !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
-                && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
-        });
-        let record = matches.next()?;
-        if matches.next().is_some() { return None; }
-        let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
-        (ObjectKind::Field, record.qualified_name().to_owned(), format!("{parent}{new_name}"))
-    };
-    Some(ObjectIdentityRename::new(kind, old_qualified, new_qualified))
+    let Some(previous) = staged_identities(&repository)? else { return Ok(None); };
+    if previous.id(ObjectKind::Table, &table).is_some() {
+        return Ok(Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name))));
+    }
+    let mut matches = previous.records().iter().filter(|record| {
+        !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
+            && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
+    });
+    let Some(record) = matches.next() else { return Ok(None); };
+    if matches.next().is_some() { return Ok(None); }
+    let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
+    Ok(Some(ObjectIdentityRename::new(
+        ObjectKind::Field,
+        record.qualified_name().to_owned(),
+        format!("{parent}{new_name}"),
+    )))
 }
 
-fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) {
-    let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else { return; };
-    let Ok(url) = url::Url::parse(uri.as_str()) else { return; };
-    let Ok(path) = url.to_file_path() else { return; };
-    let Some(open) = state.documents.get(uri) else { return; };
+/// Reads the identity inventory the staged index carries, refusing a store
+/// that is not retained, so renames never write to an unverified store.
+fn staged_identities(repository: &Repository) -> Result<Option<ObjectIdentityManifest>, String> {
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| format!("{error:?}"))?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| format!("{error:?}"))?;
+    ObjectIdentityManifest::read_staged(repository, &staged).map_err(|error| format!("{error:?}"))
+}
+
+/// Saves the identity renames the saved source applies, into the staged store.
+fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<(), String> {
+    let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else { return Ok(()); };
+    let url = url::Url::parse(uri.as_str()).map_err(|error| format!("{error:?}"))?;
+    let path = url.to_file_path().map_err(|()| format!("{uri:?} is not a file"))?;
+    let Some(open) = state.documents.get(uri) else { return Ok(()); };
     let saved_version = open.document.version;
-    let Ok(saved_text) = std::fs::read_to_string(&path) else { return; };
-    if saved_text != open.document.text { return; }
-    let Ok(repository) = Repository::discover(&path) else { return; };
-    let Ok(project) = ProjectLoader::default().load(&repository) else { return; };
+    let saved_text = std::fs::read_to_string(&path).map_err(|error| format!("{error:?}"))?;
+    if saved_text != open.document.text { return Ok(()); }
+    let repository = Repository::discover(&path).map_err(|error| format!("{error:?}"))?;
+    let project = ProjectLoader::default()
+        .load(&repository)
+        .map_err(|error| format!("{error:?}"))?;
     let modules = project.into_modules();
-    let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return; };
+    let previous = staged_identities(&repository)?
+        .ok_or_else(|| "the staged object identities are missing".to_owned())?;
     let applicable = chains.into_iter().filter_map(|chain| {
         let first = chain.first()?;
         // Intermediate destinations are not in the saved source, so the
@@ -947,17 +990,25 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) {
                 first.rename.old_qualified_name(),
                 step.rename.new_qualified_name(),
             );
-            ObjectIdentityManifest::reconcile_with_renames(
-                &modules, Some(&previous), std::slice::from_ref(&rename),
-            )
-            .ok()
-            .map(|_| rename)
+            previous
+                .with_renames(&modules, std::slice::from_ref(&rename))
+                .ok()
+                .map(|_| rename)
         })
     }).collect::<Vec<_>>();
-    if applicable.is_empty() { return; }
-    let _ = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
-        &repository, &modules, &applicable,
-    );
+    if applicable.is_empty() { return Ok(()); }
+    let next = applicable.iter().try_fold(previous, |manifest, rename| {
+        manifest
+            .with_renames(&modules, std::slice::from_ref(rename))
+            .map_err(|error| format!("{error:?}"))
+    })?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| format!("{error:?}"))?;
+    repository
+        .stage_object_identities(&staged, &next.to_stored(), &[])
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
 }
 
 fn mark_applied_identity_rename(state: &RequestContext, uri: &Uri, version: i32, text: &str) {
@@ -1017,6 +1068,7 @@ fn request_rename(
     }
     let changes = workspace_changes(&workspace, &edits);
     if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name)
+        .map_err(RequestFailed)?
         && let Some(document) = state.document(&uri)
         && let Some(expected_text) = changes
             .get(&uri)
@@ -2005,7 +2057,7 @@ mod rename_request_tests {
 mod persisted_object_rename_tests {
     use super::*;
     use orna_semantic_v1::ModuleInput;
-    use std::{fs, process::Command};
+    use std::{fs, path::{Path, PathBuf}, process::Command};
 
     fn notify(state: &mut ServerState, notification: Notification) {
         handle_notification(state, notification);
@@ -2054,25 +2106,63 @@ mod persisted_object_rename_tests {
         renamed_source
     }
 
-    #[test]
-    fn sequential_unsaved_renames_preserve_original_object_identity() {
+    fn git(directory: &Path, args: &[&str]) {
+        assert!(Command::new("git").args(args).current_dir(directory).status().unwrap().success());
+    }
+
+    /// A format-3 repository whose index stages `main.orna` as `source`, with
+    /// the identity inventory `orna commit` would stage for it.
+    fn format3_fixture(source: &str) -> (tempfile::TempDir, Repository, PathBuf, ObjectIdentityManifest) {
         let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
+        let repository = orna_repository_v1::initialize_repository(directory.path())
             .unwrap()
-            .success());
-        let source = "pub table Media(id: Str) { payload: Blob, }";
+            .into_repository();
         let source_path = directory.path().join("main.orna");
         fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
+        git(directory.path(), &["add", "main.orna", ".orna/database.orna"]);
         let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let initial = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let staged = repository.capture_staged_candidate().unwrap();
+        repository.stage_object_identities(&staged, &initial.to_stored(), &[]).unwrap();
+        (directory, repository, source_path, initial)
+    }
+
+    /// The identity inventory the staged index carries now.
+    fn staged_manifest(repository: &Repository) -> ObjectIdentityManifest {
+        let staged = repository.capture_staged_candidate().unwrap();
+        ObjectIdentityManifest::read_staged(repository, &staged).unwrap().unwrap()
+    }
+
+    fn file_uri(path: &Path) -> Uri {
+        url::Url::from_file_path(path).unwrap().as_str().parse::<Uri>().unwrap()
+    }
+
+    /// Records every message the server sends to its client.
+    fn capture_client(state: &mut ServerState) -> Arc<Mutex<Vec<Message>>> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&messages);
+        state.client = Some(Arc::new(move |message| lock(&sink).push(message)));
+        messages
+    }
+
+    /// The error messages shown to the client, as `window/showMessage`.
+    fn shown_errors(messages: &Mutex<Vec<Message>>) -> Vec<String> {
+        lock(messages).iter().filter_map(|message| match message {
+            Message::Notification(notification) if notification.method == "window/showMessage" => {
+                let params: lsp_types::ShowMessageParams =
+                    serde_json::from_value(notification.params.clone()).unwrap();
+                (params.typ == lsp_types::MessageType::ERROR).then_some(params.message)
+            }
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn sequential_unsaved_renames_preserve_original_object_identity() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
@@ -2081,29 +2171,16 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &vault_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
     }
 
     #[test]
     fn declined_followup_rename_saves_latest_applied_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
@@ -2114,29 +2191,16 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
 
     #[test]
     fn fully_applied_rename_chain_with_reused_intermediate_name_keeps_id_at_final_target() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
@@ -2153,29 +2217,17 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
         assert_ne!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
+
     #[test]
     fn unrelated_declaration_matching_declined_target_does_not_steal_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
@@ -2194,30 +2246,16 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
         assert_ne!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
     }
+
     #[test]
     fn sequential_rename_chain_not_saved_does_not_persist_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        let original_bytes = fs::read(&manifest_path).unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
@@ -2225,35 +2263,20 @@ mod persisted_object_rename_tests {
         apply_rename(&mut state, &uri, "Vault", 3);
         did_save(&mut state, &uri);
 
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
-        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
+        assert_eq!(staged_manifest(&repository), initial);
     }
 
     #[test]
     fn rename_preserves_object_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
         let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        assert_eq!(staged_manifest(&repository), initial);
 
         let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         let edits = workspace_edit.changes.unwrap().remove(&uri).unwrap();
@@ -2268,41 +2291,53 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &renamed_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
-        assert!(manifest_path.is_file());
     }
 
     #[test]
     fn declined_or_lost_rename_response_does_not_persist_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        let original_bytes = fs::read(&manifest_path).unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
         let lost_response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert!(!lost_response.is_null());
         drop(lost_response);
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        assert_eq!(staged_manifest(&repository), initial);
         did_save(&mut state, &uri);
 
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
-        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn rename_request_fails_when_staged_identities_are_unreadable() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, _repository, source_path, _initial) = format3_fixture(source);
+        git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        open_document(&mut state, &uri, source);
+
+        assert!(request_rename(&state.context, rename_request(uri, "Archive")).is_err());
+    }
+
+    #[test]
+    fn failed_identity_persist_is_reported_to_client() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        assert_eq!(shown_errors(&messages).len(), 1);
     }
 }
