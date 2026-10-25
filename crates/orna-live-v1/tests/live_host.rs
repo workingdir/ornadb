@@ -5476,7 +5476,6 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
-    let updater = open_durable_state(&repository);
     let session = [1; 16];
     let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
     let reserved_request = eval_with_context(session, [81; 16], [2; 16], None);
@@ -5515,6 +5514,9 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     .unwrap();
 
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let updater = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let mut issuer = Issuer(1, None);
     let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
@@ -12137,13 +12139,17 @@ fn delete_cancels_durable_session_work_before_returning_success() {
         Some(status) if status.state == orna_runtime_v1::RequestState::Running
     ));
 
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         second_identity,
         second_fingerprint,
         lease,
         TerminalOutcome::new(second_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
     let second_status_request = Envelope {
         request: Some([93; 16]),
         watch: None,
@@ -12465,13 +12471,17 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
 
     let first_result = unit_result([91; 16], first_fingerprint);
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         first_identity,
         first_fingerprint,
         lease,
         TerminalOutcome::new(first_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
     let exact_retry = block_on(host.dispatch_frame(
         [6; 16],
         3,
@@ -14487,13 +14497,17 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     assert_eq!(running_retry, first_mismatch);
 
     let target_result = unit_result([91; 16], target_fingerprint);
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         target_identity,
         target_fingerprint,
         lease,
         TerminalOutcome::new(target_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
 
     // The reference requires this ID/input collision to fail, but is silent
     // on replay after the existing operation becomes terminal. Preserve the
