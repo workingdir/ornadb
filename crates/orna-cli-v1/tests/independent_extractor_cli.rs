@@ -118,6 +118,20 @@ fn extracted_field(row: &Value, index: u64) -> &Value {
 #[tokio::test]
 async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() {
     let (directory, repository, relation_id) = empty_format3_repository();
+    // Transitional (bead ornadb-5il1.413): the format-3 fixture commits the
+    // legacy .orna/object-identities.cbor sidecar, and the product's publish
+    // carries it into HEAD. ORNA-META-001 forbids that tracked entry, and this
+    // extractor rejects it. Drop the tracked sidecar here, before any runtime
+    // or publish step reads the repository, so the snapshot this test exports
+    // satisfies the format-3 rule.
+    git(
+        directory.path(),
+        &["rm", "--quiet", "--", ".orna/object-identities.cbor"],
+    );
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "drop legacy identity sidecar"],
+    );
     let source = TempDir::new().unwrap();
     for name in ["tone.wav", "pixel.png"] {
         std::fs::copy(
