@@ -3,14 +3,13 @@
 //! `orna serve` admits the project's `main.orna` module and invokes its
 //! `serve` function for `GET /`. The invocation is staged and read-only: a
 //! `serve` that attempts a table write is refused, and nothing is committed.
-//! Without that entry the server keeps its Git transport, installs no page at
-//! `/`, and reports the absence once at startup.
+//! `serve` reads of tables are NOT delivered here; they are tracked by
+//! ornadb-03ol. Without that entry the server keeps its Git transport, installs
+//! no page at `/`, and reports the absence once at startup.
 
 use super::*;
 use orna_application_v1::{AdmittedApplication, ApplicationAuthority, ApplicationError};
 use orna_evaluator_v1::{Environment, Limits};
-use orna_live_v1::RuntimeReader;
-use orna_runtime_v1::RuntimeTableIdentity;
 
 /// Repository-relative module that hosts the serving entry.
 pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
@@ -21,9 +20,6 @@ pub(super) const SERVE_ENTRY: &str = "serve";
 pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     admitted: AdmittedApplication,
-    /// The clone's durable runtime. `serve` reads stored rows through one
-    /// activation snapshot of it; `None` refuses the request (never empty tables).
-    runtime: Option<RuntimeReader>,
 }
 
 impl ServeApp {
@@ -49,7 +45,6 @@ impl ServeApp {
             Ok(admitted) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
                 admitted,
-                runtime: None,
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) => Ok(None),
@@ -63,85 +58,21 @@ impl ServeApp {
         }
     }
 
-    /// Installs the clone's durable runtime, the handle that table reads use.
-    pub(super) fn with_runtime(mut self, runtime: Option<RuntimeReader>) -> Self {
-        self.runtime = runtime;
-        self
-    }
-
-    /// Table identities of the admitted application that have a stable object id.
-    fn table_identities(&self) -> Result<Vec<RuntimeTableIdentity>, orna_runtime_v1::RuntimeError> {
-        self.admitted
-            .table_schemas()
-            .iter()
-            .filter_map(|(name, table)| {
-                table
-                    .object_id()
-                    .map(|id| RuntimeTableIdentity::new(name.clone(), id))
-            })
-            .collect()
-    }
-
-    /// Invokes `serve` read-only over one activation snapshot of the clone's
-    /// stored rows, and renders its value as the `GET /` body.
+    /// Invokes `serve` read-only and renders its value as the `GET /` body.
+    /// A `serve` that stages any table mutation is refused.
     fn respond(&self) -> Response {
-        let evaluation_failed = || {
-            Response::new(
-                500,
-                "application/json",
-                br#"{"error":"serve.evaluation_failed"}"#.to_vec(),
-            )
-        };
-        let Some(runtime) = self.runtime.as_ref() else {
-            return evaluation_failed();
-        };
-        let Ok(executor) = current_thread_executor() else {
-            return evaluation_failed();
-        };
-        // Either every admitted table has a committed identity (captured by
-        // identity) or none does (captured by name, before any publication).
-        // A mix fails closed: reading an identified table as empty would be a
-        // silent wrong answer.
-        let identified = self
-            .admitted
-            .table_schemas()
-            .values()
-            .filter(|table| table.object_id().is_some())
-            .count();
-        let total = self.admitted.table_schemas().len();
-        if identified != 0 && identified != total {
-            return Response::new(
-                500,
-                "application/json",
-                br#"{"error":"serve.mixed_table_identity"}"#.to_vec(),
-            );
-        }
-        let captured = if identified == total {
-            match self.table_identities() {
-                Ok(identities) => {
-                    executor.block_on(runtime.begin_admitted_table_activation(&identities))
-                }
-                Err(error) => Err(error),
-            }
-        } else {
-            let names: Vec<&str> = self
-                .admitted
-                .table_schemas()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            executor.block_on(runtime.begin_table_activation(&names))
-        };
-        let Ok(snapshot) = captured else {
-            return evaluation_failed();
-        };
-        let staged = match self.authority.evaluate_staged_with_table_snapshot(
-            &self.admitted,
-            &Environment::new(),
-            &snapshot,
-        ) {
+        let staged = match self
+            .authority
+            .evaluate_staged(&self.admitted, &Environment::new())
+        {
             Ok(staged) => staged,
-            Err(_) => return evaluation_failed(),
+            Err(_) => {
+                return Response::new(
+                    500,
+                    "application/json",
+                    br#"{"error":"serve.evaluation_failed"}"#.to_vec(),
+                );
+            }
         };
         if !staged.mutations().is_empty() {
             return Response::new(
@@ -150,12 +81,11 @@ impl ServeApp {
                 br#"{"error":"serve.write_refused"}"#.to_vec(),
             );
         }
-        let response = Response::new(
+        Response::new(
             200,
             "text/plain; charset=utf-8",
             crate::repl::inspect(staged.value()).into_bytes(),
-        );
-        response
+        )
     }
 }
 
