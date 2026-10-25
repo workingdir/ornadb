@@ -1275,7 +1275,14 @@ fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
         let restored_path = restored.to_str().unwrap();
         let reconstructed = run(
             parent.path(),
-            &["export", archive_path, "--restore", restored_path, "--at", commit],
+            &[
+                "export",
+                archive_path,
+                "--restore",
+                restored_path,
+                "--at",
+                commit,
+            ],
         );
         assert_eq!(
             reconstructed.status.code(),
@@ -1297,4 +1304,48 @@ fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
             .expect("restored member opens offline");
         assert_eq!(context.repository_format(), expected);
     }
+}
+
+/// ORNA-GIT-007 (`24-git-history.md:19`): a full mirror of the superproject is
+/// not a complete submodule copy, so a snapshot whose pinned gitlink's
+/// dependency repository is unavailable must not export as offline-complete.
+/// The fixture HEAD pins `vendor/stdlib` with no `.gitmodules` origin and no
+/// dependency repository; its export is refused before any copy is written.
+#[test]
+fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
+    let parent = TempDir::new().unwrap();
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.path().join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success(), "clone legacy bundle");
+    git(&source, &["remote", "remove", "origin"]);
+    let head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &["export", archive.to_str().unwrap(), "--at", &head],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(1),
+        "a gitlink without an available dependency repository is refused: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains("pinned dependency"),
+        "the refusal names the dependency: {}",
+        stderr(&exported)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
 }
