@@ -1032,6 +1032,58 @@ mod tests {
         assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
     }
 
+    /// A git process that dies after writing part of an object leaves the
+    /// reader short of the declared size. The read reports the failure without
+    /// hanging on the closed pipe, the broken process is discarded, and the
+    /// next read starts a fresh one.
+    #[test]
+    fn a_truncated_object_stream_discards_the_session_and_the_next_read_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = super::ObjectHeader {
+            oid: blob.clone(),
+            kind: ObjectKind::Blob,
+            size: 20,
+        };
+        // The stub answers the `contents` request with a 20-byte header, writes
+        // 5 bytes, and exits: the stream ends mid-object.
+        let script = format!(r#"read line; printf '{blob} blob 20\n'; printf short; exit 0"#);
+        let mut child = Command::new("sh")
+            .args(["-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the stub reader");
+        let input = child.stdin.take().expect("stub stdin");
+        let output = std::io::BufReader::new(child.stdout.take().expect("stub stdout"));
+        *objects.lock_session() = Some(super::Session {
+            child,
+            input: Some(input),
+            output: Some(output),
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_exact(&blob, &header, algorithm).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a truncated read returns instead of hanging");
+            assert!(failed, "a truncated object cannot be read exactly");
+        });
+        assert!(
+            objects.process_id().is_none(),
+            "the truncated process was discarded"
+        );
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 1, "the next read started a fresh process");
+    }
+
     #[test]
     fn a_failed_read_restarts_the_reader_without_desynchronising_it() {
         let (directory, repository) = repository();
