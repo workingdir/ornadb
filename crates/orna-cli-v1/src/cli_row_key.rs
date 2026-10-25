@@ -94,7 +94,7 @@ pub(super) fn key_candidates(
 /// `ornadb-5il1.461`, which does not exist yet.
 pub(super) fn composite_key_error() -> Diagnostic {
     key_error(
-        "Composite primary keys are not supported by this command yet",
+        "Composite primary keys are not supported by ornadb-5il1.461 yet",
         "the table's primary key has more than one component; tuple key lookup and \
          paged predicate scans need the row-map successor API tracked by bead ornadb-5il1.461",
     )

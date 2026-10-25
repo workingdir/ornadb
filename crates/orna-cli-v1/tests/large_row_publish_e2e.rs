@@ -455,3 +455,97 @@ fn an_int_keyed_table_is_queried_by_its_declared_integer_key() {
         transcript(&refused)
     );
 }
+
+/// Point, range and missing-key queries over a published `Int`-keyed table of
+/// 300 rows. The point read finds a row past the first page of 256, `--from`
+/// and `--until` take half-open `int:` bounds, and an absent key exits non-zero
+/// with "Row is not committed".
+#[test]
+fn an_int_keyed_store_answers_point_range_and_missing_key_queries() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    let point = json(
+        &orna(
+            &root,
+            &["query", &relation, "--key", "299", "--format", "json"],
+        ),
+        "orna query --key 299",
+    );
+    assert_eq!(point["rows"], 1, "{point}");
+
+    let range = json(
+        &orna(
+            &root,
+            &[
+                "query", &relation, "--from", "int:250", "--until", "int:260", "--format", "json",
+            ],
+        ),
+        "orna query --from int:250 --until int:260",
+    );
+    assert_eq!(range["rows"], 10, "{range}");
+
+    let missing = orna(
+        &root,
+        &["query", &relation, "--key", "9999", "--format", "json"],
+    );
+    assert!(
+        !missing.status.success() && transcript(&missing).contains("Row is not committed"),
+        "an absent Int key is reported as not committed:\n{}",
+        transcript(&missing)
+    );
+}
+
+/// A table whose primary key has two components has no single typed key
+/// spelling. Every query form over it (`--key`, a bounded range and an
+/// unbounded scan) is refused with the typed diagnostic that names bead
+/// ornadb-5il1.461, and no row is answered.
+#[test]
+fn a_composite_key_query_is_refused_naming_the_successor_bead() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n",
+        "Stock",
+    );
+    assert_success(
+        &orna_repl(
+            &root,
+            r#"main.Stock.insert({ location: "north", sku: "widget", quantity: 3 })"#,
+        ),
+        "REPL composite insert",
+    );
+    publish(&root, "Add one stock row");
+
+    let forms: [&[&str]; 3] = [
+        &["--key", "north"],
+        &["--from", "text:north", "--until", "text:south"],
+        &[],
+    ];
+    for form in forms {
+        let mut arguments = vec!["query", relation.as_str()];
+        arguments.extend_from_slice(form);
+        arguments.extend_from_slice(&["--format", "json"]);
+        let refused = orna(&root, &arguments);
+        assert!(
+            !refused.status.success(),
+            "a composite-key query is refused for {form:?}:\n{}",
+            transcript(&refused)
+        );
+        assert!(
+            transcript(&refused).contains("ornadb-5il1.461"),
+            "the refusal names bead ornadb-5il1.461 for {form:?}:\n{}",
+            transcript(&refused)
+        );
+    }
+}
