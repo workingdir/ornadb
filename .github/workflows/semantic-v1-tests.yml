@@ -1,0 +1,38 @@
+name: Semantic v1 tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+concurrency:
+  group: semantic-v1-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semantic-v1-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      # Every orna-semantic-v1 test target runs. Tests listed in
+      # scripts/semantic-known-red.txt are excluded from the run and then each one
+      # must still fail when run alone: a new failure or a listed test that passes
+      # both fail this job.
+      - name: Check semantic v1 tests against the known-red list
+        run: scripts/check-semantic-known-red.sh
