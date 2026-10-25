@@ -170,6 +170,7 @@ impl PrivateRefCleanupOwner {
             .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        crate::bind_git_discovery_to_worktree(&mut command, self.repository.worktree());
         command
     }
 
@@ -7059,6 +7060,7 @@ impl PinnedNativeGraphReader {
             .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        crate::bind_git_discovery_to_worktree(&mut command, self.repository.worktree());
         command
     }
 }

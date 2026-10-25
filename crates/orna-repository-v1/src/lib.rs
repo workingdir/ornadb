@@ -8190,6 +8190,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, directory);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -10048,6 +10049,12 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
 pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
     if let Some(parent) = worktree.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+    // An explicit git dir makes a corrupt HEAD fail closed instead of being
+    // re-discovered from an enclosing repository.
+    let git_dir = worktree.join(".git");
+    if git_dir.is_dir() {
+        command.env("GIT_DIR", git_dir);
     }
 }
 
