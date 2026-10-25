@@ -1,4 +1,4 @@
-//! Complete, portable offline copies of one pinned format-3 snapshot.
+//! Complete, portable offline copies of one admitted repository snapshot.
 //!
 //! [`crate::offline_copy`] copies committed *rows* as verified payload files.
 //! This module copies the *snapshot*: the whole native Git object closure of one
@@ -492,7 +492,8 @@ pub enum CompleteCopyError {
     TargetNotEmpty,
     /// The selector did not resolve to a reachable commit.
     UnresolvedSnapshot,
-    /// The pinned snapshot is not an admitted format-3 repository snapshot.
+    /// The pinned snapshot is not an admitted repository snapshot (legacy
+    /// format record, or format-3 schema and store roots).
     NotAFormat3Snapshot,
     /// A gitlink names a dependency with no recorded origin.
     MissingDependencyOrigin {
@@ -536,7 +537,7 @@ impl fmt::Display for CompleteCopyError {
                 write!(formatter, "snapshot selector did not resolve to a commit")
             }
             Self::NotAFormat3Snapshot => {
-                write!(formatter, "snapshot is not an admitted format-3 repository")
+                write!(formatter, "snapshot is not an admitted repository snapshot")
             }
             Self::MissingDependencyOrigin { path } => {
                 write!(formatter, "dependency {path} has no recorded origin")

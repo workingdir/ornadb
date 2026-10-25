@@ -59,7 +59,7 @@ fn export_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2000",
         title,
-        "run `orna export DEST --at SELECTOR` inside a format-3 repository",
+        "run `orna export DEST --at SELECTOR` inside an admitted repository",
         detail.into(),
     )
 }
