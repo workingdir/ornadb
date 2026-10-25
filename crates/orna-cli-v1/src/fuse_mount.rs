@@ -2047,8 +2047,17 @@ impl DraftState {
 /// handle submitted nothing, so fsync of it succeeds (POSIX). A handle with a
 /// written but unaccepted candidate must not be acknowledged: that would report
 /// durability the accepted row does not have, so it fails closed with EIO.
-fn noncandidate_ack(draft_state: &mut DraftState, handle: u64, operation: &str) -> Result<(), Errno> {
-    let _ = operation;
+fn noncandidate_ack(
+    draft_state: &mut DraftState,
+    handle: u64,
+    operation: &str,
+) -> Result<(), Errno> {
+    if draft_state.dirty_handles.contains(&handle) {
+        eprintln!(
+            "{operation}: handle {handle} wrote a candidate that no commit found; refusing to acknowledge it (EIO)"
+        );
+        return Err(Errno::EIO);
+    }
     draft_state.unresolved_handles.remove(&handle);
     Ok(())
 }
@@ -2381,6 +2390,7 @@ impl WorkspaceFilesystem {
             }
         }
         draft_state.unresolved_handles.remove(&handle);
+        draft_state.dirty_handles.remove(&handle);
         // The accepted save supersedes the refusal it replaces. A refusing handle
         // whose candidate is unchanged holds only obsolete bytes, so its unresolved
         // state ends here and its later RELEASE retains nothing.
@@ -3657,6 +3667,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .contains_key(&inode.0);
         if !data.is_empty() && is_tracked {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
+            draft_state.dirty_handles.insert(handle.0);
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
@@ -3722,11 +3733,13 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.ok();
             }
             Err(DocumentCommitError::NoCandidate) => {
-                // The handle submitted nothing, so there is nothing to accept or
-                // reject and it cannot block unmount. POSIX requires fsync of an
-                // unmodified handle to succeed.
-                draft_state.unresolved_handles.remove(&handle.0);
-                reply.ok();
+                // The handle submitted nothing, so nothing is pending for it. A clean
+                // handle acknowledges (POSIX fsync of an unmodified handle succeeds);
+                // a dirty one fails closed (ORNA-VFS-008, EDIT-1 step 2).
+                match noncandidate_ack(&mut draft_state, handle.0, "fsync") {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                }
             }
             // A refused document candidate was already retained by accept_document
             // (ORNA-VFS-009); the error goes to the caller.
@@ -3762,10 +3775,12 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.unresolved_handles.remove(&handle.0);
                 reply.ok();
             }
-            // The handle submitted nothing, so it cannot block unmount (same as fsync).
+            // Same rule as fsync: a clean handle acknowledges; a dirty one fails closed.
             Err(DocumentCommitError::NoCandidate) => {
-                draft_state.unresolved_handles.remove(&handle.0);
-                reply.ok();
+                match noncandidate_ack(&mut draft_state, handle.0, "flush") {
+                    Ok(()) => reply.ok(),
+                    Err(errno) => reply.error(errno),
+                }
             }
             // The error goes to close(2), which applications may ignore; a refused
             // candidate stays retained (ORNA-VFS-009).
@@ -3799,6 +3814,7 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
+        draft_state.dirty_handles.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
